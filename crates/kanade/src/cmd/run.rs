@@ -347,7 +347,15 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
     let result: ExecResult = serde_json::from_slice(&msg.payload)?;
 
     println!("pc_id     : {}", result.pc_id);
-    println!("exit_code : {}", result.exit_code);
+    println!(
+        "exit_code : {}{}",
+        result.exit_code,
+        if result.is_reported_skip() {
+            " (skipped: the agent did not run the script)"
+        } else {
+            ""
+        }
+    );
     println!("started   : {}", result.started_at);
     println!("finished  : {}", result.finished_at);
     println!("--- stdout ---");

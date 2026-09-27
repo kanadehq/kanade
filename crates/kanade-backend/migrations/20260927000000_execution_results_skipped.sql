@@ -1,0 +1,18 @@
+-- `ExecResult.skipped`: 1 when the agent published this row *instead of*
+-- running the script because policy (or this OS) said "not now": deadline /
+-- revoke / version-pin / staleness / unsupported-on-this-OS. Such a row says
+-- nothing about the script's outcome, so the schedule tally / rollout
+-- coverage / health rollup / Activity filter count it as `skipped`, not as
+-- a failure.
+--
+-- The flag alone marks a skip. The reserved exit codes only say WHY, and
+-- cannot mark one on their own: a real script exits 126 ("not executable")
+-- or 127 ("command not found") under sh, and those are failures. A
+-- signature refusal (exit 123) is not a skip either: "this command was not
+-- authorised" is published with skipped = 0 and counts as a failure.
+--
+-- Existing rows backfill to 0 and are deliberately NOT inferred from the
+-- exit code, for that same reason. So are results from agents that predate
+-- the flag (they send no `skipped` key): both keep counting as failures,
+-- exactly as before this column existed.
+ALTER TABLE execution_results ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0;

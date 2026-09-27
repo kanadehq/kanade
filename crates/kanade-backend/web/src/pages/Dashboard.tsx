@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CalendarClock,
   CheckCircle2,
+  CircleMinus,
   Clock,
   Cpu,
   Gauge,
@@ -36,6 +37,7 @@ import { WidgetCard, type Widget } from '@/components/AnalyticsWidget';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ApiError, apiFetch, formatError } from '@/lib/api';
+import { exitTone } from '@/lib/exitCode';
 import { cn } from '@/lib/utils';
 import type {
   ActiveInvestigationsResponse,
@@ -74,7 +76,9 @@ type FleetHealth = {
   status: 'ok' | 'unknown' | 'degraded';
   agents: { known: number; active: number; stale: number };
   jetstream: { all_ok: boolean; healthy: number; total: number; missing: string[] };
-  recent_results: { window_hours: number; total: number; failed: number };
+  /** `failed` excludes the agent's synthetic skips, counted in
+   *  `skipped` instead (absent from pre-skip backends). */
+  recent_results: { window_hours: number; total: number; failed: number; skipped?: number };
   observed_at: string;
 };
 
@@ -90,6 +94,8 @@ type ResultRow = {
   job_id: string | null;
   pc_id: string;
   exit_code: number;
+  /** The agent published this row instead of running the script. */
+  skipped: boolean;
   started_at: string | null;
   finished_at: string | null;
 };
@@ -406,8 +412,19 @@ export function Dashboard() {
     return best;
   })();
 
-  const recentFail = (resultsQ.data ?? []).filter((r) => r.exit_code !== 0).length;
+  const recentFail = (resultsQ.data ?? []).filter((r) => exitTone(r.exit_code, r.skipped) === 'danger').length;
+  // Skips are neither green nor red: a window of only skips must not read
+  // as "all green", since nothing in it actually ran.
+  const recentSkipped = (resultsQ.data ?? []).filter((r) => r.skipped).length;
   const recentTotal = (resultsQ.data ?? []).length;
+  const recentKey =
+    recentFail > 0
+      ? recentSkipped > 0
+        ? 'recentResults.descriptionFailedSkipped'
+        : 'recentResults.descriptionFailed'
+      : recentSkipped > 0
+        ? 'recentResults.descriptionSkipped'
+        : 'recentResults.descriptionAllGreen';
 
   // Compliance rollup: fold the per-check counts into a single
   // attention-vs-ok read. `attention` = any check with at least one
@@ -647,9 +664,7 @@ export function Dashboard() {
               {t('recentResults.title')}
             </CardTitle>
             <CardDescription>
-              {recentFail > 0
-                ? t('recentResults.descriptionFailed', { count: recentTotal, failed: recentFail })
-                : t('recentResults.descriptionAllGreen', { count: recentTotal })}
+              {t(recentKey, { count: recentTotal, failed: recentFail, skipped: recentSkipped })}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-1">
@@ -660,8 +675,10 @@ export function Dashboard() {
                 className="flex items-center gap-3 text-sm rounded-md -mx-1 px-1 py-1 transition-colors hover:bg-muted/10"
                 title={t('recentResults.rowTitle')}
               >
-                {r.exit_code === 0 ? (
+                {exitTone(r.exit_code, r.skipped) === 'success' ? (
                   <CheckCircle2 className="size-4 text-success shrink-0" />
+                ) : exitTone(r.exit_code, r.skipped) === 'skipped' ? (
+                  <CircleMinus className="size-4 text-muted shrink-0" />
                 ) : (
                   <XCircle className="size-4 text-danger shrink-0" />
                 )}

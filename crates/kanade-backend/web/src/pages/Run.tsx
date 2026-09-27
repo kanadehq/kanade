@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { ExitCodeBadge } from '@/components/ExitCodeBadge';
 import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -150,8 +151,8 @@ export function Run() {
       {mut.data && (
         <Card>
           <CardHeader>
-            <CardTitle>
-              {t('result.exitCode')} <span className={mut.data.exit_code === 0 ? 'text-success' : 'text-danger'}>{mut.data.exit_code}</span>
+            <CardTitle className="flex items-center gap-2">
+              {t('result.exitCode')} <ExitCodeBadge code={mut.data.exit_code} skipped={mut.data.skipped} />
             </CardTitle>
             <CardDescription>
               {mut.data.pc_id} · {mut.data.started_at} → {mut.data.finished_at}

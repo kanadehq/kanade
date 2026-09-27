@@ -6,6 +6,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { ExitCodeBadge } from '@/components/ExitCodeBadge';
 import { PcPicker } from '@/components/PcPicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -51,6 +52,9 @@ type ResultRow = {
    *  "running…" placeholder rather than `0` to avoid confusion with
    *  successful exit code 0. */
   exit_code: number | null;
+  /** The agent published this row instead of running the script;
+   *  `exit_code` then says why. Badged neutral, never as a failure. */
+  skipped: boolean;
   /** Server-clipped preview (first 200 chars); the full body is one
    *  detail fetch away via the "show more" toggle. */
   stdout: string;
@@ -98,10 +102,12 @@ const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
   { value: 'all', ms: null },
 ];
 
-type StatusFilter = '' | 'running' | 'success' | 'failure';
+type StatusFilter = '' | 'running' | 'success' | 'failure' | 'skipped';
 
 function parseStatusFilter(raw: string | null): StatusFilter {
-  return raw === 'running' || raw === 'success' || raw === 'failure' ? raw : '';
+  return raw === 'running' || raw === 'success' || raw === 'failure' || raw === 'skipped'
+    ? raw
+    : '';
 }
 
 export function Activity() {
@@ -308,6 +314,7 @@ export function Activity() {
               <option value="running">{t('filters.statusOptions.running')}</option>
               <option value="success">{t('filters.statusOptions.success')}</option>
               <option value="failure">{t('filters.statusOptions.failure')}</option>
+              <option value="skipped">{t('filters.statusOptions.skipped')}</option>
             </Select>
           </div>
           <div className="space-y-1">
@@ -401,9 +408,7 @@ export function Activity() {
                   {r.exit_code === null ? (
                     <Badge variant="violet">{t('status.running')}</Badge>
                   ) : (
-                    <Badge variant={r.exit_code === 0 ? 'success' : 'danger'}>
-                      {r.exit_code}
-                    </Badge>
+                    <ExitCodeBadge code={r.exit_code} skipped={r.skipped} />
                   )}
                 </TableCell>
                 <TableCell label={t('columns.started')} className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>

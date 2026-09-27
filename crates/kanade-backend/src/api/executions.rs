@@ -102,7 +102,7 @@ pub async fn detail(
         None => return Err(StatusCode::NOT_FOUND),
     };
     let result_rows = sqlx::query(
-        "SELECT result_id, request_id, pc_id, exit_code, started_at,
+        "SELECT result_id, request_id, pc_id, exit_code, skipped, started_at,
                 finished_at, recorded_at
            FROM execution_results
           WHERE exec_id = ?
@@ -122,6 +122,7 @@ pub async fn detail(
             request_id: r.try_get("request_id").unwrap_or_default(),
             pc_id: r.try_get("pc_id").unwrap_or_default(),
             exit_code: r.try_get("exit_code").unwrap_or(0),
+            skipped: r.try_get("skipped").unwrap_or(false),
             started_at: r.try_get("started_at").ok(),
             finished_at: r.try_get("finished_at").ok(),
         })
@@ -145,6 +146,9 @@ pub struct ExecutionResultSummary {
     pub request_id: String,
     pub pc_id: String,
     pub exit_code: i64,
+    /// The agent published this row instead of running the script;
+    /// `exit_code` then says why.
+    pub skipped: bool,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }

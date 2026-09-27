@@ -112,5 +112,9 @@
   "comingSoon": {
     "title": "{{name}} — coming soon",
     "description": "This page is on the SPA port plan. The endpoint behind it works today; the React rebuild is incremental."
+  },
+  "exitCode": {
+    "skipped": "skipped ({{code}})",
+    "skippedTitle": "The agent did not run the script (policy or this OS said not now); the exit code and stderr say why."
   }
 }

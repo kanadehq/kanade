@@ -175,9 +175,10 @@ pub async fn run(
                 // clean run carries the reported status, a crash
                 // projects `unknown` (mirrors the agent's Health-tab
                 // behaviour), so the SPA never shows a stale green for
-                // a check that has started failing. Synthetic skip
-                // results (exit 122–127) are filtered inside — the
-                // script never ran, so they carry no evidence (#909).
+                // a check that has started failing. Agent skips
+                // (`skipped`) and signature refusals are filtered
+                // inside — the script never ran, so they carry no
+                // evidence about the check (#909).
                 if let Err(e) = maybe_project_check_status(
                     &js,
                     &pool,
@@ -306,12 +307,13 @@ where
     // first-insert value, same as before.
     let rows = sqlx::query(
         "INSERT INTO execution_results (
-             result_id, request_id, exec_id, pc_id, exit_code,
+             result_id, request_id, exec_id, pc_id, exit_code, skipped,
              stdout, stderr, started_at, finished_at, job_id,
              parent_result_id, recorded_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(result_id) DO UPDATE SET
              exit_code   = excluded.exit_code,
+             skipped     = excluded.skipped,
              stdout      = excluded.stdout,
              stderr      = excluded.stderr,
              finished_at = excluded.finished_at,
@@ -326,6 +328,7 @@ where
     .bind(&r.exec_id)
     .bind(&r.pc_id)
     .bind(r.exit_code as i64)
+    .bind(r.is_reported_skip())
     .bind(&r.stdout)
     .bind(&r.stderr)
     .bind(r.started_at)
@@ -553,16 +556,6 @@ async fn maybe_project_check_status(
     let Some(manifest_id) = r.manifest_id.as_deref() else {
         return Ok(());
     };
-    // #909: a synthetic skip result (version-pin mismatch, deadline
-    // passed, revoked, staleness) is published *instead of* running the
-    // script — it says nothing about the check itself. Projecting it
-    // flipped fleet checks to `unknown` on every version bump, and for
-    // a persistently-failing check the fail → unknown(skip) → fail hop
-    // looked like a fresh transition and re-fired the alert on each
-    // bump. The agent's Health tab deliberately skips these too.
-    if kanade_shared::wire::is_synthetic_skip(r.exit_code) {
-        return Ok(());
-    }
     let Some(job) = lookup_manifest(cache, jobs_kv, manifest_id).await? else {
         return Ok(());
     };
@@ -571,7 +564,9 @@ async fn maybe_project_check_status(
         // drives the end-user Client App's Health tab).
         return Ok(());
     };
-    let proj = upsert_check_status(pool, r, hint, recorded_at).await?;
+    let Some(proj) = upsert_check_status(pool, r, hint, recorded_at).await? else {
+        return Ok(());
+    };
 
     // Compliance auto-notification (PR-B): fire once on a transition into an
     // alert status, for live results only. `fresh` also folds in "this is
@@ -624,12 +619,35 @@ struct CheckProjection {
     prior: Option<(String, chrono::DateTime<chrono::Utc>)>,
 }
 
+/// Project one result onto `check_status`. `None` (and no write) for a
+/// result the agent published *instead of* running the script, because
+/// it says nothing about the check (#909):
+///
+/// - a skip, per [`ExecResult::skips_check_projection`]. Projecting one
+///   flipped fleet checks to `unknown` on every version bump, and for a
+///   persistently-failing check the fail → unknown(skip) → fail hop
+///   looked like a fresh transition and re-fired the alert on each bump.
+///   The agent's `skipped` flag decides when present; a legacy agent
+///   (no flag) keeps the pre-flag rule — every exit 122..=127 dropped,
+///   including a real 126 / 127 it has no way to tell apart.
+/// - a signature refusal ([`ExecResult::is_signature_refusal`]). It is
+///   NOT a skip — it counts as a failure in every result tally — but the
+///   check's state is unknown to it just the same, so this keeps the
+///   behaviour it had since #1165 (when the exit-code range still covered
+///   123): the unauthorised command shows up as a failed result, not as a
+///   bogus compliance transition.
+///
+/// For an agent that sends the flag, neither is decided by exit code: a
+/// check script that really exits 123 / 126 / 127 failed and projects.
 async fn upsert_check_status(
     pool: &SqlitePool,
     r: &ExecResult,
     hint: &CheckHint,
     recorded_at: chrono::DateTime<chrono::Utc>,
-) -> Result<CheckProjection> {
+) -> Result<Option<CheckProjection>> {
+    if r.skips_check_projection() || r.is_signature_refusal() {
+        return Ok(None);
+    }
     // Derive (status, detail) via the shared `check_eval` helpers — the
     // byte-identical code path the agent's Health tab uses — so the SPA
     // compliance view and the Client App can never disagree (#908).
@@ -687,11 +705,11 @@ async fn upsert_check_status(
 
     debug!(pc_id = %r.pc_id, check = %hint.name, status, "projected check status");
 
-    Ok(CheckProjection {
+    Ok(Some(CheckProjection {
         status,
         detail,
         prior,
-    })
+    }))
 }
 
 async fn upsert_inventory(
@@ -900,6 +918,7 @@ mod tests {
             parent_result_id: None,
             pc_id: pc_id.into(),
             exit_code: 0,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: String::new(),
             started_at: chrono::Utc.with_ymd_and_hms(2026, 5, 20, 0, 0, 0).unwrap(),
@@ -1384,7 +1403,10 @@ mod tests {
         // First-ever projection: no prior.
         let mut r = sample("a1", "q1", "pc-a", None);
         r.stdout = r#"{"status":"ok"}"#.into();
-        let p1 = upsert_check_status(&pool, &r, &hint, t0).await.unwrap();
+        let p1 = upsert_check_status(&pool, &r, &hint, t0)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(p1.prior.is_none(), "first projection ⇒ no prior");
         assert_eq!(p1.status, "ok");
 
@@ -1392,6 +1414,7 @@ mod tests {
         r.stdout = r#"{"status":"fail"}"#.into();
         let p2 = upsert_check_status(&pool, &r, &hint, t0 + chrono::Duration::seconds(1))
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(p2.prior.as_ref().map(|(s, _)| s.as_str()), Some("ok"));
         assert_eq!(p2.status, "fail");
@@ -1399,6 +1422,7 @@ mod tests {
         // Stays fail: prior is "fail" (so the decision layer won't re-fire).
         let p3 = upsert_check_status(&pool, &r, &hint, t0 + chrono::Duration::seconds(2))
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(p3.prior.as_ref().map(|(s, _)| s.as_str()), Some("fail"));
     }
@@ -1424,6 +1448,105 @@ mod tests {
         let detail = row.1.unwrap();
         assert!(detail.contains("exited 1"), "detail: {detail}");
         assert!(detail.contains("access denied"), "detail: {detail}");
+    }
+
+    /// #909 keyed on the flag / the refusal's derived id, never on the exit
+    /// code: an agent skip and a signature refusal leave the check
+    /// untouched, but a check script that really exited 127 ("command not
+    /// found") or 123 ran and failed, so it must project.
+    #[tokio::test]
+    async fn check_status_ignores_skips_and_refusals_but_projects_real_exits() {
+        let pool = fresh_pool().await;
+        let hint = check_hint("bitlocker", "status");
+        let count = || async {
+            sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM check_status")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .0
+        };
+
+        let mut refusal = sample("", "req-r1", "pc-s", None);
+        refusal.result_id = kanade_shared::wire::signature_refusal_result_id("req-r1", "pc-s");
+        refusal.exit_code = kanade_shared::wire::EXIT_REJECTED_UNSIGNED;
+        refusal.stderr = "refused: unsigned".into();
+        let proj = upsert_check_status(&pool, &refusal, &hint, chrono::Utc::now())
+            .await
+            .unwrap();
+        assert!(proj.is_none());
+        assert_eq!(count().await, 0, "a refusal writes nothing");
+
+        let mut r = sample("res-s1", "req-s1", "pc-s", None);
+        r.exit_code = 127;
+        r.skipped = Some(true);
+        r.stderr = "skipped: staleness policy".into();
+        let proj = upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
+            .await
+            .unwrap();
+        assert!(proj.is_none());
+        assert_eq!(count().await, 0, "a skip writes nothing");
+
+        // A legacy agent (no flag) keeps the pre-flag rule: its 125 skip —
+        // and even a real 127, which it cannot tell apart — is dropped.
+        for (id, code) in [("res-l1", 125), ("res-l2", 127)] {
+            let mut legacy = sample(id, "req-l", "pc-l", None);
+            legacy.exit_code = code;
+            legacy.skipped = None;
+            let proj = upsert_check_status(&pool, &legacy, &hint, chrono::Utc::now())
+                .await
+                .unwrap();
+            assert!(proj.is_none(), "legacy exit {code} is dropped");
+        }
+        assert_eq!(count().await, 0);
+
+        // A script that exits 123 under an ordinary result id is a run.
+        let mut xargs = sample("res-x1", "req-x1", "pc-x", None);
+        xargs.exit_code = 123;
+        xargs.stderr = "xargs: a command exited 1".into();
+        upsert_check_status(&pool, &xargs, &hint, chrono::Utc::now())
+            .await
+            .unwrap()
+            .expect("a real 123 projects");
+        assert_eq!(count().await, 1);
+
+        r.skipped = Some(false);
+        r.stderr = "sh: manage-bde: command not found".into();
+        upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
+            .await
+            .unwrap()
+            .expect("a flagged real run projects");
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-s'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "unknown");
+        assert!(row.1.unwrap().contains("command not found"));
+    }
+
+    /// The column the tallies read is the agent's explicit skip only: a
+    /// legacy result (no flag) is stored as not-skipped, so its exit code
+    /// counts exactly as it did before the flag existed.
+    #[tokio::test]
+    async fn only_an_explicit_skip_is_persisted_as_skipped() {
+        let pool = fresh_pool().await;
+        for (id, flag) in [("s", Some(true)), ("r", Some(false)), ("l", None)] {
+            let mut r = sample(id, id, "pc-1", None);
+            r.exit_code = 125;
+            r.skipped = flag;
+            insert_result(&pool, &r, id, chrono::Utc::now())
+                .await
+                .unwrap();
+        }
+        let rows: Vec<(String, bool)> =
+            sqlx::query_as("SELECT result_id, skipped FROM execution_results ORDER BY result_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            [("l".into(), false), ("r".into(), false), ("s".into(), true)]
+        );
     }
 
     #[tokio::test]
@@ -1462,7 +1585,8 @@ mod tests {
             .into();
         let proj = upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
             .await
-            .unwrap();
+            .unwrap()
+            .expect("a run projects");
         assert_eq!(proj.status, "fail");
         let row: (String, Option<String>) =
             sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-f'")
@@ -1483,7 +1607,8 @@ mod tests {
         r.stdout = "PS> unexpected human output".into();
         let proj = upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
             .await
-            .expect("non-JSON stdout must project, not error");
+            .expect("non-JSON stdout must project, not error")
+            .expect("a run projects");
         assert_eq!(proj.status, "unknown");
         let row: (String, Option<String>) =
             sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-nj'")

@@ -46,6 +46,14 @@ const DRAIN_INTERVAL: Duration = Duration::from_secs(1);
 /// drain task can re-publish in arrival order (`request_id`s are
 /// UUIDs so collisions are practically impossible).
 pub fn enqueue(outbox_dir: &Path, result: &ExecResult) -> Result<PathBuf> {
+    // Every result this agent publishes leaves through here, and each one
+    // must say whether the script ran: an absent flag is how the backend
+    // recognises an agent that predates it (`ExecResult::skipped`).
+    debug_assert!(
+        result.skipped.is_some(),
+        "ExecResult {} enqueued without a skipped flag",
+        result.request_id
+    );
     std::fs::create_dir_all(outbox_dir)
         .with_context(|| format!("create outbox dir {outbox_dir:?}"))?;
     let final_path = outbox_dir.join(format!("{}.json", result.request_id));
@@ -341,6 +349,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "pc-01".into(),
             exit_code: 0,
+            skipped: Some(false),
             stdout: "ok".into(),
             stderr: String::new(),
             started_at: Utc.with_ymd_and_hms(2026, 5, 19, 0, 0, 0).unwrap(),
@@ -374,6 +383,7 @@ mod tests {
         let r1 = sample("req-x");
         let r2 = ExecResult {
             exit_code: 7,
+            skipped: Some(false),
             ..sample("req-x")
         };
         enqueue(dir.path(), &r1).unwrap();

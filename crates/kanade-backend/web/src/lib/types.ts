@@ -82,6 +82,9 @@ export type ExecResult = {
   request_id: string;
   pc_id: string;
   exit_code: number;
+  /** `ExecResult::skipped`: the agent answered without running the
+   *  script. Off the wire when false. */
+  skipped?: boolean;
   stdout: string;
   stderr: string;
   started_at: string;

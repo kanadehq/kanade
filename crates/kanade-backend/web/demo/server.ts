@@ -35,6 +35,7 @@ import {
   SITES,
   DEPARTMENTS,
 } from './fleet';
+import { exitTone } from '../src/lib/exitCode';
 
 const PORT = Number(process.env.DEMO_API_PORT ?? 8082);
 
@@ -654,7 +655,8 @@ get(/^\/api\/health\/fleet$/, () =>
     recent_results: {
       window_hours: 24,
       total: RESULTS.length,
-      failed: RESULTS.filter((x) => x.exit_code !== 0).length,
+      failed: RESULTS.filter((x) => exitTone(x.exit_code, x.skipped) === 'danger').length,
+      skipped: RESULTS.filter((x) => x.skipped).length,
     },
     observed_at: iso(0),
   }),
@@ -708,6 +710,7 @@ type DemoResult = {
   job_id: string;
   pc_id: string;
   exit_code: number;
+  skipped: boolean;
   finished_ms_ago: number;
   duration_ms: number;
   stdout: string;
@@ -821,6 +824,7 @@ function buildResults(): DemoResult[] {
       job_id: job.id,
       pc_id: pc.pc_id,
       exit_code: failed ? 1 : 0,
+      skipped: false,
       finished_ms_ago: (i + 1) * 97 * 1000,
       duration_ms: Math.round(400 + r() * 4200),
       stdout: resultStdout(job.id, pc, failed),
@@ -857,6 +861,7 @@ function resultListRow(x: DemoResult) {
     job_id: x.job_id,
     pc_id: x.pc_id,
     exit_code: x.exit_code,
+    skipped: x.skipped,
     stdout: x.stdout.slice(0, PREVIEW_CHARS),
     stderr: x.stderr.slice(0, PREVIEW_CHARS),
     stdout_truncated: x.stdout.length > PREVIEW_CHARS,
@@ -894,7 +899,8 @@ get(/^\/api\/results$/, (_req, url) => {
   const sinceMs = Date.parse(url.searchParams.get('since') ?? '') || 0;
 
   let rows = RESULTS;
-  if (status === 'failure') rows = rows.filter((x) => x.exit_code !== 0);
+  if (status === 'failure') rows = rows.filter((x) => exitTone(x.exit_code, x.skipped) === 'danger');
+  if (status === 'skipped') rows = rows.filter((x) => x.skipped);
   if (status === 'success') rows = rows.filter((x) => x.exit_code === 0);
   rows = rows.filter((x) => {
     // `started_at` / `exec_id` are DERIVED in resultListRow, so the filter

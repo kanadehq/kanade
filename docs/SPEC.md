@@ -871,10 +871,20 @@ read-only ビューで確認できる（CLI `kanade schedule {preview,status,cov
   発火時刻を tz 解決して列挙（`active` / `constraints.window` /
   `skip_dates` を honor）。reconcile 形は cadence を返す。
 - `GET /api/schedules/{id}/status` — `enabled` / 次回発火 / 直近 1 件の
-  run / 直近 24h の ok・fail 集計。
+  run / 直近 24h の ok・fail・skipped 集計。`skipped` は agent がポリシー
+  （deadline / revoke / version-pin / staleness / OS 非対応）でスクリプトを
+  実行せずに返した結果（`ExecResult.skipped = Some(true)` →
+  `execution_results.skipped = 1`）で、fail には数えない。判定はこの
+  フラグのみで、予約終了コードは理由を示すだけ（実スクリプトの 126 / 127
+  は失敗）。署名検証で拒否した命令（exit 123）は `Some(false)` で送られ、
+  skip ではなく fail として数える。フラグを知る agent は常に true / false を
+  送るので、キー欠落 = フラグ以前の旧 agent。旧 agent の結果は集計では
+  従来どおり終了コードで判定し（非 0 = fail）、check_status 投影では従来の
+  規則どおり exit 122–127 を投影しない。
 - `GET /api/schedules/{id}/coverage` — **ロールアウト・カバレッジ**。
   schedule の `target` を**全台（オフライン含む）**に解決し、各 agent の
-  最新実行結果を `ok` / `fail` / `running`（`finished_at IS NULL`）/
+  最新実行結果を `ok` / `fail` / `skipped`（最新が agent の未実行結果）/
+  `running`（`finished_at IS NULL`）/
   `pending`（未実行）に分類して「N 台中 M 台完了」を出す。各 agent が
   最後に実行した manifest `version` も並記（脆弱性対応の版追跡向け）。
   脆弱性対応のアプリ更新等、フリート全体への行き渡りを追跡する用途。
@@ -1312,7 +1322,7 @@ SPA の Schedule ページに「無効化」 (default = soft) と「無効化 + 
 | Layer 2 cascade on job delete / schedule hard-disable | backend HTTP API + CLI |
 | Layer 3 `kill.{exec_id}` subscribe + child kill | agent (`process::run_command_with_kill`) |
 | 最終 connectivity timestamp 追跡 | agent (`async_nats::Client::state()` watcher) |
-| Exit code 規約 (`125 = deadline missed`, `127 = staleness check failed`) | shared (`kanade-shared/src/exec_result.rs`) |
+| Exit code 規約 (予約コード `122`, `124–127` = agent が実行を見送った理由、`123` = 署名検証で拒否。skip の判定は `ExecResult.skipped` フラグのみで終了コードでは行わず、123 の拒否は failure として数える) | shared (`kanade-shared/src/wire/result.rs`) |
 | SPA UI (revoke / kill / cascade ボタン + 進行中 job 一覧) | `kanade-backend/web/src/pages/` (Jobs / Schedules / Results) |
 
 ### 2.6.7 まとめ表 (operator 視点)

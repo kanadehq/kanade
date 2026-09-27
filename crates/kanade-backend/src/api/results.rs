@@ -49,6 +49,11 @@ pub struct ResultRow {
     /// row was created by events.started, ExecResult hasn't landed
     /// yet). The SPA renders "—" / running placeholder for None.
     pub exit_code: Option<i64>,
+    /// The agent published this row instead of running the script
+    /// (`ExecResult::skipped`); `exit_code` then holds the reserved code
+    /// saying why. Always false for rows from agents that predate the
+    /// flag. The SPA badges on this, never on the exit code.
+    pub skipped: bool,
     pub stdout: String,
     pub stderr: String,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -104,7 +109,9 @@ pub struct FinalizeChild {
 }
 
 /// Optional `status` filter on the results listing. `success` keeps
-/// only `exit_code = 0`; `failure` keeps everything else.
+/// only `exit_code = 0`; `skipped` keeps the rows the agent published
+/// instead of running the script (`execution_results.skipped`); `failure`
+/// keeps every other finished row.
 /// `running` selects in-flight rows (events.started landed but no
 /// ExecResult yet, so finished_at IS NULL). Anything else (or
 /// omitted) returns the unfiltered listing.
@@ -113,6 +120,7 @@ pub struct FinalizeChild {
 pub enum StatusFilter {
     Success,
     Failure,
+    Skipped,
     /// v0.30 / PR α' unified: in-flight rows = events.started landed
     /// but no matching ExecResult yet. Activity Running view filter.
     Running,
@@ -179,7 +187,7 @@ const MAX_FETCH_WITH_OUTPUT: i64 = 1_000;
 /// sync with `row_to_result` — a column read there but missing here
 /// silently returns its zero-value on every metadata-regex call
 /// (guarded by `metadata_regex_projection_matches_full_row`).
-const META_COLUMNS: &str = "result_id, request_id, exec_id, parent_result_id, pc_id, exit_code, started_at, finished_at, job_id, version";
+const META_COLUMNS: &str = "result_id, request_id, exec_id, parent_result_id, pc_id, exit_code, skipped, started_at, finished_at, job_id, version";
 
 /// SQLite's default bind-parameter ceiling is 999; the blob
 /// re-hydration `IN (...)` chunks its ids well under it so an
@@ -229,18 +237,21 @@ pub async fn list(
     let mut sep = " WHERE ";
 
     if let Some(status) = &params.status {
-        let cmp = match status {
-            // Both success + failure require the run to be finished
-            // (exit_code IS NOT NULL ⇒ finished_at IS NOT NULL).
+        qb.push(sep);
+        match status {
+            // Success / failure / skipped all require the run to be
+            // finished (exit_code IS NOT NULL ⇒ finished_at IS NOT NULL).
             // Pre-v0.30 schemas implicitly had exit_code NOT NULL so
             // adding the explicit check is back-compatible.
-            StatusFilter::Success => "exit_code = 0",
-            StatusFilter::Failure => "exit_code IS NOT NULL AND exit_code <> 0",
+            StatusFilter::Success => qb.push("exit_code = 0"),
+            StatusFilter::Failure => {
+                qb.push("exit_code IS NOT NULL AND exit_code <> 0 AND skipped = 0")
+            }
+            StatusFilter::Skipped => qb.push("skipped = 1"),
             // v0.30 / PR α' unified: in-flight rows = finished_at
             // not set yet. Activity Running tab filters via this.
-            StatusFilter::Running => "finished_at IS NULL",
+            StatusFilter::Running => qb.push("finished_at IS NULL"),
         };
-        qb.push(sep).push(cmp);
         sep = " AND ";
     }
     if let Some(since) = params.since {
@@ -687,6 +698,7 @@ fn build_row(
             .unwrap_or(None),
         pc_id: r.try_get("pc_id").unwrap_or_default(),
         exit_code: r.try_get::<Option<i64>, _>("exit_code").unwrap_or(None),
+        skipped: r.try_get("skipped").unwrap_or(false),
         stdout,
         stderr,
         started_at: r
@@ -1005,6 +1017,72 @@ mod tests {
         assert_eq!(
             row.version, None,
             "NULL version must stay None, not Some(\"\")",
+        );
+    }
+
+    /// `failure` must not swallow the agent's skips (the script never
+    /// ran), which get their own `skipped` bucket — keyed on the flag, so
+    /// a script that really exited 127, and the agent's unflagged
+    /// signature refusal (123), are still failures. The three
+    /// finished buckets partition the finished rows, and the row carries
+    /// the flag for the SPA badge.
+    #[tokio::test]
+    async fn status_filter_splits_skips_from_failures() {
+        let pool = fresh_pool().await;
+        let now = Utc::now();
+        for (id, exit, skipped) in [
+            ("ok", 0, false),
+            ("fail", 1, false),
+            ("not-found", 127, false),
+            ("refused", 123, false),
+            ("unsupported", 122, true),
+            ("deadline", 125, true),
+        ] {
+            sqlx::query(
+                "INSERT INTO execution_results
+                    (result_id, request_id, pc_id, exit_code, skipped, stdout, stderr,
+                     started_at, finished_at, recorded_at)
+                 VALUES (?, 'req', 'pc-1', ?, ?, '', '', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(exit)
+            .bind(skipped)
+            .bind(now - Duration::minutes(10))
+            .bind(now - Duration::minutes(9))
+            .bind(now - Duration::minutes(9))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let rows = |status: StatusFilter| {
+            let pool = pool.clone();
+            async move {
+                let mut p = params(None);
+                p.status = Some(status);
+                let mut rows: Vec<(String, bool)> = list(State(pool), Query(p))
+                    .await
+                    .unwrap()
+                    .0
+                    .into_iter()
+                    .map(|r| (r.result_id, r.skipped))
+                    .collect();
+                rows.sort();
+                rows
+            }
+        };
+        let row = |id: &str, skipped: bool| (id.to_string(), skipped);
+        assert_eq!(rows(StatusFilter::Success).await, [row("ok", false)]);
+        assert_eq!(
+            rows(StatusFilter::Failure).await,
+            [
+                row("fail", false),
+                row("not-found", false),
+                row("refused", false)
+            ]
+        );
+        assert_eq!(
+            rows(StatusFilter::Skipped).await,
+            [row("deadline", true), row("unsupported", true)]
         );
     }
 

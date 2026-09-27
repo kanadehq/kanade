@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { ExitCodeBadge } from '@/components/ExitCodeBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -41,6 +42,8 @@ type ResultDetailRow = {
   pc_id: string;
   /** v0.30 / PR α' unified: null while in-flight. */
   exit_code: number | null;
+  /** The agent published this row instead of running the script. */
+  skipped: boolean;
   stdout: string;
   stderr: string;
   started_at: string | null;
@@ -135,9 +138,7 @@ export function ResultDetail() {
               data.exit_code === null ? (
                 <Badge variant="violet">{t('values.running')}</Badge>
               ) : (
-                <Badge variant={data.exit_code === 0 ? 'success' : 'danger'}>
-                  {data.exit_code}
-                </Badge>
+                <ExitCodeBadge code={data.exit_code} skipped={data.skipped} />
               )
             }
           />
@@ -210,11 +211,7 @@ export function ResultDetail() {
                       className="inline-flex items-center gap-1 text-accent hover:underline"
                     >
                       <code className="text-xs">{c.job_id ?? c.result_id.slice(0, 8)}</code>
-                      {c.exit_code !== null ? (
-                        <Badge variant={c.exit_code === 0 ? 'success' : 'danger'}>
-                          {c.exit_code}
-                        </Badge>
-                      ) : null}
+                      {c.exit_code !== null ? <ExitCodeBadge code={c.exit_code} /> : null}
                     </Link>
                   ))}
                 </span>

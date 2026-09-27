@@ -30,7 +30,8 @@
       "any": "(すべて)",
       "running": "実行中 (進行中)",
       "success": "成功 (exit 0)",
-      "failure": "失敗 (exit ≠ 0)"
+      "failure": "失敗 (exit ≠ 0、スキップ除く)",
+      "skipped": "スキップ (エージェントが未実行)"
     },
     "sincePresets": {
       "1h": "直近 1 時間",

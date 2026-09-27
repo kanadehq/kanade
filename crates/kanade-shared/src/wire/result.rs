@@ -45,6 +45,27 @@ pub struct ExecResult {
     pub parent_result_id: Option<String>,
     pub pc_id: String,
     pub exit_code: i32,
+    /// Whether the agent ran the script, as the agent itself reports it.
+    ///
+    /// - `Some(true)`: it published this result *instead of* running the
+    ///   script because policy (or this OS) said "not now": deadline /
+    ///   revoke / version-pin / staleness / unsupported-OS. Such a result
+    ///   says nothing about the script's outcome, so aggregations count it
+    ///   as `skipped`, never as a failure.
+    /// - `Some(false)`: authoritative "this is not a skip" — the script ran
+    ///   (whatever it exited, including 126 / 127, which a real script under
+    ///   sh returns for "not executable" / "command not found"), or the
+    ///   agent refused the command ([`EXIT_REJECTED_UNSIGNED`]). A refusal
+    ///   is deliberately not a skip: "this command was not authorised" is
+    ///   something the fleet's failure counts must surface.
+    /// - `None`: the key was absent, i.e. an agent that predates the flag.
+    ///   See [`Self::is_reported_skip`] and
+    ///   [`Self::skips_check_projection`] for how each consumer reads it.
+    ///
+    /// Agents that know the flag always send it (never `null`), so absence
+    /// means exactly "legacy agent". The reserved exit codes only say *why*.
+    #[serde(default)]
+    pub skipped: Option<bool>,
     /// stdout. Empty string when [`Self::stdout_object`] is set — the
     /// agent overflowed the bytes into [`crate::kv::OBJECT_RESULT_OUTPUT`]
     /// because the inline payload would have exceeded NATS's default
@@ -90,11 +111,13 @@ pub struct ExecResult {
 
 /// Synthetic exit code for a run the agent skipped because the
 /// Command's `version` didn't match the `script_current` pin. One of
-/// the reserved synthetic codes (122–127): the agent publishes a
-/// normal [`ExecResult`] so the operator can see *why* nothing ran,
-/// but the script itself never executed — consumers that derive state
-/// from a run's output (e.g. the backend's `check_status` projection)
-/// must treat these as "no new evidence", not as a run (#909).
+/// the reserved synthetic codes (122–127) saying *why* the agent
+/// published a result instead of running the script; the result
+/// carries [`ExecResult::skipped`], which is what consumers key on —
+/// the code alone proves nothing, as a real script can exit with the
+/// same number. Consumers that derive state from a run's output (e.g.
+/// the backend's `check_status` projection) treat a skip as "no new
+/// evidence", not as a run (#909).
 pub const EXIT_SKIP_VERSION_PIN: i32 = 124;
 /// Synthetic exit code: `deadline_at` passed before the agent could
 /// fire. See [`EXIT_SKIP_VERSION_PIN`] for the shared contract.
@@ -108,13 +131,15 @@ pub const EXIT_SKIP_STALENESS: i32 = 127;
 /// Synthetic exit code: the agent **refused** the command because its
 /// provenance signature did not check out (#1165 stage 3).
 ///
-/// Extends the reserved block downwards, because 124–127 was full. It shares
-/// the block's contract — the script never ran, so this is not evidence about
-/// its outcome — but it is not a *skip*: the others mean "policy (or this
-/// OS) said not now", while this one means "this command was not authorised". The specific
-/// code is what carries that distinction; [`is_synthetic_skip`] deliberately
-/// does not, because every consumer of that predicate is asking the narrower
-/// question of whether the script ran.
+/// Extends the reserved block downwards, because 124–127 was full. The script
+/// never ran, so this is not evidence about its outcome — but it is not a
+/// *skip*: the others mean "policy (or this OS) said not now", while this one
+/// means "this command was not authorised". So the result is published with
+/// [`ExecResult::skipped`] `Some(false)` and counts as a failure everywhere
+/// results are tallied: a fleet refusing unsigned commands must show up in
+/// the failure counts, not vanish into "skipped". The one consumer that only
+/// asks whether the script ran — the `check_status` projection — recognises a
+/// refusal by [`ExecResult::is_signature_refusal`] instead.
 ///
 /// Emitting a result at all is the point. `kanade run` waits on
 /// `results.<request_id>`, so a refusal that published nothing would be
@@ -133,11 +158,18 @@ pub const EXIT_REJECTED_UNSIGNED: i32 = 123;
 /// script never ran.
 pub const EXIT_SKIP_UNSUPPORTED: i32 = 122;
 
-/// True when `exit_code` is one of the reserved synthetic codes (122–127) —
-/// the agent published this result *instead of* running the script, so it
-/// carries no evidence about the script's outcome.
-pub fn is_synthetic_skip(exit_code: i32) -> bool {
-    (EXIT_SKIP_UNSUPPORTED..=EXIT_SKIP_STALENESS).contains(&exit_code)
+/// The deterministic `result_id` of the signature refusal for
+/// `(request_id, pc_id)` (#1165). Deterministic because a refusal is the one
+/// result that repeats — the replay re-delivers the same unverifiable command
+/// on every reconnect — so every re-publish must land on the same row. It also
+/// makes a refusal recognisable without trusting the exit code alone: see
+/// [`ExecResult::is_signature_refusal`].
+pub fn signature_refusal_result_id(request_id: &str, pc_id: &str) -> String {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("{request_id}|{pc_id}|signature-refused").as_bytes(),
+    )
+    .to_string()
 }
 
 impl ExecResult {
@@ -158,6 +190,39 @@ impl ExecResult {
         );
         Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
     }
+
+    /// True when the agent reported this result as a skip. What every
+    /// result tally (and `execution_results.skipped`) counts. A legacy
+    /// result (`None`) is not one: tallies read those by exit code, exactly
+    /// as they did before the flag existed.
+    pub fn is_reported_skip(&self) -> bool {
+        self.skipped == Some(true)
+    }
+
+    /// True when this result must be kept out of the `check_status`
+    /// projection because the script never ran (#909). Follows the flag
+    /// when the agent sent one. For a legacy result (`None`) it keeps the
+    /// rule the projector applied before the flag existed: every reserved
+    /// exit code 122..=127 is dropped. A legacy agent cannot tell its own
+    /// skip from a script that really exited 126 / 127, so those real exits
+    /// stay dropped for legacy agents too — unchanged behaviour, not a new
+    /// guess. (The signature refusal is handled separately, see
+    /// [`Self::is_signature_refusal`].)
+    pub fn skips_check_projection(&self) -> bool {
+        match self.skipped {
+            Some(skipped) => skipped,
+            None => (EXIT_SKIP_UNSUPPORTED..=EXIT_SKIP_STALENESS).contains(&self.exit_code),
+        }
+    }
+
+    /// True for the agent's signature refusal (#1165): exit
+    /// [`EXIT_REJECTED_UNSIGNED`] under the refusal's derived `result_id`.
+    /// A script that merely exits 123 (xargs does, for one) carries an
+    /// ordinary random id and is not a refusal.
+    pub fn is_signature_refusal(&self) -> bool {
+        self.exit_code == EXIT_REJECTED_UNSIGNED
+            && self.result_id == signature_refusal_result_id(&self.request_id, &self.pc_id)
+    }
 }
 
 #[cfg(test)]
@@ -165,25 +230,94 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    fn sample(exit_code: i32, skipped: Option<bool>) -> ExecResult {
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 9, 27, 0, 0, 0).unwrap();
+        ExecResult {
+            result_id: "r1".into(),
+            request_id: "req".into(),
+            exec_id: None,
+            parent_result_id: None,
+            pc_id: "PC1".into(),
+            exit_code,
+            skipped,
+            stdout: String::new(),
+            stderr: String::new(),
+            started_at: t0,
+            finished_at: t0,
+            stdout_object: None,
+            stderr_object: None,
+            manifest_id: None,
+            collect_object: None,
+        }
+    }
+
     #[test]
-    fn synthetic_skip_covers_exactly_the_reserved_codes() {
-        for code in [
-            EXIT_SKIP_UNSUPPORTED,
-            EXIT_REJECTED_UNSIGNED,
-            EXIT_SKIP_VERSION_PIN,
-            EXIT_SKIP_DEADLINE,
-            EXIT_SKIP_REVOKED,
-            EXIT_SKIP_STALENESS,
-        ] {
-            assert!(is_synthetic_skip(code), "{code} is a reserved skip code");
+    fn skipped_is_always_on_the_wire_and_absent_means_legacy() {
+        for flag in [Some(true), Some(false)] {
+            let json = serde_json::to_string(&sample(127, flag)).unwrap();
+            let expected = format!("\"skipped\":{}", flag.unwrap());
+            assert!(json.contains(&expected), "{expected} missing: {json}");
+            let back: ExecResult = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.skipped, flag);
         }
-        // The block grew downwards twice: 123 for the signature rejection
-        // (#1165), then 122 for "unsupported on this OS". 121 is the new
-        // edge, and pinning both edges is what makes a future widening a
-        // deliberate act rather than an accident.
-        for code in [0, 1, -1, 121, 128, 255] {
-            assert!(!is_synthetic_skip(code), "{code} is a real exit code");
+        // An agent that predates the flag sends no key at all.
+        let json = r#"{
+            "request_id":"r","pc_id":"x","exit_code":125,
+            "stdout":"","stderr":"",
+            "started_at":"2026-05-16T00:00:00Z",
+            "finished_at":"2026-05-16T00:00:00Z"
+        }"#;
+        let legacy: ExecResult = serde_json::from_str(json).unwrap();
+        assert_eq!(legacy.skipped, None);
+    }
+
+    #[test]
+    fn reporting_follows_the_flag_and_check_projection_falls_back_for_legacy() {
+        // Reporting: only an explicit skip; legacy is read by exit code.
+        assert!(sample(125, Some(true)).is_reported_skip());
+        assert!(!sample(127, Some(false)).is_reported_skip());
+        assert!(!sample(125, None).is_reported_skip());
+
+        // Check projection: the flag decides when present...
+        assert!(sample(0, Some(true)).skips_check_projection());
+        assert!(!sample(127, Some(false)).skips_check_projection());
+        // ...and legacy keeps the pre-flag 122..=127 rule, edges included.
+        for code in [122, 123, 125, 127] {
+            assert!(sample(code, None).skips_check_projection(), "{code}");
         }
+        for code in [0, 1, 121, 128] {
+            assert!(!sample(code, None).skips_check_projection(), "{code}");
+        }
+    }
+
+    #[test]
+    fn signature_refusal_is_recognised_by_its_derived_id_not_by_exit_123() {
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 9, 27, 0, 0, 0).unwrap();
+        let mut r = ExecResult {
+            result_id: signature_refusal_result_id("req-1", "PC1"),
+            request_id: "req-1".into(),
+            exec_id: None,
+            parent_result_id: None,
+            pc_id: "PC1".into(),
+            exit_code: EXIT_REJECTED_UNSIGNED,
+            skipped: Some(false),
+            stdout: String::new(),
+            stderr: "refused: unsigned".into(),
+            started_at: t0,
+            finished_at: t0,
+            stdout_object: None,
+            stderr_object: None,
+            manifest_id: None,
+            collect_object: None,
+        };
+        assert!(r.is_signature_refusal());
+        // A script that just exits 123 (xargs does) has an ordinary id.
+        r.result_id = "3f0e6a52-1b7c-4c1e-9d55-0d8f1f2b7a10".into();
+        assert!(!r.is_signature_refusal());
+        // The derived id with any other exit code is not a refusal either.
+        r.result_id = signature_refusal_result_id("req-1", "PC1");
+        r.exit_code = 1;
+        assert!(!r.is_signature_refusal());
     }
 
     #[test]
@@ -197,6 +331,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "pc-01".into(),
             exit_code: 0,
+            skipped: Some(false),
             stdout: "hello\n".into(),
             stderr: String::new(),
             started_at: t0,
@@ -308,6 +443,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "x".into(),
             exit_code: 0,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: String::new(),
             started_at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
@@ -332,6 +468,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "PC1".into(),
             exit_code: 0,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: String::new(),
             started_at: t0,
@@ -368,6 +505,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "PC1".into(),
             exit_code: 0,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: String::new(),
             started_at: t0,

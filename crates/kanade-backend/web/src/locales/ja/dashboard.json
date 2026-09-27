@@ -37,7 +37,7 @@
       },
       "failures": {
         "label": "失敗 / {{hours}}時間",
-        "hint": "exit_code ≠ 0 / 実行数",
+        "hint": "exit_code ≠ 0 (スキップ除く) / 実行数",
         "linkTitle": "失敗した実行を表示"
       }
     }
@@ -50,6 +50,8 @@
     "title": "最近のジョブ実行結果",
     "descriptionAllGreen": "各PCで実行されたジョブの結果 · 直近 {{count}} 件すべて正常",
     "descriptionFailed": "各PCで実行されたジョブの結果 · 直近 {{count}} 件中 {{failed}} 件失敗",
+    "descriptionFailedSkipped": "各PCで実行されたジョブの結果 · 直近 {{count}} 件中 {{failed}} 件失敗、{{skipped}} 件スキップ",
+    "descriptionSkipped": "各PCで実行されたジョブの結果 · 直近 {{count}} 件: 失敗なし、{{skipped}} 件スキップ (未実行)",
     "rowTitle": "この実行の詳細を開く",
     "empty": "結果はまだありません。"
   },

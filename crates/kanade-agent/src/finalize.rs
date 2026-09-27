@@ -286,6 +286,7 @@ fn build_finalize_result(
         parent_result_id: Some(parent_result_id.to_string()),
         pc_id: pc_id.to_string(),
         exit_code,
+        skipped: Some(false),
         stdout,
         stderr,
         started_at,
@@ -365,6 +366,7 @@ mod tests {
         assert_eq!(r.pc_id, "pc-9");
         assert_eq!(r.exit_code, 1);
         assert!(!r.result_id.is_empty(), "result_id minted");
+        assert_eq!(r.skipped, Some(false), "the hook ran");
     }
 
     #[test]
