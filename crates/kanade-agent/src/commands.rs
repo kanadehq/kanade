@@ -805,7 +805,7 @@ pub async fn handle_command(
         parent_result_id: None,
         pc_id: pc_id.clone(),
         exit_code,
-        skipped: false,
+        skipped: Some(false),
         stdout,
         stderr,
         started_at,
@@ -1033,7 +1033,7 @@ fn skip_result(
         parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code,
-        skipped: true,
+        skipped: Some(true),
         stdout: String::new(),
         stderr,
         started_at: now,
@@ -1056,7 +1056,7 @@ fn admission_cancelled_result(pc_id: &str, cmd: &Command, outcome: ExecOutcome) 
             exit_code, stderr, ..
         } => skip_result(pc_id, cmd, exit_code, stderr, now),
         ExecOutcome::Killed { stderr, .. } | ExecOutcome::Timeout { stderr, .. } => ExecResult {
-            skipped: false,
+            skipped: Some(false),
             ..skip_result(pc_id, cmd, -1, stderr, now)
         },
     }
@@ -1109,7 +1109,7 @@ fn signature_refusal_result(
 ) -> ExecResult {
     ExecResult {
         result_id: signature_refusal_result_id(&cmd.request_id, pc_id),
-        skipped: false,
+        skipped: Some(false),
         ..skip_result(
             pc_id,
             cmd,
@@ -1272,14 +1272,14 @@ mod tests {
             EXIT_SKIP_STALENESS,
         ] {
             let r = skip_result("PC1", &cmd, code, "why".into(), at(0));
-            assert!(r.skipped, "exit {code} is published as skipped");
+            assert_eq!(r.skipped, Some(true), "exit {code} is published as skipped");
             assert_eq!(r.exit_code, code);
         }
 
         // A signature refusal didn't run the script either, but it is a
         // failure the fleet counts must show, not a skip.
         let refused = signature_refusal_result("PC1", &cmd, "unsigned", at(0));
-        assert!(!refused.skipped);
+        assert_eq!(refused.skipped, Some(false));
         assert_eq!(refused.exit_code, EXIT_REJECTED_UNSIGNED);
         assert_eq!(refused.stderr, "refused: unsigned");
         assert!(refused.is_signature_refusal());
@@ -1295,7 +1295,7 @@ mod tests {
                 stderr: "deadline".into(),
             },
         );
-        assert!(expired.skipped);
+        assert_eq!(expired.skipped, Some(true));
         assert_eq!(expired.exit_code, EXIT_SKIP_DEADLINE);
         let killed = admission_cancelled_result(
             "PC1",
@@ -1305,7 +1305,7 @@ mod tests {
                 stderr: "killed".into(),
             },
         );
-        assert!(!killed.skipped);
+        assert_eq!(killed.skipped, Some(false));
         assert_eq!(killed.exit_code, -1);
     }
 

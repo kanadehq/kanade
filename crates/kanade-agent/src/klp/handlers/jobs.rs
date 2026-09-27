@@ -880,7 +880,7 @@ fn build_exec_result(
         parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code,
-        skipped: false,
+        skipped: Some(false),
         stdout,
         stderr,
         started_at,
@@ -1815,6 +1815,7 @@ mod tests {
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "ok");
         assert_eq!(r.result_id, "rid-1", "caller-supplied result_id is used");
+        assert_eq!(r.skipped, Some(false), "a KLP run ran the script");
     }
 
     #[test]

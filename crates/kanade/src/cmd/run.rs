@@ -350,7 +350,7 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
     println!(
         "exit_code : {}{}",
         result.exit_code,
-        if result.skipped {
+        if result.is_reported_skip() {
             " (skipped: the agent did not run the script)"
         } else {
             ""

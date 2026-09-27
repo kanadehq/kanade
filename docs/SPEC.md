@@ -873,11 +873,14 @@ read-only ビューで確認できる（CLI `kanade schedule {preview,status,cov
 - `GET /api/schedules/{id}/status` — `enabled` / 次回発火 / 直近 1 件の
   run / 直近 24h の ok・fail・skipped 集計。`skipped` は agent がポリシー
   （deadline / revoke / version-pin / staleness / OS 非対応）でスクリプトを
-  実行せずに返した結果（`ExecResult.skipped = true` →
+  実行せずに返した結果（`ExecResult.skipped = Some(true)` →
   `execution_results.skipped = 1`）で、fail には数えない。判定はこの
   フラグのみで、予約終了コードは理由を示すだけ（実スクリプトの 126 / 127
-  は失敗）。署名検証で拒否した命令（exit 123）は skip ではなく fail として
-  数える。フラグを送らない旧 agent の結果は従来どおり終了コードで判定。
+  は失敗）。署名検証で拒否した命令（exit 123）は `Some(false)` で送られ、
+  skip ではなく fail として数える。フラグを知る agent は常に true / false を
+  送るので、キー欠落 = フラグ以前の旧 agent。旧 agent の結果は集計では
+  従来どおり終了コードで判定し（非 0 = fail）、check_status 投影では従来の
+  規則どおり exit 122–127 を投影しない。
 - `GET /api/schedules/{id}/coverage` — **ロールアウト・カバレッジ**。
   schedule の `target` を**全台（オフライン含む）**に解決し、各 agent の
   最新実行結果を `ok` / `fail` / `skipped`（最新が agent の未実行結果）/

@@ -1818,7 +1818,7 @@ fn notice_unsupported(
         parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code: EXIT_SKIP_UNSUPPORTED,
-        skipped: true,
+        skipped: Some(true),
         stdout: String::new(),
         stderr,
         started_at: now,
@@ -2600,7 +2600,7 @@ mod tests {
         assert_eq!(results.len(), 1, "one notice across repeated ticks");
         let r = &results[0];
         assert_eq!(r.exit_code, EXIT_SKIP_UNSUPPORTED);
-        assert!(r.skipped, "the notice is a did-not-run result");
+        assert_eq!(r.skipped, Some(true), "the notice is a did-not-run result");
         assert_eq!(
             r.stderr,
             format!(
@@ -2681,7 +2681,7 @@ mod tests {
         let results = outbox_results(&dir.path().join("outbox"));
         assert_eq!(results.len(), 1, "one notice, and none for startup-only");
         assert_eq!(results[0].exit_code, EXIT_SKIP_UNSUPPORTED);
-        assert!(results[0].skipped);
+        assert_eq!(results[0].skipped, Some(true));
         assert_eq!(
             results[0].stderr,
             format!(

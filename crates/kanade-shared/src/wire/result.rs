@@ -45,23 +45,27 @@ pub struct ExecResult {
     pub parent_result_id: Option<String>,
     pub pc_id: String,
     pub exit_code: i32,
-    /// True only when the agent published this result *instead of*
-    /// running the script because policy (or this OS) said "not now":
-    /// deadline / revoke / version-pin / staleness / unsupported-OS. Such
-    /// a result says nothing about the script's outcome, so aggregations
-    /// count it as `skipped`, never as a failure. This flag is the only
-    /// thing that marks a skip; the reserved exit code (122, 124–127)
-    /// merely says *why*, and on its own proves nothing — a real script
-    /// can exit 126 / 127 too (sh "not executable" / "command not found").
+    /// Whether the agent ran the script, as the agent itself reports it.
     ///
-    /// A signature refusal ([`EXIT_REJECTED_UNSIGNED`]) is deliberately
-    /// NOT flagged: the script didn't run either, but "this command was not
-    /// authorised" is something the fleet's failure counts must surface.
+    /// - `Some(true)`: it published this result *instead of* running the
+    ///   script because policy (or this OS) said "not now": deadline /
+    ///   revoke / version-pin / staleness / unsupported-OS. Such a result
+    ///   says nothing about the script's outcome, so aggregations count it
+    ///   as `skipped`, never as a failure.
+    /// - `Some(false)`: authoritative "this is not a skip" — the script ran
+    ///   (whatever it exited, including 126 / 127, which a real script under
+    ///   sh returns for "not executable" / "command not found"), or the
+    ///   agent refused the command ([`EXIT_REJECTED_UNSIGNED`]). A refusal
+    ///   is deliberately not a skip: "this command was not authorised" is
+    ///   something the fleet's failure counts must surface.
+    /// - `None`: the key was absent, i.e. an agent that predates the flag.
+    ///   See [`Self::is_reported_skip`] and
+    ///   [`Self::skips_check_projection`] for how each consumer reads it.
     ///
-    /// Off the wire when false; results from agents that predate the flag
-    /// decode as `false` — i.e. by exit code, as they were counted before.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub skipped: bool,
+    /// Agents that know the flag always send it (never `null`), so absence
+    /// means exactly "legacy agent". The reserved exit codes only say *why*.
+    #[serde(default)]
+    pub skipped: Option<bool>,
     /// stdout. Empty string when [`Self::stdout_object`] is set — the
     /// agent overflowed the bytes into [`crate::kv::OBJECT_RESULT_OUTPUT`]
     /// because the inline payload would have exceeded NATS's default
@@ -131,7 +135,7 @@ pub const EXIT_SKIP_STALENESS: i32 = 127;
 /// never ran, so this is not evidence about its outcome — but it is not a
 /// *skip*: the others mean "policy (or this OS) said not now", while this one
 /// means "this command was not authorised". So the result is published with
-/// [`ExecResult::skipped`] **false** and counts as a failure everywhere
+/// [`ExecResult::skipped`] `Some(false)` and counts as a failure everywhere
 /// results are tallied: a fleet refusing unsigned commands must show up in
 /// the failure counts, not vanish into "skipped". The one consumer that only
 /// asks whether the script ran — the `check_status` projection — recognises a
@@ -187,31 +191,34 @@ impl ExecResult {
         Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
     }
 
+    /// True when the agent reported this result as a skip. What every
+    /// result tally (and `execution_results.skipped`) counts. A legacy
+    /// result (`None`) is not one: tallies read those by exit code, exactly
+    /// as they did before the flag existed.
+    pub fn is_reported_skip(&self) -> bool {
+        self.skipped == Some(true)
+    }
+
+    /// True when this result must be kept out of the `check_status`
+    /// projection because the script never ran (#909). Follows the flag
+    /// when the agent sent one. For a legacy result (`None`) it keeps the
+    /// rule the projector applied before the flag existed: every reserved
+    /// exit code 122..=127 is dropped. A legacy agent cannot tell its own
+    /// skip from a script that really exited 126 / 127, so those real exits
+    /// stay dropped for legacy agents too — unchanged behaviour, not a new
+    /// guess. (The signature refusal is handled separately, see
+    /// [`Self::is_signature_refusal`].)
+    pub fn skips_check_projection(&self) -> bool {
+        match self.skipped {
+            Some(skipped) => skipped,
+            None => (EXIT_SKIP_UNSUPPORTED..=EXIT_SKIP_STALENESS).contains(&self.exit_code),
+        }
+    }
+
     /// True for the agent's signature refusal (#1165): exit
     /// [`EXIT_REJECTED_UNSIGNED`] under the refusal's derived `result_id`.
     /// A script that merely exits 123 (xargs does, for one) carries an
     /// ordinary random id and is not a refusal.
-    /// True for a skip published by an agent that predates
-    /// [`Self::skipped`]: unflagged, a reserved skip exit code, and one of
-    /// the exact `skipped: …` messages the synthetic publishers wrote. Only
-    /// for callers that must keep ignoring those results (the check
-    /// projector, #909); tallies deliberately ignore it. Script stderr can
-    /// not be told apart in general, so the match is on the full known
-    /// message heads rather than a bare `skipped:` prefix.
-    pub fn is_legacy_skip(&self) -> bool {
-        const HEADS: [&str; 6] = [
-            "skipped: version-pin mismatch",
-            "skipped: starting deadline expired",
-            "skipped: command was revoked",
-            "skipped: staleness policy",
-            "skipped: constraints.require.idle cannot be evaluated",
-            "skipped: when.on [",
-        ];
-        !self.skipped
-            && matches!(self.exit_code, 122 | 124..=127)
-            && HEADS.iter().any(|h| self.stderr.starts_with(h))
-    }
-
     pub fn is_signature_refusal(&self) -> bool {
         self.exit_code == EXIT_REJECTED_UNSIGNED
             && self.result_id == signature_refusal_result_id(&self.request_id, &self.pc_id)
@@ -223,49 +230,16 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    #[test]
-    fn legacy_skip_needs_reserved_code_and_skipped_stderr() {
+    fn sample(exit_code: i32, skipped: Option<bool>) -> ExecResult {
         let t0 = chrono::Utc.with_ymd_and_hms(2026, 9, 27, 0, 0, 0).unwrap();
-        let mut r = ExecResult {
+        ExecResult {
             result_id: "r1".into(),
             request_id: "req".into(),
             exec_id: None,
             parent_result_id: None,
             pc_id: "PC1".into(),
-            exit_code: 124,
-            skipped: false,
-            stdout: String::new(),
-            stderr: "skipped: version-pin mismatch".into(),
-            started_at: t0,
-            finished_at: t0,
-            stdout_object: None,
-            stderr_object: None,
-            manifest_id: None,
-            collect_object: None,
-        };
-        assert!(r.is_legacy_skip());
-        r.stderr = "sh: x: command not found".into();
-        r.exit_code = 127;
-        assert!(!r.is_legacy_skip());
-        r.stderr = "skipped: my own script note".into();
-        r.exit_code = 126;
-        assert!(!r.is_legacy_skip());
-        r.exit_code = 1;
-        r.stderr = "skipped: version-pin mismatch".into();
-        assert!(!r.is_legacy_skip());
-    }
-
-    #[test]
-    fn skipped_is_off_the_wire_when_false_and_defaults_false() {
-        let t0 = chrono::Utc.with_ymd_and_hms(2026, 9, 27, 0, 0, 0).unwrap();
-        let mut r = ExecResult {
-            result_id: "r1".into(),
-            request_id: "req".into(),
-            exec_id: None,
-            parent_result_id: None,
-            pc_id: "PC1".into(),
-            exit_code: 127,
-            skipped: false,
+            exit_code,
+            skipped,
             stdout: String::new(),
             stderr: String::new(),
             started_at: t0,
@@ -274,20 +248,46 @@ mod tests {
             stderr_object: None,
             manifest_id: None,
             collect_object: None,
-        };
-        // A real run (even one exiting 127) keeps the pre-flag wire shape,
-        // so older backends read it exactly as before...
-        let json = serde_json::to_string(&r).unwrap();
-        assert!(
-            !json.contains("skipped"),
-            "skipped must be absent when false: {json}"
-        );
-        // ...and a payload from an agent that predates the flag is a run.
-        let back: ExecResult = serde_json::from_str(&json).unwrap();
-        assert!(!back.skipped);
-        r.skipped = true;
-        let back: ExecResult = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
-        assert!(back.skipped);
+        }
+    }
+
+    #[test]
+    fn skipped_is_always_on_the_wire_and_absent_means_legacy() {
+        for flag in [Some(true), Some(false)] {
+            let json = serde_json::to_string(&sample(127, flag)).unwrap();
+            let expected = format!("\"skipped\":{}", flag.unwrap());
+            assert!(json.contains(&expected), "{expected} missing: {json}");
+            let back: ExecResult = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.skipped, flag);
+        }
+        // An agent that predates the flag sends no key at all.
+        let json = r#"{
+            "request_id":"r","pc_id":"x","exit_code":125,
+            "stdout":"","stderr":"",
+            "started_at":"2026-05-16T00:00:00Z",
+            "finished_at":"2026-05-16T00:00:00Z"
+        }"#;
+        let legacy: ExecResult = serde_json::from_str(json).unwrap();
+        assert_eq!(legacy.skipped, None);
+    }
+
+    #[test]
+    fn reporting_follows_the_flag_and_check_projection_falls_back_for_legacy() {
+        // Reporting: only an explicit skip; legacy is read by exit code.
+        assert!(sample(125, Some(true)).is_reported_skip());
+        assert!(!sample(127, Some(false)).is_reported_skip());
+        assert!(!sample(125, None).is_reported_skip());
+
+        // Check projection: the flag decides when present...
+        assert!(sample(0, Some(true)).skips_check_projection());
+        assert!(!sample(127, Some(false)).skips_check_projection());
+        // ...and legacy keeps the pre-flag 122..=127 rule, edges included.
+        for code in [122, 123, 125, 127] {
+            assert!(sample(code, None).skips_check_projection(), "{code}");
+        }
+        for code in [0, 1, 121, 128] {
+            assert!(!sample(code, None).skips_check_projection(), "{code}");
+        }
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "PC1".into(),
             exit_code: EXIT_REJECTED_UNSIGNED,
-            skipped: false,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: "refused: unsigned".into(),
             started_at: t0,
@@ -331,7 +331,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "pc-01".into(),
             exit_code: 0,
-            skipped: false,
+            skipped: Some(false),
             stdout: "hello\n".into(),
             stderr: String::new(),
             started_at: t0,
@@ -443,7 +443,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "x".into(),
             exit_code: 0,
-            skipped: false,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: String::new(),
             started_at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
@@ -468,7 +468,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "PC1".into(),
             exit_code: 0,
-            skipped: false,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: String::new(),
             started_at: t0,
@@ -505,7 +505,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "PC1".into(),
             exit_code: 0,
-            skipped: false,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: String::new(),
             started_at: t0,

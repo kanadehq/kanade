@@ -328,7 +328,7 @@ where
     .bind(&r.exec_id)
     .bind(&r.pc_id)
     .bind(r.exit_code as i64)
-    .bind(r.skipped)
+    .bind(r.is_reported_skip())
     .bind(&r.stdout)
     .bind(&r.stderr)
     .bind(r.started_at)
@@ -623,10 +623,13 @@ struct CheckProjection {
 /// result the agent published *instead of* running the script, because
 /// it says nothing about the check (#909):
 ///
-/// - a skip ([`ExecResult::skipped`]). Projecting one flipped fleet checks
-///   to `unknown` on every version bump, and for a persistently-failing
-///   check the fail → unknown(skip) → fail hop looked like a fresh
-///   transition and re-fired the alert on each bump.
+/// - a skip, per [`ExecResult::skips_check_projection`]. Projecting one
+///   flipped fleet checks to `unknown` on every version bump, and for a
+///   persistently-failing check the fail → unknown(skip) → fail hop
+///   looked like a fresh transition and re-fired the alert on each bump.
+///   The agent's `skipped` flag decides when present; a legacy agent
+///   (no flag) keeps the pre-flag rule — every exit 122..=127 dropped,
+///   including a real 126 / 127 it has no way to tell apart.
 /// - a signature refusal ([`ExecResult::is_signature_refusal`]). It is
 ///   NOT a skip — it counts as a failure in every result tally — but the
 ///   check's state is unknown to it just the same, so this keeps the
@@ -634,15 +637,15 @@ struct CheckProjection {
 ///   123): the unauthorised command shows up as a failed result, not as a
 ///   bogus compliance transition.
 ///
-/// Neither is decided by exit code: a check script that really exits
-/// 123 / 126 / 127 failed and must project as such.
+/// For an agent that sends the flag, neither is decided by exit code: a
+/// check script that really exits 123 / 126 / 127 failed and projects.
 async fn upsert_check_status(
     pool: &SqlitePool,
     r: &ExecResult,
     hint: &CheckHint,
     recorded_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<CheckProjection>> {
-    if r.skipped || r.is_legacy_skip() || r.is_signature_refusal() {
+    if r.skips_check_projection() || r.is_signature_refusal() {
         return Ok(None);
     }
     // Derive (status, detail) via the shared `check_eval` helpers — the
@@ -915,7 +918,7 @@ mod tests {
             parent_result_id: None,
             pc_id: pc_id.into(),
             exit_code: 0,
-            skipped: false,
+            skipped: Some(false),
             stdout: String::new(),
             stderr: String::new(),
             started_at: chrono::Utc.with_ymd_and_hms(2026, 5, 20, 0, 0, 0).unwrap(),
@@ -1475,13 +1478,26 @@ mod tests {
 
         let mut r = sample("res-s1", "req-s1", "pc-s", None);
         r.exit_code = 127;
-        r.skipped = true;
+        r.skipped = Some(true);
         r.stderr = "skipped: staleness policy".into();
         let proj = upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
             .await
             .unwrap();
         assert!(proj.is_none());
         assert_eq!(count().await, 0, "a skip writes nothing");
+
+        // A legacy agent (no flag) keeps the pre-flag rule: its 125 skip —
+        // and even a real 127, which it cannot tell apart — is dropped.
+        for (id, code) in [("res-l1", 125), ("res-l2", 127)] {
+            let mut legacy = sample(id, "req-l", "pc-l", None);
+            legacy.exit_code = code;
+            legacy.skipped = None;
+            let proj = upsert_check_status(&pool, &legacy, &hint, chrono::Utc::now())
+                .await
+                .unwrap();
+            assert!(proj.is_none(), "legacy exit {code} is dropped");
+        }
+        assert_eq!(count().await, 0);
 
         // A script that exits 123 under an ordinary result id is a run.
         let mut xargs = sample("res-x1", "req-x1", "pc-x", None);
@@ -1493,12 +1509,12 @@ mod tests {
             .expect("a real 123 projects");
         assert_eq!(count().await, 1);
 
-        r.skipped = false;
+        r.skipped = Some(false);
         r.stderr = "sh: manage-bde: command not found".into();
         upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
             .await
             .unwrap()
-            .expect("a real run projects");
+            .expect("a flagged real run projects");
         let row: (String, Option<String>) =
             sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-s'")
                 .fetch_one(&pool)
@@ -1506,6 +1522,31 @@ mod tests {
                 .unwrap();
         assert_eq!(row.0, "unknown");
         assert!(row.1.unwrap().contains("command not found"));
+    }
+
+    /// The column the tallies read is the agent's explicit skip only: a
+    /// legacy result (no flag) is stored as not-skipped, so its exit code
+    /// counts exactly as it did before the flag existed.
+    #[tokio::test]
+    async fn only_an_explicit_skip_is_persisted_as_skipped() {
+        let pool = fresh_pool().await;
+        for (id, flag) in [("s", Some(true)), ("r", Some(false)), ("l", None)] {
+            let mut r = sample(id, id, "pc-1", None);
+            r.exit_code = 125;
+            r.skipped = flag;
+            insert_result(&pool, &r, id, chrono::Utc::now())
+                .await
+                .unwrap();
+        }
+        let rows: Vec<(String, bool)> =
+            sqlx::query_as("SELECT result_id, skipped FROM execution_results ORDER BY result_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            [("l".into(), false), ("r".into(), false), ("s".into(), true)]
+        );
     }
 
     #[tokio::test]
