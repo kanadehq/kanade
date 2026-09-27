@@ -341,6 +341,7 @@ mod tests {
             parent_result_id: None,
             pc_id: "pc-01".into(),
             exit_code: 0,
+            skipped: false,
             stdout: "ok".into(),
             stderr: String::new(),
             started_at: Utc.with_ymd_and_hms(2026, 5, 19, 0, 0, 0).unwrap(),
@@ -374,6 +375,7 @@ mod tests {
         let r1 = sample("req-x");
         let r2 = ExecResult {
             exit_code: 7,
+            skipped: false,
             ..sample("req-x")
         };
         enqueue(dir.path(), &r1).unwrap();

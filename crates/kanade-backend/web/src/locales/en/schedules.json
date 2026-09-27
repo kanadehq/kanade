@@ -45,11 +45,12 @@
   "noMatch": "No schedules match the current filter",
   "coverage": {
     "title": "Rollout coverage",
-    "summary": "{{ok}}/{{total}} ok · {{fail}} fail · {{running}} running · {{pending}} pending",
+    "summary": "{{ok}}/{{total}} ok · {{fail}} fail · {{skipped}} skipped · {{running}} running · {{pending}} pending",
     "more": "+{{count}} more",
     "state": {
       "ok": "ok",
       "fail": "fail",
+      "skipped": "skipped",
       "running": "running",
       "pending": "pending"
     }

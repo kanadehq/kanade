@@ -102,36 +102,36 @@ type ScheduleRow = {
 // + the per-schedule rollups served by `/api/schedules[/{id}]/coverage`.
 type AgentRun = {
   pc_id: string;
-  state: 'ok' | 'fail' | 'running' | 'pending';
+  state: 'ok' | 'fail' | 'skipped' | 'running' | 'pending';
   version?: string;
   finished_at?: string;
-};
-type CoverageResponse = {
-  id: string;
-  when: string;
-  job_id: string;
-  runs_on: string;
-  total: number;
-  ok: number;
-  fail: number;
-  running: number;
-  pending: number;
-  agents: AgentRun[];
 };
 type CoverageCounts = {
   total: number;
   ok: number;
   fail: number;
+  /** Hosts whose latest run the agent declined (synthetic skip exit
+   *  code). Absent from pre-skip backends, which counted them as fail. */
+  skipped?: number;
   running: number;
   pending: number;
+};
+type CoverageResponse = CoverageCounts & {
+  id: string;
+  when: string;
+  job_id: string;
+  runs_on: string;
+  agents: AgentRun[];
 };
 type CoverageSummary = CoverageCounts & { id: string };
 
 // Map agent state → Badge variant (badge.tsx exposes
-// default|success|danger|violet|amber — no info/warning).
+// default|success|danger|violet|amber — no info/warning). A skip is
+// neutral: the script never ran, so it is no evidence of failure.
 const COVERAGE_VARIANT: Record<AgentRun['state'], 'success' | 'danger' | 'violet' | 'default'> = {
   ok: 'success',
   fail: 'danger',
+  skipped: 'default',
   running: 'violet',
   pending: 'default',
 };
@@ -140,20 +140,22 @@ const COVERAGE_VARIANT: Record<AgentRun['state'], 'success' | 'danger' | 'violet
 // "+N more" line — keeps a thousands-PC fleet from freezing the DOM.
 const COVERAGE_DETAIL_CAP = 100;
 
-// Compact stacked progress bar: ok (green) / fail (red) / running
-// (violet); pending is the uncolored remainder of the track. Total 0 →
-// an em-dash. The `title` carries the full breakdown for hover.
-function CoverageBar({ total, ok, fail, running, pending }: CoverageCounts) {
+// Compact stacked progress bar: ok (green) / fail (red) / skipped
+// (grey) / running (violet); pending is the uncolored remainder of the
+// track. Total 0 → an em-dash. The `title` carries the full breakdown
+// for hover.
+function CoverageBar({ total, ok, fail, skipped = 0, running, pending }: CoverageCounts) {
   if (total === 0) return <span className="text-muted text-xs">—</span>;
   const pct = (n: number) => `${(n / total) * 100}%`;
   return (
     <div className="flex items-center gap-2">
       <div
         className="flex h-2 w-24 overflow-hidden rounded-full bg-muted/20"
-        title={`${ok} ok · ${fail} fail · ${running} running · ${pending} pending`}
+        title={`${ok} ok · ${fail} fail · ${skipped} skipped · ${running} running · ${pending} pending`}
       >
         {ok > 0 && <div className="bg-success" style={{ width: pct(ok) }} />}
         {fail > 0 && <div className="bg-danger" style={{ width: pct(fail) }} />}
+        {skipped > 0 && <div className="bg-muted/60" style={{ width: pct(skipped) }} />}
         {running > 0 && <div className="bg-violet" style={{ width: pct(running) }} />}
       </div>
       <span className="text-xs tabular-nums text-muted whitespace-nowrap">{ok}/{total}</span>
@@ -960,6 +962,7 @@ export function Schedules() {
                           ok: c.ok,
                           total: c.total,
                           fail: c.fail,
+                          skipped: c.skipped ?? 0,
                           running: c.running,
                           pending: c.pending,
                         })}

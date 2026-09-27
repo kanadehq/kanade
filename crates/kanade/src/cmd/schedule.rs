@@ -126,7 +126,7 @@ pub enum ScheduleSub {
         count: u8,
     },
     /// Coverage view for a schedule (#418): enabled, next fire, last
-    /// run, and a 24h ok/fail tally.
+    /// run, and a 24h ok/fail/skipped tally.
     ///
     /// `next_run` comes from the same engine as `preview`; the run
     /// figures come from `execution_results` keyed by the schedule's
@@ -134,11 +134,12 @@ pub enum ScheduleSub {
     Status { id: String },
     /// Rollout coverage (#418): of the schedule's FULL target roster
     /// (offline hosts included), how many have completed-ok / failed /
-    /// are running / are still pending — plus the manifest version each
-    /// agent last ran. Built for tracking a fleet-wide rollout (e.g. a
-    /// vuln-fix app upgrade) to completion.
+    /// skipped (the agent declined to run it) / are running / are still
+    /// pending — plus the manifest version each agent last ran. Built
+    /// for tracking a fleet-wide rollout (e.g. a vuln-fix app upgrade)
+    /// to completion.
     ///
-    /// By default only the not-yet-done agents (fail / running /
+    /// By default only the not-yet-done agents (fail / skipped / running /
     /// pending) are listed; pass `--all` to list every targeted host.
     Coverage {
         id: String,
@@ -238,8 +239,10 @@ async fn status(base: &str, id: &str) -> Result<()> {
         Some(lr) if !lr.is_null() => {
             let pc = lr.get("pc_id").and_then(|v| v.as_str()).unwrap_or("?");
             let fin = lr.get("finished_at").and_then(|v| v.as_str());
+            let skipped = lr.get("skipped").and_then(|v| v.as_bool()) == Some(true);
             let outcome = match (fin, lr.get("exit_code").and_then(|v| v.as_i64())) {
                 (None, _) => "running".to_string(),
+                (Some(_), Some(code)) if skipped => format!("skipped, exit {code}"),
                 (Some(_), Some(0)) => "ok".to_string(),
                 (Some(_), Some(code)) => format!("exit {code}"),
                 (Some(_), None) => "done".to_string(),
@@ -260,7 +263,8 @@ async fn status(base: &str, id: &str) -> Result<()> {
             .unwrap_or(24);
         let ok = rec.get("ok").and_then(|v| v.as_i64()).unwrap_or(0);
         let fail = rec.get("fail").and_then(|v| v.as_i64()).unwrap_or(0);
-        println!("  last {h}h : {ok} ok / {fail} fail");
+        let skipped = rec.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
+        println!("  last {h}h : {ok} ok / {fail} fail / {skipped} skipped");
     }
     Ok(())
 }
@@ -318,14 +322,22 @@ async fn coverage(base: &str, id: &str, all: bool) -> Result<()> {
     let job = p.get("job_id").and_then(|v| v.as_str()).unwrap_or("?");
     let runs_on = p.get("runs_on").and_then(|v| v.as_str()).unwrap_or("?");
     let n = |k: &str| p.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-    let (total, ok, fail, running, pending) =
-        (n("total"), n("ok"), n("fail"), n("running"), n("pending"));
+    let (total, ok, fail, skipped, running, pending) = (
+        n("total"),
+        n("ok"),
+        n("fail"),
+        n("skipped"),
+        n("running"),
+        n("pending"),
+    );
     println!("{id}  —  {when}  (job: {job}, runs_on: {runs_on})");
-    println!("  rollout : {ok}/{total} ok · {fail} fail · {running} running · {pending} pending");
+    println!(
+        "  rollout : {ok}/{total} ok · {fail} fail · {skipped} skipped · {running} running · {pending} pending"
+    );
 
     print_cadence(&p);
 
-    // Per-agent detail: not-yet-done by default (fail/running/pending),
+    // Per-agent detail: not-yet-done by default (fail/skipped/running/pending),
     // everything with --all. ok rows are quiet unless --all.
     let show = |state: &str| all || state != "ok";
     if let Some(agents) = p.get("agents").and_then(|v| v.as_array()) {

@@ -286,6 +286,7 @@ fn build_finalize_result(
         parent_result_id: Some(parent_result_id.to_string()),
         pc_id: pc_id.to_string(),
         exit_code,
+        skipped: false,
         stdout,
         stderr,
         started_at,

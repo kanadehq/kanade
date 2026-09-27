@@ -244,25 +244,31 @@ pub async fn preview(
     }))
 }
 
-/// Trailing window for the success/fail tally in [`status`].
+/// Trailing window for the ok/fail/skipped tally in [`status`].
 const STATUS_WINDOW_HOURS: i64 = 24;
 
 /// The most recent run of a schedule's job (`exit_code` / `finished_at`
-/// `null` = still in flight).
+/// `null` = still in flight). `skipped`: the agent published it instead
+/// of running the script.
 #[derive(Serialize, Default)]
 pub struct LastRun {
     pub pc_id: String,
     pub exit_code: Option<i64>,
+    pub skipped: bool,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
 }
 
 /// Finished-run tally over the trailing [`STATUS_WINDOW_HOURS`].
+/// `skipped` counts the results the agent published instead of running
+/// the script (`execution_results.skipped`); they are neither `ok` nor
+/// `fail`.
 #[derive(Serialize, Default)]
 pub struct RecentCounts {
     pub window_hours: i64,
     pub ok: i64,
     pub fail: i64,
+    pub skipped: i64,
 }
 
 /// Coverage view for [`status`].
@@ -353,7 +359,7 @@ async fn cadence_health(
     Ok(Some(cadence_for(roster, &latest, now, threshold)))
 }
 
-/// Last run + trailing success/fail tally for a job. Keyed by `job_id`
+/// Last run + trailing ok/fail/skipped tally for a job. Keyed by `job_id`
 /// (a schedule references a job; `execution_results` has no
 /// `schedule_id`), so two schedules sharing a job share these numbers —
 /// accurate for the common 1:1 case, an over-count otherwise. Pure DB
@@ -365,7 +371,7 @@ async fn schedule_run_stats(
 ) -> Result<(Option<LastRun>, RecentCounts), sqlx::Error> {
     use sqlx::Row;
     let last = sqlx::query(
-        "SELECT pc_id, exit_code, started_at, finished_at
+        "SELECT pc_id, exit_code, skipped, started_at, finished_at
            FROM execution_results
           WHERE job_id = ?
           ORDER BY recorded_at DESC
@@ -383,6 +389,7 @@ async fn schedule_run_stats(
         // finished_at) as "exit 0, finished at ''". The Option form maps
         // NULL → None. `started_at` is NOT NULL so it stays a plain read.
         exit_code: r.try_get::<Option<i64>, _>("exit_code").unwrap_or(None),
+        skipped: r.try_get("skipped").unwrap_or(false),
         started_at: r.try_get("started_at").ok(),
         finished_at: r
             .try_get::<Option<String>, _>("finished_at")
@@ -391,7 +398,9 @@ async fn schedule_run_stats(
     let counts = sqlx::query(
         "SELECT
              COALESCE(SUM(CASE WHEN exit_code = 0 THEN 1 ELSE 0 END), 0) AS ok,
-             COALESCE(SUM(CASE WHEN exit_code IS NOT NULL AND exit_code <> 0 THEN 1 ELSE 0 END), 0) AS fail
+             COALESCE(SUM(skipped), 0) AS skipped,
+             COALESCE(SUM(CASE WHEN exit_code IS NOT NULL AND exit_code <> 0 AND skipped = 0
+                               THEN 1 ELSE 0 END), 0) AS fail
            FROM execution_results
           WHERE job_id = ? AND finished_at IS NOT NULL AND recorded_at >= ?",
     )
@@ -403,13 +412,14 @@ async fn schedule_run_stats(
         window_hours: STATUS_WINDOW_HOURS,
         ok: counts.try_get("ok").unwrap_or(0),
         fail: counts.try_get("fail").unwrap_or(0),
+        skipped: counts.try_get("skipped").unwrap_or(0),
     };
     Ok((last, recent))
 }
 
 /// GET /api/schedules/{id}/status — coverage view: enabled, next fire
 /// (via `preview_fires`), the schedule's most recent run, and a 24h
-/// ok/fail tally (#418 "カバレッジ可視化"). Read-only. The run figures
+/// ok/fail/skipped tally (#418 "カバレッジ可視化"). Read-only. The run figures
 /// are `job_id`-keyed — see [`schedule_run_stats`].
 pub async fn status(
     State(s): State<AppState>,
@@ -476,7 +486,7 @@ pub async fn status(
 #[derive(Serialize)]
 pub struct AgentRun {
     pub pc_id: String,
-    /// `"ok"` | `"fail"` | `"running"` | `"pending"`.
+    /// `"ok"` | `"fail"` | `"skipped"` | `"running"` | `"pending"`.
     pub state: &'static str,
     /// Manifest version pinned on the agent's latest finished run —
     /// the lever for vuln-response version tracking. `null` while
@@ -501,12 +511,23 @@ pub struct CoverageResponse {
     pub runs_on: String,
     /// Size of the full targeted roster — the "N" of "M of N".
     pub total: usize,
-    pub ok: usize,
-    pub fail: usize,
-    pub running: usize,
-    pub pending: usize,
+    #[serde(flatten)]
+    pub counts: CoverageCounts,
     pub agents: Vec<AgentRun>,
     pub cadence: Option<CadenceHealth>,
+}
+
+/// Per-state host counts of a rollout; they sum to the roster size.
+/// `skipped`: the host's latest finished run was one the agent published
+/// instead of running the script (`execution_results.skipped`) — no
+/// evidence either way, so it is neither `ok` nor `fail`.
+#[derive(Serialize, Default, Debug, PartialEq, Eq)]
+pub struct CoverageCounts {
+    pub ok: usize,
+    pub fail: usize,
+    pub skipped: usize,
+    pub running: usize,
+    pub pending: usize,
 }
 
 /// Per-schedule coverage counts for the list view (no per-agent detail).
@@ -514,10 +535,8 @@ pub struct CoverageResponse {
 pub struct CoverageSummary {
     pub id: String,
     pub total: usize,
-    pub ok: usize,
-    pub fail: usize,
-    pub running: usize,
-    pub pending: usize,
+    #[serde(flatten)]
+    pub counts: CoverageCounts,
 }
 
 fn runs_on_str(r: RunsOn) -> &'static str {
@@ -528,45 +547,45 @@ fn runs_on_str(r: RunsOn) -> &'static str {
 }
 
 /// An agent's latest finished run for a job: `(exit_code, version,
-/// finished_at)`. NULL-able since a finished row can carry a NULL exit.
-type FinishedRun = (Option<i64>, Option<String>, Option<String>);
+/// finished_at, skipped)`. NULL-able since a finished row can carry a
+/// NULL exit.
+type FinishedRun = (Option<i64>, Option<String>, Option<String>, bool);
 /// pc_id → its latest finished run, for one job.
 type FinishedMap = HashMap<String, FinishedRun>;
 
 /// Pure rollout-coverage aggregation, factored out of [`coverage`] so
 /// it's unit-testable without a DB/KV. For each pc in the FULL roster:
 /// in-flight (a row with `finished_at IS NULL`) → running; else its
-/// latest finished run's exit code → ok (`0`) / fail (anything else,
-/// incl. a NULL exit on a finished row); else (no rows at all) →
-/// pending. Offline-but-targeted hosts have no rows ⇒ pending — exactly
-/// the "hasn't rolled out yet" signal. Returns `(agents, ok, fail,
-/// running, pending)`.
+/// latest finished run → skipped (the agent didn't run the script) / ok
+/// (exit `0`) / fail (anything else, incl. a NULL exit on a finished
+/// row); else (no rows at all) → pending. Offline-but-targeted hosts
+/// have no rows ⇒ pending — exactly the "hasn't rolled out yet" signal.
 fn coverage_for(
     roster: &[String],
     inflight: &HashSet<String>,
     finished: &FinishedMap,
-) -> (Vec<AgentRun>, usize, usize, usize, usize) {
+) -> (Vec<AgentRun>, CoverageCounts) {
     let mut agents = Vec::with_capacity(roster.len());
-    let (mut ok, mut fail, mut running, mut pending) = (0usize, 0usize, 0usize, 0usize);
+    let mut counts = CoverageCounts::default();
     for pc in roster {
         if inflight.contains(pc) {
-            running += 1;
+            counts.running += 1;
             agents.push(AgentRun {
                 pc_id: pc.clone(),
                 state: "running",
                 version: None,
                 finished_at: None,
             });
-        } else if let Some((exit, version, finished_at)) = finished.get(pc) {
-            let state = match exit {
-                Some(0) => {
-                    ok += 1;
-                    "ok"
-                }
-                _ => {
-                    fail += 1;
-                    "fail"
-                }
+        } else if let Some((exit, version, finished_at, skipped)) = finished.get(pc) {
+            let state = if *skipped {
+                counts.skipped += 1;
+                "skipped"
+            } else if *exit == Some(0) {
+                counts.ok += 1;
+                "ok"
+            } else {
+                counts.fail += 1;
+                "fail"
             };
             agents.push(AgentRun {
                 pc_id: pc.clone(),
@@ -575,7 +594,7 @@ fn coverage_for(
                 finished_at: finished_at.clone(),
             });
         } else {
-            pending += 1;
+            counts.pending += 1;
             agents.push(AgentRun {
                 pc_id: pc.clone(),
                 state: "pending",
@@ -584,7 +603,7 @@ fn coverage_for(
             });
         }
     }
-    (agents, ok, fail, running, pending)
+    (agents, counts)
 }
 
 /// Correlated `NOT EXISTS` guard shared by the detail (`coverage_rows`)
@@ -639,8 +658,8 @@ async fn coverage_rows(
 
     let mut finished = HashMap::new();
     let rows = sqlx::query(
-        "SELECT pc_id, exit_code, finished_at, version FROM (
-             SELECT pc_id, exit_code, finished_at, version,
+        "SELECT pc_id, exit_code, skipped, finished_at, version FROM (
+             SELECT pc_id, exit_code, skipped, finished_at, version,
                     ROW_NUMBER() OVER (
                         PARTITION BY pc_id
                         ORDER BY finished_at DESC, result_id DESC
@@ -664,7 +683,8 @@ async fn coverage_rows(
         let finished_at = r
             .try_get::<Option<String>, _>("finished_at")
             .unwrap_or(None);
-        finished.insert(pc, (exit, version, finished_at));
+        let skipped = r.try_get("skipped").unwrap_or(false);
+        finished.insert(pc, (exit, version, finished_at, skipped));
     }
     Ok((inflight, finished))
 }
@@ -708,7 +728,7 @@ async fn summary_inflight(
 
 /// GET /api/schedules/{id}/coverage — rollout coverage for one
 /// schedule: how many of its FULL targeted roster have completed-ok /
-/// failed / are running / are still pending, with the manifest version
+/// failed / skipped / are running / are still pending, with the manifest version
 /// each agent last ran (#418 "ロールアウト・カバレッジ可視化"). The
 /// roster includes offline hosts so "pending" reflects true rollout
 /// progress. Read-only.
@@ -744,7 +764,7 @@ pub async fn coverage(
     let (inflight, finished) = coverage_rows(&s.pool, &schedule.job_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("coverage: {e}")))?;
-    let (agents, ok, fail, running, pending) = coverage_for(&roster, &inflight, &finished);
+    let (agents, counts) = coverage_for(&roster, &inflight, &finished);
 
     let cadence = cadence_health(&s.pool, &schedule, &roster, chrono::Utc::now())
         .await
@@ -756,10 +776,7 @@ pub async fn coverage(
         job_id: schedule.job_id.clone(),
         runs_on: runs_on_str(schedule.runs_on).to_string(),
         total: roster.len(),
-        ok,
-        fail,
-        running,
-        pending,
+        counts,
         agents,
         cadence,
     }))
@@ -824,7 +841,7 @@ pub async fn coverage_summary(
     let inflight: HashMap<String, HashSet<String>> = summary_inflight(&s.pool, &job_ids)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inflight: {e}")))?;
-    // job_id → (pc → (exit, version, finished_at)).
+    // job_id → (pc → (exit, version, finished_at, skipped)).
     let mut finished: HashMap<String, FinishedMap> = HashMap::new();
 
     if !job_ids.is_empty() {
@@ -835,8 +852,8 @@ pub async fn coverage_summary(
         // inner WHERE so the planner can seek a (job_id, finished_at)
         // index instead of scanning the whole table.
         let finished_sql = format!(
-            "SELECT job_id, pc_id, exit_code, finished_at, version FROM (
-                 SELECT job_id, pc_id, exit_code, finished_at, version,
+            "SELECT job_id, pc_id, exit_code, skipped, finished_at, version FROM (
+                 SELECT job_id, pc_id, exit_code, skipped, finished_at, version,
                         ROW_NUMBER() OVER (
                             PARTITION BY job_id, pc_id
                             ORDER BY finished_at DESC, result_id DESC
@@ -868,10 +885,11 @@ pub async fn coverage_summary(
             let finished_at = r
                 .try_get::<Option<String>, _>("finished_at")
                 .unwrap_or(None);
+            let skipped = r.try_get("skipped").unwrap_or(false);
             finished
                 .entry(jid)
                 .or_default()
-                .insert(pc, (exit, version, finished_at));
+                .insert(pc, (exit, version, finished_at, skipped));
         }
     }
 
@@ -909,14 +927,11 @@ pub async fn coverage_summary(
             let roster = rosters.get(&key).cloned().unwrap_or_default();
             let inf = inflight.get(&sched.job_id).unwrap_or(&empty_set);
             let fin = finished.get(&sched.job_id).unwrap_or(&empty_map);
-            let (_, ok, fail, running, pending) = coverage_for(&roster, inf, fin);
+            let (_, counts) = coverage_for(&roster, inf, fin);
             CoverageSummary {
                 id: sched.id.clone(),
                 total: roster.len(),
-                ok,
-                fail,
-                running,
-                pending,
+                counts,
             }
         })
         .collect();
@@ -1733,7 +1748,37 @@ mod tests {
             .await
             .unwrap();
         assert!(last.is_none());
-        assert_eq!((recent.ok, recent.fail), (0, 0));
+        assert_eq!((recent.ok, recent.fail, recent.skipped), (0, 0, 0));
+    }
+
+    /// Mark rows as the agent's did-not-run results (`ExecResult::skipped`).
+    async fn mark_skipped(pool: &SqlitePool, result_ids: &[&str]) {
+        for id in result_ids {
+            sqlx::query("UPDATE execution_results SET skipped = 1 WHERE result_id = ?")
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// The flag, not the exit code, decides: a script that really exits
+    /// 127 ("command not found") failed, while the agent's 122 / 125
+    /// skips never ran it.
+    #[tokio::test]
+    async fn run_stats_counts_agent_skips_apart_from_failures() {
+        let pool = fresh_pool().await;
+        insert_exec(&pool, "ok", "j1", Some(0), true, 50).await;
+        insert_exec(&pool, "fail", "j1", Some(1), true, 40).await;
+        insert_exec(&pool, "not-found", "j1", Some(127), true, 30).await;
+        insert_exec(&pool, "unsupported", "j1", Some(122), true, 20).await;
+        insert_exec(&pool, "deadline", "j1", Some(125), true, 10).await;
+        mark_skipped(&pool, &["unsupported", "deadline"]).await;
+        let since = Utc::now() - Duration::hours(24);
+        let (last, recent) = schedule_run_stats(&pool, "j1", since).await.unwrap();
+        assert_eq!((recent.ok, recent.fail, recent.skipped), (1, 2, 2));
+        let last = last.expect("j1 has runs");
+        assert_eq!((last.exit_code, last.skipped), (Some(125), true));
     }
 
     // ---- coverage_for (#418 rollout coverage) ----
@@ -1761,6 +1806,7 @@ mod tests {
                 Some(0),
                 Some("v1.4.3".into()),
                 Some("2026-06-12T00:00:00Z".into()),
+                false,
             ),
         );
         finished.insert(
@@ -1769,14 +1815,18 @@ mod tests {
                 Some(1),
                 Some("v1.4.2".into()),
                 Some("2026-06-12T00:00:00Z".into()),
+                false,
             ),
         );
         // A stale finished row for the currently-running pc — running
         // must take precedence.
-        finished.insert("pc-run".into(), (Some(0), None, None));
+        finished.insert("pc-run".into(), (Some(0), None, None, false));
 
-        let (agents, ok, fail, running, pending) = coverage_for(&roster, &inflight, &finished);
-        assert_eq!((ok, fail, running, pending), (1, 1, 1, 2));
+        let (agents, counts) = coverage_for(&roster, &inflight, &finished);
+        assert_eq!(
+            (counts.ok, counts.fail, counts.running, counts.pending),
+            (1, 1, 1, 2)
+        );
         assert_eq!(agents.len(), 5);
 
         let state = |pc: &str| agents.iter().find(|a| a.pc_id == pc).unwrap().state;
@@ -1800,12 +1850,42 @@ mod tests {
         assert_eq!(ver("pc-pend"), None);
     }
 
+    #[tokio::test]
+    async fn coverage_counts_a_latest_agent_skip_as_skipped() {
+        let pool = fresh_pool().await;
+        insert_run(&pool, "r-ok", "j1", "pc-ok", Some(0), true, "v1", 50).await;
+        insert_run(&pool, "r-fail", "j1", "pc-fail", Some(1), true, "v1", 40).await;
+        insert_run(&pool, "r-127", "j1", "pc-127", Some(127), true, "v1", 30).await;
+        insert_run(&pool, "r-122", "j1", "pc-122", Some(122), true, "v1", 20).await;
+        insert_run(&pool, "r-125", "j1", "pc-125", Some(125), true, "v1", 10).await;
+        mark_skipped(&pool, &["r-122", "r-125"]).await;
+        let roster = pcs(&["pc-ok", "pc-fail", "pc-127", "pc-122", "pc-125"]);
+        let (inflight, finished) = coverage_rows(&pool, "j1").await.unwrap();
+        let (agents, counts) = coverage_for(&roster, &inflight, &finished);
+        assert_eq!(
+            counts,
+            super::CoverageCounts {
+                ok: 1,
+                fail: 2,
+                skipped: 2,
+                running: 0,
+                pending: 0,
+            }
+        );
+        let state = |pc: &str| agents.iter().find(|a| a.pc_id == pc).unwrap().state;
+        assert_eq!(state("pc-127"), "fail");
+        assert_eq!(state("pc-122"), "skipped");
+        assert_eq!(state("pc-125"), "skipped");
+    }
+
     #[test]
     fn coverage_all_pending_when_no_runs() {
         let roster = pcs(&["a", "b", "c"]);
-        let (agents, ok, fail, running, pending) =
-            coverage_for(&roster, &HashSet::new(), &HashMap::new());
-        assert_eq!((ok, fail, running, pending), (0, 0, 0, 3));
+        let (agents, counts) = coverage_for(&roster, &HashSet::new(), &HashMap::new());
+        assert_eq!(
+            (counts.ok, counts.fail, counts.running, counts.pending),
+            (0, 0, 0, 3)
+        );
         assert!(agents.iter().all(|a| a.state == "pending"));
     }
 
@@ -1817,10 +1897,10 @@ mod tests {
         let mut finished: FinishedMap = HashMap::new();
         finished.insert(
             "x".into(),
-            (None, None, Some("2026-06-12T00:00:00Z".into())),
+            (None, None, Some("2026-06-12T00:00:00Z".into()), false),
         );
-        let (_, ok, fail, _, _) = coverage_for(&roster, &HashSet::new(), &finished);
-        assert_eq!((ok, fail), (0, 1));
+        let (_, counts) = coverage_for(&roster, &HashSet::new(), &finished);
+        assert_eq!((counts.ok, counts.fail), (0, 1));
     }
 
     #[test]
@@ -1829,10 +1909,10 @@ mod tests {
         // counted — the totals follow the roster, not the result table.
         let roster = pcs(&["in"]);
         let mut finished: FinishedMap = HashMap::new();
-        finished.insert("in".into(), (Some(0), None, None));
-        finished.insert("gone".into(), (Some(0), None, None));
-        let (agents, ok, _, _, _) = coverage_for(&roster, &HashSet::new(), &finished);
-        assert_eq!(ok, 1);
+        finished.insert("in".into(), (Some(0), None, None, false));
+        finished.insert("gone".into(), (Some(0), None, None, false));
+        let (agents, counts) = coverage_for(&roster, &HashSet::new(), &finished);
+        assert_eq!(counts.ok, 1);
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].pc_id, "in");
     }

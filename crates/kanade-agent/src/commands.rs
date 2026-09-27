@@ -9,7 +9,7 @@ use kanade_shared::default_paths;
 use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED};
 use kanade_shared::wire::{
     Command, EXIT_REJECTED_UNSIGNED, EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS,
-    EXIT_SKIP_VERSION_PIN,
+    EXIT_SKIP_VERSION_PIN, signature_refusal_result_id,
 };
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -470,31 +470,8 @@ pub async fn handle_command(
     let _local_slot = match crate::concurrency::admit(&client, &cmd).await {
         Ok(permit) => permit,
         Err(outcome) => {
-            let now = chrono::Utc::now();
-            let (exit_code, stderr) = match outcome {
-                ExecOutcome::Completed {
-                    exit_code, stderr, ..
-                } => (exit_code, stderr),
-                ExecOutcome::Killed { stderr, .. } => (-1, stderr),
-                ExecOutcome::Timeout { stderr, .. } => (-1, stderr),
-            };
             enqueue_result_best_effort(
-                ExecResult {
-                    result_id: Uuid::new_v4().to_string(),
-                    request_id: cmd.request_id.clone(),
-                    exec_id: cmd.exec_id.clone(),
-                    parent_result_id: None,
-                    pc_id: pc_id.clone(),
-                    exit_code,
-                    stdout: String::new(),
-                    stderr,
-                    started_at: now,
-                    finished_at: now,
-                    stdout_object: None,
-                    stderr_object: None,
-                    manifest_id: Some(cmd.id.clone()),
-                    collect_object: None,
-                },
+                admission_cancelled_result(&pc_id, &cmd, outcome),
                 "local admission cancellation enqueued",
             );
             return Ok(CommandOutcome::Skipped);
@@ -804,6 +781,7 @@ pub async fn handle_command(
         parent_result_id: None,
         pc_id: pc_id.clone(),
         exit_code,
+        skipped: false,
         stdout,
         stderr,
         started_at,
@@ -1006,14 +984,32 @@ async fn publish_staleness_skipped(
         humantime::format_duration(observed),
         humantime::format_duration(allowed),
     );
-    let result = ExecResult {
+    enqueue_result_best_effort(
+        skip_result(pc_id, cmd, EXIT_SKIP_STALENESS, stderr, now),
+        "staleness-skip result enqueued to outbox",
+    );
+    Ok(())
+}
+
+/// The [`ExecResult`] every agent-side "not now" path publishes: flagged
+/// [`ExecResult::skipped`] (which is what the backend counts on), with the
+/// reserved `exit_code` saying why. Nothing ran, so there is no output, no
+/// finalize parent (#955) and no collect bundle (#219).
+fn skip_result(
+    pc_id: &str,
+    cmd: &Command,
+    exit_code: i32,
+    stderr: String,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ExecResult {
+    ExecResult {
         result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
-        // Synthetic skip results have no parent finalize link (#955).
         parent_result_id: None,
         pc_id: pc_id.to_string(),
-        exit_code: EXIT_SKIP_STALENESS,
+        exit_code,
+        skipped: true,
         stdout: String::new(),
         stderr,
         started_at: now,
@@ -1021,11 +1017,25 @@ async fn publish_staleness_skipped(
         stdout_object: None,
         stderr_object: None,
         manifest_id: Some(cmd.id.clone()),
-        // #219: skip results never collect.
         collect_object: None,
-    };
-    enqueue_result_best_effort(result, "staleness-skip result enqueued to outbox");
-    Ok(())
+    }
+}
+
+/// The result for a command that never got a local job slot. A starting
+/// deadline that expired in the queue is a skip (the script never ran); a
+/// kill while queued stays the ordinary killed run (`-1`, not skipped), as
+/// the operator asked for it to stop.
+fn admission_cancelled_result(pc_id: &str, cmd: &Command, outcome: ExecOutcome) -> ExecResult {
+    let now = chrono::Utc::now();
+    match outcome {
+        ExecOutcome::Completed {
+            exit_code, stderr, ..
+        } => skip_result(pc_id, cmd, exit_code, stderr, now),
+        ExecOutcome::Killed { stderr, .. } | ExecOutcome::Timeout { stderr, .. } => ExecResult {
+            skipped: false,
+            ..skip_result(pc_id, cmd, -1, stderr, now)
+        },
+    }
 }
 
 /// #1165 stage 3: synthesise an ExecResult for a command this host **refused**
@@ -1044,39 +1054,46 @@ async fn publish_staleness_skipped(
 /// decode the same bytes and a refusal reachable through only one of them is
 /// the #1155 bypass with extra steps.
 pub(crate) fn publish_signature_refused(pc_id: &str, cmd: &Command, reason: &str) {
-    let now = chrono::Utc::now();
-    // Deterministic `result_id`, unlike every other result this agent
-    // publishes, because a refusal is the one that repeats.
-    //
-    // The refusal deliberately does not consume the `request_id` (see the call
-    // site), so nothing stops the same unverifiable command being seen again —
-    // and it will be: the replay consumer is `DeliverPolicy::LastPerSubject`,
-    // so it re-delivers the newest command on every reconnect, and a broadcast
-    // reaches `commands.all` and `commands.pc.<id>` both. With a fresh v4 each
-    // time, one bad command would accrete a result row per delivery forever.
-    //
-    // Derived from (request_id, pc_id) so every re-publish lands on the same
-    // row and the projector's `ON CONFLICT(result_id) DO UPDATE` collapses it.
-    // Chosen over an in-memory "already refused" set because that set dies
-    // with the process — and an agent restart is exactly when the replay
-    // re-delivers.
-    let result = ExecResult {
-        result_id: refusal_result_id(&cmd.request_id, pc_id),
-        request_id: cmd.request_id.clone(),
-        exec_id: cmd.exec_id.clone(),
-        parent_result_id: None,
-        pc_id: pc_id.to_string(),
-        exit_code: EXIT_REJECTED_UNSIGNED,
-        stdout: String::new(),
-        stderr: format!("refused: {reason}"),
-        started_at: now,
-        finished_at: now,
-        stdout_object: None,
-        stderr_object: None,
-        manifest_id: Some(cmd.id.clone()),
-        collect_object: None,
-    };
-    enqueue_result_best_effort(result, "signature-refusal result enqueued to outbox");
+    enqueue_result_best_effort(
+        signature_refusal_result(pc_id, cmd, reason, chrono::Utc::now()),
+        "signature-refusal result enqueued to outbox",
+    );
+}
+
+/// The refusal [`publish_signature_refused`] publishes. The script never ran,
+/// but a refusal is NOT a skip: "this command was not authorised" must count
+/// as a failure in every tally, so `skipped` stays false and exit
+/// [`EXIT_REJECTED_UNSIGNED`] carries the distinction.
+///
+/// Deterministic `result_id`, unlike every other result this agent publishes,
+/// because a refusal is the one that repeats. The refusal deliberately does not
+/// consume the `request_id` (see the call site), so nothing stops the same
+/// unverifiable command being seen again — and it will be: the replay consumer
+/// is `DeliverPolicy::LastPerSubject`, so it re-delivers the newest command on
+/// every reconnect, and a broadcast reaches `commands.all` and
+/// `commands.pc.<id>` both. With a fresh v4 each time, one bad command would
+/// accrete a result row per delivery forever. Derived from (request_id, pc_id)
+/// ([`signature_refusal_result_id`]) so every re-publish lands on the same row
+/// and the projector's `ON CONFLICT(result_id) DO UPDATE` collapses it. Chosen
+/// over an in-memory "already refused" set because that set dies with the
+/// process — and an agent restart is exactly when the replay re-delivers.
+fn signature_refusal_result(
+    pc_id: &str,
+    cmd: &Command,
+    reason: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ExecResult {
+    ExecResult {
+        result_id: signature_refusal_result_id(&cmd.request_id, pc_id),
+        skipped: false,
+        ..skip_result(
+            pc_id,
+            cmd,
+            EXIT_REJECTED_UNSIGNED,
+            format!("refused: {reason}"),
+            now,
+        )
+    }
 }
 
 /// Synthesise an ExecResult that mirrors a real run but flags
@@ -1102,25 +1119,10 @@ async fn publish_skipped(
         deadline,
         now,
     );
-    let result = ExecResult {
-        result_id: Uuid::new_v4().to_string(),
-        request_id: cmd.request_id.clone(),
-        exec_id: cmd.exec_id.clone(),
-        // Synthetic skip results have no parent finalize link (#955).
-        parent_result_id: None,
-        pc_id: pc_id.to_string(),
-        exit_code: EXIT_SKIP_DEADLINE,
-        stdout: String::new(),
-        stderr,
-        started_at: now,
-        finished_at: now,
-        stdout_object: None,
-        stderr_object: None,
-        manifest_id: Some(cmd.id.clone()),
-        // #219: skip results never collect.
-        collect_object: None,
-    };
-    enqueue_result_best_effort(result, "synthetic skipped-result enqueued to outbox");
+    enqueue_result_best_effort(
+        skip_result(pc_id, cmd, EXIT_SKIP_DEADLINE, stderr, now),
+        "synthetic skipped-result enqueued to outbox",
+    );
     Ok(())
 }
 
@@ -1144,25 +1146,10 @@ async fn publish_version_mismatch_skipped(
         "skipped: version-pin mismatch — script_current[{}] = {expected}, command brought {}",
         cmd.id, cmd.version,
     );
-    let result = ExecResult {
-        result_id: Uuid::new_v4().to_string(),
-        request_id: cmd.request_id.clone(),
-        exec_id: cmd.exec_id.clone(),
-        // Synthetic skip results have no parent finalize link (#955).
-        parent_result_id: None,
-        pc_id: pc_id.to_string(),
-        exit_code: EXIT_SKIP_VERSION_PIN,
-        stdout: String::new(),
-        stderr,
-        started_at: now,
-        finished_at: now,
-        stdout_object: None,
-        stderr_object: None,
-        manifest_id: Some(cmd.id.clone()),
-        // #219: skip results never collect.
-        collect_object: None,
-    };
-    enqueue_result_best_effort(result, "version-mismatch skip result enqueued to outbox");
+    enqueue_result_best_effort(
+        skip_result(pc_id, cmd, EXIT_SKIP_VERSION_PIN, stderr, now),
+        "version-mismatch skip result enqueued to outbox",
+    );
     Ok(())
 }
 
@@ -1180,36 +1167,11 @@ async fn publish_revoked_skipped(pc_id: &str, cmd: &Command) -> Result<()> {
         "skipped: command was revoked (script_status[{}] = revoked)",
         cmd.id,
     );
-    let result = ExecResult {
-        result_id: Uuid::new_v4().to_string(),
-        request_id: cmd.request_id.clone(),
-        exec_id: cmd.exec_id.clone(),
-        // Synthetic skip results have no parent finalize link (#955).
-        parent_result_id: None,
-        pc_id: pc_id.to_string(),
-        exit_code: EXIT_SKIP_REVOKED,
-        stdout: String::new(),
-        stderr,
-        started_at: now,
-        finished_at: now,
-        stdout_object: None,
-        stderr_object: None,
-        manifest_id: Some(cmd.id.clone()),
-        // #219: skip results never collect.
-        collect_object: None,
-    };
-    enqueue_result_best_effort(result, "revoked skip result enqueued to outbox");
+    enqueue_result_best_effort(
+        skip_result(pc_id, cmd, EXIT_SKIP_REVOKED, stderr, now),
+        "revoked skip result enqueued to outbox",
+    );
     Ok(())
-}
-
-/// The `result_id` [`publish_signature_refused`] uses. Extracted so the
-/// determinism it relies on is testable without a broker or an outbox.
-fn refusal_result_id(request_id: &str, pc_id: &str) -> String {
-    Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        format!("{request_id}|{pc_id}|signature-refused").as_bytes(),
-    )
-    .to_string()
 }
 
 #[cfg(test)]
@@ -1232,14 +1194,14 @@ mod tests {
         // arrives on both `commands.all` and `commands.pc.<id>`. With a fresh
         // v4 per publish, one bad command would accrete a result row per
         // delivery, forever.
-        let a = refusal_result_id("req-1", "PC1");
-        let b = refusal_result_id("req-1", "PC1");
+        let a = signature_refusal_result_id("req-1", "PC1");
+        let b = signature_refusal_result_id("req-1", "PC1");
         assert_eq!(a, b, "the projector collapses on result_id; it must repeat");
 
         // Different command, or the same command on another machine, must NOT
         // collapse — each is a distinct refusal an operator needs to see.
-        assert_ne!(a, refusal_result_id("req-2", "PC1"));
-        assert_ne!(a, refusal_result_id("req-1", "PC2"));
+        assert_ne!(a, signature_refusal_result_id("req-2", "PC1"));
+        assert_ne!(a, signature_refusal_result_id("req-1", "PC2"));
 
         // Stable across processes -- an in-memory suppression set would
         // forget this on restart, which is precisely when the replay
@@ -1251,6 +1213,76 @@ mod tests {
         );
         // A real v5, not a v4 that happened to repeat.
         assert_eq!(Uuid::parse_str(&a).unwrap().get_version_num(), 5);
+    }
+
+    #[test]
+    fn not_now_results_are_skipped_but_a_refusal_or_queued_kill_is_not() {
+        let cmd = Command {
+            id: "job".into(),
+            version: "1".into(),
+            request_id: "req-1".into(),
+            exec_id: Some("exec-1".into()),
+            shell: kanade_shared::wire::Shell::Powershell,
+            script: String::new(),
+            script_object: None,
+            script_object_sha256: None,
+            timeout_secs: 60,
+            bypass_local_limit: false,
+            jitter_secs: None,
+            run_as: Default::default(),
+            cwd: None,
+            deadline_at: None,
+            staleness: Default::default(),
+            emit: None,
+            check: None,
+            collect: None,
+            retry: None,
+            finalize: None,
+        };
+        // Every "not now" publisher goes through `skip_result`; the
+        // backend's skipped tallies key on the flag.
+        for code in [
+            EXIT_SKIP_VERSION_PIN,
+            EXIT_SKIP_DEADLINE,
+            EXIT_SKIP_REVOKED,
+            EXIT_SKIP_STALENESS,
+        ] {
+            let r = skip_result("PC1", &cmd, code, "why".into(), at(0));
+            assert!(r.skipped, "exit {code} is published as skipped");
+            assert_eq!(r.exit_code, code);
+        }
+
+        // A signature refusal didn't run the script either, but it is a
+        // failure the fleet counts must show, not a skip.
+        let refused = signature_refusal_result("PC1", &cmd, "unsigned", at(0));
+        assert!(!refused.skipped);
+        assert_eq!(refused.exit_code, EXIT_REJECTED_UNSIGNED);
+        assert_eq!(refused.stderr, "refused: unsigned");
+        assert!(refused.is_signature_refusal());
+
+        // Queue admission: the starting deadline passing in the queue is a
+        // skip, a kill while queued is a (killed) run.
+        let expired = admission_cancelled_result(
+            "PC1",
+            &cmd,
+            ExecOutcome::Completed {
+                exit_code: EXIT_SKIP_DEADLINE,
+                stdout: String::new(),
+                stderr: "deadline".into(),
+            },
+        );
+        assert!(expired.skipped);
+        assert_eq!(expired.exit_code, EXIT_SKIP_DEADLINE);
+        let killed = admission_cancelled_result(
+            "PC1",
+            &cmd,
+            ExecOutcome::Killed {
+                stdout: String::new(),
+                stderr: "killed".into(),
+            },
+        );
+        assert!(!killed.skipped);
+        assert_eq!(killed.exit_code, -1);
     }
 
     #[test]

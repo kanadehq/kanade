@@ -82,11 +82,16 @@ pub struct JetstreamHealth {
     pub missing: Vec<String>,
 }
 
+/// `total` counts every recorded row; `failed` and `skipped` are
+/// disjoint slices of it — `skipped` being the results the agent
+/// published instead of running the script (`execution_results.skipped`),
+/// which say nothing about the script's outcome.
 #[derive(Serialize)]
 pub struct RecentResults {
     pub window_hours: i64,
     pub total: i64,
     pub failed: i64,
+    pub skipped: i64,
 }
 
 pub async fn fleet(State(state): State<AppState>) -> (StatusCode, Json<FleetHealth>) {
@@ -207,27 +212,30 @@ async fn recent_results(pool: &sqlx::SqlitePool, since: DateTime<Utc>) -> Recent
     let row = sqlx::query(
         "SELECT
              COUNT(*) AS total,
-             COALESCE(SUM(CASE WHEN exit_code <> 0 THEN 1 ELSE 0 END), 0) AS failed
+             COALESCE(SUM(CASE WHEN exit_code <> 0 AND skipped = 0 THEN 1 ELSE 0 END), 0) AS failed,
+             COALESCE(SUM(skipped), 0) AS skipped
          FROM execution_results
          WHERE recorded_at >= ?",
     )
     .bind(since)
     .fetch_one(pool)
     .await;
-    let (total, failed) = match row {
+    let (total, failed, skipped) = match row {
         Ok(r) => (
             r.try_get::<i64, _>("total").unwrap_or(0),
             r.try_get::<i64, _>("failed").unwrap_or(0),
+            r.try_get::<i64, _>("skipped").unwrap_or(0),
         ),
         Err(e) => {
             warn!(error = %e, "recent_results query");
-            (0, 0)
+            (0, 0, 0)
         }
     };
     RecentResults {
         window_hours: RECENT_WINDOW.num_hours(),
         total,
         failed,
+        skipped,
     }
 }
 

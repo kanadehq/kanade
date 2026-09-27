@@ -37,7 +37,7 @@
       },
       "failures": {
         "label": "failures / {{hours}}h",
-        "hint": "exit_code ≠ 0 / runs",
+        "hint": "exit_code ≠ 0, skips excluded / runs",
         "linkTitle": "View the failed runs"
       }
     }
@@ -50,6 +50,8 @@
     "title": "Recent job results",
     "descriptionAllGreen": "Results of jobs run on each PC · last {{count}} all green",
     "descriptionFailed": "Results of jobs run on each PC · {{failed}} of last {{count}} failed",
+    "descriptionFailedSkipped": "Results of jobs run on each PC · {{failed}} of last {{count}} failed, {{skipped}} skipped",
+    "descriptionSkipped": "Results of jobs run on each PC · last {{count}}: no failures, {{skipped}} skipped (not run)",
     "rowTitle": "Open this run's detail",
     "empty": "No results yet."
   },

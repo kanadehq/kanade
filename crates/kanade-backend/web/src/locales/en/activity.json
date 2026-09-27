@@ -30,7 +30,8 @@
       "any": "(any)",
       "running": "running (in flight)",
       "success": "success (exit 0)",
-      "failure": "failure (exit ≠ 0)"
+      "failure": "failure (exit ≠ 0, not skipped)",
+      "skipped": "skipped (agent did not run it)"
     },
     "sincePresets": {
       "1h": "last 1h",

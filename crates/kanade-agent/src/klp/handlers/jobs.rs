@@ -880,6 +880,7 @@ fn build_exec_result(
         parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code,
+        skipped: false,
         stdout,
         stderr,
         started_at,
