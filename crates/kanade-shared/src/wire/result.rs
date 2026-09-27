@@ -191,6 +191,17 @@ impl ExecResult {
     /// [`EXIT_REJECTED_UNSIGNED`] under the refusal's derived `result_id`.
     /// A script that merely exits 123 (xargs does, for one) carries an
     /// ordinary random id and is not a refusal.
+    /// True for a skip published by an agent that predates
+    /// [`Self::skipped`]: unflagged, a reserved skip exit code, and the
+    /// `skipped:` stderr every synthetic publisher wrote. Only for callers
+    /// that must keep ignoring those results (the check projector, #909);
+    /// tallies deliberately ignore it.
+    pub fn is_legacy_skip(&self) -> bool {
+        !self.skipped
+            && matches!(self.exit_code, 122 | 124..=127)
+            && self.stderr.starts_with("skipped:")
+    }
+
     pub fn is_signature_refusal(&self) -> bool {
         self.exit_code == EXIT_REJECTED_UNSIGNED
             && self.result_id == signature_refusal_result_id(&self.request_id, &self.pc_id)
@@ -201,6 +212,35 @@ impl ExecResult {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn legacy_skip_needs_reserved_code_and_skipped_stderr() {
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 9, 27, 0, 0, 0).unwrap();
+        let mut r = ExecResult {
+            result_id: "r1".into(),
+            request_id: "req".into(),
+            exec_id: None,
+            parent_result_id: None,
+            pc_id: "PC1".into(),
+            exit_code: 124,
+            skipped: false,
+            stdout: String::new(),
+            stderr: "skipped: version-pin mismatch".into(),
+            started_at: t0,
+            finished_at: t0,
+            stdout_object: None,
+            stderr_object: None,
+            manifest_id: None,
+            collect_object: None,
+        };
+        assert!(r.is_legacy_skip());
+        r.stderr = "sh: x: command not found".into();
+        r.exit_code = 127;
+        assert!(!r.is_legacy_skip());
+        r.stderr = "skipped: x".into();
+        r.exit_code = 1;
+        assert!(!r.is_legacy_skip());
+    }
 
     #[test]
     fn skipped_is_off_the_wire_when_false_and_defaults_false() {

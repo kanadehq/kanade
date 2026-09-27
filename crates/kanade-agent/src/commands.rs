@@ -409,6 +409,30 @@ async fn command_is_gated(
         return Ok(true);
     }
 
+    // Linux has no user-session launch: run_as user / system_gui would
+    // otherwise reach the process.rs stub, which reports exit 0. Publish a
+    // flagged skip instead so it never reads as a success.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    if !matches!(cmd.run_as, kanade_shared::wire::RunAs::System) {
+        let now = chrono::Utc::now();
+        let stderr = format!(
+            "skipped: run_as {:?} is not supported on Linux agents",
+            cmd.run_as
+        );
+        warn!(cmd_id = %cmd.id, run_as = ?cmd.run_as, "skip: run_as unsupported on this OS");
+        enqueue_result_best_effort(
+            skip_result(
+                pc_id,
+                cmd,
+                kanade_shared::wire::EXIT_SKIP_UNSUPPORTED,
+                stderr,
+                now,
+            ),
+            "unsupported run_as skip result enqueued to outbox",
+        );
+        return Ok(true);
+    }
+
     let now = chrono::Utc::now();
     if let Some(deadline) = cmd.deadline_at
         && should_skip_for_deadline(deadline, now)

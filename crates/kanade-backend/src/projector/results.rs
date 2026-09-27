@@ -642,7 +642,7 @@ async fn upsert_check_status(
     hint: &CheckHint,
     recorded_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<CheckProjection>> {
-    if r.skipped || r.is_signature_refusal() {
+    if r.skipped || r.is_legacy_skip() || r.is_signature_refusal() {
         return Ok(None);
     }
     // Derive (status, detail) via the shared `check_eval` helpers — the
