@@ -14,7 +14,9 @@ As of [PR #230](https://github.com/kanadehq/kanade/pull/230)
    (Windows) or `$TMPDIR/kanade-agent-<UUID>/kanade-<UUID>.ps1`
    (non-Windows dev only).
 2. Writes a *launcher* `.ps1` next to it that sets UTF-8 console
-   encoding then `& '<your-script>' @args`.
+   encoding then `& '<your-script>' @args`, and re-raises your
+   script's `exit N` / terminating error as the job's exit code
+   (`if (-not $?) { exit $LASTEXITCODE }`).
 3. Spawns `powershell -NoProfile -NonInteractive -ExecutionPolicy
    Bypass -File <launcher>`.
 
@@ -131,10 +133,12 @@ does **not** save you here.
 > them terminating, but that's not available in the deployment
 > target. **Always check `$LASTEXITCODE` explicitly.**
 
-The agent does NOT auto-propagate `$LASTEXITCODE` either — that
-would exit nonzero even when your script handled the native error
-gracefully. If you want the script's exit code to reflect a
-specific native call, propagate it yourself:
+The agent does NOT auto-propagate a leftover `$LASTEXITCODE` —
+that would exit nonzero even when your script handled the native
+error gracefully. The launcher only re-raises an explicit `exit N`
+or a terminating error, so the job's exit code matches running your
+script with `powershell -File`. If you want the script's exit code
+to reflect a specific native call, propagate it yourself:
 
 ```powershell
 & git pull

@@ -738,6 +738,15 @@ RDP リモート / 自動ログオンを含む。サービス / ネットワー�
 DHCP 更新/VPN/Wi-Fi ローミング）で発火 ─ 1回の遷移が複数の生イベントを出すため
 **agent 側でデバウンス**（ネットワークが落ち着いてから1回）。
 
+**OS 対応**：イベント源があるのは `startup` のみ全 OS。`logon` / `lock` /
+`unlock` / `network_change` は Windows 専用 ─ macOS / Linux agent では**決して
+発火しない**。schedule は create 時に OS を知り得ない（target が OS をまたぐ）ため
+create 時 reject はせず、agent が schedule をロード（reconcile）した時点で
+**1回だけ** WARN ＋ synthetic skip 結果（exit 122、stderr
+`skipped: when.on [unlock] never fires on macos — this OS has no unlock source`）
+を出す（schedule id ＋ job version ＋ 未対応 trigger 集合ごと・agent プロセス生存中1回）。
+`startup` を含む schedule は登録されたままなので `startup` は通常どおり撃つ。
+
 **`tz`（Phase 2）** — `local`（既定・実行ホストの TZ。`runs_on: agent`
 なら agent、それ以外は backend サーバー）/ `utc`。calendar の `at` も
 下記 `active` の境界も**同じ `tz` で評価**する（スケジュール単位で
@@ -814,10 +823,18 @@ constraints:              #   条件未充足なら見送り）
   `WTSQuerySessionInformationW`（idle）/ `GetNetworkConnectivityHint`
   （network・**InternetAccess のみ**を「接続あり」と判定。captive portal=
   ConstrainedInternetAccess は通信が傍受されダウンロードが失敗するので不可、
-  LAN のみ=LocalAccess も不可）。非 Windows agent は allow（capability gap・
-  decision K）。`cpu_below` は既存 `host_perf` の system CPU%（`sysinfo` の全コア
-  平均）を**再利用**するので、最大 host_perf cadence（既定 60s）ぶん古い値になり
-  うる（「概ねビジーか」の代理としては十分・gate 時の単発読みより正確）。
+  LAN のみ=LocalAccess も不可）。`cpu_below` は既存 `host_perf` の system CPU%
+  （`sysinfo` の全コア平均）を**再利用**するので全 OS で評価でき、最大 host_perf
+  cadence（既定 60s）ぶん古い値になりうる（「概ねビジーか」の代理としては十分・
+  gate 時の単発読みより正確）。
+- **非 Windows は fail-closed ＋可視化**：macOS / Linux agent では `ac_power` /
+  `idle` / `network` を評価できない（判定は agent が fire 時に行う・create 時の OS
+  検査はしない）。そのゲートが1つでも設定されていれば**ジョブを実行せず**、
+  per-pc 完了も記録しない（ゲートが対応した時点で改めて走る）。毎分 tick でも
+  WARN ＋ synthetic skip 結果（exit 122、stderr
+  `skipped: constraints.require.idle cannot be evaluated on macos — not running (fail-closed)`）
+  は schedule id ＋ job version ＋ 未対応ゲート集合ごとに agent プロセス生存中
+  **1回だけ**、以降の tick は debug ログのみ。
 - **fail-closed / 端**：AC が unknown/読めない → ac ゲートは block（確認できない
   制限ゲートは撃たない）。idle は、ヘッドレス/コンソール未接続（対話ユーザー
   不在）なら**充足扱い**（無人機は「作業中に撃たない」を自明に満たす）。

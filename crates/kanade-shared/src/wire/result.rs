@@ -90,7 +90,7 @@ pub struct ExecResult {
 
 /// Synthetic exit code for a run the agent skipped because the
 /// Command's `version` didn't match the `script_current` pin. One of
-/// the four reserved skip codes (124–127): the agent publishes a
+/// the reserved synthetic codes (122–127): the agent publishes a
 /// normal [`ExecResult`] so the operator can see *why* nothing ran,
 /// but the script itself never executed — consumers that derive state
 /// from a run's output (e.g. the backend's `check_status` projection)
@@ -110,8 +110,8 @@ pub const EXIT_SKIP_STALENESS: i32 = 127;
 ///
 /// Extends the reserved block downwards, because 124–127 was full. It shares
 /// the block's contract — the script never ran, so this is not evidence about
-/// its outcome — but it is not a *skip*: the other four mean "policy said not
-/// now", while this one means "this command was not authorised". The specific
+/// its outcome — but it is not a *skip*: the others mean "policy (or this
+/// OS) said not now", while this one means "this command was not authorised". The specific
 /// code is what carries that distinction; [`is_synthetic_skip`] deliberately
 /// does not, because every consumer of that predicate is asking the narrower
 /// question of whether the script ran.
@@ -123,12 +123,21 @@ pub const EXIT_SKIP_STALENESS: i32 = 127;
 /// a host whose clock is wrong, during an incident, with the backend down and
 /// the obs event stuck in the outbox.
 pub const EXIT_REJECTED_UNSIGNED: i32 = 123;
+/// Synthetic exit code: the schedule needs a feature this agent's OS
+/// **cannot evaluate or source** — a `constraints.require` gate with no
+/// sensing on this platform, or a `when.on` event this OS never emits.
+/// Emitted by the agent's local scheduler, which fails closed (the job is
+/// not run and no per-pc completion is recorded, so it still runs once the
+/// gate becomes supported). Grew the reserved block downwards again (123
+/// was the edge); shares the [`EXIT_SKIP_VERSION_PIN`] contract — the
+/// script never ran.
+pub const EXIT_SKIP_UNSUPPORTED: i32 = 122;
 
-/// True when `exit_code` is one of the reserved synthetic codes (123–127) —
+/// True when `exit_code` is one of the reserved synthetic codes (122–127) —
 /// the agent published this result *instead of* running the script, so it
 /// carries no evidence about the script's outcome.
 pub fn is_synthetic_skip(exit_code: i32) -> bool {
-    (EXIT_REJECTED_UNSIGNED..=EXIT_SKIP_STALENESS).contains(&exit_code)
+    (EXIT_SKIP_UNSUPPORTED..=EXIT_SKIP_STALENESS).contains(&exit_code)
 }
 
 impl ExecResult {
@@ -159,6 +168,7 @@ mod tests {
     #[test]
     fn synthetic_skip_covers_exactly_the_reserved_codes() {
         for code in [
+            EXIT_SKIP_UNSUPPORTED,
             EXIT_REJECTED_UNSIGNED,
             EXIT_SKIP_VERSION_PIN,
             EXIT_SKIP_DEADLINE,
@@ -167,11 +177,11 @@ mod tests {
         ] {
             assert!(is_synthetic_skip(code), "{code} is a reserved skip code");
         }
-        // 123 moved into the reserved block when the signature rejection was
-        // added (#1165) — the block was full at 124-127 and grew downwards.
-        // 122 is the new edge, and pinning both edges is what makes a future
-        // widening a deliberate act rather than an accident.
-        for code in [0, 1, -1, 122, 128, 255] {
+        // The block grew downwards twice: 123 for the signature rejection
+        // (#1165), then 122 for "unsupported on this OS". 121 is the new
+        // edge, and pinning both edges is what makes a future widening a
+        // deliberate act rather than an accident.
+        for code in [0, 1, -1, 121, 128, 255] {
             assert!(!is_synthetic_skip(code), "{code} is a real exit code");
         }
     }

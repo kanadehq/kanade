@@ -176,7 +176,7 @@ pub async fn run(
                 // projects `unknown` (mirrors the agent's Health-tab
                 // behaviour), so the SPA never shows a stale green for
                 // a check that has started failing. Synthetic skip
-                // results (exit 124–127) are filtered inside — the
+                // results (exit 122–127) are filtered inside — the
                 // script never ran, so they carry no evidence (#909).
                 if let Err(e) = maybe_project_check_status(
                     &js,

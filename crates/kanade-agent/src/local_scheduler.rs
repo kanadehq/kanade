@@ -35,19 +35,21 @@ use anyhow::{Context, Result};
 use async_nats::jetstream::kv::Operation;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{StreamExt, TryStreamExt};
+use kanade_shared::ExecResult;
 use kanade_shared::kv::{
     BUCKET_FLEET_CONFIG, BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, KEY_FREEZE,
 };
 use kanade_shared::manifest::{
     ExecMode, Freeze, Manifest, OnTrigger, RunsOn, Schedule, ScheduleTz, When,
 };
-use kanade_shared::wire::Command;
+use kanade_shared::wire::{Command, EXIT_SKIP_UNSUPPORTED};
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::commands::{CommandSource, handle_command};
+use crate::commands::{CommandSource, enqueue_result_best_effort_in, handle_command};
+use crate::env_gate::RequireStatus;
 use crate::nats_retry;
 use crate::script_cache::ScriptCache;
 
@@ -124,6 +126,14 @@ struct State {
     /// unreachable (the whole point of `runs_on: agent`). `None` ⇒ not
     /// frozen (key absent on the last successful read / watch event).
     freeze: Option<kanade_shared::manifest::Freeze>,
+    /// Dedup keys of the "unsupported on this OS" notices already published
+    /// this process (see [`notice_unsupported`]): one WARN + one synthetic
+    /// skip result per (schedule, revision) instead of one per tick. Not
+    /// persisted — an agent restart re-announces once, by design.
+    unsupported_notices: HashSet<String>,
+    /// Where synthetic results are enqueued — the same outbox the command
+    /// path writes to (`<data_dir>/outbox`); a field so tests can redirect it.
+    outbox_dir: PathBuf,
 }
 
 #[derive(Default)]
@@ -164,6 +174,15 @@ impl State {
 
     fn key(schedule_id: &str, job_id: &str) -> String {
         format!("{schedule_id}::{job_id}")
+    }
+
+    /// The cached manifest version of `job_id` (empty if not cached) — the
+    /// revision component of the unsupported-notice dedup keys.
+    fn cached_job_version(&self, job_id: &str) -> String {
+        self.jobs
+            .get(job_id)
+            .map(|j| j.manifest.version.clone())
+            .unwrap_or_default()
     }
 
     fn last_completion(&self, schedule_id: &str, job_id: &str) -> Option<&DateTime<Utc>> {
@@ -503,6 +522,8 @@ async fn run(
         in_flight: HashMap::new(),
         live_fires: HashMap::new(),
         freeze: None,
+        unsupported_notices: HashSet::new(),
+        outbox_dir: kanade_shared::default_paths::data_dir().join("outbox"),
     }));
 
     let pending = {
@@ -1145,6 +1166,30 @@ async fn reconcile_schedule(
             when = %schedule.when,
             "local_scheduler: registered (event-triggered, no cron)",
         );
+        // Triggers this OS never sources (off Windows: logon / lock /
+        // unlock / network_change) would otherwise sit registered and
+        // silently never fire. Say so once per (schedule, job version,
+        // trigger set) — the same revision notion as the require notice.
+        // Awaited under the lock like `internal.add` below: a one-off
+        // small file write, deduped to once per revision per process.
+        let unsourced = unsourced_triggers(schedule.event_triggers());
+        if !unsourced.is_empty() {
+            let key = format!(
+                "on\u{1f}{}\u{1f}{}\u{1f}{}",
+                schedule.id,
+                st.cached_job_version(&schedule.job_id),
+                trigger_names(&unsourced, ",")
+            );
+            if let Some(write) = notice_unsupported(
+                &mut st,
+                key,
+                pc_id,
+                schedule,
+                on_unsourced_stderr(&unsourced),
+            ) {
+                let _ = write.await;
+            }
+        }
         return;
     }
 
@@ -1689,6 +1734,106 @@ fn local_starting_deadline(
     .transpose()
 }
 
+/// This agent's OS as it appears in "unsupported" notices (`macos`,
+/// `linux`, `windows`).
+const THIS_OS: &str = std::env::consts::OS;
+
+/// Does this OS source `trigger`? `startup` works everywhere (sysinfo boot
+/// time). `logon` / `lock` / `unlock` come from the Windows SCM
+/// session-change handler and `network_change` from `NotifyAddrChange`;
+/// neither source exists off Windows, so those never fire there.
+fn event_source_available(trigger: OnTrigger) -> bool {
+    matches!(trigger, OnTrigger::Startup) || cfg!(target_os = "windows")
+}
+
+/// The triggers in `triggers` this OS never sources, in listed order.
+fn unsourced_triggers(triggers: &[OnTrigger]) -> Vec<OnTrigger> {
+    triggers
+        .iter()
+        .copied()
+        .filter(|t| !event_source_available(*t))
+        .collect()
+}
+
+fn trigger_names(triggers: &[OnTrigger], sep: &str) -> String {
+    triggers
+        .iter()
+        .map(|t| t.as_str())
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+/// stderr of the synthetic skip for `constraints.require` gates this OS
+/// cannot sense (`gates` = field names, e.g. `["idle"]`).
+fn require_unsupported_stderr(gates: &[&str]) -> String {
+    let fields = gates
+        .iter()
+        .map(|g| format!("constraints.require.{g}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("skipped: {fields} cannot be evaluated on {THIS_OS} — not running (fail-closed)")
+}
+
+/// stderr of the synthetic skip for `when.on` triggers this OS never sources.
+fn on_unsourced_stderr(triggers: &[OnTrigger]) -> String {
+    format!(
+        "skipped: when.on [{}] never fires on {THIS_OS} — this OS has no {} source",
+        trigger_names(triggers, ","),
+        trigger_names(triggers, "/"),
+    )
+}
+
+/// Announce, once per `key` per process, that `schedule` needs something
+/// this OS cannot provide: WARN + a synthetic [`EXIT_SKIP_UNSUPPORTED`]
+/// result in the outbox (the job never runs, so there is no real result to
+/// say why). Later calls with the same key only debug-log, so a schedule
+/// ticking every minute doesn't flood the Results page. Returns the
+/// enqueue handle when it published — await it or drop it to detach.
+fn notice_unsupported(
+    st: &mut State,
+    key: String,
+    pc_id: &str,
+    schedule: &Schedule,
+    stderr: String,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !st.unsupported_notices.insert(key) {
+        debug!(
+            schedule_id = %schedule.id,
+            %stderr,
+            "local_scheduler: unsupported on this OS (already reported)",
+        );
+        return None;
+    }
+    warn!(
+        schedule_id = %schedule.id,
+        job_id = %schedule.job_id,
+        "local_scheduler: {stderr}",
+    );
+    let now = Utc::now();
+    let result = ExecResult {
+        result_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::new_v4().to_string(),
+        // Nothing was executed, so there is no execution to link to.
+        exec_id: None,
+        parent_result_id: None,
+        pc_id: pc_id.to_string(),
+        exit_code: EXIT_SKIP_UNSUPPORTED,
+        stdout: String::new(),
+        stderr,
+        started_at: now,
+        finished_at: now,
+        stdout_object: None,
+        stderr_object: None,
+        manifest_id: Some(schedule.job_id.clone()),
+        collect_object: None,
+    };
+    Some(enqueue_result_best_effort_in(
+        st.outbox_dir.clone(),
+        result,
+        "unsupported-on-this-OS skip result enqueued to outbox",
+    ))
+}
+
 async fn local_tick(
     client: &async_nats::Client,
     pc_id: &str,
@@ -1742,19 +1887,48 @@ async fn local_tick(
     }
 
     // 0c) Host-environment gate (#418 constraints.require) — ac_power /
-    //     idle, sensed in-process (Win32). runs_on: agent only (validate
-    //     rejects backend). Skip-this-tick if unmet: a reconcile cadence
-    //     re-checks next tick (effectively deferring until the state is
-    //     met — the intended pairing); a calendar one-shot is missed,
-    //     same as the window gate above. Empty require → zero syscalls.
-    if let Some(req) = &schedule.constraints.require
-        && !crate::env_gate::require_satisfied(req)
-    {
-        debug!(
-            schedule_id = %schedule.id,
-            "local_scheduler: constraints.require not met (env gate) — skip",
-        );
-        return;
+    //     idle / cpu_below / network, sensed in-process. runs_on: agent
+    //     only (validate rejects backend). Skip-this-tick if unmet: a
+    //     reconcile cadence re-checks next tick (effectively deferring
+    //     until the state is met — the intended pairing); a calendar
+    //     one-shot is missed, same as the window gate above. Empty
+    //     require → zero syscalls. A gate this OS cannot sense fails
+    //     closed too, but visibly: one WARN + one synthetic skip result
+    //     per (schedule, job version, gate set), and no completion is
+    //     recorded so the job still runs once the gate is supported.
+    if let Some(req) = &schedule.constraints.require {
+        match crate::env_gate::require_status(req) {
+            RequireStatus::Satisfied => {}
+            RequireStatus::NotSatisfied => {
+                debug!(
+                    schedule_id = %schedule.id,
+                    "local_scheduler: constraints.require not met (env gate) — skip",
+                );
+                return;
+            }
+            RequireStatus::Unsupported(gates) => {
+                let write = {
+                    let mut st = state.lock().await;
+                    let key = format!(
+                        "require\u{1f}{}\u{1f}{}\u{1f}{}",
+                        schedule.id,
+                        st.cached_job_version(&schedule.job_id),
+                        gates.join(","),
+                    );
+                    notice_unsupported(
+                        &mut st,
+                        key,
+                        pc_id,
+                        schedule,
+                        require_unsupported_stderr(&gates),
+                    )
+                };
+                if let Some(write) = write {
+                    let _ = write.await;
+                }
+                return;
+            }
+        }
     }
 
     // 1) Manifest + (optional) pre-resolved script_object digest
@@ -2302,11 +2476,238 @@ mod tests {
             in_flight: HashMap::new(),
             live_fires: HashMap::new(),
             freeze: None,
+            unsupported_notices: HashSet::new(),
+            outbox_dir: std::env::temp_dir().join(format!("kanade-test-outbox-{}", Uuid::new_v4())),
         }
     }
 
     fn t(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    // ---- unsupported-on-this-OS notices ----
+
+    // Helpers for the notice tests, which only run where the notices fire
+    // (Windows senses every gate and sources every trigger).
+    #[cfg(not(target_os = "windows"))]
+    /// Offline stand-ins for the collaborators `local_tick` /
+    /// `reconcile_schedule` take: nothing listens on port 1, and the
+    /// paths under test return before any of them is used for I/O.
+    async fn offline_deps(
+        dir: &std::path::Path,
+    ) -> (
+        async_nats::Client,
+        crate::staleness::Tracker,
+        ScriptCache,
+        crate::check_cache::CheckSink,
+    ) {
+        let client = async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("127.0.0.1:1")
+            .await
+            .expect("lazy client");
+        let cache = ScriptCache::new(
+            async_nats::jetstream::new(client.clone()),
+            dir.join("script_cache"),
+        );
+        (
+            client,
+            crate::staleness::Tracker::new(),
+            cache,
+            crate::check_cache::CheckSink::new(),
+        )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn outbox_results(dir: &std::path::Path) -> Vec<ExecResult> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap())
+            .collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn job(version: &str) -> ResolvedJob {
+        ResolvedJob {
+            manifest: serde_json::from_value(serde_json::json!({
+                "id": "j",
+                "version": version,
+                "execute": { "shell": "sh", "script": "exit 0", "timeout": "10s" },
+            }))
+            .unwrap(),
+            script_object_sha256: None,
+        }
+    }
+
+    #[test]
+    fn only_startup_is_sourced_off_windows() {
+        let all = [
+            OnTrigger::Startup,
+            OnTrigger::Logon,
+            OnTrigger::Lock,
+            OnTrigger::Unlock,
+            OnTrigger::NetworkChange,
+        ];
+        let expected: &[OnTrigger] = if cfg!(target_os = "windows") {
+            &[]
+        } else {
+            &all[1..]
+        };
+        assert_eq!(unsourced_triggers(&all), expected);
+        assert!(unsourced_triggers(&[OnTrigger::Startup]).is_empty());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn unsupported_require_never_runs_records_nothing_and_reports_once_per_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let (client, staleness, script_cache, check_sink) = offline_deps(dir.path()).await;
+        let mut st = test_state();
+        st.outbox_dir = dir.path().join("outbox");
+        st.jobs.insert("j".into(), job("1.0.0"));
+        let state = Arc::new(Mutex::new(st));
+        let mut s = schedule(
+            Target {
+                all: true,
+                ..Default::default()
+            },
+            RunsOn::Agent,
+        );
+        s.constraints.require = Some(kanade_shared::manifest::Require {
+            idle: Some("10m".into()),
+            ..Default::default()
+        });
+
+        for _ in 0..3 {
+            local_tick(
+                &client,
+                "pc-01",
+                &state,
+                &s,
+                &staleness,
+                &script_cache,
+                &check_sink,
+            )
+            .await;
+        }
+        let outbox = dir.path().join("outbox");
+        let results = outbox_results(&outbox);
+        assert_eq!(results.len(), 1, "one notice across repeated ticks");
+        let r = &results[0];
+        assert_eq!(r.exit_code, EXIT_SKIP_UNSUPPORTED);
+        assert_eq!(
+            r.stderr,
+            format!(
+                "skipped: constraints.require.idle cannot be evaluated on {} — not running (fail-closed)",
+                std::env::consts::OS
+            )
+        );
+        assert_eq!(r.manifest_id.as_deref(), Some("j"));
+        assert_eq!(r.pc_id, "pc-01");
+        {
+            let st = state.lock().await;
+            // Never claimed, never completed: per_pc once still runs once
+            // the gate becomes supported.
+            assert!(st.last_completion("s", "j").is_none());
+            assert!(st.completions.is_empty());
+            assert!(st.in_flight.is_empty() && st.live_fires.is_empty());
+        }
+
+        // A new job version is a new revision → announced again, once.
+        state.lock().await.jobs.insert("j".into(), job("1.0.1"));
+        for _ in 0..2 {
+            local_tick(
+                &client,
+                "pc-01",
+                &state,
+                &s,
+                &staleness,
+                &script_cache,
+                &check_sink,
+            )
+            .await;
+        }
+        assert_eq!(outbox_results(&outbox).len(), 2);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn unsourced_when_on_is_reported_once_across_reconciles() {
+        let dir = tempfile::tempdir().unwrap();
+        let (client, staleness, script_cache, check_sink) = offline_deps(dir.path()).await;
+        let internal = JobScheduler::new().await.unwrap();
+        let mut st = test_state();
+        st.outbox_dir = dir.path().join("outbox");
+        st.jobs.insert("j".into(), job("1.0.0"));
+        let state = Arc::new(Mutex::new(st));
+        let mut s = schedule(
+            Target {
+                all: true,
+                ..Default::default()
+            },
+            RunsOn::Agent,
+        );
+        s.when = When::On(vec![
+            OnTrigger::Startup,
+            OnTrigger::Unlock,
+            OnTrigger::Logon,
+        ]);
+        let mut startup_only = s.clone();
+        startup_only.id = "boot".into();
+        startup_only.when = When::On(vec![OnTrigger::Startup]);
+
+        for _ in 0..3 {
+            for sched in [&s, &startup_only] {
+                reconcile_schedule(
+                    &internal,
+                    &state,
+                    &client,
+                    "pc-01",
+                    &[],
+                    sched,
+                    &staleness,
+                    &script_cache,
+                    &check_sink,
+                )
+                .await;
+            }
+        }
+        let results = outbox_results(&dir.path().join("outbox"));
+        assert_eq!(results.len(), 1, "one notice, and none for startup-only");
+        assert_eq!(results[0].exit_code, EXIT_SKIP_UNSUPPORTED);
+        assert_eq!(
+            results[0].stderr,
+            format!(
+                "skipped: when.on [unlock,logon] never fires on {} — this OS has no unlock/logon source",
+                std::env::consts::OS
+            )
+        );
+        // Still registered: its `startup` trigger keeps working.
+        assert!(state.lock().await.schedules.contains_key("s"));
+
+        // A new job version is a new revision → announced again, once.
+        state.lock().await.jobs.insert("j".into(), job("1.0.1"));
+        for _ in 0..2 {
+            for sched in [&s, &startup_only] {
+                reconcile_schedule(
+                    &internal,
+                    &state,
+                    &client,
+                    "pc-01",
+                    &[],
+                    sched,
+                    &staleness,
+                    &script_cache,
+                    &check_sink,
+                )
+                .await;
+            }
+        }
+        assert_eq!(outbox_results(&dir.path().join("outbox")).len(), 2);
     }
 
     #[test]

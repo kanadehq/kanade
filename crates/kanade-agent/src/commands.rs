@@ -76,8 +76,24 @@ pub fn shared_dedup_cache() -> Arc<Mutex<DedupCache>> {
 /// best-effort changes nothing observable except that it no longer stalls
 /// the executor. `note` is the per-site success breadcrumb.
 fn enqueue_result_best_effort(result: ExecResult, note: &'static str) {
+    // Detached: dropping the handle lets the write finish on its own.
+    drop(enqueue_result_best_effort_in(
+        default_paths::data_dir().join("outbox"),
+        result,
+        note,
+    ));
+}
+
+/// [`enqueue_result_best_effort`] into an explicit outbox dir. Returns the
+/// blocking task's handle so a caller that needs the write to have landed
+/// (the local scheduler's unsupported-gate skip, whose dedup is observable
+/// in tests) can await it; everyone else just drops it.
+pub(crate) fn enqueue_result_best_effort_in(
+    outbox_dir: std::path::PathBuf,
+    result: ExecResult,
+    note: &'static str,
+) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
-        let outbox_dir = default_paths::data_dir().join("outbox");
         // `enqueue` only borrows `result`, so after it returns `result` is
         // still owned here — read its fields directly rather than cloning
         // request_id / copying exit_code out before the move (gemini).
@@ -97,7 +113,7 @@ fn enqueue_result_best_effort(result: ExecResult, note: &'static str) {
                 "outbox enqueue failed (run still completed)",
             ),
         }
-    });
+    })
 }
 
 // One argument over the limit since #1165 added the verifier. Same
@@ -967,6 +983,8 @@ fn version_pin_rejects(source: CommandSource, pinned: Option<&str>, cmd_version:
 ///
 /// | Code | Meaning                                | Helper                            |
 /// |------|----------------------------------------|-----------------------------------|
+/// | 122  | schedule feature unsupported on this OS | `local_scheduler` (require / when.on) |
+/// | 123  | command signature refused (#1165)      | `publish_signature_refused`       |
 /// | 124  | Layer 2 version-pin mismatch (#271)    | `publish_version_mismatch_skipped`|
 /// | 125  | deadline_at expired                    | `publish_skipped`                 |
 /// | 126  | Layer 2 revoked (#271)                 | `publish_revoked_skipped`         |

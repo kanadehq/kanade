@@ -220,15 +220,32 @@ impl TempPowerShellLaunch {
         // on Windows but technically representable) still produces
         // a path we can hand to PowerShell.
         let user_path = user.path().to_string_lossy().replace('\'', "''");
-        // No explicit `exit $LASTEXITCODE` propagation: that would
-        // make us exit nonzero even when the user script HANDLED a
-        // native command's failure (`$LASTEXITCODE` remains set
-        // from the last native call, not the script's overall
-        // status). PowerShell's default is to exit 0 unless the
-        // user script itself calls `exit N` — which IS propagated
-        // because `exit` aborts the host process, not just the
-        // call-operator scope.
-        let launcher_body = format!("{POWERSHELL_UTF8_PRELUDE}& '{user_path}' @args\n");
+        // Exit-code propagation. `&` runs the user script in a child
+        // scope, so a user `exit N` only ends THAT scope — without the
+        // lines below the launcher then ran off its end and the job
+        // recorded 0 for every `exit N`. After `&` returns:
+        //   * `$?` is False only when the script ended via an explicit
+        //     `exit N` (N != 0) or a terminating error; then
+        //     `$LASTEXITCODE` holds N (or 1 for a throw) → `exit` it.
+        //   * `$?` is True for a script that ran to its end — including
+        //     one that HANDLED a failing native command, which leaves a
+        //     stale nonzero `$LASTEXITCODE` behind. That is why a plain
+        //     `exit $LASTEXITCODE` is wrong: it would fail those runs.
+        //     Falling off the end reports 0, as `pwsh -File` does.
+        // `$global:LASTEXITCODE = 0` first so nothing from the prelude
+        // (or an inherited value) can leak into the propagated code.
+        // Measured on pwsh 7.6.6 against running the user script directly
+        // with `pwsh -File`, over cases including: exit 3; handled native
+        // failure then success; throw; plain output; trailing failing
+        // native; exit 0; non-terminating error; exit inside a function;
+        // EAP=Stop + Write-Error; CmdletBinding+param+exit 7 — identical
+        // exit codes in every case. Windows PowerShell 5.1 shares this
+        // launcher, and `$?` after `&` has the same semantics there.
+        let launcher_body = format!(
+            "{POWERSHELL_UTF8_PRELUDE}$global:LASTEXITCODE = 0\n\
+             & '{user_path}' @args\n\
+             if (-not $?) {{ exit $LASTEXITCODE }}\n"
+        );
         let launcher = TempPowerShellScript::write(&launcher_body)?;
         Ok(Self {
             launcher,
@@ -1080,6 +1097,54 @@ mod tests {
         drop(launch);
         assert!(!launcher_path.exists(), "launcher must be removed on drop");
         assert!(!user_path.exists(), "user file must be removed on drop");
+    }
+
+    /// The launcher must report what `pwsh -File <user.ps1>` would: a user
+    /// `exit 3` is 3 (the old `& '<user>' @args` body recorded 0), and a
+    /// script that handled a failing native command before succeeding is 0
+    /// (a naive `exit $LASTEXITCODE` would report 1).
+    #[cfg(unix)]
+    #[test]
+    fn staged_launcher_reports_the_user_scripts_exit_code() {
+        let Ok(pwsh) = which::which("pwsh") else {
+            println!("skipping: `pwsh` not on PATH");
+            return;
+        };
+        for (script, want) in [("exit 3", 3), ("/usr/bin/false; Write-Output ok", 0)] {
+            let launch = super::TempPowerShellLaunch::stage(script).expect("stage");
+            let status = std::process::Command::new(&pwsh)
+                .args(["-NoProfile", "-NonInteractive", "-File"])
+                .arg(launch.launcher_path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("run pwsh");
+            assert_eq!(status.code(), Some(want), "script: {script}");
+        }
+    }
+
+    /// Same contract on Windows PowerShell 5.1, which shares the launcher
+    /// (`shell: powershell`), spawned the way the agent spawns it.
+    #[cfg(windows)]
+    #[test]
+    fn staged_launcher_reports_the_user_scripts_exit_code_on_windows_powershell() {
+        for (script, want) in [("exit 3", 3), ("cmd /c exit 1; Write-Output ok", 0)] {
+            let launch = super::TempPowerShellLaunch::stage(script).expect("stage");
+            let status = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(launch.launcher_path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("run powershell");
+            assert_eq!(status.code(), Some(want), "script: {script}");
+        }
     }
 }
 
