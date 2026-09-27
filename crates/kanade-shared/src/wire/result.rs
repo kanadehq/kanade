@@ -192,14 +192,24 @@ impl ExecResult {
     /// A script that merely exits 123 (xargs does, for one) carries an
     /// ordinary random id and is not a refusal.
     /// True for a skip published by an agent that predates
-    /// [`Self::skipped`]: unflagged, a reserved skip exit code, and the
-    /// `skipped:` stderr every synthetic publisher wrote. Only for callers
-    /// that must keep ignoring those results (the check projector, #909);
-    /// tallies deliberately ignore it.
+    /// [`Self::skipped`]: unflagged, a reserved skip exit code, and one of
+    /// the exact `skipped: …` messages the synthetic publishers wrote. Only
+    /// for callers that must keep ignoring those results (the check
+    /// projector, #909); tallies deliberately ignore it. Script stderr can
+    /// not be told apart in general, so the match is on the full known
+    /// message heads rather than a bare `skipped:` prefix.
     pub fn is_legacy_skip(&self) -> bool {
+        const HEADS: [&str; 6] = [
+            "skipped: version-pin mismatch",
+            "skipped: starting deadline expired",
+            "skipped: command was revoked",
+            "skipped: staleness policy",
+            "skipped: constraints.require.idle cannot be evaluated",
+            "skipped: when.on [",
+        ];
         !self.skipped
             && matches!(self.exit_code, 122 | 124..=127)
-            && self.stderr.starts_with("skipped:")
+            && HEADS.iter().any(|h| self.stderr.starts_with(h))
     }
 
     pub fn is_signature_refusal(&self) -> bool {
@@ -237,8 +247,11 @@ mod tests {
         r.stderr = "sh: x: command not found".into();
         r.exit_code = 127;
         assert!(!r.is_legacy_skip());
-        r.stderr = "skipped: x".into();
+        r.stderr = "skipped: my own script note".into();
+        r.exit_code = 126;
+        assert!(!r.is_legacy_skip());
         r.exit_code = 1;
+        r.stderr = "skipped: version-pin mismatch".into();
         assert!(!r.is_legacy_skip());
     }
 
