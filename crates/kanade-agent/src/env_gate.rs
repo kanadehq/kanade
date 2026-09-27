@@ -10,15 +10,16 @@
 //! a skip-this-tick gate in `local_scheduler::local_tick`.
 //!
 //! Not cfg-gated as a module: `local_tick` is cross-platform and calls
-//! [`require_satisfied`] on every target; the Windows sensing is gated
-//! internally and a non-Windows build returns "allow" (documented gap —
-//! all kanade agents are Windows; decision K capability matrix).
+//! [`require_status`] on every target. Off Windows only `cpu_below` can be
+//! sensed (it reuses the cross-platform `host_perf` sysinfo sample); every
+//! other set gate is reported as [`RequireStatus::Unsupported`] so the
+//! caller fails closed *and says so*, instead of silently allowing.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use kanade_shared::manifest::Require;
+use kanade_shared::manifest::{EnvState, Require, require_met};
 
 /// Latest whole-machine CPU% (0–100), published by `host_perf_loop` each
 /// tick. Stored as `f32` bits in an atomic; `f32::NAN` = "no sample yet"
@@ -38,8 +39,6 @@ pub fn set_system_cpu(pct: Option<f32>) {
 
 /// The latest system CPU% (`None` = no sample yet → a `cpu_below`
 /// requirement is treated as unmet, fail-closed).
-// Only read in the Windows gate path; the non-Windows stub returns early.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn system_cpu() -> Option<f64> {
     let v = f32::from_bits(LATEST_SYSTEM_CPU.load(Ordering::Relaxed));
     if v.is_nan() { None } else { Some(v as f64) }
@@ -74,39 +73,77 @@ pub(crate) fn set_console_idle(idle: Option<Duration>) {
     *g = idle.map(|d| (Instant::now(), d));
 }
 
-/// Fire-time env gate. An empty `require` short-circuits to `true` with
-/// zero syscalls (the common case — most schedules have no require).
-/// Windows: sense AC + idle + network, fold in the latest host CPU%,
-/// apply `require_met`. Non-Windows: allow (sensing unsupported; no
-/// non-Windows agents in the fleet).
-pub fn require_satisfied(req: &Require) -> bool {
+/// Result of the fire-time env gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequireStatus {
+    /// Every set gate is met (or `require` is empty) — fire.
+    Satisfied,
+    /// At least one set gate is sensed and currently unmet — skip this tick.
+    NotSatisfied,
+    /// These set gates (field names under `constraints.require`) cannot be
+    /// evaluated on this OS. The caller must NOT run the job (fail-closed)
+    /// and should surface why. Takes precedence over `NotSatisfied`.
+    Unsupported(Vec<&'static str>),
+}
+
+/// Fire-time env gate. An empty `require` short-circuits to `Satisfied`
+/// with zero syscalls (the common case — most schedules have no require).
+/// Windows: sense AC + idle + network, fold in the latest host CPU%, apply
+/// `require_met`. Non-Windows: any set gate without a sensor on this OS
+/// (see [`unsupported_gates`]) yields `Unsupported`; a `cpu_below`-only
+/// require is evaluated from the same host CPU% sample as on Windows.
+pub fn require_status(req: &Require) -> RequireStatus {
     if req.is_empty() {
-        return true; // fast path — no Win32, no work
+        return RequireStatus::Satisfied; // fast path — no Win32, no work
+    }
+    let unsupported = unsupported_gates(req);
+    if !unsupported.is_empty() {
+        return RequireStatus::Unsupported(unsupported);
     }
     #[cfg(target_os = "windows")]
-    {
-        // Imported here (not at module scope) so non-Windows builds
-        // don't flag them unused — the stub below never calls them.
-        use kanade_shared::manifest::{EnvState, require_met};
+    let env = {
         let (ac_online, idle, network_up) = sense_windows();
-        require_met(
-            req,
-            &EnvState {
-                ac_online,
-                idle,
-                cpu_pct: system_cpu(),
-                network_up,
-            },
-        )
-    }
+        EnvState {
+            ac_online,
+            idle,
+            cpu_pct: system_cpu(),
+            network_up,
+        }
+    };
+    // Only portable gates reach here (unsupported_gates rejected the rest),
+    // so the defaulted fields are never consulted.
     #[cfg(not(target_os = "windows"))]
-    {
-        // No host sensing off Windows. Allow rather than fail-closed so a
-        // non-Windows build (CI, dev) doesn't permanently starve every
-        // require-gated schedule; the production fleet is all-Windows.
-        let _ = req;
-        true
+    let env = EnvState {
+        cpu_pct: system_cpu(),
+        ..EnvState::default()
+    };
+    if require_met(req, &env) {
+        RequireStatus::Satisfied
+    } else {
+        RequireStatus::NotSatisfied
     }
+}
+
+/// The set gates in `req` this OS has no sensor for, as their
+/// `constraints.require.<field>` names. Empty on Windows. Off Windows:
+/// `ac_power` (no power-status reader), `idle` (no in-session input
+/// sampler) and `network` (no connectivity-hint reader); `cpu_below` is
+/// portable and never listed.
+pub fn unsupported_gates(req: &Require) -> Vec<&'static str> {
+    if cfg!(target_os = "windows") {
+        return Vec::new();
+    }
+    let mut gates = Vec::new();
+    if req.ac_power {
+        gates.push("ac_power");
+    }
+    if req.idle.is_some() {
+        gates.push("idle");
+    }
+    if req.network {
+        gates.push("network");
+    }
+    gates
 }
 
 /// Sense `(ac_online, console_idle, network_up)` on Windows. `ac_online`
@@ -198,23 +235,69 @@ mod tests {
     #[test]
     fn empty_require_is_satisfied_without_syscalls() {
         // Exercises the no-Win32 fast path on every platform.
-        assert!(require_satisfied(&Require::default()));
-        assert!(require_satisfied(&Require {
-            ac_power: false,
-            idle: None,
-            cpu_below: None,
-            network: false,
-        }));
-        // Non-Windows: a non-empty require also returns true (allow-all
-        // stub — the production fleet is all-Windows, decision K). Pins
-        // that contract so a future refactor can't silently flip it.
-        #[cfg(not(target_os = "windows"))]
-        assert!(require_satisfied(&Require {
+        assert_eq!(
+            require_status(&Require::default()),
+            RequireStatus::Satisfied
+        );
+    }
+
+    // Off Windows every sensor-less gate is reported (fail-closed and
+    // named), never silently allowed; cpu_below alone stays evaluable
+    // because it reuses the cross-platform host_perf sample.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn non_windows_reports_exactly_the_unsensed_gates() {
+        let all = Require {
             ac_power: true,
             idle: Some("10m".into()),
             cpu_below: Some(20.0),
             network: true,
-        }));
+        };
+        assert_eq!(
+            require_status(&all),
+            RequireStatus::Unsupported(vec!["ac_power", "idle", "network"])
+        );
+        let idle_only = Require {
+            idle: Some("10m".into()),
+            ..Require::default()
+        };
+        assert_eq!(
+            require_status(&idle_only),
+            RequireStatus::Unsupported(vec!["idle"])
+        );
+        // Unsupported wins over a sensed-but-unmet cpu gate.
+        let net_and_cpu = Require {
+            network: true,
+            cpu_below: Some(0.0),
+            ..Require::default()
+        };
+        assert_eq!(
+            require_status(&net_and_cpu),
+            RequireStatus::Unsupported(vec!["network"])
+        );
+        let cpu_only = Require {
+            cpu_below: Some(20.0),
+            ..Require::default()
+        };
+        assert!(unsupported_gates(&cpu_only).is_empty());
+        assert!(!matches!(
+            require_status(&cpu_only),
+            RequireStatus::Unsupported(_)
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_senses_every_gate() {
+        assert!(
+            unsupported_gates(&Require {
+                ac_power: true,
+                idle: Some("10m".into()),
+                cpu_below: Some(20.0),
+                network: true,
+            })
+            .is_empty()
+        );
     }
 
     #[test]

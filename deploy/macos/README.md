@@ -147,3 +147,29 @@ system_gui:  /bin/launchctl asuser <uid> /usr/bin/env -i <env> <host> <args…>
   if the binary is modified after the build.
 - **Command signing**: keyring provisioning is Windows-only today, so
   signed-command verification is inactive on macOS agents (the #1165 gap).
+
+## What does not work on macOS yet
+
+A schedule's targets can span operating systems, so none of this is
+rejected when the schedule is created — the agent decides at run time.
+
+- **`constraints.require` gates** `ac_power`, `idle` and `network` have no
+  sensor on macOS (`cpu_below` works). A schedule that sets any of them
+  **fails closed**: the job is not run and no per-pc completion is recorded
+  (so it still runs once the gate is supported). The agent logs a WARN and
+  publishes one synthetic skipped result (exit 122) per schedule / job
+  version per agent run, e.g. `skipped: constraints.require.idle cannot be
+  evaluated on macos — not running (fail-closed)`; later ticks only
+  debug-log.
+- **`when.on: [logon, lock, unlock, network_change]`** never fire — macOS
+  has no source for them (`startup` works). When the agent loads such a
+  schedule it warns once and publishes one synthetic skipped result (exit
+  122), e.g. `skipped: when.on [unlock] never fires on macos — this OS has
+  no unlock source`.
+- **Idle / presence and Windows event log (winlog) swimlanes** on the
+  per-PC timeline stay empty — both samplers are Windows-only.
+- **`last_logon`** (last signed-in user / display name) is empty — it is
+  read from the Windows registry.
+- **Client App features** (the KLP listener: notifications, self-service
+  job catalog, Health tab, support unlock, desktop shortcut) are
+  Windows-only.

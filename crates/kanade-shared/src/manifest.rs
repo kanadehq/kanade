@@ -8169,6 +8169,10 @@ pub enum When {
     /// `skip_dates` checks as the cron path. `startup` fires once per OS
     /// boot (deduped via the host boot time); a `starting_deadline`, if
     /// set, limits it to "agent came up within that long after boot".
+    /// Only `startup` has an event source on every OS; `logon` / `lock` /
+    /// `unlock` / `network_change` are Windows-only — on macOS / Linux
+    /// they never fire, and the agent says so once per schedule / job
+    /// version (WARN + a synthetic skipped result, exit 122) when it loads it.
     On(Vec<OnTrigger>),
 }
 
@@ -8180,19 +8184,19 @@ pub enum OnTrigger {
     /// freshly-imaged / reinstalled hosts at their next startup.
     Startup,
     /// On an interactive-session user logon — console, RDP, or
-    /// auto-logon (Windows `WTS_SESSION_LOGON`). Does not fire for
+    /// auto-logon (Windows `WTS_SESSION_LOGON`; Windows only). Does not fire for
     /// service / network / batch logons (no interactive session).
     Logon,
     /// When the workstation is locked (Win+L / idle lock; Windows
-    /// `WTS_SESSION_LOCK`). Use for step-away compliance / cleanup.
+    /// `WTS_SESSION_LOCK`; Windows only). Use for step-away compliance / cleanup.
     Lock,
     /// When the workstation is unlocked — the user returns to a locked
-    /// session (Windows `WTS_SESSION_UNLOCK`). Use to re-check
+    /// session (Windows `WTS_SESSION_UNLOCK`; Windows only). Use to re-check
     /// compliance / refresh state when work resumes.
     Unlock,
     /// When the host's network changes — IP address table change on
     /// connect / disconnect / DHCP renew / VPN / Wi-Fi roam (Windows
-    /// `NotifyAddrChange`). Debounced agent-side (a burst of changes
+    /// `NotifyAddrChange`; Windows only). Debounced agent-side (a burst of changes
     /// from one transition fires once after the network settles), so
     /// use it for "re-check connectivity / re-register on network move"
     /// rather than expecting one fire per raw adapter event.
@@ -8646,6 +8650,12 @@ impl Active {
 /// state is met — the intended pairing); a `calendar` fire that lands
 /// while the state is unmet is simply missed, same as `window`. It is
 /// therefore a *runtime* gate and does not appear in `preview`.
+///
+/// Off Windows only `cpu_below` can be sensed. On macOS / Linux any other
+/// set gate cannot be evaluated, so the agent fails closed: the job does
+/// not run, no per-pc completion is recorded (it still runs once the gate
+/// is supported), and one WARN + one synthetic skipped result (exit 122,
+/// naming the gate) is published per schedule / job version.
 // No `Eq`: `cpu_below: Option<f64>` is only `PartialEq` (f64 is not Eq).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq)]
 pub struct Require {
@@ -8653,7 +8663,7 @@ pub struct Require {
     /// `GetSystemPowerStatus`; an unknown/unreadable status is treated
     /// as not-on-AC (fail-closed — a restrictive gate must not fire
     /// when it can't confirm the condition). `false` (default) = no
-    /// power requirement.
+    /// power requirement. Windows only (fail-closed skip elsewhere).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ac_power: bool,
     /// Fire only when the active console session has had **no keyboard /
@@ -8663,6 +8673,7 @@ pub struct Require {
     /// headless / disconnected console (no interactive user) trivially
     /// satisfies it. `None` (default) = no idle requirement. Parsed
     /// lazily; [`Schedule::validate`] rejects garbage at create time.
+    /// Windows only (fail-closed skip elsewhere).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle: Option<String>,
     /// Fire only when the **whole-machine CPU usage is below this
@@ -8685,7 +8696,8 @@ pub struct Require {
     /// unknown/unreadable state is treated as offline (fail-closed) — a
     /// portal would just fail a download, so we hold the run. For VPN /
     /// SASE / app-specific conditions, use a custom script gate (separate
-    /// slice). `false` (default) = no network requirement.
+    /// slice). `false` (default) = no network requirement. Windows only
+    /// (fail-closed skip elsewhere).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub network: bool,
 }

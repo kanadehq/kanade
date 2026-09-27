@@ -229,22 +229,22 @@
           "const": "startup"
         },
         {
-          "description": "On an interactive-session user logon — console, RDP, or\nauto-logon (Windows `WTS_SESSION_LOGON`). Does not fire for\nservice / network / batch logons (no interactive session).",
+          "description": "On an interactive-session user logon — console, RDP, or\nauto-logon (Windows `WTS_SESSION_LOGON`; Windows only). Does not fire for\nservice / network / batch logons (no interactive session).",
           "type": "string",
           "const": "logon"
         },
         {
-          "description": "When the workstation is locked (Win+L / idle lock; Windows\n`WTS_SESSION_LOCK`). Use for step-away compliance / cleanup.",
+          "description": "When the workstation is locked (Win+L / idle lock; Windows\n`WTS_SESSION_LOCK`; Windows only). Use for step-away compliance / cleanup.",
           "type": "string",
           "const": "lock"
         },
         {
-          "description": "When the workstation is unlocked — the user returns to a locked\nsession (Windows `WTS_SESSION_UNLOCK`). Use to re-check\ncompliance / refresh state when work resumes.",
+          "description": "When the workstation is unlocked — the user returns to a locked\nsession (Windows `WTS_SESSION_UNLOCK`; Windows only). Use to re-check\ncompliance / refresh state when work resumes.",
           "type": "string",
           "const": "unlock"
         },
         {
-          "description": "When the host's network changes — IP address table change on\nconnect / disconnect / DHCP renew / VPN / Wi-Fi roam (Windows\n`NotifyAddrChange`). Debounced agent-side (a burst of changes\nfrom one transition fires once after the network settles), so\nuse it for \"re-check connectivity / re-register on network move\"\nrather than expecting one fire per raw adapter event.\n\nIPv4 only: `NotifyAddrChange` watches the IPv4 address table, so a\ntransition that touches only IPv6 addresses won't fire. In practice\ndual-stack networks change both tables together, but a pure-IPv6\nmove (e.g. an IPv6-only Wi-Fi roam) is not detected.",
+          "description": "When the host's network changes — IP address table change on\nconnect / disconnect / DHCP renew / VPN / Wi-Fi roam (Windows\n`NotifyAddrChange`; Windows only). Debounced agent-side (a burst of changes\nfrom one transition fires once after the network settles), so\nuse it for \"re-check connectivity / re-register on network move\"\nrather than expecting one fire per raw adapter event.\n\nIPv4 only: `NotifyAddrChange` watches the IPv4 address table, so a\ntransition that touches only IPv6 addresses won't fire. In practice\ndual-stack networks change both tables together, but a pure-IPv6\nmove (e.g. an IPv6-only Wi-Fi roam) is not detected.",
           "type": "string",
           "const": "network_change"
         }
@@ -309,11 +309,11 @@
       ]
     },
     "Require": {
-      "description": "Host-environment gate (#418 `constraints.require`). Fire only when\nthe target host is in the required state. Sensed **in-process by the\nagent** (Win32), so it is `runs_on: agent` only — the backend cannot\nread a target host's power/idle state ([`Schedule::validate`]\nrejects it on `runs_on: backend`, symmetric with `when: { on }`).\n\nEvaluated at fire time as a skip-this-tick gate (NOT in\n[`Constraints::allows`], which stays pure for `preview`): a reconcile\ncadence re-checks every minute (so it effectively defers until the\nstate is met — the intended pairing); a `calendar` fire that lands\nwhile the state is unmet is simply missed, same as `window`. It is\ntherefore a *runtime* gate and does not appear in `preview`.",
+      "description": "Host-environment gate (#418 `constraints.require`). Fire only when\nthe target host is in the required state. Sensed **in-process by the\nagent** (Win32), so it is `runs_on: agent` only — the backend cannot\nread a target host's power/idle state ([`Schedule::validate`]\nrejects it on `runs_on: backend`, symmetric with `when: { on }`).\n\nEvaluated at fire time as a skip-this-tick gate (NOT in\n[`Constraints::allows`], which stays pure for `preview`): a reconcile\ncadence re-checks every minute (so it effectively defers until the\nstate is met — the intended pairing); a `calendar` fire that lands\nwhile the state is unmet is simply missed, same as `window`. It is\ntherefore a *runtime* gate and does not appear in `preview`.\n\nOff Windows only `cpu_below` can be sensed. On macOS / Linux any other\nset gate cannot be evaluated, so the agent fails closed: the job does\nnot run, no per-pc completion is recorded (it still runs once the gate\nis supported), and one WARN + one synthetic skipped result (exit 122,\nnaming the gate) is published per schedule / job version.",
       "type": "object",
       "properties": {
         "ac_power": {
-          "description": "Fire only while on **AC power** (skip on battery). Reads\n`GetSystemPowerStatus`; an unknown/unreadable status is treated\nas not-on-AC (fail-closed — a restrictive gate must not fire\nwhen it can't confirm the condition). `false` (default) = no\npower requirement.",
+          "description": "Fire only while on **AC power** (skip on battery). Reads\n`GetSystemPowerStatus`; an unknown/unreadable status is treated\nas not-on-AC (fail-closed — a restrictive gate must not fire\nwhen it can't confirm the condition). `false` (default) = no\npower requirement. Windows only (fail-closed skip elsewhere).",
           "type": "boolean"
         },
         "cpu_below": {
@@ -325,14 +325,14 @@
           "format": "double"
         },
         "idle": {
-          "description": "Fire only when the active console session has had **no keyboard /\nmouse input for at least this long** (humantime, e.g. `\"10m\"`) —\n\"don't run while the user is actively working\". Input-based\n(simpler than Task Scheduler's CPU/disk-aware idle). A\nheadless / disconnected console (no interactive user) trivially\nsatisfies it. `None` (default) = no idle requirement. Parsed\nlazily; [`Schedule::validate`] rejects garbage at create time.",
+          "description": "Fire only when the active console session has had **no keyboard /\nmouse input for at least this long** (humantime, e.g. `\"10m\"`) —\n\"don't run while the user is actively working\". Input-based\n(simpler than Task Scheduler's CPU/disk-aware idle). A\nheadless / disconnected console (no interactive user) trivially\nsatisfies it. `None` (default) = no idle requirement. Parsed\nlazily; [`Schedule::validate`] rejects garbage at create time.\nWindows only (fail-closed skip elsewhere).",
           "type": [
             "string",
             "null"
           ]
         },
         "network": {
-          "description": "Fire only when the host has **internet connectivity** (Windows\n`GetNetworkConnectivityHint` reports InternetAccess) — \"don't run\nuntil online\" for jobs that download / phone home. A captive\nportal (ConstrainedInternetAccess), LAN-only (LocalAccess), or\nunknown/unreadable state is treated as offline (fail-closed) — a\nportal would just fail a download, so we hold the run. For VPN /\nSASE / app-specific conditions, use a custom script gate (separate\nslice). `false` (default) = no network requirement.",
+          "description": "Fire only when the host has **internet connectivity** (Windows\n`GetNetworkConnectivityHint` reports InternetAccess) — \"don't run\nuntil online\" for jobs that download / phone home. A captive\nportal (ConstrainedInternetAccess), LAN-only (LocalAccess), or\nunknown/unreadable state is treated as offline (fail-closed) — a\nportal would just fail a download, so we hold the run. For VPN /\nSASE / app-specific conditions, use a custom script gate (separate\nslice). `false` (default) = no network requirement. Windows only\n(fail-closed skip elsewhere).",
           "type": "boolean"
         }
       }
@@ -495,7 +495,7 @@
         },
         {
           "title": "418 OS-native event trigger: `when: { on: [startup, logon] }`.",
-          "description": "Fires when the agent observes the listed OS event(s) rather than\non a clock — there is no cron. `runs_on: agent` only (the agent\nowns the event source); [`Schedule::validate`] rejects it on\n`backend` and rejects an empty list. Each event occurrence fires\nonce, gated by the same freeze / active / `constraints.window` /\n`skip_dates` checks as the cron path. `startup` fires once per OS\nboot (deduped via the host boot time); a `starting_deadline`, if\nset, limits it to \"agent came up within that long after boot\".",
+          "description": "Fires when the agent observes the listed OS event(s) rather than\non a clock — there is no cron. `runs_on: agent` only (the agent\nowns the event source); [`Schedule::validate`] rejects it on\n`backend` and rejects an empty list. Each event occurrence fires\nonce, gated by the same freeze / active / `constraints.window` /\n`skip_dates` checks as the cron path. `startup` fires once per OS\nboot (deduped via the host boot time); a `starting_deadline`, if\nset, limits it to \"agent came up within that long after boot\".\nOnly `startup` has an event source on every OS; `logon` / `lock` /\n`unlock` / `network_change` are Windows-only — on macOS / Linux\nthey never fire, and the agent says so once per schedule / job\nversion (WARN + a synthetic skipped result, exit 122) when it loads it.",
           "type": "object",
           "properties": {
             "on": {
