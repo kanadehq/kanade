@@ -20,30 +20,43 @@
 //! COLUMN` for each addition. Anything that can't be expressed as a
 //! pure addition — a `primary_key` change, a column type change, a
 //! removed column — triggers a rebuild: a new table is created under
-//! a temp name with the current spec's schema, common columns are
-//! copied over with `INSERT OR IGNORE` (rows whose old identity
-//! collides under the new primary key are dropped rather than
-//! guessed at), the old table is dropped, and the temp table is
-//! renamed into place, all inside one transaction so readers never
-//! see a half-migrated table. Before this fix, `ensure_table` was
-//! `CREATE TABLE IF NOT EXISTS` only: a manifest edit to
-//! `primary_key` / `columns` left the on-disk table exactly as it
-//! was created the first time, and every subsequent `replace_rows`
-//! call silently succeeded at the top-level `inventory_facts` layer
-//! while inserting into a table whose schema (and PK) didn't match
-//! the payload it was building rows from, so future inserts either
-//! errored per-row (logged as a debug-only warn and swallowed by
-//! `replace_rows`' per-row error handling) or landed in stale
-//! columns — either way the operator never saw an error anywhere in
-//! `job create` / `job validate` / `exec` output.
+//! a fresh, per-call temp name (never derived from `spec.table`, so
+//! it can never collide with another job's real explode table — see
+//! [`migration_temp_table_name`]) with the current spec's schema,
+//! common columns are copied over with `INSERT OR IGNORE` (rows
+//! whose old identity collides under the new primary key are
+//! dropped rather than guessed at), the old table is dropped, and
+//! the temp table is renamed into place. Before this fix,
+//! `ensure_table` was `CREATE TABLE IF NOT EXISTS` only: a manifest
+//! edit to `primary_key` / `columns` left the on-disk table exactly
+//! as it was created the first time, and every subsequent
+//! `replace_rows` call silently succeeded at the top-level
+//! `inventory_facts` layer while inserting into a table whose schema
+//! (and PK) didn't match the payload it was building rows from, so
+//! future inserts either errored per-row (logged as a debug-only
+//! warn and swallowed by `replace_rows`' per-row error handling) or
+//! landed in stale columns — either way the operator never saw an
+//! error anywhere in `job create` / `job validate` / `exec` output.
+//!
+//! Atomicity across a whole manifest: [`ensure_table`] and
+//! [`ensure_tables_atomic`] each run their DDL inside exactly one
+//! transaction — the former for a single spec, the latter across
+//! every `inventory.explode` spec in a manifest. `job create`'s HTTP
+//! handler uses [`ensure_tables_atomic`] specifically so a manifest
+//! declaring several explode specs either migrates ALL of them or
+//! NONE: if spec N+1 fails, spec N's already-executed rebuild rolls
+//! back with it instead of leaving a derived table already mutated
+//! (with real row loss) while the request reports failure and the
+//! stored manifest stays on the old version.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, anyhow, bail};
 use kanade_shared::manifest::{ExplodeColumn, ExplodeSpec, Manifest};
 use serde_json::Value as JsonValue;
-use sqlx::{AssertSqlSafe, Row, Sqlite, SqlitePool, Transaction};
+use sqlx::{AssertSqlSafe, Row, Sqlite, SqliteConnection, SqlitePool, Transaction};
 use tracing::{info, warn};
 
 /// #1492 fix: in-memory cache of derived tables we've already
@@ -240,15 +253,19 @@ struct ExistingColumn {
     pk_seq: i64,
 }
 
-/// Read `spec.table`'s current schema via `PRAGMA table_info`.
-/// Returns `None` if the table doesn't exist yet. `spec.table` must
-/// already be validated by the caller (both call sites route through
-/// [`create_table_sql`] first, which validates it).
-async fn existing_columns(pool: &SqlitePool, table: &str) -> Result<Option<Vec<ExistingColumn>>> {
+/// Read `table`'s current schema via `PRAGMA table_info`. Returns
+/// `None` if the table doesn't exist yet. `table` must already be
+/// validated by the caller — every call site routes through either
+/// [`create_table_sql`] or [`migration_temp_table_name`] first, both
+/// of which validate it.
+async fn existing_columns(
+    conn: &mut SqliteConnection,
+    table: &str,
+) -> Result<Option<Vec<ExistingColumn>>> {
     let exists: Option<(String,)> =
         sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
             .bind(table)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(|e| anyhow!("check existence of table {table}: {e}"))?;
     if exists.is_none() {
@@ -256,7 +273,7 @@ async fn existing_columns(pool: &SqlitePool, table: &str) -> Result<Option<Vec<E
     }
 
     let rows = sqlx::query(AssertSqlSafe(format!("PRAGMA table_info(\"{table}\")")))
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| anyhow!("read table_info for {table}: {e}"))?;
     let cols = rows
@@ -290,7 +307,7 @@ fn expected_columns(spec: &ExplodeSpec) -> Vec<(String, &'static str)> {
 /// `primary_key` change, a removed column, or a type change on a
 /// surviving column — triggers [`rebuild_table`].
 async fn reconcile_existing_table(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     spec: &ExplodeSpec,
     existing: &[ExistingColumn],
 ) -> Result<SchemaChange> {
@@ -325,7 +342,7 @@ async fn reconcile_existing_table(
     let pk_changed = expected_pk != existing_pk;
 
     if pk_changed || has_extra_columns || has_type_drift {
-        return rebuild_table(pool, spec, existing).await;
+        return rebuild_table(conn, spec, existing).await;
     }
 
     for (name, affinity) in &missing {
@@ -334,7 +351,7 @@ async fn reconcile_existing_table(
             spec.table
         );
         sqlx::query(AssertSqlSafe(sql))
-            .execute(pool)
+            .execute(&mut *conn)
             .await
             .map_err(|e| anyhow!("add column {name} to {}: {e}", spec.table))?;
     }
@@ -344,17 +361,47 @@ async fn reconcile_existing_table(
     })
 }
 
+/// #1492 review fix (R1-1-1): a fresh, globally-unpredictable temp
+/// table name for every [`rebuild_table`] call. The original
+/// implementation derived the temp name deterministically from
+/// `spec.table` (`"{spec.table}__migrate"`) and unconditionally
+/// `DROP TABLE IF EXISTS`-ed it first. If any OTHER job's
+/// `explode.table` ever happened to equal that exact string — an
+/// operator naming their own table `"foo__migrate"`, coincidentally
+/// or deliberately once this suffix convention became known — a
+/// `primary_key` change to `foo` would drop that unrelated table and
+/// its data outright, then rename the rebuild's temp table over it.
+/// Naming the temp table from process-local time + a monotonic
+/// counter instead means it carries no relationship to any
+/// operator-chosen name, so it cannot coincide with another job's
+/// real table, and [`rebuild_table`] additionally refuses to proceed
+/// (rather than dropping or reusing) if the generated name somehow
+/// already exists.
+fn migration_temp_table_name() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("_explode_migrate_{nanos:x}_{seq:x}")
+}
+
 /// Rebuild `spec.table` under its current schema: create a
-/// same-shape table under a temp name, copy over every column the
-/// old and new schemas share via `INSERT OR IGNORE` (rows that
-/// collide under the new primary key, or that have no surviving
-/// column at all, are dropped rather than guessed at — recovered on
-/// this PC's next `exec`, which does a full replace), then swap the
-/// temp table in for the original. All in one transaction so a
+/// same-shape table under a fresh temp name (see
+/// [`migration_temp_table_name`]), copy over every column the old
+/// and new schemas share via `INSERT OR IGNORE` (rows that collide
+/// under the new primary key, or that have no surviving column at
+/// all, are dropped rather than guessed at — recovered on this PC's
+/// next `exec`, which does a full replace), then swap the temp table
+/// in for the original. Runs on whatever connection the caller
+/// passes in — [`ensure_table`] / [`ensure_tables_atomic`] wrap the
+/// whole reconcile (this included) in one transaction, so a
 /// concurrent reader never observes a dropped-but-not-yet-recreated
-/// table.
+/// table, and a later step failing (e.g. a sibling spec in the same
+/// manifest) rolls this rebuild back too.
 async fn rebuild_table(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     spec: &ExplodeSpec,
     existing: &[ExistingColumn],
 ) -> Result<SchemaChange> {
@@ -371,29 +418,24 @@ async fn rebuild_table(
         .filter(|n| existing_names.contains(n))
         .collect();
 
-    // `spec.table` is already validated by `create_table_sql` below
-    // (and by every caller before that); the suffix is a fixed,
-    // hard-coded literal, so the temp name carries no operator input
-    // beyond what's already been validated. A `spec.table` within a
-    // few characters of the 64-char identifier cap makes this
-    // `validate_ident` call fail — fail-closed (a clear migration
-    // error) rather than silently truncating into a colliding name.
-    let tmp_table = format!("{}__migrate", spec.table);
+    let tmp_table = migration_temp_table_name();
     validate_ident(&tmp_table)?;
+    if existing_columns(&mut *conn, &tmp_table).await?.is_some() {
+        // Astronomically unlikely (would require another in-flight
+        // migration to land on the exact same nanosecond + counter
+        // value) — fail loudly rather than dropping or reusing a
+        // table we can't be sure is ours.
+        bail!(
+            "migration temp table {tmp_table} unexpectedly already exists; \
+             aborting this migration rather than touching it"
+        );
+    }
     let mut tmp_spec = spec.clone();
     tmp_spec.table = tmp_table.clone();
     let create_tmp_sql = create_table_sql(&tmp_spec)?;
 
-    let mut tx: Transaction<'_, Sqlite> = pool.begin().await?;
-
-    sqlx::query(AssertSqlSafe(format!(
-        "DROP TABLE IF EXISTS \"{tmp_table}\""
-    )))
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| anyhow!("drop stale migration temp table {tmp_table}: {e}"))?;
     sqlx::query(AssertSqlSafe(create_tmp_sql))
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| anyhow!("create migration temp table {tmp_table}: {e}"))?;
 
@@ -401,7 +443,7 @@ async fn rebuild_table(
         "SELECT COUNT(*) FROM \"{}\"",
         spec.table
     )))
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await
     .map_err(|e| anyhow!("count rows in {}: {e}", spec.table))?;
 
@@ -418,25 +460,23 @@ async fn rebuild_table(
             spec.table,
         );
         sqlx::query(AssertSqlSafe(copy_sql))
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .map_err(|e| anyhow!("copy rows into migration temp table {tmp_table}: {e}"))?
             .rows_affected() as i64
     };
 
     sqlx::query(AssertSqlSafe(format!("DROP TABLE \"{}\"", spec.table)))
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| anyhow!("drop old table {}: {e}", spec.table))?;
     sqlx::query(AssertSqlSafe(format!(
         "ALTER TABLE \"{tmp_table}\" RENAME TO \"{}\"",
         spec.table
     )))
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .map_err(|e| anyhow!("rename migration temp table into {}: {e}", spec.table))?;
-
-    tx.commit().await?;
 
     let rows_lost = (before.0 - rows_copied).max(0);
     if rows_lost > 0 {
@@ -455,32 +495,70 @@ async fn rebuild_table(
     })
 }
 
-/// Create (or migrate) the derived table + indexes for one spec.
-/// Called from the projector's startup pass (scan all registered
-/// jobs), from the inventory upsert path (just before writing
-/// exploded rows) and from `job create`'s HTTP handler, so a new or
-/// changed manifest works without a backend restart. See the module
-/// doc for the reconcile algorithm (#1492).
-pub async fn ensure_table(pool: &SqlitePool, spec: &ExplodeSpec) -> Result<SchemaChange> {
+/// Reconcile the derived table + indexes for one spec against
+/// whatever connection the caller passes in. Pure logic — no
+/// transaction handling here; [`ensure_table`] and
+/// [`ensure_tables_atomic`] own that, so a batch of specs migrated
+/// together can share a single all-or-nothing transaction.
+async fn reconcile_table(conn: &mut SqliteConnection, spec: &ExplodeSpec) -> Result<SchemaChange> {
     // Also validates every identifier in the spec.
     let table_sql = create_table_sql(spec)?;
-    let change = match existing_columns(pool, &spec.table).await? {
+    let change = match existing_columns(&mut *conn, &spec.table).await? {
         None => {
             sqlx::query(AssertSqlSafe(table_sql))
-                .execute(pool)
+                .execute(&mut *conn)
                 .await
                 .map_err(|e| anyhow!("create table {}: {e}", spec.table))?;
             SchemaChange::default()
         }
-        Some(cols) => reconcile_existing_table(pool, spec, &cols).await?,
+        Some(cols) => reconcile_existing_table(conn, spec, &cols).await?,
     };
     for index_sql in create_index_sqls(spec)? {
         sqlx::query(AssertSqlSafe(index_sql))
-            .execute(pool)
+            .execute(&mut *conn)
             .await
             .map_err(|e| anyhow!("create index for {}: {e}", spec.table))?;
     }
     Ok(change)
+}
+
+/// Create (or migrate) the derived table + indexes for one spec,
+/// inside its own transaction. Called from the projector's startup
+/// pass (scan all registered jobs) and from the inventory upsert
+/// path (just before writing exploded rows), so a new or changed
+/// manifest works without a backend restart. `job create`'s HTTP
+/// handler uses [`ensure_tables_atomic`] instead, so a manifest with
+/// several explode specs migrates them as one unit — see the module
+/// doc for why. See also the module doc for the reconcile algorithm
+/// (#1492).
+pub async fn ensure_table(pool: &SqlitePool, spec: &ExplodeSpec) -> Result<SchemaChange> {
+    let mut tx: Transaction<'_, Sqlite> = pool.begin().await?;
+    let change = reconcile_table(&mut tx, spec).await?;
+    tx.commit().await?;
+    Ok(change)
+}
+
+/// Reconcile every spec in `specs` inside ONE transaction. `job
+/// create`'s HTTP handler calls this (instead of [`ensure_table`]
+/// once per spec) so a manifest declaring multiple
+/// `inventory.explode` entries either migrates ALL of them or NONE
+/// (review R1-2-1): if spec N+1's reconcile fails, the transaction
+/// is dropped without a commit, which rolls back every earlier
+/// spec's ALTER/rebuild from this same call too — the DB ends up
+/// exactly where it started, matching the unchanged catalog the
+/// failed request also left behind. Returns the specs' changes in
+/// the same order as `specs`.
+pub async fn ensure_tables_atomic(
+    pool: &SqlitePool,
+    specs: &[ExplodeSpec],
+) -> Result<Vec<SchemaChange>> {
+    let mut tx: Transaction<'_, Sqlite> = pool.begin().await?;
+    let mut changes = Vec::with_capacity(specs.len());
+    for spec in specs {
+        changes.push(reconcile_table(&mut tx, spec).await?);
+    }
+    tx.commit().await?;
+    Ok(changes)
 }
 
 /// Cached version of [`ensure_table`] for the hot per-result path.
@@ -1236,5 +1314,151 @@ mod tests {
             "spec-fingerprinted cache must detect the primary_key change and rebuild"
         );
         assert_eq!(change.rows_copied, 1);
+    }
+
+    /// Review R1-1-1: a rebuild's temp table must never collide with —
+    /// and therefore never `DROP` — another job's real explode table.
+    /// Regression for the original implementation, which named the
+    /// temp table `"{spec.table}__migrate"` and unconditionally
+    /// `DROP TABLE IF EXISTS`-ed it: an operator (or attacker who knew
+    /// the convention) naming their own table exactly that would have
+    /// had it silently destroyed by an unrelated job's primary_key
+    /// change. Here a second job's table is deliberately named to
+    /// match what the OLD naming scheme would have picked for
+    /// `example_items`'s migration, and must survive untouched.
+    #[tokio::test]
+    async fn rebuild_does_not_touch_a_table_named_like_the_old_temp_convention() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        // A second, unrelated job's table happens to be named exactly
+        // what the pre-fix temp-table convention would have used for
+        // example_items's migration.
+        let decoy = ExplodeSpec {
+            field: "decoy".into(),
+            table: "example_items__migrate".into(),
+            primary_key: vec!["k".into()],
+            track_history: false,
+            columns: vec![ExplodeColumn {
+                field: "k".into(),
+                kind: Some("text".into()),
+                index: false,
+            }],
+        };
+        ensure_table(&pool, &decoy).await.unwrap();
+        replace_rows(
+            &pool,
+            &decoy,
+            "pc-99",
+            "job-decoy",
+            None,
+            &serde_json::json!({"decoy": [{"k": "precious"}]}),
+        )
+        .await
+        .unwrap();
+
+        // Now trigger a rebuild of example_items (primary_key change).
+        let v1 = items_spec_v1();
+        ensure_table(&pool, &v1).await.unwrap();
+        let v2 = items_spec_v2();
+        ensure_table(&pool, &v2).await.unwrap();
+
+        // The decoy table and its row must be completely unaffected.
+        let decoy_rows: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM example_items__migrate")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(decoy_rows.0, 1, "unrelated table's row must survive");
+        let k: (String,) = sqlx::query_as("SELECT k FROM example_items__migrate")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(k.0, "precious");
+    }
+
+    /// Review R1-2-1: `job create`'s HTTP handler now migrates every
+    /// explode spec in a manifest inside one transaction via
+    /// `ensure_tables_atomic`, so a manifest with two specs where the
+    /// first spec's migration would succeed but the second spec is
+    /// invalid must leave NEITHER table mutated — not a half-applied
+    /// state where the first table was already rebuilt while the
+    /// request (and hence the stored manifest) reports failure.
+    #[tokio::test]
+    async fn ensure_tables_atomic_rolls_back_every_spec_when_one_fails() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        // Spec A already exists under its original schema and would
+        // successfully rebuild (primary_key change) if reconciled
+        // alone.
+        let a_v1 = items_spec_v1();
+        ensure_table(&pool, &a_v1).await.unwrap();
+        replace_rows(
+            &pool,
+            &a_v1,
+            "pc-01",
+            "job-items",
+            None,
+            &serde_json::json!({"items": [{"item_id": "i-1", "name": "Widget"}]}),
+        )
+        .await
+        .unwrap();
+        let a_v2 = items_spec_v2();
+
+        // Spec B is invalid: its primary_key references a column that
+        // isn't declared, so `create_table_sql` (called from inside
+        // `reconcile_table`) rejects it.
+        let mut b_bad = items_spec_v1();
+        b_bad.table = "example_other".into();
+        b_bad.primary_key = vec!["does_not_exist".into()];
+
+        let err = ensure_tables_atomic(&pool, &[a_v2, b_bad])
+            .await
+            .expect_err("second spec is invalid; the whole batch must fail");
+        assert!(err.to_string().contains("does_not_exist"));
+
+        // Spec A's table must be untouched — still the ORIGINAL
+        // schema, not rebuilt — because the failure rolled the shared
+        // transaction back instead of leaving A's migration committed.
+        let ddl: (String,) = sqlx::query_as(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'example_items'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            ddl.0.contains("PRIMARY KEY (pc_id, job_id, \"item_id\")"),
+            "spec A's rebuild must have rolled back when spec B failed: {}",
+            ddl.0
+        );
+        assert!(
+            !ddl.0.contains("\"kind\""),
+            "spec A must not carry v2's new column after rollback: {}",
+            ddl.0
+        );
+
+        // And the pre-existing row is still there under the old shape.
+        let rows: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM example_items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.0, 1);
+
+        // Spec B's table must not have been created at all.
+        let b_exists: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'example_other'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert!(b_exists.is_none(), "spec B's table must not exist");
     }
 }

@@ -349,20 +349,28 @@ pub async fn create(
     // the request (not writing the manifest) if it errors, means a job
     // catalog entry is never left pointing at a derived table we know
     // is out of sync with it.
+    //
+    // `ensure_tables_atomic` runs every spec inside ONE transaction
+    // (review R1-2-1): a manifest with several explode specs where an
+    // earlier spec's migration succeeds but a later one fails must not
+    // leave the earlier table already mutated while this handler
+    // reports failure — that would both lose the earlier migration's
+    // own report (discarded along with the 500 response) and leave the
+    // DB and the (unwritten) catalog disagreeing about that table's
+    // shape. A single transaction means a failure anywhere rolls every
+    // spec in this call back together, so schema_changes below is only
+    // ever populated with changes that actually landed.
     let mut schema_changes = Vec::new();
     if let Some(specs) = job.inventory.as_ref().and_then(|inv| inv.explode.as_ref()) {
-        for spec in specs {
-            let change = crate::projector::explode::ensure_table(&s.pool, spec)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "inventory.explode table '{}' schema migration failed: {e:#}",
-                            spec.table
-                        ),
-                    )
-                })?;
+        let changes = crate::projector::explode::ensure_tables_atomic(&s.pool, specs)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("inventory.explode schema migration failed: {e:#}"),
+                )
+            })?;
+        for (spec, change) in specs.iter().zip(changes) {
             if !change.is_notable() {
                 continue;
             }
