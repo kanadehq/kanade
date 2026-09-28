@@ -62,6 +62,21 @@
   there to stop tampering, not disclosure. Whoever can write this
   decides what the machine will execute.
 
+.PARAMETER RequireSignedCommands
+  If set, write RequireSignedCommands=1 to
+  HKLM\SOFTWARE\kanade\agent\RequireSignedCommands (REG_SZ), the value
+  `command_verify.rs::enforce_requested()` reads once at agent startup.
+  Once set, the agent REFUSES any command it cannot verify against its
+  CommandKeys ring instead of merely reporting it.
+
+  Requires a non-empty keyring: pass -CommandKeys alongside this on a
+  brand-new machine, or make sure CommandKeys is already provisioned
+  on one being re-run. An enforcing agent with an empty ring declines
+  to enforce rather than refusing everything (see command_verify.rs),
+  so asking for enforcement with no keys on hand would just be
+  silently inert -- this script refuses instead of writing a value
+  that does nothing.
+
 .EXAMPLE
   # Drop deploy-agent.ps1 + kanade-agent.exe + agent.toml in a folder,
   # then on the target:
@@ -85,6 +100,13 @@
   '@
 
 .EXAMPLE
+  # Kit a brand-new machine that should enforce signed commands from day
+  # one, rather than leaving that as a manual post-install step:
+  PS> .\deploy-agent.ps1 -NatsToken '<your-fleet-token>' -CommandKeys @'
+  [{"kid":"backend-20260728","label":"backend","public_key":"..."}]
+  '@ -RequireSignedCommands
+
+.EXAMPLE
   # Recover from a stuck / broken service:
   PS> .\deploy-agent.ps1 -Recreate
 #>
@@ -97,7 +119,8 @@ param(
     [switch]$Recreate,
     [switch]$NoStart,
     [string]$NatsToken   = '',
-    [string]$CommandKeys = ''
+    [string]$CommandKeys = '',
+    [switch]$RequireSignedCommands
 )
 
 $ErrorActionPreference = 'Stop'
@@ -319,6 +342,37 @@ if ($CommandKeys) {
     $readBack = ConvertFrom-Json -InputObject $written
     $kids = @($readBack) | ForEach-Object { $_.kid }
     Write-Host "CommandKeys provisioned. kids: $($kids -join ', ')"
+}
+
+# #1155/#1165 day-1 enforcement: RequireSignedCommands=1 tells the agent to
+# REFUSE unverified commands instead of just reporting them. This is the
+# value `command_verify.rs::enforce_requested()` reads once at startup.
+#
+# An empty ring makes enforcement inert (the agent declines to enforce
+# rather than refusing everything, so it never bricks a host) -- but
+# writing the value anyway would let an operator believe a machine is
+# protected when it silently is not, with nothing at the time of the
+# mistake to say otherwise. So this checks for a ring rather than trusting
+# the operator remembered one: either -CommandKeys was passed alongside
+# this run, or one is already sitting in the registry from an earlier run.
+if ($RequireSignedCommands) {
+    $hasRing = [bool]$CommandKeys
+    if (-not $hasRing) {
+        $existingKeysKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\kanade\agent')
+        if ($existingKeysKey) {
+            try {
+                $existing = $existingKeysKey.GetValue('CommandKeys')
+            } finally {
+                $existingKeysKey.Close()
+            }
+            $hasRing = -not [string]::IsNullOrWhiteSpace($existing)
+        }
+    }
+    if (-not $hasRing) {
+        throw "-RequireSignedCommands was passed but this machine has no CommandKeys (neither -CommandKeys nor an existing registry value). Enforcing with an empty ring is inert on the agent side, so this refuses rather than writing a value that silently does nothing. Pass -CommandKeys too."
+    }
+    Set-KanadeRegistrySecret -Subkey 'agent' -ValueName 'RequireSignedCommands' -Value '1'
+    Write-Host 'RequireSignedCommands provisioned. This agent will refuse unverified commands.'
 }
 
 # Service binPath = quoted exe + --config flag pointing at the

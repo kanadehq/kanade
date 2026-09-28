@@ -322,10 +322,20 @@ pub async fn installer(
                 })?),
                 None => None,
             };
-            let install_ps1 =
-                render_install_ps1(&key, nats_token.as_deref(), command_keys.as_deref());
+            let enforcement_requested = settings
+                .agent_install
+                .as_ref()
+                .and_then(|ai| ai.require_signed_commands)
+                .unwrap_or(false);
+            let enforcement = resolve_enforcement(enforcement_requested, keyring.is_some());
+            let install_ps1 = render_install_ps1(
+                &key,
+                nats_token.as_deref(),
+                command_keys.as_deref(),
+                enforcement == EnforcementPlan::Embedded,
+            );
             let install_cmd = render_install_cmd(&key);
-            let readme = render_readme(&key, command_keys.is_some());
+            let readme = render_readme(&key, command_keys.is_some(), enforcement);
             let entries: Vec<(&str, Vec<u8>)> = vec![
                 ("kanade-agent.exe", exe),
                 ("agent.toml", agent_toml.into_bytes()),
@@ -723,19 +733,60 @@ fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// What the installer should do about `-RequireSignedCommands`, decided
+/// from the two inputs that matter and nothing else — kept pure and
+/// separate from the request handler for the same reason `resolve_kid` in
+/// `kanade-backend`'s `main.rs` is: a decision worth getting right deserves
+/// a test that doesn't need a running server.
+///
+/// `RequestedButNoKey` is its own outcome, not folded into `Off`, because
+/// those two cases must be told apart downstream. Settings asking for
+/// enforcement while this backend has no signing key configured is a
+/// misconfiguration, not a "nothing to do" — silently generating an
+/// installer that behaves like `Off` would let an operator believe a fresh
+/// fleet is protected when not one machine actually is. The empty-keyring
+/// fallback in `command_verify.rs` (an enforcing agent with no keys
+/// declines to enforce, rather than refusing everything) protects hosts
+/// that already got such an installer; it is not a reason to keep handing
+/// out more of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnforcementPlan {
+    /// Not requested — `-RequireSignedCommands` is omitted, same as today.
+    Off,
+    /// Requested, and this backend has a signing key to back it: embed
+    /// `-RequireSignedCommands` alongside the `-CommandKeys` ring.
+    Embedded,
+    /// Requested, but this backend has no signing key — embedding the
+    /// switch here would ask a fresh agent to enforce against an empty
+    /// ring, which the agent declines to do (see `command_verify.rs`), so
+    /// the request would be silently inert. Surfaced in README.txt instead
+    /// of being dropped without a trace.
+    RequestedButNoKey,
+}
+
+fn resolve_enforcement(requested: bool, key_present: bool) -> EnforcementPlan {
+    match (requested, key_present) {
+        (false, _) => EnforcementPlan::Off,
+        (true, true) => EnforcementPlan::Embedded,
+        (true, false) => EnforcementPlan::RequestedButNoKey,
+    }
+}
+
 /// The generated `install-agent.ps1` wrapper. All real work stays in
-/// `deploy-agent.ps1`; this only pins the version banner, the two
-/// provisioned knobs (`-NatsToken`, `-CommandKeys`, each omitted from the
-/// invocation entirely when not provided), and a transcript to
-/// `install.log` next to the script. The transcript exists because the
-/// one-liner's UAC-elevated console (see [`render_installer_ps1`]) closes
-/// the instant this script exits, taking any on-screen error with it —
-/// `install.log` is what's left to read afterward. CRLF line endings like
-/// every other Windows-facing file in the ZIP.
+/// `deploy-agent.ps1`; this only pins the version banner, the provisioned
+/// knobs (`-NatsToken`, `-CommandKeys`, `-RequireSignedCommands`, each
+/// omitted from the invocation entirely when not provided/requested), and a
+/// transcript to `install.log` next to the script. The transcript exists
+/// because the one-liner's UAC-elevated console (see
+/// [`render_installer_ps1`]) closes the instant this script exits, taking
+/// any on-screen error with it — `install.log` is what's left to read
+/// afterward. CRLF line endings like every other Windows-facing file in the
+/// ZIP.
 fn render_install_ps1(
     version: &str,
     nats_token: Option<&str>,
     command_keys: Option<&str>,
+    require_signed_commands: bool,
 ) -> String {
     let mut args = String::new();
     if let Some(token) = nats_token {
@@ -743,6 +794,9 @@ fn render_install_ps1(
     }
     if let Some(keys) = command_keys {
         args.push_str(&format!(" -CommandKeys {}", ps_quote(keys)));
+    }
+    if require_signed_commands {
+        args.push_str(" -RequireSignedCommands");
     }
     format!(
         "# Generated by kanade-backend — do not edit.\r\n\
@@ -787,8 +841,12 @@ fn render_install_cmd(version: &str) -> String {
 /// `README.txt` — the contents list plus the two-step install. Mentions
 /// the embedded command-signing PUBLIC key when the backend signs, so the
 /// operator knows what the ZIP carries (and what it deliberately does
-/// not: break-glass keys).
-fn render_readme(version: &str, signing: bool) -> String {
+/// not: break-glass keys). `enforcement` additionally calls out
+/// `-RequireSignedCommands` when embedded, and — when settings asked for it
+/// but no signing key exists — surfaces that loudly rather than shipping an
+/// installer that silently omits the protection the operator thinks they
+/// turned on.
+fn render_readme(version: &str, signing: bool, enforcement: EnforcementPlan) -> String {
     let signing_note = if signing {
         "This ZIP embeds the backend's command-signing PUBLIC key (provisioned\r\n\
          into the agent's keyring by the installer, so signed commands verify\r\n\
@@ -797,6 +855,22 @@ fn render_readme(version: &str, signing: bool) -> String {
     } else {
         "The backend that generated this ZIP is not signing commands, so no\r\n\
          command-signing keyring is provisioned by the installer.\r\n"
+    };
+    let enforcement_note = match enforcement {
+        EnforcementPlan::Off => "",
+        EnforcementPlan::Embedded => {
+            "\r\nThis installer passes -RequireSignedCommands: the agent will REFUSE any\r\n\
+             command it cannot verify against the embedded keyring, starting from\r\n\
+             first boot.\r\n"
+        }
+        EnforcementPlan::RequestedButNoKey => {
+            "\r\n*** WARNING: RequireSignedCommands was requested in server settings, but\r\n\
+             *** this backend has no command-signing key configured, so this installer\r\n\
+             *** does NOT enable enforcement — an agent enforcing against an empty\r\n\
+             *** keyring would just decline to enforce, which is not what was asked for.\r\n\
+             *** Run `kanade-backend command-key-generate` on the backend host, then\r\n\
+             *** re-download this installer.\r\n"
+        }
     };
     let mut s = String::new();
     s.push_str(&format!("kanade-agent installer (version {version})\r\n"));
@@ -821,6 +895,7 @@ fn render_readme(version: &str, signing: bool) -> String {
     s.push_str("Re-running the installer upgrades the agent in place.\r\n");
     s.push_str("\r\n");
     s.push_str(signing_note);
+    s.push_str(enforcement_note);
     s
 }
 
@@ -1299,15 +1374,54 @@ mod tests {
             "0.43.99",
             Some("s3cret"),
             Some(r#"[{"kid":"backend-1","public_key":"AAAA","label":"backend"}]"#),
+            false,
         );
         assert!(out.contains("# Installs kanade-agent 0.43.99 as a Windows service."));
         assert!(out.contains("-NatsToken 's3cret'"));
         assert!(out.contains(
             "-CommandKeys '[{\"kid\":\"backend-1\",\"public_key\":\"AAAA\",\"label\":\"backend\"}]'"
         ));
+        assert!(!out.contains("-RequireSignedCommands"));
         assert!(out.contains("exit $LASTEXITCODE"));
         assert!(out.contains("Start-Transcript -Path (Join-Path $PSScriptRoot 'install.log')"));
         assert!(out.contains("Stop-Transcript"));
+    }
+
+    #[test]
+    fn install_ps1_embeds_require_signed_commands_when_enforcement_is_embedded() {
+        let out = render_install_ps1(
+            "0.43.99",
+            Some("s3cret"),
+            Some(r#"[{"kid":"backend-1","public_key":"AAAA"}]"#),
+            true,
+        );
+        assert!(out.contains("-CommandKeys"));
+        assert!(out.contains("-RequireSignedCommands"));
+        // Comes after the other args, on the same invocation line.
+        let line = out
+            .lines()
+            .find(|l| l.contains("deploy-agent.ps1"))
+            .unwrap();
+        assert!(line.trim_end().ends_with("-RequireSignedCommands"));
+    }
+
+    #[test]
+    fn resolve_enforcement_off_when_not_requested() {
+        assert_eq!(resolve_enforcement(false, true), EnforcementPlan::Off);
+        assert_eq!(resolve_enforcement(false, false), EnforcementPlan::Off);
+    }
+
+    #[test]
+    fn resolve_enforcement_embeds_only_when_a_key_is_present() {
+        assert_eq!(resolve_enforcement(true, true), EnforcementPlan::Embedded);
+    }
+
+    #[test]
+    fn resolve_enforcement_flags_a_request_with_no_key_rather_than_silently_dropping_it() {
+        assert_eq!(
+            resolve_enforcement(true, false),
+            EnforcementPlan::RequestedButNoKey
+        );
     }
 
     #[test]
@@ -1315,7 +1429,7 @@ mod tests {
         // Windows-facing like every other ps1 we generate — a bare LF
         // inside the try/finally block would still run under PowerShell,
         // but stay consistent with the rest of the ZIP.
-        let out = render_install_ps1("0.43.99", Some("tok"), None);
+        let out = render_install_ps1("0.43.99", Some("tok"), None, false);
         for (i, b) in out.bytes().enumerate() {
             if b == b'\n' {
                 assert!(
@@ -1347,7 +1461,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("install-agent.ps1"),
-            render_install_ps1("9.9.9", None, None),
+            render_install_ps1("9.9.9", None, None, false),
         )
         .unwrap();
         std::fs::write(
@@ -1378,9 +1492,10 @@ mod tests {
 
     #[test]
     fn install_ps1_omits_args_entirely_when_not_given() {
-        let out = render_install_ps1("0.43.99", None, None);
+        let out = render_install_ps1("0.43.99", None, None, false);
         assert!(!out.contains("-NatsToken"));
         assert!(!out.contains("-CommandKeys"));
+        assert!(!out.contains("-RequireSignedCommands"));
         // Nothing trailing the script path but the newline.
         assert!(out.contains("& (Join-Path $PSScriptRoot 'deploy-agent.ps1')\r\n"));
     }
@@ -1390,7 +1505,7 @@ mod tests {
         // PowerShell single-quoted literal escaping: `'` becomes `''`. An
         // unescaped quote would terminate the literal and let the rest of
         // the token run as script.
-        let out = render_install_ps1("0.43.99", Some("it's"), None);
+        let out = render_install_ps1("0.43.99", Some("it's"), None, false);
         assert!(out.contains("-NatsToken 'it''s'"));
     }
 
@@ -1420,14 +1535,18 @@ mod tests {
     #[test]
     fn zip_round_trips_all_entries() {
         let agent_toml = render_agent_toml("nats://broker.corp:4222").unwrap();
-        let install_ps1 = render_install_ps1("0.43.99", Some("tok"), Some("[{\"kid\":\"k\"}]"));
+        let install_ps1 =
+            render_install_ps1("0.43.99", Some("tok"), Some("[{\"kid\":\"k\"}]"), true);
         let entries: Vec<(&str, Vec<u8>)> = vec![
             ("kanade-agent.exe", b"MZ-fake-exe".to_vec()),
             ("agent.toml", agent_toml.clone().into_bytes()),
             ("deploy-agent.ps1", DEPLOY_AGENT_PS1.as_bytes().to_vec()),
             ("install-agent.ps1", install_ps1.clone().into_bytes()),
             ("install.cmd", render_install_cmd("0.43.99").into_bytes()),
-            ("README.txt", render_readme("0.43.99", true).into_bytes()),
+            (
+                "README.txt",
+                render_readme("0.43.99", true, EnforcementPlan::Embedded).into_bytes(),
+            ),
         ];
         let bytes = build_zip(entries).unwrap();
 
@@ -1475,12 +1594,27 @@ mod tests {
 
     #[test]
     fn readme_names_the_signing_state() {
-        let signed = render_readme("0.43.99", true);
+        let signed = render_readme("0.43.99", true, EnforcementPlan::Off);
         assert!(signed.contains("command-signing PUBLIC key"));
         assert!(signed.contains("Break-glass keys are\r\nNEVER included"));
-        let unsigned = render_readme("0.43.99", false);
+        let unsigned = render_readme("0.43.99", false, EnforcementPlan::Off);
         assert!(unsigned.contains("not signing commands"));
         assert!(!unsigned.contains("PUBLIC key (provisioned"));
+    }
+
+    #[test]
+    fn readme_names_embedded_enforcement() {
+        let out = render_readme("0.43.99", true, EnforcementPlan::Embedded);
+        assert!(out.contains("-RequireSignedCommands"));
+        assert!(out.contains("REFUSE"));
+    }
+
+    #[test]
+    fn readme_warns_loudly_when_enforcement_was_requested_but_no_key_exists() {
+        let out = render_readme("0.43.99", false, EnforcementPlan::RequestedButNoKey);
+        assert!(out.contains("WARNING"));
+        assert!(out.contains("command-key-generate"));
+        assert!(out.contains("does NOT enable enforcement"));
     }
 
     #[test]
@@ -1511,6 +1645,7 @@ mod tests {
                 nats_url: Some("nats://broker.corp:4222".into()),
                 nats_token: Some("s3cret".into()),
                 nats_token_set: false,
+                require_signed_commands: None,
             }),
             ..Default::default()
         };

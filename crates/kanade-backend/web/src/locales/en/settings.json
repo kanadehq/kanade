@@ -101,7 +101,9 @@
       "natsTokenPlaceholder": "type a new token to replace the stored one",
       "tokenSet": "A token is currently configured.",
       "tokenNotSet": "No token configured — set one only when the broker requires it.",
-      "tokenHint": "The stored token is never displayed. Saving with the field blank keeps the current token."
+      "tokenHint": "The stored token is never displayed. Saving with the field blank keeps the current token.",
+      "requireSignedCommands": "Require signed commands from install",
+      "requireSignedCommandsHint": "Pass -RequireSignedCommands to the generated Windows installer, so a fresh agent refuses unsigned commands from first boot. Only takes effect while this backend has a command-signing key configured (kanade-backend command-key-generate) — otherwise the installer's README.txt calls out the mismatch instead of turning enforcement on with an empty keyring."
     },
     "mail": {
       "title": "Email (SMTP) settings",

@@ -303,6 +303,20 @@ pub struct AgentInstallSection {
     /// "configured" without ever seeing the value. Never accepted from PUT.
     #[serde(skip_deserializing)]
     pub nats_token_set: bool,
+    /// Ask the generated Windows installer to pass `-RequireSignedCommands`
+    /// to `deploy-agent.ps1`, so a fresh agent starts enforcing signed
+    /// commands from first boot instead of leaving that as a manual
+    /// post-install step (#1155/#1165 day-1 gap).
+    ///
+    /// `None`/`Some(false)` → omitted, matching every other unset knob here.
+    /// `Some(true)` is honored by the installer ONLY when this backend also
+    /// has a command-signing key configured — see
+    /// `agent_installer::resolve_enforcement`. A backend with no key must
+    /// never generate an installer that turns on enforcement with an empty
+    /// keyring; that request is instead surfaced in the installer's
+    /// README.txt rather than silently dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_signed_commands: Option<bool>,
 }
 
 /// Value stored in the `server_settings` KV bucket under the single key
@@ -1192,6 +1206,7 @@ mod tests {
                 nats_url: Some("nats://broker.corp:4222".into()),
                 nats_token: Some("s3cret".into()),
                 nats_token_set: false,
+                require_signed_commands: None,
             }),
             ..Default::default()
         };
@@ -1199,6 +1214,23 @@ mod tests {
         assert_eq!(
             json,
             r#"{"agent_install":{"nats_url":"nats://broker.corp:4222","nats_token":"s3cret","nats_token_set":false}}"#
+        );
+        assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn agent_install_require_signed_commands_round_trips() {
+        let s = ServerSettings {
+            agent_install: Some(AgentInstallSection {
+                require_signed_commands: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            json,
+            r#"{"agent_install":{"nats_token_set":false,"require_signed_commands":true}}"#
         );
         assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
     }
@@ -1227,6 +1259,7 @@ mod tests {
                 nats_url: Some("nats://broker.corp:4222".into()),
                 nats_token: Some("s3cret".into()),
                 nats_token_set: false,
+                require_signed_commands: None,
             }),
             ..Default::default()
         };
