@@ -120,6 +120,30 @@
   `$AgentStaticToken` / `$AgentJwtSecret` / `$AgentBootstrapAdminPassword`
   knobs in the published copy instead (they fold into these params).
 
+.PARAMETER FreshInstall
+  Explicit operator confirmation that this host has NEVER before been part
+  of the fleet -- not a reimage, migration, or registry-rebuild of one that
+  was. When set, writes FreshInstallMarker=1 to
+  HKLM\SOFTWARE\kanade\backend\FreshInstallMarker, which kanade-backend
+  reads once at startup to decide whether it may auto-generate its
+  command-signing keypair (#1155/#1165) instead of leaving that as a
+  manual `command-key-generate` step.
+
+  Deliberately NOT inferred from local host state (e.g. "no backend.toml
+  installed yet"): a full OS reimage of an existing fleet member wipes
+  backend.toml and the HKLM signing key together, since both live on the
+  same system volume. "Nothing here" therefore cannot tell a truly new
+  host apart from one that used to hold a key every agent in the fleet
+  already trusts under its kid -- only the operator running this deploy
+  knows which case it is, which is why this is a switch they choose to
+  pass rather than something this script infers.
+
+  Refuses if $configDst (the installed backend.toml) already exists: that
+  is by definition not a first provision, and honoring -FreshInstall there
+  would let a mistaken flag mint a keypair on a host that may already have
+  agents trusting a different one. Rotate deliberately instead, with
+  `kanade-backend command-key-generate --rotate`.
+
 .PARAMETER MailPassword
   If set, write the SMTP AUTH password to
   HKLM\SOFTWARE\kanade\backend\MailPassword (REG_SZ, hardened ACL).
@@ -155,6 +179,11 @@
 
 .EXAMPLE
   PS> .\deploy-backend.ps1 -WipeDb                     # upgrade across a squashed-migration baseline (drops the projector DB)
+
+.EXAMPLE
+  # Brand-new box, never before part of the fleet: let the backend mint its
+  # own signing keypair on first start instead of a manual command-key-generate.
+  PS> .\deploy-backend.ps1 -FreshInstall
 #>
 
 [CmdletBinding()]
@@ -167,6 +196,7 @@ param(
     [switch]$Recreate,
     [switch]$NoStart,
     [switch]$WipeDb,
+    [switch]$FreshInstall,
     [string]$NatsToken    = '',
     [string]$StaticToken  = '',
     [string]$JwtSecret    = '',
@@ -680,13 +710,19 @@ if ($stagedVersion -and (Test-Path $exeDst)) {
 Write-Host "Installing $exeName -> $exeDst"
 Install-BackendBinaryAtomic -Source $exeSrc -Destination $exeDst
 
-# Captured BEFORE the config copy below (which would create $configDst and
-# make the check lie): "no config installed yet" is this script's existing
-# fresh-vs-upgrade signal (already used for -WipeDb and the config-seed
-# branch right below). -ForceConfig deliberately does NOT count — it
-# re-seeds config on a box that may have been running for months, which is
-# an upgrade, not a first provision.
-$isFreshInstall = -not (Test-Path $configDst)
+# #1155/#1165: -FreshInstall is the operator's own confirmation that this
+# host never held a signing key the fleet trusts -- see .PARAMETER
+# FreshInstall for why that can't be inferred from local state (a reimage
+# wipes backend.toml and the registry TOGETHER, so their mutual absence
+# proves nothing about fleet history). Checked and written BEFORE the
+# config copy below, which would otherwise make $configDst exist by the
+# time of a later check.
+if ($FreshInstall) {
+    if (Test-Path $configDst) {
+        throw "-FreshInstall was passed, but $configDst already exists -- this host already has a backend config installed and is not a first provision. If you genuinely mean to retire the current signing key, do that deliberately with 'kanade-backend command-key-generate --rotate' instead."
+    }
+    Set-KanadeRegistrySecret -Subkey 'backend' -ValueName 'FreshInstallMarker' -Value '1'
+}
 
 if ($ForceConfig -or -not (Test-Path $configDst)) {
     $verb = if (Test-Path $configDst) { 'Overwriting' } else { 'Seeding' }
@@ -694,24 +730,6 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
     Copy-Item -Path $configSrc -Destination $configDst -Force
 } else {
     Write-Host "Keeping existing $configDst (pass -ForceConfig to overwrite)."
-}
-
-# #1155/#1165: tell a genuinely fresh backend it may auto-generate its
-# command-signing keypair on first start, without also telling a box that
-# merely lost its registry (reimage, migration, accidental deletion) the
-# same thing — that host must NOT mint a new keypair under
-# RequireSignedCommands=1, since every agent already trusts the OLD kid and
-# a silent new one breaks all of them fleet-wide. $isFreshInstall (no
-# backend.toml installed yet) is the right signal for exactly the same
-# reason it already gates -WipeDb's config resolution above: a reimaged box
-# still has its old backend.toml sitting in ProgramData even though its
-# HKLM hive is gone, so this is false there, same as a plain restart. Only
-# a box this script is provisioning for the very first time is both
-# "no config yet" and (normally) "no signing key yet". See
-# decide_signing_bootstrap in kanade-backend's main.rs for the startup side
-# of this contract, including the double-check against a half-written key.
-if ($isFreshInstall) {
-    Set-KanadeRegistrySecret -Subkey 'backend' -ValueName 'FreshInstallMarker' -Value '1'
 }
 
 if ($NatsToken) {

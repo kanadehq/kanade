@@ -379,7 +379,19 @@ if ($RequireSignedCommands) {
                 } catch {
                     throw "-RequireSignedCommands was passed, and this machine has a CommandKeys registry value, but it is not valid JSON: $($_.Exception.Message). Fix or re-provision it with -CommandKeys before enabling enforcement."
                 }
-                $hasRing = @($existingParsed).Count -gt 0
+                # Count is not enough: `[null]` or `[{}]` parse as one
+                # element but hold no usable key, so the agent's own
+                # `parse_keyring` (String kid + public_key required) rejects
+                # them and starts with an empty ring anyway -- same
+                # silently-inert outcome the whole guard exists to prevent.
+                # Only count entries that actually look like a KeyEntry, the
+                # same shape check the -CommandKeys write path above applies.
+                $validEntries = @($existingParsed) | Where-Object {
+                    $_ -and
+                    ($_.kid -is [string]) -and (-not [string]::IsNullOrWhiteSpace($_.kid)) -and
+                    ($_.public_key -is [string]) -and (-not [string]::IsNullOrWhiteSpace($_.public_key))
+                }
+                $hasRing = @($validEntries).Count -gt 0
             }
         }
     }

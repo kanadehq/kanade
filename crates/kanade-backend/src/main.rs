@@ -471,18 +471,29 @@ enum SigningBootstrapDecision {
 /// point at.
 ///
 /// The signal that tells the two apart is `marker_present`
-/// ([`REG_FRESH_INSTALL_MARKER`]) — written by the deploy script exactly
-/// once, at the moment it provisions a host for the first time, and by
-/// nothing else ever. Critically, it lives in the SAME registry key
-/// (`HKLM\SOFTWARE\kanade\backend`) as the signing key itself. That
-/// placement is load-bearing, not incidental: whatever wipes the key on a
-/// reimaged host — a fresh OS image, a `reg delete`, a botched migration —
-/// wipes the marker right along with it, because they are the same hive. A
-/// host that merely lost its key therefore always presents as
-/// `(marker_present=false, key_present=false)`, indistinguishable in this
-/// function from an ordinary unprovisioned restart, and gets `Nothing`, not
-/// `Generate`. Only a host the deploy script itself is provisioning RIGHT
-/// NOW can ever present `marker_present=true` next to a missing key.
+/// ([`REG_FRESH_INSTALL_MARKER`]) — written by `deploy-backend.ps1` ONLY
+/// when the operator explicitly passes `-FreshInstall`, and by nothing else
+/// ever. That is deliberate, not merely convenient: the marker is NOT
+/// derived from local host state (e.g. "no backend.toml installed yet" —
+/// an earlier version of this feature tried exactly that and was wrong).
+/// The marker lives in the same registry hive as the signing key
+/// (`HKLM\SOFTWARE\kanade\backend`), and a full OS reimage wipes the
+/// ENTIRE system volume — the registry hive, `%ProgramData%`, everything
+/// local — together. A reimaged fleet member therefore looks, from local
+/// state alone, EXACTLY like a host that has never been provisioned:
+/// no config file, no registry key, no marker. Any signal this function
+/// could derive by inspecting the reimaged host itself is unable to tell
+/// the two apart, which is exactly why the marker instead comes from a
+/// human decision at deploy time — an operator who knows this host's
+/// history passes `-FreshInstall` only for a box that has genuinely never
+/// held a signing key the fleet trusts, and `deploy-backend.ps1` itself
+/// refuses `-FreshInstall` outright when it finds an already-installed
+/// `backend.toml` (see its `.PARAMETER FreshInstall`), which catches the
+/// case of running it against a live, merely-upgrading host by mistake.
+/// A host that lost its key without that explicit flag therefore presents
+/// as `(marker_present=false, key_present=false)`, indistinguishable in
+/// this function from an ordinary unprovisioned restart, and gets
+/// `Nothing`, not `Generate`.
 ///
 /// (A NATS/JetStream rebuild happening at the same time as a reimage — the
 /// scenario that would matter if the signal instead lived in `agents_state`
