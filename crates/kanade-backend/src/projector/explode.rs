@@ -12,35 +12,62 @@
 //! operation with a clean error rather than risking SQL injection
 //! through the manifest's YAML.
 //!
-//! Schema evolution: idempotent. `CREATE TABLE IF NOT EXISTS` +
-//! `CREATE INDEX IF NOT EXISTS` so re-registering the same job
-//! redoes nothing. Adding a new column to the manifest doesn't
-//! auto-`ALTER TABLE` — operators do that manually if they want to
-//! reshape an existing table, OR drop+recreate via `kanade
-//! inventory reproject` (followup CLI).
+//! Schema evolution (#1492): [`ensure_table`] reconciles the derived
+//! table's actual schema against the spec's expected schema every
+//! time it runs, not just on first creation. A missing table is
+//! created via `CREATE TABLE IF NOT EXISTS` as before. An existing
+//! table whose only drift is new columns gets `ALTER TABLE ADD
+//! COLUMN` for each addition. Anything that can't be expressed as a
+//! pure addition — a `primary_key` change, a column type change, a
+//! removed column — triggers a rebuild: a new table is created under
+//! a temp name with the current spec's schema, common columns are
+//! copied over with `INSERT OR IGNORE` (rows whose old identity
+//! collides under the new primary key are dropped rather than
+//! guessed at), the old table is dropped, and the temp table is
+//! renamed into place, all inside one transaction so readers never
+//! see a half-migrated table. Before this fix, `ensure_table` was
+//! `CREATE TABLE IF NOT EXISTS` only: a manifest edit to
+//! `primary_key` / `columns` left the on-disk table exactly as it
+//! was created the first time, and every subsequent `replace_rows`
+//! call silently succeeded at the top-level `inventory_facts` layer
+//! while inserting into a table whose schema (and PK) didn't match
+//! the payload it was building rows from, so future inserts either
+//! errored per-row (logged as a debug-only warn and swallowed by
+//! `replace_rows`' per-row error handling) or landed in stale
+//! columns — either way the operator never saw an error anywhere in
+//! `job create` / `job validate` / `exec` output.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, anyhow, bail};
 use kanade_shared::manifest::{ExplodeColumn, ExplodeSpec, Manifest};
 use serde_json::Value as JsonValue;
-use sqlx::{AssertSqlSafe, Sqlite, SqlitePool, Transaction};
+use sqlx::{AssertSqlSafe, Row, Sqlite, SqlitePool, Transaction};
 use tracing::{info, warn};
 
-/// Gemini #85 fix: in-memory cache of derived tables we've already
-/// ensured exist + indexed. Hot path is the results projector
-/// calling [`ensure_table_cached`] on every inventory ExecResult —
-/// pre-cache this was one CREATE TABLE IF NOT EXISTS + N CREATE
-/// INDEX IF NOT EXISTS round-trips per result, across every PC
-/// reporting data. With the cache, the first delivery per spec
-/// pays the DB cost; subsequent deliveries are an in-memory set
-/// lookup. Keyed on the spec's table name (operator-unique).
-/// Invalidation: process restart re-fills via the startup
-/// `ensure_tables_for_jobs` pass — the table itself is idempotent.
-fn ensured_tables() -> &'static Mutex<HashSet<String>> {
-    static CACHE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashSet::new()))
+/// #1492 fix: in-memory cache of derived tables we've already
+/// reconciled against their current spec. Hot path is the results
+/// projector calling [`ensure_table_cached`] on every inventory
+/// ExecResult — pre-cache this was one CREATE TABLE IF NOT EXISTS + N
+/// CREATE INDEX IF NOT EXISTS round-trips per result, across every PC
+/// reporting data. With the cache, the first delivery per spec pays
+/// the DB cost; subsequent deliveries are an in-memory map lookup.
+///
+/// Keyed on the spec's table name, valued on the spec's expected
+/// `CREATE TABLE` DDL (see [`create_table_sql`]) — NOT just "have we
+/// ever seen this table". A manifest edit that changes `primary_key`
+/// or `columns` produces a different DDL string for the same table
+/// name, so the cache misses and [`ensure_table`] re-runs its
+/// reconcile pass instead of trusting a stale "already ensured"
+/// marker. Before this fix the cache was a bare `HashSet<String>`
+/// keyed on table name only, which meant a schema change made via
+/// `kanade job create` was invisible to every already-warm process —
+/// the derived table silently kept its original schema forever, even
+/// though `ensure_table` itself now knows how to migrate it.
+fn ensured_tables() -> &'static Mutex<HashMap<String, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Validate that an operator-supplied identifier (table name,
@@ -168,42 +195,315 @@ pub fn create_index_sqls(spec: &ExplodeSpec) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Create the derived table + indexes for one spec. Called from
-/// the projector's startup pass (scan all registered jobs) and from
-/// the inventory upsert path (just before writing exploded rows)
-/// so a new manifest works without a backend restart.
-pub async fn ensure_table(pool: &SqlitePool, spec: &ExplodeSpec) -> Result<()> {
-    let table_sql = create_table_sql(spec)?;
-    sqlx::query(AssertSqlSafe(table_sql))
-        .execute(pool)
+/// #1492: what [`ensure_table`] actually did to reconcile a derived
+/// table against its spec, so callers (`job create`'s HTTP handler
+/// in particular) can report it instead of swallowing it. All-zero /
+/// `rebuilt: false` means the table either didn't exist yet (plain
+/// create) or already matched the spec exactly (no-op).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SchemaChange {
+    /// Columns added via `ALTER TABLE ADD COLUMN` (additive path).
+    pub added_columns: Vec<String>,
+    /// `true` if the table was dropped and recreated under the new
+    /// schema (primary_key change, column removal, or a column type
+    /// change — none of which a plain `ALTER TABLE ADD COLUMN` can
+    /// express).
+    pub rebuilt: bool,
+    /// Rows successfully copied from the old table into the rebuilt
+    /// one. Only meaningful when `rebuilt` is true.
+    pub rows_copied: i64,
+    /// Rows that existed in the old table but were NOT copied,
+    /// because they collided with another row under the new primary
+    /// key (`INSERT OR IGNORE` dropped them) or referenced no
+    /// surviving column. Only meaningful when `rebuilt` is true — a
+    /// non-zero value here means the migration is lossy and the
+    /// operator should expect those PCs' rows to reappear only after
+    /// their next `exec`.
+    pub rows_lost: i64,
+}
+
+impl SchemaChange {
+    /// Whether this change is worth telling the operator about — a
+    /// pure create-or-noop isn't.
+    pub fn is_notable(&self) -> bool {
+        self.rebuilt || !self.added_columns.is_empty()
+    }
+}
+
+/// One column as reported by `PRAGMA table_info`.
+struct ExistingColumn {
+    name: String,
+    /// Declared type as SQLite stored it (`TEXT` / `INTEGER` / `REAL`
+    /// / ...), uppercased for comparison against [`sql_affinity`].
+    decl_type: String,
+    /// 1-based position within the primary key, 0 if not part of it.
+    pk_seq: i64,
+}
+
+/// Read `spec.table`'s current schema via `PRAGMA table_info`.
+/// Returns `None` if the table doesn't exist yet. `spec.table` must
+/// already be validated by the caller (both call sites route through
+/// [`create_table_sql`] first, which validates it).
+async fn existing_columns(pool: &SqlitePool, table: &str) -> Result<Option<Vec<ExistingColumn>>> {
+    let exists: Option<(String,)> =
+        sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(table)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| anyhow!("check existence of table {table}: {e}"))?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+
+    let rows = sqlx::query(AssertSqlSafe(format!("PRAGMA table_info(\"{table}\")")))
+        .fetch_all(pool)
         .await
-        .map_err(|e| anyhow!("create table {}: {e}", spec.table))?;
+        .map_err(|e| anyhow!("read table_info for {table}: {e}"))?;
+    let cols = rows
+        .into_iter()
+        .map(|r| ExistingColumn {
+            name: r.get::<String, _>("name"),
+            decl_type: r.get::<String, _>("type").to_ascii_uppercase(),
+            pk_seq: r.get::<i64, _>("pk"),
+        })
+        .collect();
+    Ok(Some(cols))
+}
+
+/// The columns + affinities a spec expects, in declaration order,
+/// including the three built-ins every explode table carries.
+fn expected_columns(spec: &ExplodeSpec) -> Vec<(String, &'static str)> {
+    let mut out = vec![
+        ("pc_id".to_string(), "TEXT"),
+        ("job_id".to_string(), "TEXT"),
+        ("collected_at".to_string(), "TIMESTAMP"),
+    ];
+    for col in &spec.columns {
+        out.push((col.field.clone(), sql_affinity(col.kind.as_deref())));
+    }
+    out
+}
+
+/// Reconcile an existing table against `spec`'s expected schema.
+/// Additive-only drift (new columns, everything else identical) is
+/// migrated with `ALTER TABLE ADD COLUMN`. Anything else — a
+/// `primary_key` change, a removed column, or a type change on a
+/// surviving column — triggers [`rebuild_table`].
+async fn reconcile_existing_table(
+    pool: &SqlitePool,
+    spec: &ExplodeSpec,
+    existing: &[ExistingColumn],
+) -> Result<SchemaChange> {
+    let expected = expected_columns(spec);
+    let expected_names: BTreeSet<&str> = expected.iter().map(|(n, _)| n.as_str()).collect();
+    let existing_by_name: HashMap<&str, &ExistingColumn> =
+        existing.iter().map(|c| (c.name.as_str(), c)).collect();
+
+    let missing: Vec<(String, &'static str)> = expected
+        .iter()
+        .filter(|(name, _)| !existing_by_name.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+    let has_extra_columns = existing
+        .iter()
+        .any(|c| !expected_names.contains(c.name.as_str()));
+    let has_type_drift = expected.iter().any(|(name, affinity)| {
+        existing_by_name
+            .get(name.as_str())
+            .is_some_and(|c| c.decl_type != *affinity)
+    });
+
+    let expected_pk: BTreeSet<&str> = std::iter::empty()
+        .chain(["pc_id", "job_id"])
+        .chain(spec.primary_key.iter().map(String::as_str))
+        .collect();
+    let existing_pk: BTreeSet<&str> = existing
+        .iter()
+        .filter(|c| c.pk_seq > 0)
+        .map(|c| c.name.as_str())
+        .collect();
+    let pk_changed = expected_pk != existing_pk;
+
+    if pk_changed || has_extra_columns || has_type_drift {
+        return rebuild_table(pool, spec, existing).await;
+    }
+
+    for (name, affinity) in &missing {
+        let sql = format!(
+            "ALTER TABLE \"{}\" ADD COLUMN \"{name}\" {affinity}",
+            spec.table
+        );
+        sqlx::query(AssertSqlSafe(sql))
+            .execute(pool)
+            .await
+            .map_err(|e| anyhow!("add column {name} to {}: {e}", spec.table))?;
+    }
+    Ok(SchemaChange {
+        added_columns: missing.into_iter().map(|(n, _)| n).collect(),
+        ..Default::default()
+    })
+}
+
+/// Rebuild `spec.table` under its current schema: create a
+/// same-shape table under a temp name, copy over every column the
+/// old and new schemas share via `INSERT OR IGNORE` (rows that
+/// collide under the new primary key, or that have no surviving
+/// column at all, are dropped rather than guessed at — recovered on
+/// this PC's next `exec`, which does a full replace), then swap the
+/// temp table in for the original. All in one transaction so a
+/// concurrent reader never observes a dropped-but-not-yet-recreated
+/// table.
+async fn rebuild_table(
+    pool: &SqlitePool,
+    spec: &ExplodeSpec,
+    existing: &[ExistingColumn],
+) -> Result<SchemaChange> {
+    let expected = expected_columns(spec);
+    let existing_names: BTreeSet<&str> = existing.iter().map(|c| c.name.as_str()).collect();
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|(n, _)| !existing_names.contains(n.as_str()))
+        .map(|(n, _)| n.clone())
+        .collect();
+    let common_columns: Vec<&str> = expected
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|n| existing_names.contains(n))
+        .collect();
+
+    // `spec.table` is already validated by `create_table_sql` below
+    // (and by every caller before that); the suffix is a fixed,
+    // hard-coded literal, so the temp name carries no operator input
+    // beyond what's already been validated. A `spec.table` within a
+    // few characters of the 64-char identifier cap makes this
+    // `validate_ident` call fail — fail-closed (a clear migration
+    // error) rather than silently truncating into a colliding name.
+    let tmp_table = format!("{}__migrate", spec.table);
+    validate_ident(&tmp_table)?;
+    let mut tmp_spec = spec.clone();
+    tmp_spec.table = tmp_table.clone();
+    let create_tmp_sql = create_table_sql(&tmp_spec)?;
+
+    let mut tx: Transaction<'_, Sqlite> = pool.begin().await?;
+
+    sqlx::query(AssertSqlSafe(format!(
+        "DROP TABLE IF EXISTS \"{tmp_table}\""
+    )))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| anyhow!("drop stale migration temp table {tmp_table}: {e}"))?;
+    sqlx::query(AssertSqlSafe(create_tmp_sql))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("create migration temp table {tmp_table}: {e}"))?;
+
+    let before: (i64,) = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM \"{}\"",
+        spec.table
+    )))
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| anyhow!("count rows in {}: {e}", spec.table))?;
+
+    let rows_copied = if common_columns.is_empty() {
+        0
+    } else {
+        let col_list = common_columns
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let copy_sql = format!(
+            "INSERT OR IGNORE INTO \"{tmp_table}\" ({col_list}) SELECT {col_list} FROM \"{}\"",
+            spec.table,
+        );
+        sqlx::query(AssertSqlSafe(copy_sql))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| anyhow!("copy rows into migration temp table {tmp_table}: {e}"))?
+            .rows_affected() as i64
+    };
+
+    sqlx::query(AssertSqlSafe(format!("DROP TABLE \"{}\"", spec.table)))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("drop old table {}: {e}", spec.table))?;
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE \"{tmp_table}\" RENAME TO \"{}\"",
+        spec.table
+    )))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| anyhow!("rename migration temp table into {}: {e}", spec.table))?;
+
+    tx.commit().await?;
+
+    let rows_lost = (before.0 - rows_copied).max(0);
+    if rows_lost > 0 {
+        warn!(
+            table = %spec.table,
+            rows_lost,
+            "explode: schema rebuild dropped rows that collided under the new primary key; \
+             they will reappear after their PC's next exec",
+        );
+    }
+    Ok(SchemaChange {
+        added_columns: missing,
+        rebuilt: true,
+        rows_copied,
+        rows_lost,
+    })
+}
+
+/// Create (or migrate) the derived table + indexes for one spec.
+/// Called from the projector's startup pass (scan all registered
+/// jobs), from the inventory upsert path (just before writing
+/// exploded rows) and from `job create`'s HTTP handler, so a new or
+/// changed manifest works without a backend restart. See the module
+/// doc for the reconcile algorithm (#1492).
+pub async fn ensure_table(pool: &SqlitePool, spec: &ExplodeSpec) -> Result<SchemaChange> {
+    // Also validates every identifier in the spec.
+    let table_sql = create_table_sql(spec)?;
+    let change = match existing_columns(pool, &spec.table).await? {
+        None => {
+            sqlx::query(AssertSqlSafe(table_sql))
+                .execute(pool)
+                .await
+                .map_err(|e| anyhow!("create table {}: {e}", spec.table))?;
+            SchemaChange::default()
+        }
+        Some(cols) => reconcile_existing_table(pool, spec, &cols).await?,
+    };
     for index_sql in create_index_sqls(spec)? {
         sqlx::query(AssertSqlSafe(index_sql))
             .execute(pool)
             .await
             .map_err(|e| anyhow!("create index for {}: {e}", spec.table))?;
     }
-    Ok(())
+    Ok(change)
 }
 
-/// Gemini #85 fix: cached version of [`ensure_table`] for the hot
-/// per-result path. First call per `spec.table` runs the real
-/// `ensure_table`; subsequent calls are a `HashSet` lookup. The
-/// startup `ensure_tables_for_jobs` pass already warmed the cache
-/// for every registered job, so the hot path is effectively
-/// free after backend boot.
-pub async fn ensure_table_cached(pool: &SqlitePool, spec: &ExplodeSpec) -> Result<()> {
+/// Cached version of [`ensure_table`] for the hot per-result path.
+/// The cache key is `spec.table`; the cache VALUE is the spec's
+/// expected `CREATE TABLE` DDL, so a manifest edit that changes
+/// `primary_key` / `columns` invalidates the cache entry for that
+/// table (see [`ensured_tables`]) and drives a real reconcile pass
+/// instead of trusting a stale "already ensured" marker. The startup
+/// `ensure_tables_for_jobs` pass already warms the cache for every
+/// registered job, so the hot path is effectively free after backend
+/// boot — until the next manifest edit for that table.
+pub async fn ensure_table_cached(pool: &SqlitePool, spec: &ExplodeSpec) -> Result<SchemaChange> {
+    let expected_sql = create_table_sql(spec)?;
     {
         let cache = ensured_tables().lock().expect("ensured_tables mutex");
-        if cache.contains(&spec.table) {
-            return Ok(());
+        if cache.get(&spec.table) == Some(&expected_sql) {
+            return Ok(SchemaChange::default());
         }
     }
-    ensure_table(pool, spec).await?;
+    let change = ensure_table(pool, spec).await?;
     let mut cache = ensured_tables().lock().expect("ensured_tables mutex");
-    cache.insert(spec.table.clone());
-    Ok(())
+    cache.insert(spec.table.clone(), expected_sql);
+    Ok(change)
 }
 
 /// Walk every registered inventory manifest and ensure its derived
@@ -228,7 +528,15 @@ pub async fn ensure_tables_for_jobs(
             // populates the cache, subsequent results are a
             // HashSet lookup.
             match ensure_table_cached(pool, spec).await {
-                Ok(()) => info!(
+                Ok(change) if change.is_notable() => info!(
+                    job_id = %manifest.id,
+                    table = %spec.table,
+                    rebuilt = change.rebuilt,
+                    added_columns = ?change.added_columns,
+                    rows_lost = change.rows_lost,
+                    "explode: derived table schema migrated at startup",
+                ),
+                Ok(_) => info!(
                     job_id = %manifest.id,
                     table = %spec.table,
                     "explode: derived table ready",
@@ -683,5 +991,250 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(events.0, 0, "no rows existed, so nothing to remove");
+    }
+
+    fn items_spec_v1() -> ExplodeSpec {
+        ExplodeSpec {
+            field: "items".into(),
+            table: "example_items".into(),
+            primary_key: vec!["item_id".into()],
+            track_history: false,
+            columns: vec![
+                ExplodeColumn {
+                    field: "item_id".into(),
+                    kind: Some("text".into()),
+                    index: false,
+                },
+                ExplodeColumn {
+                    field: "name".into(),
+                    kind: Some("text".into()),
+                    index: false,
+                },
+            ],
+        }
+    }
+
+    /// #1492 repro: primary_key changes from `item_id` to `name`, and a
+    /// new `kind` column is added.
+    fn items_spec_v2() -> ExplodeSpec {
+        ExplodeSpec {
+            field: "items".into(),
+            table: "example_items".into(),
+            primary_key: vec!["name".into()],
+            track_history: false,
+            columns: vec![
+                ExplodeColumn {
+                    field: "item_id".into(),
+                    kind: Some("text".into()),
+                    index: false,
+                },
+                ExplodeColumn {
+                    field: "name".into(),
+                    kind: Some("text".into()),
+                    index: false,
+                },
+                ExplodeColumn {
+                    field: "kind".into(),
+                    kind: Some("text".into()),
+                    index: false,
+                },
+            ],
+        }
+    }
+
+    /// #1492 repro, end to end at the reconcile layer: v1 spec creates
+    /// the table and gets one row written by `exec`. The manifest is
+    /// then edited exactly as in the issue — `primary_key` changes and
+    /// a column is added — and `ensure_table` (what `job create` now
+    /// calls) must migrate the on-disk table so the SAME PC's next
+    /// `exec` actually lands a row with the new column populated,
+    /// instead of the table silently freezing at its original schema.
+    #[tokio::test]
+    async fn ensure_table_migrates_primary_key_and_new_column() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        // 1) Register + exec against the original schema.
+        let v1 = items_spec_v1();
+        ensure_table(&pool, &v1).await.unwrap();
+        let payload_v1 = serde_json::json!({
+            "items": [{"item_id": "i-1", "name": "Widget"}]
+        });
+        let n = replace_rows(&pool, &v1, "pc-01", "job-items", None, &payload_v1)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // 2) Manifest edited: primary_key item_id -> name, `kind` added.
+        //    `job create` now runs `ensure_table` again with the new
+        //    spec — this must not be a silent CREATE TABLE IF NOT
+        //    EXISTS no-op.
+        let v2 = items_spec_v2();
+        let change = ensure_table(&pool, &v2).await.unwrap();
+        assert!(change.rebuilt, "primary_key change must trigger a rebuild");
+        assert_eq!(
+            change.rows_copied, 1,
+            "the existing row survives the rebuild"
+        );
+        assert_eq!(change.rows_lost, 0);
+
+        let ddl: (String,) = sqlx::query_as(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'example_items'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            ddl.0.contains("PRIMARY KEY (pc_id, job_id, \"name\")"),
+            "on-disk schema must reflect the new primary_key: {}",
+            ddl.0
+        );
+        assert!(
+            ddl.0.contains("\"kind\" TEXT"),
+            "on-disk schema must carry the new column: {}",
+            ddl.0
+        );
+
+        // 3) The same PC execs again under the new schema — this is
+        //    the step that silently dropped rows before the fix: the
+        //    table's actual PRIMARY KEY still didn't include `name`,
+        //    so this insert either errored per-row or wrote into a
+        //    stale layout. It must now succeed and be readable back.
+        let payload_v2 = serde_json::json!({
+            "items": [{"item_id": "i-1", "name": "Widget", "kind": "hardware"}]
+        });
+        let n = replace_rows(&pool, &v2, "pc-01", "job-items", None, &payload_v2)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "post-migration exec must actually insert a row");
+
+        let row: (String, String, String) =
+            sqlx::query_as("SELECT item_id, name, kind FROM example_items WHERE pc_id = 'pc-01'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row,
+            (
+                "i-1".to_string(),
+                "Widget".to_string(),
+                "hardware".to_string()
+            )
+        );
+    }
+
+    /// Additive-only drift (new column, same primary_key) must use
+    /// `ALTER TABLE ADD COLUMN` rather than a rebuild — cheaper, and a
+    /// useful contrast against the rebuild path above.
+    #[tokio::test]
+    async fn ensure_table_adds_column_without_rebuild_when_pk_unchanged() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        let v1 = items_spec_v1();
+        ensure_table(&pool, &v1).await.unwrap();
+        replace_rows(
+            &pool,
+            &v1,
+            "pc-01",
+            "job-items",
+            None,
+            &serde_json::json!({"items": [{"item_id": "i-1", "name": "Widget"}]}),
+        )
+        .await
+        .unwrap();
+
+        let mut v1_plus_kind = v1.clone();
+        v1_plus_kind.columns.push(ExplodeColumn {
+            field: "kind".into(),
+            kind: Some("text".into()),
+            index: false,
+        });
+        let change = ensure_table(&pool, &v1_plus_kind).await.unwrap();
+        assert!(
+            !change.rebuilt,
+            "same primary_key + additive column must not rebuild"
+        );
+        assert_eq!(change.added_columns, vec!["kind".to_string()]);
+
+        // The pre-existing row survives untouched (rebuild would also
+        // preserve it, but the point here is that ALTER TABLE never
+        // touches existing rows at all).
+        let row: (String, String, Option<String>) =
+            sqlx::query_as("SELECT item_id, name, kind FROM example_items WHERE pc_id = 'pc-01'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "i-1");
+        assert_eq!(row.1, "Widget");
+        assert_eq!(row.2, None);
+    }
+
+    /// A re-registration with an unchanged spec must be a true no-op —
+    /// no `ALTER TABLE`, no rebuild — matching the module's pre-#1492
+    /// idempotence guarantee.
+    #[tokio::test]
+    async fn ensure_table_noop_when_spec_unchanged() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let spec = items_spec_v1();
+        ensure_table(&pool, &spec).await.unwrap();
+        let change = ensure_table(&pool, &spec).await.unwrap();
+        assert!(!change.rebuilt);
+        assert!(change.added_columns.is_empty());
+    }
+
+    /// #1492: the per-result hot-path cache must key on the spec's
+    /// shape, not just the table name — otherwise a process that had
+    /// already warmed the cache for `example_items` under the v1 spec
+    /// would treat the v2 spec's arrival as "nothing to do" forever,
+    /// even though `ensure_table` itself now knows how to migrate it.
+    #[tokio::test]
+    async fn ensure_table_cached_detects_spec_change_and_reconciles() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        let v1 = items_spec_v1();
+        ensure_table_cached(&pool, &v1).await.unwrap();
+        // Cache hit: cheap no-op re-ensure of the same spec.
+        let noop = ensure_table_cached(&pool, &v1).await.unwrap();
+        assert!(!noop.rebuilt && noop.added_columns.is_empty());
+
+        replace_rows(
+            &pool,
+            &v1,
+            "pc-01",
+            "job-items",
+            None,
+            &serde_json::json!({"items": [{"item_id": "i-1", "name": "Widget"}]}),
+        )
+        .await
+        .unwrap();
+
+        // Cache miss on the changed spec's DDL fingerprint: must
+        // actually reconcile (rebuild, here), not report a false noop.
+        let v2 = items_spec_v2();
+        let change = ensure_table_cached(&pool, &v2).await.unwrap();
+        assert!(
+            change.rebuilt,
+            "spec-fingerprinted cache must detect the primary_key change and rebuild"
+        );
+        assert_eq!(change.rows_copied, 1);
     }
 }

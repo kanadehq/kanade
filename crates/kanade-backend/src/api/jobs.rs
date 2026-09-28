@@ -106,6 +106,17 @@ pub struct JobSummary {
     pub version: String,
     pub description: Option<String>,
     pub inventory: bool,
+    /// #1492: human-readable notes about any `inventory.explode`
+    /// derived-table schema migration this `create` triggered — e.g.
+    /// `"example_items: added column 'kind'"` or `"example_items:
+    /// rebuilt (primary_key/columns changed); copied 12 row(s), lost
+    /// 1 row(s) to the new primary key"`. Empty when the manifest has
+    /// no explode specs, or every explode table already matched the
+    /// manifest. Surfaced by `kanade job create` so a schema drift
+    /// that used to silently freeze a derived table now shows up in
+    /// the CLI's own success output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_changes: Vec<String>,
 }
 
 /// v0.30 / PR γ: in-flight counters joined onto each `/api/jobs`
@@ -326,6 +337,58 @@ pub async fn create(
                 .to_string(),
         ));
     }
+    // #1492: reconcile every `inventory.explode` derived table's SQL
+    // schema against this manifest BEFORE the KV write below. Without
+    // this, a manifest edit that changed `primary_key` / `columns`
+    // stored cleanly (this handler never touched the derived table at
+    // all — only the startup pass and the per-result hot path did, and
+    // both used a plain `CREATE TABLE IF NOT EXISTS` that's a no-op
+    // once the table exists), so the derived table kept its original
+    // schema forever while `job create` / `job validate` / `exec` all
+    // kept reporting success. Running the reconcile here, and failing
+    // the request (not writing the manifest) if it errors, means a job
+    // catalog entry is never left pointing at a derived table we know
+    // is out of sync with it.
+    let mut schema_changes = Vec::new();
+    if let Some(specs) = job.inventory.as_ref().and_then(|inv| inv.explode.as_ref()) {
+        for spec in specs {
+            let change = crate::projector::explode::ensure_table(&s.pool, spec)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "inventory.explode table '{}' schema migration failed: {e:#}",
+                            spec.table
+                        ),
+                    )
+                })?;
+            if !change.is_notable() {
+                continue;
+            }
+            let mut note = if change.rebuilt {
+                format!(
+                    "{}: rebuilt (primary_key/columns changed); copied {} row(s)",
+                    spec.table, change.rows_copied
+                )
+            } else {
+                format!(
+                    "{}: added column(s) {}",
+                    spec.table,
+                    change.added_columns.join(", ")
+                )
+            };
+            if change.rows_lost > 0 {
+                note.push_str(&format!(
+                    ", lost {} row(s) to the new primary key (will reappear on next exec)",
+                    change.rows_lost
+                ));
+            }
+            warn!(job_id = %job.id, table = %spec.table, %note, "explode: derived table schema migrated");
+            schema_changes.push(note);
+        }
+    }
+
     let kv = s
         .jetstream
         .create_key_value(KvConfig {
@@ -390,6 +453,7 @@ pub async fn create(
         version: job.version.clone(),
         description: job.description.clone(),
         inventory: job.inventory.is_some(),
+        schema_changes,
     };
     info!(job_id = %job.id, version = %job.version, "job upserted");
     audit::record(
