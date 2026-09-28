@@ -356,6 +356,14 @@ if ($CommandKeys) {
 # the operator remembered one: either -CommandKeys was passed alongside
 # this run, or one is already sitting in the registry from an earlier run.
 if ($RequireSignedCommands) {
+    # -CommandKeys, if passed, was already validated non-empty above (the
+    # empty-array throw earlier in this script) -- so a $CommandKeys value
+    # reaching here always means at least one entry. The registry fallback
+    # below cannot make the same assumption: a value that merely EXISTS is
+    # not the same as one that holds a key. `[]`, whitespace, or corrupt
+    # JSON left over from some other tooling would pass a whitespace check
+    # while still leaving the agent with an empty ring -- exactly the
+    # silently-inert state this guard exists to catch.
     $hasRing = [bool]$CommandKeys
     if (-not $hasRing) {
         $existingKeysKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\kanade\agent')
@@ -365,11 +373,18 @@ if ($RequireSignedCommands) {
             } finally {
                 $existingKeysKey.Close()
             }
-            $hasRing = -not [string]::IsNullOrWhiteSpace($existing)
+            if (-not [string]::IsNullOrWhiteSpace($existing)) {
+                try {
+                    $existingParsed = ConvertFrom-Json -InputObject $existing
+                } catch {
+                    throw "-RequireSignedCommands was passed, and this machine has a CommandKeys registry value, but it is not valid JSON: $($_.Exception.Message). Fix or re-provision it with -CommandKeys before enabling enforcement."
+                }
+                $hasRing = @($existingParsed).Count -gt 0
+            }
         }
     }
     if (-not $hasRing) {
-        throw "-RequireSignedCommands was passed but this machine has no CommandKeys (neither -CommandKeys nor an existing registry value). Enforcing with an empty ring is inert on the agent side, so this refuses rather than writing a value that silently does nothing. Pass -CommandKeys too."
+        throw "-RequireSignedCommands was passed but this machine has no CommandKeys (neither -CommandKeys nor a non-empty existing registry value). Enforcing with an empty ring is inert on the agent side, so this refuses rather than writing a value that silently does nothing. Pass -CommandKeys too."
     }
     Set-KanadeRegistrySecret -Subkey 'agent' -ValueName 'RequireSignedCommands' -Value '1'
     Write-Host 'RequireSignedCommands provisioned. This agent will refuse unverified commands.'
