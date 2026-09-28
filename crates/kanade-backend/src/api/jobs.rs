@@ -297,6 +297,71 @@ async fn fetch_live_counts(
     Ok(out)
 }
 
+/// #1492 review (R2-1-1): build the error response for a catalog
+/// write (KV bucket lookup / serialize / put) that failed AFTER
+/// `ensure_tables_atomic` already committed an explode-table schema
+/// migration for this manifest. There is no way to undo that SQLite
+/// commit from here — it's a different transactional system than the
+/// NATS KV write that just failed, so this handler can't offer
+/// all-or-nothing across both. What it CAN do is make the gap loud
+/// instead of silent: the `note` strings already computed (rebuilt?
+/// which columns? rows lost to the new primary key?) go into both the
+/// HTTP error body — so the CLI prints them instead of just "KV put:
+/// ..." — and an audit record, so the drift is still discoverable
+/// later even if the operator doesn't read this response closely.
+/// `schema_changes` is empty on the common path (no explode specs, or
+/// every explode table already matched), in which case this is just
+/// the plain error.
+async fn catalog_write_failed(
+    s: &AppState,
+    job: &Manifest,
+    caller: &Caller,
+    schema_changes: &[String],
+    reason: String,
+) -> (StatusCode, String) {
+    if !schema_changes.is_empty() {
+        warn!(
+            job_id = %job.id,
+            ?schema_changes,
+            error = %reason,
+            "job_upsert: catalog write failed after explode schema migration already committed",
+        );
+        audit::record(
+            &s.nats,
+            "operator",
+            "job_upsert_failed_after_schema_migration",
+            Some(&job.id),
+            Some(caller),
+            serde_json::json!({
+                "error": reason,
+                "schema_changes": schema_changes,
+            }),
+        )
+        .await;
+    }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        catalog_write_failure_message(&reason, schema_changes),
+    )
+}
+
+/// Pure message-building half of [`catalog_write_failed`], split out
+/// so it's testable without a live NATS client (audit::record needs
+/// one; this doesn't). `schema_changes` empty ⇒ the plain error,
+/// unchanged from before this fix.
+fn catalog_write_failure_message(reason: &str, schema_changes: &[String]) -> String {
+    if schema_changes.is_empty() {
+        return reason.to_string();
+    }
+    format!(
+        "{reason}; NOTE: this job's inventory.explode derived table schema was already \
+         migrated before this failure and was NOT rolled back ({}) — the manifest was NOT \
+         saved, so the catalog and the derived table now disagree on that table's shape \
+         until this job is created successfully or the table receives another exec result",
+        schema_changes.join("; ")
+    )
+}
+
 /// POST /api/jobs — upsert a Manifest into the job catalog. The KV
 /// key is `manifest.id`.
 ///
@@ -397,7 +462,18 @@ pub async fn create(
         }
     }
 
-    let kv = s
+    // #1492 review (R2-1-1): everything from here on writes to the KV
+    // catalog, which is a different transactional system than the
+    // SQLite migration `ensure_tables_atomic` already committed above
+    // — there's no 2-phase commit spanning NATS KV and SQLite, so a
+    // failure in any of these steps can't be made to un-migrate the
+    // derived table. `catalog_write_failed` makes that unavoidable gap
+    // visible instead of silent: it folds the already-committed
+    // `schema_changes` into both the error response and an audit
+    // record, mirroring `delete`'s `job_delete_failed_post_revoke`
+    // event for the same "committed side effect, primary write still
+    // failed" shape.
+    let kv = match s
         .jetstream
         .create_key_value(KvConfig {
             bucket: BUCKET_JOBS.into(),
@@ -405,12 +481,42 @@ pub async fn create(
             ..Default::default()
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ensure KV: {e}")))?;
-    let body_bytes = serde_json::to_vec(&job)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
-    kv.put(&job.id, body_bytes.into())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV put: {e}")))?;
+    {
+        Ok(kv) => kv,
+        Err(e) => {
+            return Err(catalog_write_failed(
+                &s,
+                &job,
+                &caller,
+                &schema_changes,
+                format!("ensure KV: {e}"),
+            )
+            .await);
+        }
+    };
+    let body_bytes = match serde_json::to_vec(&job) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(catalog_write_failed(
+                &s,
+                &job,
+                &caller,
+                &schema_changes,
+                format!("serialize: {e}"),
+            )
+            .await);
+        }
+    };
+    if let Err(e) = kv.put(&job.id, body_bytes.into()).await {
+        return Err(catalog_write_failed(
+            &s,
+            &job,
+            &caller,
+            &schema_changes,
+            format!("KV put: {e}"),
+        )
+        .await);
+    }
 
     // Keep `script_current` in lockstep with the catalog on every upsert,
     // NOT just on `kanade exec` (exec.rs #258). `script_current.<id>` is
@@ -910,5 +1016,43 @@ mod tests {
         assert!(v["execute"].get("script").is_none());
         assert!(v["execute"].get("script_file").is_none());
         assert!(v["execute"].get("script_object").is_none());
+    }
+
+    /// Review R2-1-1: when the KV catalog write fails with no explode
+    /// migration in play (the common case), the response is exactly
+    /// the underlying error — no change from before this fix.
+    #[test]
+    fn catalog_write_failure_message_is_plain_reason_when_no_schema_changes() {
+        let msg = catalog_write_failure_message("KV put: connection refused", &[]);
+        assert_eq!(msg, "KV put: connection refused");
+    }
+
+    /// Review R2-1-1: when `ensure_tables_atomic` already committed a
+    /// migration before the KV write failed, that fact — including any
+    /// row loss from a rebuild — must be readable in the error body
+    /// the CLI prints, not just in a server-side log line. Before this
+    /// fix the handler returned bare `format!("KV put: {e}")`,
+    /// discarding the already-computed `schema_changes` entirely.
+    #[test]
+    fn catalog_write_failure_message_surfaces_committed_schema_changes() {
+        let changes = vec![
+            "example_items: rebuilt (primary_key/columns changed); copied 3 row(s), lost 1 \
+             row(s) to the new primary key (will reappear on next exec)"
+                .to_string(),
+        ];
+        let msg = catalog_write_failure_message("KV put: timeout", &changes);
+        assert!(msg.starts_with("KV put: timeout"), "{msg}");
+        assert!(
+            msg.contains("example_items: rebuilt"),
+            "migration note must appear in the response body: {msg}"
+        );
+        assert!(
+            msg.contains("lost 1 row(s)"),
+            "row loss must be visible in the response body, not just logs: {msg}"
+        );
+        assert!(
+            msg.contains("was NOT saved"),
+            "must make clear the catalog write itself failed despite the migration landing: {msg}"
+        );
     }
 }
