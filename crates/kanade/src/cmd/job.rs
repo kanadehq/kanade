@@ -288,6 +288,19 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
         .and_then(|v| v.as_str())
         .unwrap_or("?");
     println!("✓ {} → job '{id}' v{version}", yaml.display());
+    // #1492: an `inventory.explode` derived table that had to be
+    // migrated (or rebuilt) to match this manifest is exactly the
+    // kind of thing that used to fail silently — the table just
+    // stopped receiving rows with no error anywhere. Print it loudly
+    // rather than burying it in a field the operator has to know to
+    // look for.
+    if let Some(changes) = payload.get("schema_changes").and_then(|v| v.as_array()) {
+        for change in changes {
+            if let Some(note) = change.as_str() {
+                println!("  ⚠ schema migrated: {note}");
+            }
+        }
+    }
     Ok(())
 }
 
