@@ -25,6 +25,23 @@ set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 
+# #1155/#1165 command-signing keyring + enforcement provisioning is
+# Windows-only today: kanade_shared::secrets::read_hklm_value() (what
+# command_verify.rs's keyring loader and enforce_requested() both read from)
+# is a compile-time stub on non-Windows that always returns None, so there
+# is no store on this platform for either value to land in. Fail loudly
+# rather than silently accepting and ignoring these — an operator who thinks
+# they just provisioned a keyring or turned on enforcement, and did not,
+# needs to find out here, not the first time an agent fails to verify
+# anything.
+if [ -n "${KANADE_COMMAND_KEYS:-}" ] || [ -n "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" ]; then
+	echo "KANADE_COMMAND_KEYS / KANADE_REQUIRE_SIGNED_COMMANDS: not yet supported on this OS." >&2
+	echo "Command-signing keyring provisioning and RequireSignedCommands enforcement are" >&2
+	echo "implemented for Windows only (see command_verify.rs / deploy-agent.ps1). Unset" >&2
+	echo "these before re-running, or provision this host on Windows instead." >&2
+	exit 1
+fi
+
 # The bundle root is this script's directory. Everything is installed
 # from here; nothing is downloaded.
 bundle="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

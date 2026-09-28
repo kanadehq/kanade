@@ -414,6 +414,246 @@ fn resolve_kid(
     Ok(kid)
 }
 
+/// #1155/#1165: registry value a genuinely fresh install's deploy script
+/// writes — and ONLY that script writes — to say "mint a signing key on
+/// first boot." See [`decide_signing_bootstrap`] for why this, and not mere
+/// key-absence, is the signal that gates auto-generation.
+const REG_FRESH_INSTALL_MARKER: &str = "FreshInstallMarker";
+
+/// What backend startup should do about the command-signing key, decided
+/// from registry state alone — pure, and separate from the registry I/O for
+/// the same reason [`resolve_kid`] is: `read_hklm_value` returns `None` on
+/// non-Windows, so a test that reached through it would assert nothing on
+/// CI, which is exactly where this decision most needs to be held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SigningBootstrapDecision {
+    /// Mint a new keypair. Only reachable when NEITHER half of an existing
+    /// pair is present AND the fresh-install marker is.
+    Generate,
+    /// A key already exists; the marker is stale (left over from a
+    /// provisioning run whose backend then crashed before consuming it, or a
+    /// marker copied onto an already-keyed host by mistake). Clear it
+    /// without touching the key.
+    ConsumeMarkerOnly,
+    /// Nothing to do: no marker, and either both halves of a key are present
+    /// (ordinary restart) or neither is (a host that has never been
+    /// provisioned, or — the case this whole design exists to protect —
+    /// one that lost its registry).
+    Nothing,
+    /// The key and its kid disagree on presence. `command_key_generate`
+    /// writes the key first and the kid second (see its body), so this is
+    /// the exact partial-write window: a previous run was interrupted
+    /// between the two writes. Minting a new pair on top of that would
+    /// either strand the orphaned half or silently replace a key some
+    /// agents may already hold — refuse instead and let an operator
+    /// resolve it by hand (`--rotate`, or restoring the missing half).
+    Inconsistent,
+}
+
+/// Decide whether an unattended backend startup may mint a brand-new
+/// command-signing keypair.
+///
+/// This is deliberately NOT "generate whenever the key is missing." Compare
+/// the two hosts this function must tell apart:
+///
+///   * a box `deploy-backend.ps1` is provisioning for the very first time —
+///     no key exists yet, and nothing should have to remember to run
+///     `command-key-generate` by hand before the service can enforce
+///     anything (day-1 hardening is the whole point of this feature);
+///   * a box that HAD a key and lost it — reimaged, migrated, or the
+///     registry hive got wiped by accident. No key exists here either.
+///
+/// Both present as `key_present = false` to a check that only looks at the
+/// key. Minting fresh on the second host is the failure this function
+/// exists to prevent: under `RequireSignedCommands=1` it mints a new `kid`
+/// that not one agent in the fleet has been given yet, and every one of
+/// them starts refusing every command, silently, with no operator action to
+/// point at.
+///
+/// The signal that tells the two apart is `marker_present`
+/// ([`REG_FRESH_INSTALL_MARKER`]) — written by `deploy-backend.ps1` ONLY
+/// when the operator explicitly passes `-FreshInstall`, and by nothing else
+/// ever. That is deliberate, not merely convenient: the marker is NOT
+/// derived from local host state (e.g. "no backend.toml installed yet" —
+/// an earlier version of this feature tried exactly that and was wrong).
+/// The marker lives in the same registry hive as the signing key
+/// (`HKLM\SOFTWARE\kanade\backend`), and a full OS reimage wipes the
+/// ENTIRE system volume — the registry hive, `%ProgramData%`, everything
+/// local — together. A reimaged fleet member therefore looks, from local
+/// state alone, EXACTLY like a host that has never been provisioned:
+/// no config file, no registry key, no marker. Any signal this function
+/// could derive by inspecting the reimaged host itself is unable to tell
+/// the two apart, which is exactly why the marker instead comes from a
+/// human decision at deploy time — an operator who knows this host's
+/// history passes `-FreshInstall` only for a box that has genuinely never
+/// held a signing key the fleet trusts, and `deploy-backend.ps1` itself
+/// refuses `-FreshInstall` outright when it finds an already-installed
+/// `backend.toml` (see its `.PARAMETER FreshInstall`), which catches the
+/// case of running it against a live, merely-upgrading host by mistake.
+/// A host that lost its key without that explicit flag therefore presents
+/// as `(marker_present=false, key_present=false)`, indistinguishable in
+/// this function from an ordinary unprovisioned restart, and gets
+/// `Nothing`, not `Generate`.
+///
+/// (A NATS/JetStream rebuild happening at the same time as a reimage — the
+/// scenario that would matter if the signal instead lived in `agents_state`
+/// or some other broker-side store — cannot produce a false positive here:
+/// this function never looks at NATS at all. The registry is the only
+/// input, and the registry is what a reimage actually destroys.)
+///
+/// The marker is consumed (cleared) by the caller on every branch except
+/// `Inconsistent` — even `Nothing`, where a marker left over from some
+/// other cause should not linger forever — so a startup only ever acts on
+/// it once.
+fn decide_signing_bootstrap(
+    marker_present: bool,
+    key_present: bool,
+    kid_present: bool,
+) -> SigningBootstrapDecision {
+    match (key_present, kid_present) {
+        (true, false) | (false, true) => SigningBootstrapDecision::Inconsistent,
+        (true, true) => {
+            if marker_present {
+                SigningBootstrapDecision::ConsumeMarkerOnly
+            } else {
+                SigningBootstrapDecision::Nothing
+            }
+        }
+        (false, false) => {
+            if marker_present {
+                SigningBootstrapDecision::Generate
+            } else {
+                SigningBootstrapDecision::Nothing
+            }
+        }
+    }
+}
+
+/// The part of `command_key_generate` that actually mints and stores a
+/// keypair, split out so both the operator subcommand and the unattended
+/// startup auto-generate path share one write sequence rather than two that
+/// could drift.
+struct GeneratedSigningKey {
+    public_key: String,
+    fingerprint: String,
+    entry: serde_json::Value,
+}
+
+fn generate_and_store_signing_key(kid: &str) -> Result<GeneratedSigningKey> {
+    use kanade_shared::signing;
+
+    let key = signing::generate_keypair().map_err(|e| anyhow::anyhow!(e))?;
+    kanade_shared::secrets::write_hklm_value(
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KEY,
+        &signing::encode_secret(&key),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    kanade_shared::secrets::write_hklm_value(
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KID,
+        kid,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    let entry = signing::keyring_entry(kid, &key.verifying_key(), "backend");
+    Ok(GeneratedSigningKey {
+        public_key: signing::encode_public(&key.verifying_key()),
+        fingerprint: signing::fingerprint(&key.verifying_key()),
+        entry,
+    })
+}
+
+/// Read the registry, apply [`decide_signing_bootstrap`], and act on it —
+/// called once early in [`run_backend_inner`], before NATS, since this is
+/// registry-only. Errors are logged and swallowed rather than propagated:
+/// a failure here must never stop the backend from starting (an operator
+/// can always fall back to `command-key-generate` by hand), but it must be
+/// LOUD, because a fleet running `RequireSignedCommands=1` with no key at
+/// all fails closed on every agent at once.
+fn auto_generate_signing_key_on_fresh_install() {
+    use kanade_shared::signing;
+
+    let marker_present = matches!(
+        kanade_shared::secrets::read_hklm_value(
+            signing::REG_BACKEND_SUBKEY,
+            REG_FRESH_INSTALL_MARKER
+        )
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref(),
+        Some("1" | "true" | "yes")
+    );
+    let key_present = kanade_shared::secrets::read_hklm_value(
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KEY,
+    )
+    .is_some();
+    let kid_present = kanade_shared::secrets::read_hklm_value(
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KID,
+    )
+    .is_some();
+
+    let clear_marker = || {
+        if let Err(e) = kanade_shared::secrets::write_hklm_value(
+            signing::REG_BACKEND_SUBKEY,
+            REG_FRESH_INSTALL_MARKER,
+            "0",
+        ) {
+            warn!(error = %e, "failed to clear FreshInstallMarker");
+        }
+    };
+
+    match decide_signing_bootstrap(marker_present, key_present, kid_present) {
+        SigningBootstrapDecision::Nothing => {}
+        SigningBootstrapDecision::Inconsistent => {
+            error!(
+                key_present,
+                kid_present,
+                "command-signing registry state is inconsistent (the signing key and its kid \
+                 disagree on presence) — refusing to auto-generate a new keypair on top of a \
+                 half-written one; resolve by hand with `kanade-backend command-key-generate \
+                 --rotate` (or restore the missing value) before enabling RequireSignedCommands"
+            );
+        }
+        SigningBootstrapDecision::ConsumeMarkerOnly => {
+            info!(
+                "FreshInstallMarker is set but a command-signing key already exists — clearing \
+                 the marker without touching the key"
+            );
+            clear_marker();
+        }
+        SigningBootstrapDecision::Generate => {
+            let kid = format!("backend-{}", chrono::Utc::now().format("%Y%m%d"));
+            match generate_and_store_signing_key(&kid) {
+                Ok(generated) => {
+                    info!(
+                        %kid,
+                        fingerprint = %generated.fingerprint,
+                        public_key = %generated.public_key,
+                        keyring_entry = %generated.entry,
+                        "auto-generated command-signing keypair on fresh install (#1155/#1165) — \
+                         distribute the keyring_entry above to every agent's CommandKeys before \
+                         turning on RequireSignedCommands fleet-wide"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "auto-generate command-signing keypair failed on fresh install — no key \
+                         exists; run `kanade-backend command-key-generate` by hand"
+                    );
+                    // Do not consume the marker on failure: the next restart
+                    // should retry rather than silently give up forever.
+                    return;
+                }
+            }
+            clear_marker();
+        }
+    }
+}
+
 /// Mint the backend's command-signing keypair (#1165).
 ///
 /// The private key goes straight into the registry and is never printed —
@@ -443,26 +683,8 @@ fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 
-    let key = signing::generate_keypair().map_err(|e| anyhow::anyhow!(e))?;
-    kanade_shared::secrets::write_hklm_value(
-        signing::REG_BACKEND_SUBKEY,
-        signing::REG_SIGNING_KEY,
-        &signing::encode_secret(&key),
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
-    // The kid is persisted beside the key, not merely printed. The signing
-    // path needs it to fill `Kanade-Sig-Kid`, and it is the operator's choice
-    // — re-deriving a date at signing time would produce a different id than
-    // the one distributed to agents whenever the key is generated on one day
-    // and first used on another.
-    kanade_shared::secrets::write_hklm_value(
-        signing::REG_BACKEND_SUBKEY,
-        signing::REG_SIGNING_KID,
-        &kid,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
+    let generated = generate_and_store_signing_key(&kid)?;
 
-    let entry = signing::keyring_entry(&kid, &key.verifying_key(), "backend");
     println!(
         "Wrote the private key to HKLM\\{}\\{} (SYSTEM + Administrators only, inherited from the existing key's ACL).",
         signing::REG_BACKEND_SUBKEY,
@@ -470,10 +692,7 @@ fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
     );
     println!();
     println!("kid:        {kid}");
-    println!(
-        "public key: {}",
-        signing::encode_public(&key.verifying_key())
-    );
+    println!("public key: {}", generated.public_key);
     // Printed because it is the value an operator matches against, not one they
     // transcribe: it is what a correctly provisioned agent reports in
     // `command_keys`, so a host listing this kid with any other fingerprint
@@ -481,13 +700,10 @@ fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
     // (#1229). Deriving it here rather than by hand keeps the fleet check
     // honest — a fingerprint computed from the same mistyped paste that wrote
     // the ring would agree with itself.
-    println!(
-        "identity:   {kid}:{}",
-        signing::fingerprint(&key.verifying_key())
-    );
+    println!("identity:   {kid}:{}", generated.fingerprint);
     println!();
     println!("Add this entry to every agent's HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys array:");
-    println!("{}", serde_json::to_string_pretty(&entry)?);
+    println!("{}", serde_json::to_string_pretty(&generated.entry)?);
     println!();
     // Names both outcomes because this subcommand serves both cases: a
     // first-time mint leaves agents holding nothing (`unprovisioned`), a
@@ -1045,6 +1261,12 @@ async fn run_backend_inner(
     if let Err(e) = api::accounts::seed_bootstrap_admin(&pool).await {
         warn!(error = %e, "bootstrap admin seed failed");
     }
+
+    // #1155/#1165 day-1 hardening: mint the command-signing keypair
+    // automatically when (and only when) startup can prove this host was
+    // JUST provisioned fresh — see decide_signing_bootstrap. Registry-only,
+    // so it runs before NATS is anywhere in the picture.
+    auto_generate_signing_key_on_fresh_install();
 
     // NATS connect + JetStream context. The role decides which credential
     // the helper looks for (#1155): `HKLM\SOFTWARE\kanade\backend\NatsToken`
@@ -1901,6 +2123,66 @@ mod key_generate_tests {
             )
             .unwrap(),
             "backend-20260728b"
+        );
+    }
+}
+
+#[cfg(test)]
+mod signing_bootstrap_tests {
+    use super::{SigningBootstrapDecision, decide_signing_bootstrap};
+
+    #[test]
+    fn a_fresh_install_marker_with_no_key_generates() {
+        assert_eq!(
+            decide_signing_bootstrap(true, false, false),
+            SigningBootstrapDecision::Generate
+        );
+    }
+
+    #[test]
+    fn no_marker_and_no_key_does_nothing_not_generate() {
+        // The reimage/registry-loss scenario this whole design exists to
+        // protect: a host that lost its key looks identical to one that was
+        // never provisioned, and must never be treated as fresh.
+        assert_eq!(
+            decide_signing_bootstrap(false, false, false),
+            SigningBootstrapDecision::Nothing
+        );
+    }
+
+    #[test]
+    fn an_ordinary_restart_with_an_existing_key_and_no_marker_does_nothing() {
+        assert_eq!(
+            decide_signing_bootstrap(false, true, true),
+            SigningBootstrapDecision::Nothing
+        );
+    }
+
+    #[test]
+    fn a_stale_marker_next_to_an_existing_key_only_clears_the_marker() {
+        assert_eq!(
+            decide_signing_bootstrap(true, true, true),
+            SigningBootstrapDecision::ConsumeMarkerOnly
+        );
+    }
+
+    #[test]
+    fn a_key_without_its_kid_is_inconsistent() {
+        assert_eq!(
+            decide_signing_bootstrap(false, true, false),
+            SigningBootstrapDecision::Inconsistent
+        );
+        assert_eq!(
+            decide_signing_bootstrap(true, true, false),
+            SigningBootstrapDecision::Inconsistent
+        );
+    }
+
+    #[test]
+    fn a_kid_without_its_key_is_inconsistent() {
+        assert_eq!(
+            decide_signing_bootstrap(false, false, true),
+            SigningBootstrapDecision::Inconsistent
         );
     }
 }

@@ -97,6 +97,12 @@ interface AgentInstallSettings {
   /// Server-reported: whether a token is currently stored. Display hint
   /// for the form (the token itself can never be read back).
   nats_token_set?: boolean;
+  /// Ask the generated Windows installer to pass `-RequireSignedCommands`,
+  /// so a fresh agent enforces signed commands from first boot. Only takes
+  /// effect while this backend has a command-signing key configured — see
+  /// `agent_installer::resolve_enforcement` — otherwise the installer's
+  /// README.txt calls out the mismatch instead of silently doing nothing.
+  require_signed_commands?: boolean | null;
 }
 
 /// Backend-side server settings document (`server_settings` KV). Mirrors
@@ -367,6 +373,8 @@ function ServerTab() {
   // the post-save refetch) so a saved token can't be re-sent by accident.
   const [agentInstallNatsUrl, setAgentInstallNatsUrl] = useState('');
   const [agentInstallNatsToken, setAgentInstallNatsToken] = useState('');
+  const [agentInstallRequireSignedCommands, setAgentInstallRequireSignedCommands] =
+    useState(false);
   useEffect(() => {
     if (settings.data) {
       setPruneDays(settings.data.agent_prune_days == null ? '' : String(settings.data.agent_prune_days));
@@ -405,6 +413,9 @@ function ServerTab() {
       setCapCollections(c?.collections_mib == null ? '' : String(c.collections_mib));
       setAgentInstallNatsUrl((settings.data.agent_install?.nats_url ?? '').trim());
       setAgentInstallNatsToken('');
+      setAgentInstallRequireSignedCommands(
+        settings.data.agent_install?.require_signed_commands ?? false,
+      );
     }
   }, [settings.data]);
 
@@ -635,9 +646,13 @@ function ServerTab() {
   const agentInstallValue: AgentInstallSettings = {
     nats_url: aiUrlValue,
     ...(aiTokenTyped ? { nats_token: agentInstallNatsToken } : {}),
+    require_signed_commands: agentInstallRequireSignedCommands,
   };
   const aiDirty =
-    aiUrlValue !== (settings.data?.agent_install?.nats_url ?? null) || aiTokenTyped;
+    aiUrlValue !== (settings.data?.agent_install?.nats_url ?? null) ||
+    aiTokenTyped ||
+    agentInstallRequireSignedCommands !==
+      (settings.data?.agent_install?.require_signed_commands ?? false);
 
   // One save for the whole document. The PUT merges per-field, but the SPA
   // always sends every field it knows, so an unchanged one is re-sent
@@ -987,6 +1002,23 @@ function ServerTab() {
           </div>
           <p className="text-muted text-xs">{t('server.agentInstall.natsUrlHint')}</p>
           <p className="text-muted text-xs">{t('server.agentInstall.tokenHint')}</p>
+          <div className="space-y-1">
+            <Label htmlFor="agent-install-require-signed-commands">
+              {t('server.agentInstall.requireSignedCommands')}
+            </Label>
+            <div className="flex items-center gap-2 pt-2">
+              <input
+                id="agent-install-require-signed-commands"
+                type="checkbox"
+                checked={agentInstallRequireSignedCommands}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setAgentInstallRequireSignedCommands(e.target.checked)}
+              />
+              <span className="text-muted text-xs">
+                {t('server.agentInstall.requireSignedCommandsHint')}
+              </span>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

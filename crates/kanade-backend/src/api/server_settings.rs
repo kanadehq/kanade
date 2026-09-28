@@ -1508,6 +1508,7 @@ mod tests {
                 nats_url: nats_url.map(str::to_string),
                 nats_token: nats_token.map(str::to_string),
                 nats_token_set: false,
+                require_signed_commands: None,
             }),
             ..Default::default()
         };

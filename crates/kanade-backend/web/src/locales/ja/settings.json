@@ -101,7 +101,9 @@
       "natsTokenPlaceholder": "新しいトークンを入力すると差し替わります",
       "tokenSet": "トークンは設定済みです。",
       "tokenNotSet": "トークンは未設定です。 ブローカーが要求する場合のみ設定してください。",
-      "tokenHint": "保存済みのトークンは表示されません。 空欄のまま保存すると現在のトークンが保持されます。"
+      "tokenHint": "保存済みのトークンは表示されません。 空欄のまま保存すると現在のトークンが保持されます。",
+      "requireSignedCommands": "インストール時にコマンド署名の必須化を有効にする",
+      "requireSignedCommandsHint": "生成される Windows インストーラに -RequireSignedCommands を渡し、新規エージェントが初回起動時から未署名コマンドを拒否するようにします。 このバックエンドにコマンド署名鍵が設定されている場合のみ有効になります (kanade-backend command-key-generate)。 鍵が無い場合はインストーラの README.txt に不整合の警告が表示され、空のキーリングのまま強制が有効化されることはありません。"
     },
     "mail": {
       "title": "メール (SMTP) 設定",
