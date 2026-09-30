@@ -194,7 +194,10 @@ fn main() -> Result<()> {
             }
             Err(e) => {
                 eprintln!("command keys rejected: {e}");
-                std::process::exit(2);
+                // Not 2: clap uses that for an unknown argument, and the setup
+                // scripts must tell "this ring is bad" from "this binary does
+                // not have the check".
+                std::process::exit(3);
             }
         };
     }

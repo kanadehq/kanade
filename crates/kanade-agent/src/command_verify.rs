@@ -303,9 +303,16 @@ fn read_keyring_raw() -> Result<Option<String>, String> {
     // silently drop every key this machine trusts, and keep doing it.
     read_keyring_raw_from(
         kanade_shared::secrets::try_read_hklm_value(REG_SUBKEY, REG_VALUE),
-        platform_file(KEYRING_FILE).as_deref(),
+        platform_file(KEYRING_FILE)
+            .as_deref()
+            .map(|p| (p, ROOT_UID)),
     )
 }
+
+/// The only owner the keyring file is trusted to have. Injected into the reader
+/// (as `(path, owner uid)`) so tests, which cannot create root-owned files, can
+/// name their own uid instead.
+const ROOT_UID: u32 = 0;
 
 /// Combine the two stores: registry, then file, then nothing.
 ///
@@ -316,12 +323,12 @@ fn read_keyring_raw() -> Result<Option<String>, String> {
 /// registry with nothing in it defers to the file.
 fn read_keyring_raw_from(
     registry: Result<Option<String>, String>,
-    file: Option<&std::path::Path>,
+    file: Option<(&std::path::Path, u32)>,
 ) -> Result<Option<String>, String> {
     match registry? {
         Some(v) => Ok(Some(v)),
         None => match file {
-            Some(p) => read_keyring_file(p),
+            Some((p, owner)) => read_keyring_file(p, owner),
             None => Ok(None),
         },
     }
@@ -330,24 +337,34 @@ fn read_keyring_raw_from(
 /// Read the file store, keeping "absent" distinct from "present and unusable"
 /// for the same reason the registry does: absent adopts an empty ring, anything
 /// else must not be allowed to replace a working one.
-fn read_keyring_file(path: &std::path::Path) -> Result<Option<String>, String> {
+fn read_keyring_file(path: &std::path::Path, owner: u32) -> Result<Option<String>, String> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         // A keyring another account can rewrite is a trust root it can
         // replace. Refuse it rather than load it; the ring in memory, if any,
-        // is kept.
-        match std::fs::metadata(path) {
-            Ok(m) if m.permissions().mode() & 0o022 != 0 => {
+        // is kept. The mode alone is not enough: a 0600 file owned by some
+        // other account is writable by that account, so the owner is checked
+        // too.
+        if let Ok(m) = std::fs::metadata(path) {
+            if m.uid() != owner {
+                return Err(format!(
+                    "{}: owned by uid {}, not uid {owner} — refusing to trust it; chown root",
+                    path.display(),
+                    m.uid()
+                ));
+            }
+            if m.permissions().mode() & 0o022 != 0 {
                 return Err(format!(
                     "{}: writable by group/other (mode {:o}) — refusing to trust it; chmod 0600",
                     path.display(),
                     m.permissions().mode() & 0o777
                 ));
             }
-            _ => {}
         }
     }
+    #[cfg(not(unix))]
+    let _ = owner;
     interpret_file_read(path, std::fs::read_to_string(path))
 }
 
@@ -452,6 +469,24 @@ pub fn check_keyring_file(path: &std::path::Path) -> Result<Vec<String>, String>
                 "every entry needs a non-empty STRING 'kid' and 'public_key'; got: {e}"
             ));
         };
+        if e.get("label").is_some_and(|v| !v.is_string()) {
+            return Err(format!("key {kid}: 'label' must be a string"));
+        }
+        // `max_age_secs` is what makes an entry break-glass, so a quoted value
+        // would silently demote it to an unbounded key, and zero would make
+        // `verify` reject every signature that is not exactly zero seconds
+        // old: the entry looks provisioned and fails when it is reached for.
+        if let Some(v) = e.get("max_age_secs") {
+            match v.as_u64() {
+                Some(n) if n > 0 => {}
+                _ => {
+                    return Err(format!(
+                        "key {kid}: 'max_age_secs' must be a positive integer (do not quote it); \
+                         a zero window rejects every signature made with the key"
+                    ));
+                }
+            }
+        }
         if kids.iter().any(|k| k == kid) {
             return Err(format!(
                 "key id {kid} appears more than once — two different keys must never share an id"
@@ -2314,16 +2349,34 @@ mod tests {
         ring_to_json(&backend_ring(kid, sk)).expect("non-empty ring")
     }
 
+    /// The uid that owns files this test process creates — the stand-in for
+    /// root, which a test cannot be.
+    fn me() -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let f = tempfile::NamedTempFile::new().unwrap();
+            f.as_file().metadata().unwrap().uid()
+        }
+        #[cfg(not(unix))]
+        {
+            0
+        }
+    }
+
     /// A loader over a real file, the way production reads it off-Windows.
     fn file_loader(path: std::path::PathBuf) -> Loader {
-        Box::new(move || read_keyring_raw_from(Ok(None), Some(&path)))
+        Box::new(move || read_keyring_raw_from(Ok(None), Some((&path, me()))))
     }
 
     #[test]
     fn an_absent_keyring_file_is_nothing_provisioned() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("command-keys.json");
-        assert_eq!(read_keyring_raw_from(Ok(None), Some(&path)), Ok(None));
+        assert_eq!(
+            read_keyring_raw_from(Ok(None), Some((&path, me()))),
+            Ok(None)
+        );
         // No file store at all (Windows) behaves the same.
         assert_eq!(read_keyring_raw_from(Ok(None), None), Ok(None));
     }
@@ -2335,7 +2388,7 @@ mod tests {
         let sk = SigningKey::from_bytes(&[71u8; 32]);
         std::fs::write(&path, ring_json("backend-1", &sk)).unwrap();
 
-        let raw = read_keyring_raw_from(Ok(None), Some(&path)).unwrap();
+        let raw = read_keyring_raw_from(Ok(None), Some((&path, me()))).unwrap();
         let ring = parse_raw(raw.as_deref()).unwrap();
         assert_eq!(ring.kids().collect::<Vec<_>>(), vec!["backend-1"]);
     }
@@ -2354,7 +2407,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let raw = read_keyring_raw_from(Ok(None), Some(&path)).unwrap();
+        let raw = read_keyring_raw_from(Ok(None), Some((&path, me()))).unwrap();
         assert!(raw.is_some(), "present, so not reported as absent");
         assert!(parse_raw(raw.as_deref()).is_err());
     }
@@ -2364,9 +2417,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("command-keys.json");
         std::fs::write(&path, "  \n").unwrap();
-        assert!(read_keyring_raw_from(Ok(None), Some(&path)).is_err());
+        assert!(read_keyring_raw_from(Ok(None), Some((&path, me()))).is_err());
         std::fs::write(&path, "[]").unwrap();
-        let raw = read_keyring_raw_from(Ok(None), Some(&path)).unwrap();
+        let raw = read_keyring_raw_from(Ok(None), Some((&path, me()))).unwrap();
         assert!(parse_raw(raw.as_deref()).unwrap().is_empty());
     }
 
@@ -2389,9 +2442,21 @@ mod tests {
         let sk = SigningKey::from_bytes(&[73u8; 32]);
         std::fs::write(&path, ring_json("backend-1", &sk)).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
-        assert!(read_keyring_raw_from(Ok(None), Some(&path)).is_err());
+        assert!(read_keyring_raw_from(Ok(None), Some((&path, me()))).is_err());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(read_keyring_raw_from(Ok(None), Some(&path)).is_ok());
+        assert!(read_keyring_raw_from(Ok(None), Some((&path, me()))).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keyring_file_owned_by_someone_else_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        let sk = SigningKey::from_bytes(&[82u8; 32]);
+        std::fs::write(&path, ring_json("backend-1", &sk)).unwrap();
+        // Mode is fine (not group/other-writable); only the owner differs.
+        assert!(read_keyring_raw_from(Ok(None), Some((&path, me() + 1))).is_err());
+        assert!(read_keyring_raw_from(Ok(None), Some((&path, me()))).is_ok());
     }
 
     #[test]
@@ -2404,16 +2469,18 @@ mod tests {
         // Registry holds a value: it is used, the file is ignored.
         let reg = Ok(Some("[]".to_string()));
         assert_eq!(
-            read_keyring_raw_from(reg, Some(&path)),
+            read_keyring_raw_from(reg, Some((&path, me()))),
             Ok(Some("[]".to_string()))
         );
         // Registry has nothing: the file is used.
         assert_eq!(
-            read_keyring_raw_from(Ok(None), Some(&path)).unwrap(),
+            read_keyring_raw_from(Ok(None), Some((&path, me()))).unwrap(),
             Some(ring_json("from-file", &file_key))
         );
         // Registry failed: that is an error, not licence to use the file.
-        assert!(read_keyring_raw_from(Err("registry unavailable".into()), Some(&path)).is_err());
+        assert!(
+            read_keyring_raw_from(Err("registry unavailable".into()), Some((&path, me()))).is_err()
+        );
     }
 
     #[test]
@@ -2520,6 +2587,22 @@ mod tests {
             "duplicate kid"
         );
         assert!(check(r#"[{"kid":"a","public_key":"not-a-key"}]"#).is_err());
+        for bad in ["0", "-5", "\"900\"", "1.5"] {
+            assert!(
+                check(&format!(
+                    r#"[{{"kid":"a","public_key":"{pk}","max_age_secs":{bad}}}]"#
+                ))
+                .is_err(),
+                "max_age_secs {bad}"
+            );
+        }
+        assert!(check(&format!(r#"[{{"kid":"a","public_key":"{pk}","label":5}}]"#)).is_err());
+        assert!(
+            check(&format!(
+                r#"[{{"kid":"a","public_key":"{pk}","max_age_secs":900}}]"#
+            ))
+            .is_ok()
+        );
     }
 
     // ---- enforcement flag off-Windows ----

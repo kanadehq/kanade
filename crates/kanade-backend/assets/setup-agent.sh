@@ -66,15 +66,33 @@ trap '[ -z "$keys_stage" ] || rm -f "$keys_stage"' EXIT
 # time, plus the deploy-agent.ps1 checks: JSON array, non-empty, string kid +
 # public_key on every entry, no duplicate kid) so nothing can be accepted here
 # that the agent would then reject, and no jq is needed.
+#
+# Run from a private executable copy: a bundle extracted from a tar that lost
+# the exec bit still validates. Exit 3 is "ring rejected"; any other failure
+# means the checker itself could not run (an older agent without the flag, or a
+# binary for another architecture), which is reported as that rather than as a
+# bad ring.
 check_keys() {
-	"$bundle/bin/kanade-agent" --check-command-keys "$1"
+	_chk="$(umask 077; mktemp "${TMPDIR:-/tmp}/kanade-agent-check.XXXXXX")"
+	_rc=0
+	{ cp "$bundle/bin/kanade-agent" "$_chk" && chmod 0700 "$_chk" && "$_chk" --check-command-keys "$1"; } || _rc=$?
+	rm -f "$_chk"
+	return "$_rc"
+}
+check_failed() {
+	if [ "$1" -eq 3 ]; then
+		echo "$2 rejected — nothing was changed" >&2
+	else
+		echo "could not run the bundled agent's keyring check (exit $1): its kanade-agent is probably older than this script or built for another architecture — rebuild the bundle. Nothing was changed" >&2
+	fi
+	exit 1
 }
 if [ -n "${KANADE_COMMAND_KEYS:-}" ]; then
 	keys_stage="$(umask 077; mktemp "${TMPDIR:-/tmp}/kanade-command-keys.XXXXXX")"
 	printf '%s\n' "$KANADE_COMMAND_KEYS" > "$keys_stage"
-	keys_kids="$(check_keys "$keys_stage")" || { echo "KANADE_COMMAND_KEYS rejected — nothing was changed" >&2; exit 1; }
+	keys_kids="$(check_keys "$keys_stage")" || check_failed "$?" "KANADE_COMMAND_KEYS"
 elif [ -f "$keys_file" ] && [ "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" = "1" ]; then
-	check_keys "$keys_file" >/dev/null || { echo "the existing $keys_file is not a valid keyring — pass KANADE_COMMAND_KEYS to replace it; nothing was changed" >&2; exit 1; }
+	check_keys "$keys_file" >/dev/null || check_failed "$?" "the existing $keys_file (pass KANADE_COMMAND_KEYS to replace it)"
 fi
 if [ "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" = "1" ] && [ -z "$keys_stage" ] && [ ! -f "$keys_file" ]; then
 	echo "KANADE_REQUIRE_SIGNED_COMMANDS=1 but this host has no keyring (and none was passed). Enforcing with an empty ring is inert — the agent declines to enforce — so pass KANADE_COMMAND_KEYS too." >&2
