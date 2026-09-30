@@ -145,8 +145,13 @@ system_gui:  /bin/launchctl asuser <uid> /usr/bin/env -i <env> <host> <args…>
   without a prompt. Apple Silicon still needs at least an ad-hoc signature,
   which the Rust linker applies — re-sign with `codesign --force --sign -`
   if the binary is modified after the build.
-- **Command signing**: keyring provisioning is Windows-only today, so
-  signed-command verification is inactive on macOS agents (the #1165 gap).
+- **Command signing**: the keyring lives in `/etc/kanade/command-keys.json`
+  (root:wheel, 0600) and enforcement in `/etc/kanade/require-signed-commands`,
+  both written by `setup-agent-macos.sh` from `KANADE_COMMAND_KEYS` (JSON
+  array) and `KANADE_REQUIRE_SIGNED_COMMANDS` (`1` enforce, `0` stop, unset
+  keep) — the same inputs and semantics as the Linux agent, see
+  [`deploy/linux/README.md`](../linux/README.md). The backend-generated
+  tarball passes the backend's own public key automatically.
 
 ## What does not work on macOS yet
 

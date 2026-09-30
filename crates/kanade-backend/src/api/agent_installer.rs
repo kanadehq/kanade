@@ -53,11 +53,13 @@
 //!     `nats_url` only when `KANADE_NATS_URL` is set.
 //!   * `install.sh` (0755) — a generated wrapper: exports
 //!     `KANADE_NATS_TOKEN` when (and only when) the settings carry one,
-//!     then `exec ./setup-agent.sh`. `KANADE_NATS_URL` is deliberately NOT
+//!     `KANADE_COMMAND_KEYS` when this backend signs commands and
+//!     `KANADE_REQUIRE_SIGNED_COMMANDS=1` when the require-signed-commands
+//!     setting is on and there is a key to back it, then
+//!     `exec ./setup-agent.sh`. `KANADE_NATS_URL` is deliberately NOT
 //!     exported — the baked agent.toml already carries it.
 //!   * `README.txt` — extract + `sudo ./install.sh` instructions, with
-//!     the note that command-signing keyring provisioning is Windows-only
-//!     today (#1165 gap).
+//!     the same command-signing / enforcement note the Windows ZIP carries.
 //!
 //! macOS tar.gz contents (same shape, launchd instead of systemd):
 //!
@@ -72,7 +74,7 @@
 //!   * `install.sh` (0755) — the same generated wrapper as Linux, handing
 //!     over to `setup-agent-macos.sh`.
 //!   * `README.txt` — extract + `sudo ./install.sh`, the Gatekeeper note,
-//!     and the same #1165 keyring gap.
+//!     and the same command-signing / enforcement note.
 
 use axum::body::Body;
 use axum::extract::{Query, State};
@@ -305,29 +307,34 @@ pub async fn installer(
     })?;
 
     // Archive assembly is CPU-bound (deflate/gzip over ~20 MB) — built in
-    // a spawn_blocking closure below. The keyring is embedded only in the
-    // Windows flow: command-signing keyring provisioning is Windows-only
-    // today (#1165 gap), so the Linux/macOS tarballs never carry one.
+    // a spawn_blocking closure below.
+    //
+    // When this backend signs commands, provision the fresh agent's ring with
+    // THIS backend's own public key — nothing else — on every OS. Break-glass
+    // keys are never bundled; an operator distributes those separately.
+    let keyring = state.commands.keyring_entry();
+    let command_keys = match &keyring {
+        Some(entry) => Some(serde_json::to_string(&vec![entry]).map_err(|e| {
+            warn!(error = %e, "serialize command keyring");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?),
+        None => None,
+    };
+    let enforcement_requested = settings
+        .agent_install
+        .as_ref()
+        .and_then(|ai| ai.require_signed_commands)
+        .unwrap_or(false);
+    let enforcement = resolve_enforcement(enforcement_requested, keyring.is_some());
+    if enforcement == EnforcementPlan::RequestedButNoKey {
+        warn!(
+            %key,
+            "installer: require_signed_commands is set but this backend has no command-signing \
+             key — the generated installer will not enable enforcement"
+        );
+    }
     let (content_type, filename, payload, command_keys_embedded) = match params.os {
         InstallerOs::Windows => {
-            // When this backend signs commands, provision the fresh agent's
-            // ring with THIS backend's own public key — nothing else.
-            // Break-glass keys are never bundled; an operator distributes
-            // those separately.
-            let keyring = state.commands.keyring_entry();
-            let command_keys = match &keyring {
-                Some(entry) => Some(serde_json::to_string(&vec![entry]).map_err(|e| {
-                    warn!(error = %e, "serialize command keyring");
-                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-                })?),
-                None => None,
-            };
-            let enforcement_requested = settings
-                .agent_install
-                .as_ref()
-                .and_then(|ai| ai.require_signed_commands)
-                .unwrap_or(false);
-            let enforcement = resolve_enforcement(enforcement_requested, keyring.is_some());
             let install_ps1 = render_install_ps1(
                 &key,
                 nats_token.as_deref(),
@@ -365,7 +372,15 @@ pub async fn installer(
             )
         }
         InstallerOs::Linux | InstallerOs::Macos => {
-            let entries = unix_tar_entries(params.os, &key, exe, agent_toml, nats_token.as_deref());
+            let entries = unix_tar_entries(
+                params.os,
+                &key,
+                exe,
+                agent_toml,
+                nats_token.as_deref(),
+                command_keys.as_deref(),
+                enforcement,
+            );
             let tgz_bytes = tokio::task::spawn_blocking(move || build_tar_gz(entries))
                 .await
                 .map_err(|e| {
@@ -384,7 +399,7 @@ pub async fn installer(
                 "application/gzip",
                 format!("kanade-agent-installer-{key}.tar.gz"),
                 tgz_bytes,
-                false,
+                command_keys.is_some(),
             )
         }
     };
@@ -941,6 +956,8 @@ fn unix_tar_entries(
     exe: Vec<u8>,
     agent_toml: String,
     nats_token: Option<&str>,
+    command_keys: Option<&str>,
+    enforcement: EnforcementPlan,
 ) -> Vec<TarEntry> {
     let (service_entry, setup_name, setup_script, service_kind, readme) =
         if os == InstallerOs::Macos {
@@ -953,7 +970,7 @@ fn unix_tar_entries(
                 "setup-agent-macos.sh",
                 SETUP_AGENT_MACOS_SH,
                 "a launchd daemon",
-                render_readme_macos(key),
+                render_readme_macos(key, command_keys.is_some(), enforcement),
             )
         } else {
             (
@@ -965,10 +982,16 @@ fn unix_tar_entries(
                 "setup-agent.sh",
                 SETUP_AGENT_SH,
                 "a systemd service",
-                render_readme_linux(key),
+                render_readme_linux(key, command_keys.is_some(), enforcement),
             )
         };
-    let install_sh = render_install_sh(nats_token, setup_name, service_kind);
+    let install_sh = render_install_sh(
+        nats_token,
+        command_keys,
+        enforcement == EnforcementPlan::Embedded,
+        setup_name,
+        service_kind,
+    );
     vec![
         TarEntry::new("bin/kanade-agent", 0o755, exe),
         TarEntry::new("etc/agent.toml", 0o644, agent_toml.into_bytes()),
@@ -1013,12 +1036,22 @@ fn sh_quote(value: &str) -> String {
 /// stays in the canonical setup script (`setup_script`: `setup-agent.sh`
 /// on Linux, `setup-agent-macos.sh` on macOS; `service` names what it
 /// installs, for the header comment); this only provisions the token from
-/// the backend's settings and hands over. `KANADE_NATS_URL` is
+/// the backend's settings — plus, when this backend signs commands, its
+/// command-signing public key as `KANADE_COMMAND_KEYS` and (when the
+/// require-signed-commands setting is on) `KANADE_REQUIRE_SIGNED_COMMANDS=1`,
+/// each omitted entirely when not provided/requested — and hands over.
+/// `KANADE_NATS_URL` is
 /// deliberately NOT exported: the baked `etc/agent.toml` already carries
 /// it, and both setup scripts only rewrite the url when the env var is
 /// set — leaving it unset keeps the "preserve an existing deployment's
 /// broker on redeploy" logic intact.
-fn render_install_sh(nats_token: Option<&str>, setup_script: &str, service: &str) -> String {
+fn render_install_sh(
+    nats_token: Option<&str>,
+    command_keys: Option<&str>,
+    require_signed_commands: bool,
+    setup_script: &str,
+    service: &str,
+) -> String {
     let mut s = String::new();
     s.push_str("#!/bin/sh\n");
     s.push_str("# Generated by kanade-backend — do not edit.\n");
@@ -1030,17 +1063,55 @@ fn render_install_sh(nats_token: Option<&str>, setup_script: &str, service: &str
     if let Some(token) = nats_token {
         s.push_str(&format!("export KANADE_NATS_TOKEN={}\n", sh_quote(token)));
     }
+    if let Some(keys) = command_keys {
+        s.push_str(&format!("export KANADE_COMMAND_KEYS={}\n", sh_quote(keys)));
+    }
+    if require_signed_commands {
+        s.push_str("export KANADE_REQUIRE_SIGNED_COMMANDS=1\n");
+    }
     s.push_str(&format!("exec ./{setup_script}\n"));
     s
 }
 
-/// Linux `README.txt` — the contents list plus extract/install steps.
-/// Calls out the #1165 gap explicitly: command-signing keyring
-/// provisioning is Windows-only today (the Windows install script writes
-/// the keyring to the registry; there is no Linux equivalent yet), so a
-/// Linux agent installed from this tarball runs with signature
-/// verification inactive until that's built.
-fn render_readme_linux(key: &str) -> String {
+/// The command-signing / enforcement paragraph of the Linux and macOS
+/// READMEs, the LF counterpart of the notes in [`render_readme`]. `keyring` is
+fn unix_signing_note(signing: bool, enforcement: EnforcementPlan) -> String {
+    let mut s = String::new();
+    if signing {
+        s.push_str(
+            "This tarball embeds the backend's command-signing PUBLIC key (provisioned\n\
+             into the agent's keyring by the installer, so signed commands verify\n\
+             from first boot). Public keys are not secrets. Break-glass keys are\n\
+             NEVER included in this tarball — distribute those separately.\n",
+        );
+    } else {
+        s.push_str(
+            "The backend that generated this tarball is not signing commands, so no\n\
+             command-signing keyring is provisioned by the installer.\n",
+        );
+    }
+    match enforcement {
+        EnforcementPlan::Off => {}
+        EnforcementPlan::Embedded => s.push_str(
+            "\nThis installer sets KANADE_REQUIRE_SIGNED_COMMANDS=1: the agent will REFUSE\n\
+             any command it cannot verify against the embedded keyring, starting from\n\
+             first boot.\n",
+        ),
+        EnforcementPlan::RequestedButNoKey => s.push_str(
+            "\n*** WARNING: RequireSignedCommands was requested in server settings, but\n\
+             *** this backend has no command-signing key configured, so this installer\n\
+             *** does NOT enable enforcement — an agent enforcing against an empty\n\
+             *** keyring would just decline to enforce, which is not what was asked for.\n\
+             *** Run `kanade-backend command-key-generate` on the backend host, then\n\
+             *** re-download this installer.\n",
+        ),
+    }
+    s
+}
+
+/// Linux `README.txt` — the contents list plus extract/install steps and the
+/// command-signing state (see [`unix_signing_note`]).
+fn render_readme_linux(key: &str, signing: bool, enforcement: EnforcementPlan) -> String {
     let mut s = String::new();
     s.push_str(&format!("kanade-agent installer (release {key})\n"));
     s.push_str("=================================================\n");
@@ -1068,18 +1139,13 @@ fn render_readme_linux(key: &str) -> String {
     s.push_str("Re-running the installer upgrades the agent in place (an existing\n");
     s.push_str("/etc/kanade/agent.env token and broker URL are preserved).\n");
     s.push('\n');
-    s.push_str("Note: command-signing keyring provisioning is Windows-only today, so\n");
-    s.push_str("signed-command verification is INACTIVE on Linux agents installed\n");
-    s.push_str("from this tarball (the #1165 enforcement gap) — break-glass and\n");
-    s.push_str("backend public keys must be provisioned separately once a Linux\n");
-    s.push_str("provisioning path exists.\n");
+    s.push_str(&unix_signing_note(signing, enforcement));
     s
 }
 
 /// macOS `README.txt` — the Linux README's shape, plus the Gatekeeper /
-/// code-signing facts an operator hits on a Mac, and the same #1165 gap
-/// (the keyring is provisioned into the Windows registry only).
-fn render_readme_macos(key: &str) -> String {
+/// code-signing facts an operator hits on a Mac.
+fn render_readme_macos(key: &str, signing: bool, enforcement: EnforcementPlan) -> String {
     let mut s = String::new();
     s.push_str(&format!("kanade-agent installer (release {key})\n"));
     s.push_str("=================================================\n");
@@ -1121,11 +1187,7 @@ fn render_readme_macos(key: &str) -> String {
     s.push_str("Rust toolchain's linker applies; a binary modified after the build\n");
     s.push_str("must be re-signed (codesign --force --sign - <binary>).\n");
     s.push('\n');
-    s.push_str("Note: command-signing keyring provisioning is Windows-only today, so\n");
-    s.push_str("signed-command verification is INACTIVE on macOS agents installed\n");
-    s.push_str("from this tarball (the #1165 enforcement gap) — break-glass and\n");
-    s.push_str("backend public keys must be provisioned separately once a macOS\n");
-    s.push_str("provisioning path exists.\n");
+    s.push_str(&unix_signing_note(signing, enforcement));
     s
 }
 
@@ -1877,7 +1939,13 @@ mod tests {
 
     #[test]
     fn install_sh_exports_the_token_only_when_given() {
-        let with = render_install_sh(Some("s3cret"), "setup-agent.sh", "a systemd service");
+        let with = render_install_sh(
+            Some("s3cret"),
+            None,
+            false,
+            "setup-agent.sh",
+            "a systemd service",
+        );
         assert!(with.starts_with("#!/bin/sh\n"));
         assert!(with.contains("set -eu\n"));
         assert!(with.contains("export KANADE_NATS_TOKEN='s3cret'\n"));
@@ -1888,7 +1956,7 @@ mod tests {
         // LF only.
         assert!(!with.contains('\r'));
 
-        let without = render_install_sh(None, "setup-agent.sh", "a systemd service");
+        let without = render_install_sh(None, None, false, "setup-agent.sh", "a systemd service");
         assert!(!without.contains("KANADE_NATS_TOKEN"));
         assert!(without.ends_with("exec ./setup-agent.sh\n"));
     }
@@ -1898,7 +1966,13 @@ mod tests {
         // POSIX single-quote escaping: `'` → `'\''`. An unescaped quote
         // would terminate the literal and let the rest of the token run
         // as shell.
-        let out = render_install_sh(Some("it's"), "setup-agent.sh", "a systemd service");
+        let out = render_install_sh(
+            Some("it's"),
+            None,
+            false,
+            "setup-agent.sh",
+            "a systemd service",
+        );
         assert!(out.contains("export KANADE_NATS_TOKEN='it'\\''s'\n"));
     }
 
@@ -1929,6 +2003,8 @@ mod tests {
             b"\x7fELF-fake".to_vec(),
             agent_toml.clone(),
             Some("tok"),
+            None,
+            EnforcementPlan::Off,
         ));
         for expected in [
             "bin/kanade-agent",
@@ -1958,7 +2034,14 @@ mod tests {
         assert_eq!(seen["etc/agent.toml"].1, agent_toml.as_bytes());
         assert_eq!(
             seen["install.sh"].1,
-            render_install_sh(Some("tok"), "setup-agent.sh", "a systemd service").as_bytes()
+            render_install_sh(
+                Some("tok"),
+                None,
+                false,
+                "setup-agent.sh",
+                "a systemd service"
+            )
+            .as_bytes()
         );
         assert_eq!(seen["setup-agent.sh"].1, SETUP_AGENT_SH.as_bytes());
         assert_eq!(
@@ -1976,6 +2059,8 @@ mod tests {
             b"\xcf\xfa\xed\xfe-fake".to_vec(),
             agent_toml.clone(),
             Some("tok"),
+            None,
+            EnforcementPlan::Off,
         ));
         let mut names: Vec<&str> = seen.keys().map(String::as_str).collect();
         names.sort_unstable();
@@ -2020,26 +2105,78 @@ mod tests {
     }
 
     #[test]
-    fn readme_linux_documents_the_flow_and_the_signing_gap() {
-        let out = render_readme_linux("0.45.4-linux-x86_64");
+    fn readme_linux_documents_the_flow_and_the_signing_state() {
+        let out = render_readme_linux("0.45.4-linux-x86_64", true, EnforcementPlan::Off);
         assert!(out.contains("release 0.45.4-linux-x86_64"));
         assert!(out.contains("tar xzf"));
         assert!(out.contains("sudo ./install.sh"));
-        assert!(out.contains("Windows-only"));
-        assert!(out.contains("INACTIVE on Linux agents"));
+        assert!(!out.contains("Windows-only"));
+        assert!(!out.contains("INACTIVE"));
+        assert!(out.contains("command-signing PUBLIC key"));
+        assert!(out.contains("Break-glass keys are"));
         // LF only.
         assert!(!out.contains('\r'));
     }
 
     #[test]
-    fn readme_macos_documents_the_flow_gatekeeper_and_the_signing_gap() {
-        let out = render_readme_macos("0.45.4-macos-aarch64");
+    fn readme_macos_documents_the_flow_gatekeeper_and_the_signing_state() {
+        let out = render_readme_macos("0.45.4-macos-aarch64", false, EnforcementPlan::Off);
         assert!(out.contains("release 0.45.4-macos-aarch64"));
         assert!(out.contains("tar xzf ../kanade-agent-installer-0.45.4-macos-aarch64.tar.gz"));
         assert!(out.contains("sudo ./install.sh"));
         assert!(out.contains("launchctl print system/com.kanade.agent"));
         assert!(out.contains("com.apple.quarantine"));
-        assert!(out.contains("INACTIVE on macOS agents"));
+        assert!(!out.contains("Windows-only"));
+        assert!(out.contains("is not signing commands"));
         assert!(!out.contains('\r'));
+    }
+
+    const KEYS_JSON: &str = r#"[{"kid":"backend-1","public_key":"AAAA","label":"it's"}]"#;
+
+    fn install_sh_of(os: InstallerOs, keys: Option<&str>, enforcement: EnforcementPlan) -> String {
+        let seen = tar_round_trip(unix_tar_entries(
+            os,
+            "0.45.4-x",
+            b"bin".to_vec(),
+            "toml".into(),
+            Some("tok"),
+            keys,
+            enforcement,
+        ));
+        String::from_utf8(seen["install.sh"].1.clone()).unwrap()
+    }
+
+    #[test]
+    fn unix_install_sh_embeds_the_backend_key_and_enforcement() {
+        for os in [InstallerOs::Linux, InstallerOs::Macos] {
+            let sh = install_sh_of(os, Some(KEYS_JSON), EnforcementPlan::Embedded);
+            // Quoted as data: the embedded quote must not end the literal.
+            assert!(sh.contains(&format!(
+                "export KANADE_COMMAND_KEYS={}\n",
+                sh_quote(KEYS_JSON)
+            )));
+            assert!(sh.contains("export KANADE_REQUIRE_SIGNED_COMMANDS=1\n"));
+            assert!(sh.find("export KANADE_COMMAND_KEYS").unwrap() < sh.find("exec ./").unwrap());
+            assert!(!sh.contains('\r'));
+
+            let keys_only = install_sh_of(os, Some(KEYS_JSON), EnforcementPlan::Off);
+            assert!(keys_only.contains("KANADE_COMMAND_KEYS="));
+            assert!(!keys_only.contains("KANADE_REQUIRE_SIGNED_COMMANDS"));
+
+            // Requested but no key: never export the switch without a ring.
+            let none = install_sh_of(os, None, EnforcementPlan::RequestedButNoKey);
+            assert!(!none.contains("KANADE_COMMAND_KEYS"));
+            assert!(!none.contains("KANADE_REQUIRE_SIGNED_COMMANDS"));
+        }
+    }
+
+    #[test]
+    fn unix_readmes_name_the_signing_and_enforcement_state() {
+        let embedded = render_readme_linux("k", true, EnforcementPlan::Embedded);
+        assert!(embedded.contains("KANADE_REQUIRE_SIGNED_COMMANDS=1"));
+        let warned = render_readme_macos("k", false, EnforcementPlan::RequestedButNoKey);
+        assert!(warned.contains("*** WARNING"));
+        assert!(warned.contains("does NOT enable enforcement"));
+        assert!(!warned.contains('\r'));
     }
 }
