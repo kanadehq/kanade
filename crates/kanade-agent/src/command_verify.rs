@@ -261,7 +261,9 @@ struct KeyEntry {
 fn enforce_requested() -> bool {
     enforce_requested_from(
         kanade_shared::secrets::read_hklm_value(REG_SUBKEY, REG_ENFORCE),
-        platform_file(ENFORCE_FILE).as_deref(),
+        platform_file(ENFORCE_FILE)
+            .as_deref()
+            .map(|p| (p, ROOT_UID)),
     )
 }
 
@@ -271,14 +273,28 @@ fn platform_file(path: &str) -> Option<std::path::PathBuf> {
     (!cfg!(windows)).then(|| std::path::PathBuf::from(path))
 }
 
-/// Pure core of [`enforce_requested`], with both stores injected. The registry
-/// wins when it is set; the file is consulted only when the registry has
-/// nothing. An unreadable file reads as "not requested" — the host keeps
-/// verifying and reporting but does not refuse, the same fail-open the registry
-/// read has always had, and the safe direction when the alternative is a host
-/// that refuses everything because a file could not be opened.
-fn enforce_requested_from(registry: Option<String>, file: Option<&std::path::Path>) -> bool {
-    let value = registry.or_else(|| file.and_then(|p| std::fs::read_to_string(p).ok()));
+/// Pure core of [`enforce_requested`], with both stores injected (the file as
+/// `(path, owner uid)`). The registry wins when it is set; the file is
+/// consulted only when the registry has nothing.
+///
+/// A file that cannot be read for an ordinary reason reads as "not requested" —
+/// the host keeps verifying and reporting but does not refuse, the same
+/// fail-open the registry read has always had. A file that exists but is owned
+/// by someone other than `owner`, or is writable by group/other, is the
+/// opposite case: whoever can write it could flip `1` to `0`, and ignoring it
+/// would hand them exactly that. So an untrusted file is treated as a request
+/// to enforce whatever it says; the worst that costs is refusals on a host
+/// whose ring is non-empty (an empty ring still declines), and only root can
+/// put the host back.
+fn enforce_requested_from(registry: Option<String>, file: Option<(&std::path::Path, u32)>) -> bool {
+    let value = registry.or_else(|| {
+        let (path, owner) = file?;
+        if let Err(e) = check_file_trusted(path, owner) {
+            error!(error = %e, "enforcement file is not root-only — treating enforcement as requested");
+            return Some("1".to_string());
+        }
+        std::fs::read_to_string(path).ok()
+    });
     matches!(
         value
             .as_deref()
@@ -334,18 +350,14 @@ fn read_keyring_raw_from(
     }
 }
 
-/// Read the file store, keeping "absent" distinct from "present and unusable"
-/// for the same reason the registry does: absent adopts an empty ring, anything
-/// else must not be allowed to replace a working one.
-fn read_keyring_file(path: &std::path::Path, owner: u32) -> Result<Option<String>, String> {
+/// Refuse a local-config file another account could rewrite. The mode alone is
+/// not enough: a 0600 file owned by some other account is writable by that
+/// account, so the owner is checked too. A file that does not exist passes —
+/// absence is the caller's to interpret. No-op off unix.
+fn check_file_trusted(path: &std::path::Path, owner: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        // A keyring another account can rewrite is a trust root it can
-        // replace. Refuse it rather than load it; the ring in memory, if any,
-        // is kept. The mode alone is not enough: a 0600 file owned by some
-        // other account is writable by that account, so the owner is checked
-        // too.
         if let Ok(m) = std::fs::metadata(path) {
             if m.uid() != owner {
                 return Err(format!(
@@ -364,7 +376,15 @@ fn read_keyring_file(path: &std::path::Path, owner: u32) -> Result<Option<String
         }
     }
     #[cfg(not(unix))]
-    let _ = owner;
+    let _ = (path, owner);
+    Ok(())
+}
+
+/// Read the file store, keeping "absent" distinct from "present and unusable"
+/// for the same reason the registry does: absent adopts an empty ring, anything
+/// else must not be allowed to replace a working one.
+fn read_keyring_file(path: &std::path::Path, owner: u32) -> Result<Option<String>, String> {
+    check_file_trusted(path, owner)?;
     interpret_file_read(path, std::fs::read_to_string(path))
 }
 
@@ -2621,7 +2641,7 @@ mod tests {
         ] {
             std::fs::write(&path, content).unwrap();
             assert_eq!(
-                enforce_requested_from(None, Some(&path)),
+                enforce_requested_from(None, Some((&path, me()))),
                 want,
                 "content {content:?}"
             );
@@ -2634,10 +2654,27 @@ mod tests {
         // Absent, and a directory where a file should be (unreadable as text).
         assert!(!enforce_requested_from(
             None,
-            Some(&dir.path().join("nope"))
+            Some((&dir.path().join("nope"), me()))
         ));
-        assert!(!enforce_requested_from(None, Some(dir.path())));
+        assert!(!enforce_requested_from(None, Some((dir.path(), me()))));
         assert!(!enforce_requested_from(None, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_enforce_file_others_can_rewrite_is_treated_as_enforcing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("require-signed-commands");
+        // Owned by someone else: even "0" must not switch enforcement off.
+        std::fs::write(&path, "0").unwrap();
+        assert!(enforce_requested_from(None, Some((&path, me() + 1))));
+        // Writable by group/other.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(enforce_requested_from(None, Some((&path, me()))));
+        // Trusted again: the content decides.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!enforce_requested_from(None, Some((&path, me()))));
     }
 
     #[test]
@@ -2645,9 +2682,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("require-signed-commands");
         std::fs::write(&path, "0").unwrap();
-        assert!(enforce_requested_from(Some("1".into()), Some(&path)));
+        assert!(enforce_requested_from(
+            Some("1".into()),
+            Some((&path, me()))
+        ));
         std::fs::write(&path, "1").unwrap();
-        assert!(!enforce_requested_from(Some("0".into()), Some(&path)));
+        assert!(!enforce_requested_from(
+            Some("0".into()),
+            Some((&path, me()))
+        ));
     }
 
     #[test]

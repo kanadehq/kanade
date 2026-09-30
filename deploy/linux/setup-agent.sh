@@ -67,12 +67,17 @@ trap '[ -z "$keys_stage" ] || rm -f "$keys_stage"' EXIT
 # public_key on every entry, no duplicate kid) so nothing can be accepted here
 # that the agent would then reject, and no jq is needed.
 #
-# Run from a private executable copy: a bundle extracted from a tar that lost
-# the exec bit still validates. Exit 3 is "ring rejected"; any other failure
-# means the checker itself could not run (an older agent without the flag, or a
-# binary for another architecture), which is reported as that rather than as a
-# bad ring.
+# Run the bundled binary in place when it is executable, so a noexec temp
+# directory is never in the way; otherwise from a private executable copy, so a
+# bundle extracted from a tar that lost the exec bit still validates. Exit 3 is
+# "ring rejected"; any other failure means the checker itself could not run (an
+# older agent without the flag, a binary for another architecture, or no place
+# to exec from), which is reported as that rather than as a bad ring.
 check_keys() {
+	if [ -x "$bundle/bin/kanade-agent" ]; then
+		"$bundle/bin/kanade-agent" --check-command-keys "$1"
+		return $?
+	fi
 	_chk="$(umask 077; mktemp "${TMPDIR:-/tmp}/kanade-agent-check.XXXXXX")"
 	_rc=0
 	{ cp "$bundle/bin/kanade-agent" "$_chk" && chmod 0700 "$_chk" && "$_chk" --check-command-keys "$1"; } || _rc=$?
@@ -83,7 +88,7 @@ check_failed() {
 	if [ "$1" -eq 3 ]; then
 		echo "$2 rejected — nothing was changed" >&2
 	else
-		echo "could not run the bundled agent's keyring check (exit $1): its kanade-agent is probably older than this script or built for another architecture — rebuild the bundle. Nothing was changed" >&2
+		echo "could not run the bundled agent's keyring check (exit $1): its kanade-agent is probably older than this script or built for another architecture — rebuild the bundle, or make bin/kanade-agent executable and re-run. Nothing was changed" >&2
 	fi
 	exit 1
 }
