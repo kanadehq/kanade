@@ -49,6 +49,14 @@
 //! rotate a key is the kind of procedure that does not get used. The public
 //! keys are not secrets; the ACL is there to stop tampering, not disclosure.
 //!
+//! Off-Windows there is no registry, so the same ring comes from
+//! `/etc/kanade/command-keys.json` (root-only, 0600) when the registry yields
+//! nothing, and enforcement from the root-only `/etc/kanade/require-signed-commands`
+//! file. Precedence is registry, then file, then none; a registry that fails to
+//! read does not fall through to the file. Both files are local config in the
+//! same sense as the registry values — not KV — and both are read through the
+//! same loader, so the reload and heartbeat behaviour below applies unchanged.
+//!
 //! # The ring reloads itself when, and only when, it is wrong
 //!
 //! Loading once at startup made provisioning a no-op until the agent
@@ -133,8 +141,8 @@
 //! ## If the keyring source stops being local
 //!
 //! The reload runs synchronously on the async command path, which is fine only
-//! because the registry is local and memory-mapped: microseconds, at most once
-//! per interval per machine. Move the ring to a network fetch, a remote share
+//! because the registry and the keyring file are local: microseconds, at most
+//! once per interval per machine. Move the ring to a network fetch, a remote share
 //! or a KV read and that inverts — it then belongs on `spawn_blocking`, and the
 //! `last_reload` guard held across the load (which is what collapses two
 //! concurrent misses into one read) has to be reworked around an async-aware
@@ -158,6 +166,35 @@ const REG_VALUE: &str = "CommandKeys";
 /// under a running agent would make "was this host enforcing when it refused?"
 /// unanswerable after the fact.
 const REG_ENFORCE: &str = "RequireSignedCommands";
+
+/// File-based keyring for hosts with no registry, the off-Windows counterpart
+/// of `CommandKeys` — same JSON array, same strict [`parse_keyring`] rules.
+///
+/// Provisioned like the NATS token in `agent.env`: a root-owned 0600 file under
+/// `/etc/kanade`, written by the setup script. The public keys are not secret;
+/// the mode is there to stop tampering, exactly as the registry ACL is.
+const KEYRING_FILE: &str = "/etc/kanade/command-keys.json";
+
+/// File that turns enforcement on off-Windows — the counterpart of
+/// [`REG_ENFORCE`], and like it **local config, never KV**. Holds `1` / `true`
+/// / `yes`; anything else, or no file, leaves enforcement off. Its own file
+/// rather than a line in `agent.env` because launchd only exports the token
+/// from `agent.env`, so a setting there would silently not reach a macOS agent.
+const ENFORCE_FILE: &str = "/etc/kanade/require-signed-commands";
+
+/// Where an operator provisions the keyring on this platform, for messages.
+#[cfg(windows)]
+macro_rules! keyring_location {
+    () => {
+        r"HKLM\SOFTWARE\kanade\agent\CommandKeys"
+    };
+}
+#[cfg(not(windows))]
+macro_rules! keyring_location {
+    () => {
+        "/etc/kanade/command-keys.json"
+    };
+}
 
 /// `source` on emitted [`ObsEvent`]s.
 const SOURCE: &str = "command_signature";
@@ -215,15 +252,35 @@ struct KeyEntry {
 /// rejects every command.
 /// Whether local config asks this host to enforce (#1165 stage 3).
 ///
-/// Deliberately reads only the registry. The `agent_config` KV bucket is the
-/// convenient place and the wrong one: any holder of the shared NATS token can
-/// write it (#1155), so an attacker able to forge commands could first turn
-/// off the check that would have caught them. An enforcement switch reachable
-/// by the attacker is not a switch. Returns `false` off-Windows, where
-/// `read_hklm_value` has no store to read.
+/// Deliberately reads only local config: the registry on Windows, a root-only
+/// file elsewhere. The `agent_config` KV bucket is the convenient place and the
+/// wrong one: any holder of the shared NATS token can write it (#1155), so an
+/// attacker able to forge commands could first turn off the check that would
+/// have caught them. An enforcement switch reachable by the attacker is not a
+/// switch.
 fn enforce_requested() -> bool {
+    enforce_requested_from(
+        kanade_shared::secrets::read_hklm_value(REG_SUBKEY, REG_ENFORCE),
+        platform_file(ENFORCE_FILE).as_deref(),
+    )
+}
+
+/// The file store's path on this platform: `None` on Windows, where the
+/// registry is the only store and a stray file must not become a second one.
+fn platform_file(path: &str) -> Option<std::path::PathBuf> {
+    (!cfg!(windows)).then(|| std::path::PathBuf::from(path))
+}
+
+/// Pure core of [`enforce_requested`], with both stores injected. The registry
+/// wins when it is set; the file is consulted only when the registry has
+/// nothing. An unreadable file reads as "not requested" — the host keeps
+/// verifying and reporting but does not refuse, the same fail-open the registry
+/// read has always had, and the safe direction when the alternative is a host
+/// that refuses everything because a file could not be opened.
+fn enforce_requested_from(registry: Option<String>, file: Option<&std::path::Path>) -> bool {
+    let value = registry.or_else(|| file.and_then(|p| std::fs::read_to_string(p).ok()));
     matches!(
-        kanade_shared::secrets::read_hklm_value(REG_SUBKEY, REG_ENFORCE)
+        value
             .as_deref()
             .map(str::trim)
             .map(str::to_ascii_lowercase)
@@ -244,7 +301,71 @@ fn read_keyring_raw() -> Result<Option<String>, String> {
     // Read once at startup that hardly matters. Read on a schedule it matters a
     // lot — "absent" means *adopt an empty ring*, so a transient failure would
     // silently drop every key this machine trusts, and keep doing it.
-    kanade_shared::secrets::try_read_hklm_value(REG_SUBKEY, REG_VALUE)
+    read_keyring_raw_from(
+        kanade_shared::secrets::try_read_hklm_value(REG_SUBKEY, REG_VALUE),
+        platform_file(KEYRING_FILE).as_deref(),
+    )
+}
+
+/// Combine the two stores: registry, then file, then nothing.
+///
+/// A registry that holds a value wins outright. A registry that *failed* is an
+/// error and does not fall through to the file — "could not read the
+/// authoritative store" must not quietly become "use the other one", or a
+/// transient registry failure would swap in a possibly older ring. Only a
+/// registry with nothing in it defers to the file.
+fn read_keyring_raw_from(
+    registry: Result<Option<String>, String>,
+    file: Option<&std::path::Path>,
+) -> Result<Option<String>, String> {
+    match registry? {
+        Some(v) => Ok(Some(v)),
+        None => match file {
+            Some(p) => read_keyring_file(p),
+            None => Ok(None),
+        },
+    }
+}
+
+/// Read the file store, keeping "absent" distinct from "present and unusable"
+/// for the same reason the registry does: absent adopts an empty ring, anything
+/// else must not be allowed to replace a working one.
+fn read_keyring_file(path: &std::path::Path) -> Result<Option<String>, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // A keyring another account can rewrite is a trust root it can
+        // replace. Refuse it rather than load it; the ring in memory, if any,
+        // is kept.
+        match std::fs::metadata(path) {
+            Ok(m) if m.permissions().mode() & 0o022 != 0 => {
+                return Err(format!(
+                    "{}: writable by group/other (mode {:o}) — refusing to trust it; chmod 0600",
+                    path.display(),
+                    m.permissions().mode() & 0o777
+                ));
+            }
+            _ => {}
+        }
+    }
+    interpret_file_read(path, std::fs::read_to_string(path))
+}
+
+/// Classify the outcome of reading the file. Split from the read so a
+/// permission failure is reachable from a test on any OS, including as root.
+fn interpret_file_read(
+    path: &std::path::Path,
+    read: std::io::Result<String>,
+) -> Result<Option<String>, String> {
+    match read {
+        Ok(s) if s.trim().is_empty() => Err(format!(
+            "{}: file is empty — write `[]` to revoke every key deliberately, or remove the file",
+            path.display()
+        )),
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// Parse what [`read_keyring_raw`] returned. `None` (value absent) is the
@@ -300,6 +421,46 @@ fn parse_keyring(raw: &str) -> Result<KeyRing, String> {
         ring.insert(e.kid, vk, policy);
     }
     Ok(ring)
+}
+
+/// Validate a keyring file the way the Windows deploy script validates
+/// `-CommandKeys`, plus the agent's own strict parse, and return its kids.
+///
+/// Backs the agent's hidden `--check-command-keys` flag, which the setup
+/// scripts call before writing anything. Using the agent's own parser means the
+/// installer cannot accept a ring the running agent would then reject, and it
+/// needs no `jq` on a minimal Linux or a stock macOS.
+pub fn check_keyring_file(path: &std::path::Path) -> Result<Vec<String>, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(raw.trim()).map_err(|e| format!("not valid JSON: {e}"))?;
+    let entries = value
+        .as_array()
+        .ok_or("must be a JSON ARRAY of entries, even for a single key")?;
+    if entries.is_empty() {
+        return Err("is an empty array — that provisions no keys at all".into());
+    }
+    let mut kids: Vec<String> = Vec::new();
+    for e in entries {
+        let field = |name: &str| {
+            e.get(name)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+        };
+        let (Some(kid), Some(_)) = (field("kid"), field("public_key")) else {
+            return Err(format!(
+                "every entry needs a non-empty STRING 'kid' and 'public_key'; got: {e}"
+            ));
+        };
+        if kids.iter().any(|k| k == kid) {
+            return Err(format!(
+                "key id {kid} appears more than once — two different keys must never share an id"
+            ));
+        }
+        kids.push(kid.to_string());
+    }
+    parse_keyring(raw.trim())?;
+    Ok(kids)
 }
 
 /// Pull the signature headers off a NATS message.
@@ -380,8 +541,12 @@ impl Outcome {
                  signing yet."
             }
             Outcome::Unprovisioned => {
-                "this host holds no command-signing keys at all, so nothing can be verified. \
-                 Provision HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys."
+                concat!(
+                    "this host holds no command-signing keys at all, so nothing can be verified. \
+                     Provision ",
+                    keyring_location!(),
+                    "."
+                )
             }
             Outcome::UnknownKid => {
                 "signed by a key this host does not have — it likely missed a rotation. Re-run \
@@ -628,12 +793,13 @@ impl Verifier {
                 .empty_ring_warned
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
             {
-                error!(
-                    "this host is configured to require signed commands but its keyring is now \
-                     EMPTY — declining to enforce rather than refusing everything, including the \
-                     command that would restore the keys. Re-provision \
-                     HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys."
-                );
+                error!(concat!(
+                    "this host is configured to require signed commands but its keyring is \
+                         now EMPTY — declining to enforce rather than refusing everything, \
+                         including the command that would restore the keys. Re-provision ",
+                    keyring_location!(),
+                    "."
+                ));
             }
             return false;
         }
@@ -821,8 +987,10 @@ impl Verifier {
                 kid,
                 request_id,
                 reload,
-                "command is signed but this agent holds no keys — provision \
-                 HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys"
+                concat!(
+                    "command is signed but this agent holds no keys — provision ",
+                    keyring_location!()
+                )
             );
             Outcome::Unprovisioned
         } else {
@@ -2138,5 +2306,274 @@ mod tests {
             ),
             Outcome::Verified
         );
+    }
+
+    // ---- file-based keyring (hosts with no registry) ----
+
+    fn ring_json(kid: &str, sk: &SigningKey) -> String {
+        ring_to_json(&backend_ring(kid, sk)).expect("non-empty ring")
+    }
+
+    /// A loader over a real file, the way production reads it off-Windows.
+    fn file_loader(path: std::path::PathBuf) -> Loader {
+        Box::new(move || read_keyring_raw_from(Ok(None), Some(&path)))
+    }
+
+    #[test]
+    fn an_absent_keyring_file_is_nothing_provisioned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        assert_eq!(read_keyring_raw_from(Ok(None), Some(&path)), Ok(None));
+        // No file store at all (Windows) behaves the same.
+        assert_eq!(read_keyring_raw_from(Ok(None), None), Ok(None));
+    }
+
+    #[test]
+    fn a_valid_keyring_file_is_read_and_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        let sk = SigningKey::from_bytes(&[71u8; 32]);
+        std::fs::write(&path, ring_json("backend-1", &sk)).unwrap();
+
+        let raw = read_keyring_raw_from(Ok(None), Some(&path)).unwrap();
+        let ring = parse_raw(raw.as_deref()).unwrap();
+        assert_eq!(ring.kids().collect::<Vec<_>>(), vec!["backend-1"]);
+    }
+
+    #[test]
+    fn a_malformed_keyring_file_is_present_but_unparseable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        // One good entry and one bad: the strict parse rejects the whole ring.
+        let sk = SigningKey::from_bytes(&[72u8; 32]);
+        std::fs::write(
+            &path,
+            format!(
+                r#"[{{"kid":"ok","public_key":"{}"}},{{"kid":"bad","public_key":"not-base64!"}}]"#,
+                b64(sk.verifying_key().as_bytes())
+            ),
+        )
+        .unwrap();
+        let raw = read_keyring_raw_from(Ok(None), Some(&path)).unwrap();
+        assert!(raw.is_some(), "present, so not reported as absent");
+        assert!(parse_raw(raw.as_deref()).is_err());
+    }
+
+    #[test]
+    fn an_empty_keyring_file_is_an_error_but_an_empty_array_is_a_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        std::fs::write(&path, "  \n").unwrap();
+        assert!(read_keyring_raw_from(Ok(None), Some(&path)).is_err());
+        std::fs::write(&path, "[]").unwrap();
+        let raw = read_keyring_raw_from(Ok(None), Some(&path)).unwrap();
+        assert!(parse_raw(raw.as_deref()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_keyring_file_is_an_error_not_absence() {
+        // Injected so it holds on every OS and when the suite runs as root.
+        let path = std::path::Path::new("/etc/kanade/command-keys.json");
+        let denied = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(interpret_file_read(path, denied).is_err());
+        let gone = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(interpret_file_read(path, gone), Ok(None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keyring_file_others_can_write_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        let sk = SigningKey::from_bytes(&[73u8; 32]);
+        std::fs::write(&path, ring_json("backend-1", &sk)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(read_keyring_raw_from(Ok(None), Some(&path)).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_keyring_raw_from(Ok(None), Some(&path)).is_ok());
+    }
+
+    #[test]
+    fn the_registry_wins_over_the_file_and_a_registry_error_does_not_fall_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        let file_key = SigningKey::from_bytes(&[74u8; 32]);
+        std::fs::write(&path, ring_json("from-file", &file_key)).unwrap();
+
+        // Registry holds a value: it is used, the file is ignored.
+        let reg = Ok(Some("[]".to_string()));
+        assert_eq!(
+            read_keyring_raw_from(reg, Some(&path)),
+            Ok(Some("[]".to_string()))
+        );
+        // Registry has nothing: the file is used.
+        assert_eq!(
+            read_keyring_raw_from(Ok(None), Some(&path)).unwrap(),
+            Some(ring_json("from-file", &file_key))
+        );
+        // Registry failed: that is an error, not licence to use the file.
+        assert!(read_keyring_raw_from(Err("registry unavailable".into()), Some(&path)).is_err());
+    }
+
+    #[test]
+    fn a_file_keyring_verifies_and_is_listed_like_the_registry_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        let sk = SigningKey::from_bytes(&[75u8; 32]);
+        std::fs::write(&path, ring_json("backend-1", &sk)).unwrap();
+        let v = Verifier::with_loader("PC1".into(), test_dir(), file_loader(path));
+
+        let now = 1_700_000_000_000i64;
+        assert_eq!(
+            v.observe_at(b"p", &sign(&sk, "backend-1", b"p", now), "r1", now),
+            Outcome::Verified
+        );
+        assert_eq!(v.trusted_keys(), vec![reported("backend-1", &sk)]);
+    }
+
+    #[test]
+    fn a_key_added_to_the_file_after_boot_takes_effect_on_an_unknown_kid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        let v = Verifier::with_loader("PC1".into(), test_dir(), file_loader(path.clone()));
+        let sk = SigningKey::from_bytes(&[76u8; 32]);
+        let now = 1_700_000_000_000i64;
+        let t = Instant::now() + RELOAD_MIN_INTERVAL * 2;
+        let signed = sign(&sk, "backend-1", b"p", now);
+        assert_eq!(
+            v.classify(b"p", &signed, "r1", now, t),
+            Outcome::Unprovisioned
+        );
+
+        std::fs::write(&path, ring_json("backend-1", &sk)).unwrap();
+        assert_eq!(
+            v.classify(b"p", &signed, "r2", now, t + RELOAD_MIN_INTERVAL * 2),
+            Outcome::Verified
+        );
+    }
+
+    #[test]
+    fn revoking_a_key_in_the_file_takes_effect_on_the_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        let backend = SigningKey::from_bytes(&[77u8; 32]);
+        let leaked = SigningKey::from_bytes(&[78u8; 32]);
+        let mut both = backend_ring("backend-1", &backend);
+        both.insert(
+            "leaked",
+            leaked.verifying_key(),
+            KeyPolicy::backend("leaked"),
+        );
+        std::fs::write(&path, ring_to_json(&both).unwrap()).unwrap();
+        let v = Verifier::with_loader("PC1".into(), test_dir(), file_loader(path.clone()));
+        assert_eq!(v.trusted_keys().len(), 2);
+
+        std::fs::write(&path, ring_json("backend-1", &backend)).unwrap();
+        let (kids, _) = v.refresh_and_report();
+        assert_eq!(kids, vec![reported("backend-1", &backend)]);
+
+        // Removing the file is a deliberate revocation of everything.
+        std::fs::remove_file(&path).unwrap();
+        let (kids, _) = v.refresh_and_report();
+        assert!(kids.is_empty());
+    }
+
+    #[test]
+    fn a_broken_keyring_file_keeps_the_working_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("command-keys.json");
+        let sk = SigningKey::from_bytes(&[79u8; 32]);
+        std::fs::write(&path, ring_json("backend-1", &sk)).unwrap();
+        let v = Verifier::with_loader("PC1".into(), test_dir(), file_loader(path.clone()));
+
+        std::fs::write(&path, "[{\"kid\":\"half-writ").unwrap();
+        let (kids, _) = v.refresh_and_report();
+        assert_eq!(kids, vec![reported("backend-1", &sk)]);
+    }
+
+    #[test]
+    fn the_installer_check_applies_the_deploy_script_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.json");
+        let sk = SigningKey::from_bytes(&[81u8; 32]);
+        let pk = b64(sk.verifying_key().as_bytes());
+        let check = |body: &str| {
+            std::fs::write(&path, body).unwrap();
+            check_keyring_file(&path)
+        };
+        assert_eq!(
+            check(&format!(r#"[{{"kid":"a","public_key":"{pk}"}}]"#)),
+            Ok(vec!["a".to_string()])
+        );
+        assert!(check("{}").is_err(), "not an array");
+        assert!(check("[]").is_err(), "empty");
+        assert!(check("nope").is_err(), "not JSON");
+        assert!(check(&format!(r#"[{{"kid":20260728,"public_key":"{pk}"}}]"#)).is_err());
+        assert!(check(&format!(r#"[{{"kid":" ","public_key":"{pk}"}}]"#)).is_err());
+        assert!(check(r#"[{"kid":"a","public_key":""}]"#).is_err());
+        assert!(
+            check(&format!(
+                r#"[{{"kid":"a","public_key":"{pk}"}},{{"kid":"a","public_key":"{pk}"}}]"#
+            ))
+            .is_err(),
+            "duplicate kid"
+        );
+        assert!(check(r#"[{"kid":"a","public_key":"not-a-key"}]"#).is_err());
+    }
+
+    // ---- enforcement flag off-Windows ----
+
+    #[test]
+    fn the_enforce_file_turns_enforcement_on_only_for_truthy_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("require-signed-commands");
+        for (content, want) in [
+            ("1\n", true),
+            ("true", true),
+            (" YES ", true),
+            ("0", false),
+            ("", false),
+            ("no", false),
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(
+                enforce_requested_from(None, Some(&path)),
+                want,
+                "content {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_or_unreadable_enforce_file_leaves_enforcement_off() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent, and a directory where a file should be (unreadable as text).
+        assert!(!enforce_requested_from(
+            None,
+            Some(&dir.path().join("nope"))
+        ));
+        assert!(!enforce_requested_from(None, Some(dir.path())));
+        assert!(!enforce_requested_from(None, None));
+    }
+
+    #[test]
+    fn the_registry_flag_takes_precedence_over_the_enforce_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("require-signed-commands");
+        std::fs::write(&path, "0").unwrap();
+        assert!(enforce_requested_from(Some("1".into()), Some(&path)));
+        std::fs::write(&path, "1").unwrap();
+        assert!(!enforce_requested_from(Some("0".into()), Some(&path)));
+    }
+
+    #[test]
+    fn a_requested_flag_with_an_empty_ring_still_declines_to_enforce() {
+        let v =
+            Verifier::with_loader_and_policy("PC1".into(), test_dir(), Box::new(|| Ok(None)), true);
+        assert!(!v.enforcing_now());
+        let sk = SigningKey::from_bytes(&[80u8; 32]);
+        let v = enforcing_with(backend_ring("backend-1", &sk));
+        assert!(v.enforcing_now());
     }
 }

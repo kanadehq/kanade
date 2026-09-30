@@ -39,7 +39,10 @@ done
 echo "==> Creating users and directories"
 id -u kanade >/dev/null 2>&1 || useradd --system --home /var/lib/kanade --shell /usr/sbin/nologin kanade
 id -u caddy  >/dev/null 2>&1 || useradd --system --home /var/lib/caddy  --shell /usr/sbin/nologin caddy
-install -d -o kanade -g kanade /etc/kanade /var/lib/kanade /var/lib/kanade/nats/jetstream /var/log/kanade
+install -d -o kanade -g kanade /var/lib/kanade /var/lib/kanade/nats/jetstream /var/log/kanade
+# Root-owned so a co-located agent's keyring / enforcement files in here cannot
+# be deleted or replaced by the shared `kanade` account.
+install -d -o root -g root -m 0755 /etc/kanade
 install -d -o caddy  -g caddy  /var/lib/caddy
 install -d /etc/caddy
 

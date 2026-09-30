@@ -160,6 +160,12 @@ struct Cli {
     /// dump can be proved to round-trip rather than assumed to.
     #[arg(long, hide = true)]
     capture_decode: Option<PathBuf>,
+
+    /// Internal: validate a command-keys file with the agent's own rules and
+    /// exit (0 = acceptable, prints its key ids). Used by the setup scripts
+    /// before they provision a keyring; not for manual use.
+    #[arg(long, hide = true)]
+    check_command_keys: Option<PathBuf>,
 }
 
 /// Top-level entry point.
@@ -178,6 +184,20 @@ fn main() -> Result<()> {
     // rollback attempt counter in the shared data dir) and must NOT attach to
     // the SCM — so branch out before either. It reads its own argv only.
     let cli = Cli::parse();
+    // Before config, tracing or the boot sentinel: a pure file check run by the
+    // installer, which must not touch agent state.
+    if let Some(path) = &cli.check_command_keys {
+        return match command_verify::check_keyring_file(path) {
+            Ok(kids) => {
+                println!("{}", kids.join(", "));
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("command keys rejected: {e}");
+                std::process::exit(2);
+            }
+        };
+    }
     if cli.session_agent {
         return run_session_agent();
     }

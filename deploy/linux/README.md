@@ -268,9 +268,33 @@ server settings (`agent_install`). Extract and `sudo ./install.sh` — no
 the `agent_releases` Object Store (`<version>-linux-<arch>` keys,
 published with `kanade agent publish --version …`); the manual
 bundle-agent.sh flow above remains the way to install a binary that was
-never published to the store. One caveat: command-signing keyring
-provisioning is Windows-only today, so agents installed this way run
-with signature verification inactive (the #1165 gap).
+never published to the store. When the backend signs commands, the
+tarball's `install.sh` also provisions its command-signing public key
+(and, if the require-signed-commands server setting is on, enforcement).
+
+### Command signing on a Linux agent
+
+`setup-agent.sh` takes the same inputs as the Windows deploy script:
+
+```sh
+sudo KANADE_COMMAND_KEYS='[{"kid":"backend-1","public_key":"<base64>"}]' \
+     KANADE_REQUIRE_SIGNED_COMMANDS=1 bash ./setup-agent.sh
+```
+
+- `KANADE_COMMAND_KEYS` (JSON array) is written to
+  `/etc/kanade/command-keys.json` (root-owned, 0600). The agent reads it
+  when the registry yields nothing (always, off-Windows), re-reads it on
+  an unknown key id and on every heartbeat, so adding or removing a key
+  takes effect without a restart. A ring that is empty, not a JSON array,
+  has a blank `kid`/`public_key` or repeats a `kid` is refused.
+- `KANADE_REQUIRE_SIGNED_COMMANDS=1` writes `1` to
+  `/etc/kanade/require-signed-commands` (root-owned, 0600); `0` removes
+  it; unset keeps the current setting. It is read once at agent start and
+  is deliberately not settable through KV / `agent_config`. An empty
+  keyring never enforces, and the script refuses `=1` without a keyring.
+- `/etc/kanade` is root-owned so the shared `kanade` account cannot
+  replace these files; the agent also refuses a keyring file that is
+  group/other-writable.
 
 Note: `sh` / `pwsh` command execution on the Linux agent needs #1198
 (older agent builds can register and be monitored but fail exec at
@@ -287,8 +311,8 @@ tarball, or the same `installer.sh` one-liner, which branches on
   artifact ships from a Release like the Windows binaries — tracked
   separately; `build-aarch64.sh` is the interim producer.
 - This bundle is the #1172 floor (TLS, real secrets, one public surface).
-  The fast-follow — command signing (#1165), per-agent identity (#1162),
-  update signing — is not wired here.
+  The fast-follow — per-agent identity (#1162), update signing — is not
+  wired here.
 - `Restart=on-failure` maps the Windows "exit(1) → SCM recovery" self-
   restart onto systemd. The boot-sentinel quarantine (#582) is Windows-
   deploy-script logic and has no Linux equivalent yet.

@@ -11,6 +11,11 @@
 #   sudo KANADE_NATS_URL=wss://nats.kanade.example.com \
 #        KANADE_NATS_TOKEN=<the deployment's token> bash ./setup-agent.sh
 #
+#   # Command signing (optional): trust the backend's signing key, and refuse
+#   # commands that do not verify against it:
+#   sudo KANADE_COMMAND_KEYS='[{"kid":"backend-1","public_key":"<base64>"}]' \
+#        KANADE_REQUIRE_SIGNED_COMMANDS=1 bash ./setup-agent.sh
+#
 # Invoke via `bash ./setup-agent.sh` (not `./setup-agent.sh`): a
 # Windows-built bundle's tar may not carry the exec bit, so a bare
 # `./setup-agent.sh` fails with "command not found".
@@ -25,23 +30,6 @@ set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 
-# #1155/#1165 command-signing keyring + enforcement provisioning is
-# Windows-only today: kanade_shared::secrets::read_hklm_value() (what
-# command_verify.rs's keyring loader and enforce_requested() both read from)
-# is a compile-time stub on non-Windows that always returns None, so there
-# is no store on this platform for either value to land in. Fail loudly
-# rather than silently accepting and ignoring these — an operator who thinks
-# they just provisioned a keyring or turned on enforcement, and did not,
-# needs to find out here, not the first time an agent fails to verify
-# anything.
-if [ -n "${KANADE_COMMAND_KEYS:-}" ] || [ -n "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" ]; then
-	echo "KANADE_COMMAND_KEYS / KANADE_REQUIRE_SIGNED_COMMANDS: not yet supported on this OS." >&2
-	echo "Command-signing keyring provisioning and RequireSignedCommands enforcement are" >&2
-	echo "implemented for Windows only (see command_verify.rs / deploy-agent.ps1). Unset" >&2
-	echo "these before re-running, or provision this host on Windows instead." >&2
-	exit 1
-fi
-
 # The bundle root is this script's directory. Everything is installed
 # from here; nothing is downloaded.
 bundle="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,12 +39,60 @@ for f in bin/kanade-agent etc/agent.toml systemd/kanade-agent.service; do
 	[ -e "$bundle/$f" ] || { echo "bundle is missing $f — rebuild it with bundle-agent.sh" >&2; exit 1; }
 done
 
+# Command-signing keyring + enforcement (optional). Validated here, before
+# anything on the box is stopped or changed, so a bad ring fails the run with
+# the old agent still in place.
+#
+#   KANADE_COMMAND_KEYS                 JSON array of {kid, public_key[, label,
+#                                       max_age_secs, audit_every_use]}; replaces
+#                                       the host's keyring. Unset keeps the
+#                                       existing one.
+#   KANADE_REQUIRE_SIGNED_COMMANDS      1 = refuse unsigned/unverified commands
+#                                       (needs a non-empty keyring), 0 = stop
+#                                       enforcing, unset = keep as is.
+#
+# Both land in root-only 0600 files the agent reads (command-keys.json and
+# require-signed-commands) — local config, deliberately not something a NATS
+# message or the agent_config KV can change.
+keys_file=/etc/kanade/command-keys.json
+enforce_file=/etc/kanade/require-signed-commands
+case "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" in
+	""|0|1) ;;
+	*) echo "KANADE_REQUIRE_SIGNED_COMMANDS must be 1 (enforce), 0 (stop enforcing) or unset (keep the current setting)" >&2; exit 1 ;;
+esac
+keys_stage=""
+trap '[ -z "$keys_stage" ] || rm -f "$keys_stage"' EXIT
+# Validation is the agent's own parser (same strict rules it applies at run
+# time, plus the deploy-agent.ps1 checks: JSON array, non-empty, string kid +
+# public_key on every entry, no duplicate kid) so nothing can be accepted here
+# that the agent would then reject, and no jq is needed.
+check_keys() {
+	"$bundle/bin/kanade-agent" --check-command-keys "$1"
+}
+if [ -n "${KANADE_COMMAND_KEYS:-}" ]; then
+	keys_stage="$(umask 077; mktemp "${TMPDIR:-/tmp}/kanade-command-keys.XXXXXX")"
+	printf '%s\n' "$KANADE_COMMAND_KEYS" > "$keys_stage"
+	keys_kids="$(check_keys "$keys_stage")" || { echo "KANADE_COMMAND_KEYS rejected — nothing was changed" >&2; exit 1; }
+elif [ -f "$keys_file" ] && [ "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" = "1" ]; then
+	check_keys "$keys_file" >/dev/null || { echo "the existing $keys_file is not a valid keyring — pass KANADE_COMMAND_KEYS to replace it; nothing was changed" >&2; exit 1; }
+fi
+if [ "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" = "1" ] && [ -z "$keys_stage" ] && [ ! -f "$keys_file" ]; then
+	echo "KANADE_REQUIRE_SIGNED_COMMANDS=1 but this host has no keyring (and none was passed). Enforcing with an empty ring is inert — the agent declines to enforce — so pass KANADE_COMMAND_KEYS too." >&2
+	exit 1
+fi
+
 echo "==> Creating user and directories"
 # Reuse the `kanade` service user if a backend already made it; the agent
 # itself runs as root (see the unit), but the data/log dirs are owned by
 # kanade for parity with the backend's layout.
 id -u kanade >/dev/null 2>&1 || useradd --system --home /var/lib/kanade --shell /usr/sbin/nologin kanade
-install -d -o kanade -g kanade /etc/kanade /var/log/kanade
+install -d -o kanade -g kanade /var/log/kanade
+# /etc/kanade is root-owned: the keyring and enforcement files in it are the
+# agent's trust root, and a directory the shared `kanade` account owns would
+# let it delete or replace them (renaming needs directory write, not file
+# write). A redeploy also puts this back if an earlier install left it
+# kanade-owned.
+install -d -o root -g root -m 0755 /etc/kanade
 # The agent runs as root; keep its data dir root-owned (0700) so the
 # shared, lower-privileged `kanade` account can't read or tamper with
 # agent state.
@@ -128,6 +164,40 @@ printf 'KANADE_NATS_TOKEN=%s\n' "$token" > /etc/kanade/agent.env
 # process must not be able to read the root agent's token file.
 chown root:root /etc/kanade/agent.env
 chmod 0600 /etc/kanade/agent.env
+
+echo "==> Command-signing keyring (root-only)"
+# Write to a temp file beside the target, fix owner/mode, then rename: the
+# agent re-reads these while running, and a rename means it never sees a
+# half-written ring (which it would reject and keep its old one, but there is
+# no reason to offer it the chance).
+put_root_file() {
+	_tmp="$(umask 077; mktemp /etc/kanade/.kanade-cfg.XXXXXX)"
+	cat "$1" > "$_tmp"
+	chown root:root "$_tmp"
+	chmod 0600 "$_tmp"
+	mv -f "$_tmp" "$2"
+}
+if [ -n "$keys_stage" ]; then
+	put_root_file "$keys_stage" "$keys_file"
+	echo "    $keys_file provisioned, kids: $keys_kids"
+elif [ -f "$keys_file" ]; then
+	echo "    keeping the existing $keys_file"
+else
+	echo "    none provisioned (pass KANADE_COMMAND_KEYS to enable signature verification)"
+fi
+case "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" in
+	1)
+		_one="$(umask 077; mktemp "${TMPDIR:-/tmp}/kanade-enforce.XXXXXX")"
+		echo 1 > "$_one"
+		put_root_file "$_one" "$enforce_file"
+		rm -f "$_one"
+		echo "    enforcing: unsigned/unverified commands will be refused"
+		;;
+	0)
+		rm -f "$enforce_file"
+		echo "    enforcement off"
+		;;
+esac
 
 echo "==> systemd unit (from bundle)"
 install -m 0644 "$bundle/systemd/kanade-agent.service" /etc/systemd/system/kanade-agent.service
