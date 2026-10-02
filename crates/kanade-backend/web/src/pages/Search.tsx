@@ -133,11 +133,24 @@ function columnKind(c: ExplodeColumn | undefined): 'text' | 'numeric' {
   return c?.type === 'integer' || c?.type === 'real' ? 'numeric' : 'text';
 }
 
-function opsForColumn(c: ExplodeColumn | undefined): Op[] {
+/** Built-in text column every cross-PC search row carries. It is not in
+ *  any manifest, so it is offered for filtering only (never rendered as
+ *  a result column — the table already has a fixed PC column). */
+export const PC_ID_FILTER_COLUMN: ExplodeColumn = { field: 'pc_id', type: 'text' };
+
+/** Filter-dropdown columns: the tab's columns plus `pc_id` (last, so the
+ *  default column for a new filter stays the first manifest column). A
+ *  manifest column named `pc_id` is replaced by the built-in, matching
+ *  the backend. */
+export function filterColumnsOf(base: ExplodeColumn[]): ExplodeColumn[] {
+  return [...base.filter((c) => c.field !== PC_ID_FILTER_COLUMN.field), PC_ID_FILTER_COLUMN];
+}
+
+export function opsForColumn(c: ExplodeColumn | undefined): Op[] {
   return columnKind(c) === 'numeric' ? NUMERIC_OPS : TEXT_OPS;
 }
 
-function filterToParam(f: Filter): [string, string] | null {
+export function filterToParam(f: Filter): [string, string] | null {
   if (!f.column || f.value === '') return null;
   const key = f.op === 'eq' ? f.column : `${f.column}__${f.op}`;
   return [key, f.value];
@@ -157,7 +170,7 @@ function filterToUrlToken(f: Filter): string {
  *  recognised or whose column is empty, so a hand-mangled URL degrades
  *  to "fewer filters" rather than throwing. `nextUid` hands out the
  *  same client-side keys the interactive add path uses. */
-function parseFilterTokens(tokens: string[], nextUid: () => number): Filter[] {
+export function parseFilterTokens(tokens: string[], nextUid: () => number): Filter[] {
   const out: Filter[] = [];
   for (const tok of tokens) {
     const dot1 = tok.indexOf('.');
@@ -278,6 +291,9 @@ export function InventorySearch() {
   );
   // Unified searchable column set for the active tab.
   const columns = isScalar ? scalarCols : (currentSpec?.columns ?? []);
+  // Filter-only column list (adds the built-in `pc_id`). Result headers
+  // and cells keep using `columns`.
+  const filterColumns = filterColumnsOf(columns);
   // Whether there's a tab to render a result view for.
   const hasView = isScalar || !!currentSpec;
 
@@ -397,8 +413,8 @@ export function InventorySearch() {
   const rows = searchQ.data ?? [];
 
   function addFilter() {
-    if (columns.length === 0) return;
-    const col = columns[0];
+    if (filterColumns.length === 0) return;
+    const col = filterColumns[0];
     setFilters((prev) => [
       ...prev,
       {
@@ -420,7 +436,7 @@ export function InventorySearch() {
         // column's kind — operator likely doesn't want `<` carried
         // over onto a text column.
         if (patch.column) {
-          const newCol = columns.find((c) => c.field === patch.column);
+          const newCol = filterColumns.find((c) => c.field === patch.column);
           if (newCol && !opsForColumn(newCol).includes(merged.op)) {
             merged.op = opsForColumn(newCol)[0];
           }
@@ -537,7 +553,7 @@ export function InventorySearch() {
                 ) : (
                   <div className="space-y-2">
                     {filters.map((f) => {
-                      const col = columns.find((c) => c.field === f.column) ?? columns[0];
+                      const col = filterColumns.find((c) => c.field === f.column) ?? filterColumns[0];
                       // Don't render a filter row until its column
                       // resolves. `columns` is transiently empty on the
                       // render right after the jobs load — before the
@@ -559,7 +575,7 @@ export function InventorySearch() {
                             onChange={(e) => updateFilter(f.uid, { column: e.target.value })}
                             className="w-40"
                           >
-                            {columns.map((c) => (
+                            {filterColumns.map((c) => (
                               <option key={c.field} value={c.field}>
                                 {c.field}
                                 {c.type ? ` (${c.type})` : ''}

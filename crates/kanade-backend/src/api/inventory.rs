@@ -429,7 +429,7 @@ pub async fn search(
             None => (raw_key.clone(), "eq"),
         };
         // Reject filters on columns that don't exist on this spec.
-        if !spec.columns.iter().any(|c| c.field == col) {
+        if !is_filterable_explode_column(&spec, &col) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!("unknown column for filter: {col:?}"),
@@ -758,10 +758,49 @@ pub async fn search_scalars(
             Some((c, o)) => (c.to_string(), o),
             None => (raw_key.clone(), "eq"),
         };
-        let scalar = scalars.iter().find(|s| s.field == col).ok_or((
+        let target = resolve_scalar_filter_column(&scalars, &col).ok_or((
             StatusCode::BAD_REQUEST,
             format!("unknown column for filter: {col:?}"),
         ))?;
+        // `pc_id` is the row's own key column, not a fact: compare the
+        // real column as text instead of json_extract'ing facts_json.
+        let scalar = match target {
+            ScalarFilterTarget::PcId => {
+                let pattern = match op {
+                    "eq" | "ne" | "lt" | "le" | "gt" | "ge" => None,
+                    "contains" => Some(format!("%{}%", escape_like(value))),
+                    "prefix" => Some(format!("{}%", escape_like(value))),
+                    "suffix" => Some(format!("%{}", escape_like(value))),
+                    other => {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!("unknown filter operator {other:?}"),
+                        ));
+                    }
+                };
+                match pattern {
+                    Some(p) => {
+                        qb.push(" AND pc_id LIKE ");
+                        qb.push_bind(p);
+                        qb.push(" ESCAPE '\\'");
+                    }
+                    None => {
+                        let comparator = match op {
+                            "eq" => "=",
+                            "ne" => "<>",
+                            "lt" => "<",
+                            "le" => "<=",
+                            "gt" => ">",
+                            _ => ">=",
+                        };
+                        qb.push(format!(" AND pc_id {comparator} "));
+                        qb.push_bind(value.clone());
+                    }
+                }
+                continue;
+            }
+            ScalarFilterTarget::Fact(s) => s,
+        };
         // col == scalar.field, already validate_ident'd above — safe
         // to splice into the JSON path. Values always go through bind.
         match op {
@@ -1369,6 +1408,38 @@ fn row_to_fact(r: sqlx::sqlite::SqliteRow) -> InventoryFact {
     }
 }
 
+/// Built-in text column every inventory row carries (the owning PC).
+/// Not part of any manifest, but always filterable on the cross-PC
+/// search endpoints.
+const PC_ID_FILTER_COLUMN: &str = "pc_id";
+
+/// Whether `col` may be filtered on for an explode table: a manifest
+/// column, or the built-in `pc_id` (a real column of every derived table).
+fn is_filterable_explode_column(spec: &ExplodeSpec, col: &str) -> bool {
+    col == PC_ID_FILTER_COLUMN || spec.columns.iter().any(|c| c.field == col)
+}
+
+/// What a scalar-search filter column refers to.
+enum ScalarFilterTarget<'a> {
+    /// The `inventory_facts.pc_id` column (wins over a same-named fact).
+    PcId,
+    /// A manifest display field read out of `facts_json`.
+    Fact(&'a ScalarColumn),
+}
+
+fn resolve_scalar_filter_column<'a>(
+    scalars: &'a [ScalarColumn],
+    col: &str,
+) -> Option<ScalarFilterTarget<'a>> {
+    if col == PC_ID_FILTER_COLUMN {
+        return Some(ScalarFilterTarget::PcId);
+    }
+    scalars
+        .iter()
+        .find(|s| s.field == col)
+        .map(ScalarFilterTarget::Fact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1432,6 +1503,48 @@ mod tests {
             kind: kind.map(str::to_string),
             columns: None,
         }
+    }
+
+    #[test]
+    fn explode_filter_accepts_pc_id_and_manifest_columns_only() {
+        let spec: ExplodeSpec = serde_json::from_value(serde_json::json!({
+            "field": "apps",
+            "table": "inventory_sw_apps",
+            "primary_key": ["name"],
+            "columns": [{ "field": "name" }],
+        }))
+        .unwrap();
+        assert!(is_filterable_explode_column(&spec, "pc_id"));
+        assert!(is_filterable_explode_column(&spec, "name"));
+        assert!(!is_filterable_explode_column(&spec, "bogus"));
+    }
+
+    #[test]
+    fn scalar_filter_resolves_pc_id_to_real_column() {
+        let scalars = vec![
+            ScalarColumn {
+                field: "pc_id".into(),
+                numeric: true,
+            },
+            ScalarColumn {
+                field: "os_build".into(),
+                numeric: false,
+            },
+        ];
+        // The built-in column wins over a same-named display field.
+        assert!(matches!(
+            resolve_scalar_filter_column(&scalars, "pc_id"),
+            Some(ScalarFilterTarget::PcId)
+        ));
+        assert!(matches!(
+            resolve_scalar_filter_column(&[], "pc_id"),
+            Some(ScalarFilterTarget::PcId)
+        ));
+        assert!(matches!(
+            resolve_scalar_filter_column(&scalars, "os_build"),
+            Some(ScalarFilterTarget::Fact(_))
+        ));
+        assert!(resolve_scalar_filter_column(&scalars, "bogus").is_none());
     }
 
     #[test]
