@@ -44,6 +44,10 @@
       "collectedAt": "collected_at"
     }
   },
+  "export": {
+    "button": "Export CSV",
+    "exporting": "Exporting…"
+  },
   "pagination": {
     "lastPage": "Last page (fewer rows than the page size returned)",
     "nextPage": "Next page"

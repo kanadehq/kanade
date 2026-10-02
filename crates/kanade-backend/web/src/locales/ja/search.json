@@ -44,6 +44,10 @@
       "collectedAt": "collected_at"
     }
   },
+  "export": {
+    "button": "CSV エクスポート",
+    "exporting": "エクスポート中…"
+  },
   "pagination": {
     "lastPage": "最終ページです (ページサイズより少ない行数が返されました)",
     "nextPage": "次のページ"
