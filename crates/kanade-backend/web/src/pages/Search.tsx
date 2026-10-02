@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, Search } from 'lucide-react';
+import { Download, Loader2, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Button } from '@/components/ui/button';
@@ -11,7 +12,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, formatError } from '@/lib/api';
+import { downloadCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
 import { cn, fmtAccount, fmtIsoLocal } from '@/lib/utils';
 
@@ -185,11 +187,105 @@ export function parseFilterTokens(tokens: string[], nextUid: () => number): Filt
   return out;
 }
 
-function formatCell(v: unknown): string {
-  if (v === null || v === undefined) return '—';
+/** Cell text without the null placeholder: null/undefined -> '' (the CSV
+ *  export wants an empty cell, the table wants a dash). */
+function cellText(v: unknown): string {
+  if (v === null || v === undefined) return '';
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   return JSON.stringify(v);
+}
+
+function formatCell(v: unknown): string {
+  return v === null || v === undefined ? '—' : cellText(v);
+}
+
+// Mirrors the backend's 5000-row clamp on both the `search` and
+// `search-scalars` handlers in `api/inventory.rs` (same idea as
+// `BY_JOB_EXPORT_PAGE_SIZE` mirroring `BY_JOB_MAX_LIMIT` in Inventory.tsx).
+// Asking for more is silently clamped, which would break the
+// "short page = last page" stop rule below.
+export const SEARCH_EXPORT_PAGE_SIZE = 5000;
+
+/** Build a search request URL; shared by the on-screen query and the CSV
+ *  export so both apply identical filter rules. */
+export function buildSearchUrl(a: {
+  manifestId: string;
+  field: string;
+  isScalar: boolean;
+  filters: Filter[];
+  limit: number;
+  offset: number;
+}): string {
+  const sp = new URLSearchParams();
+  for (const f of a.filters) {
+    const param = filterToParam(f);
+    if (param) sp.append(param[0], param[1]);
+  }
+  sp.set('limit', String(a.limit));
+  if (a.offset > 0) sp.set('offset', String(a.offset));
+  // #574: scalar tab hits the facts_json endpoint; explode tabs hit
+  // the derived-table one keyed by the array `field`.
+  const base = a.isScalar
+    ? `/api/inventory/${encodeURIComponent(a.manifestId)}/search-scalars`
+    : `/api/inventory/${encodeURIComponent(a.manifestId)}/search/${encodeURIComponent(a.field)}`;
+  return `${base}?${sp.toString()}`;
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+export function searchExportFilename(manifestId: string, fieldOrScalar: string, now: Date): string {
+  return (
+    `inventory-search_${manifestId}_${fieldOrScalar}_${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}` +
+    `_${pad2(now.getHours())}${pad2(now.getMinutes())}.csv`
+  );
+}
+
+/** pc_id + the tab's columns, header first. null/undefined -> empty cell,
+ *  objects -> JSON. */
+export function searchRowsToCsv(columns: { field: string }[], rows: Record<string, unknown>[]): string[][] {
+  return [
+    ['pc_id', ...columns.map((c) => c.field)],
+    ...rows.map((r) => [cellText(r.pc_id), ...columns.map((c) => cellText(r[c.field]))]),
+  ];
+}
+
+/**
+ * Walk the whole result set with limit/offset. `fetchPage(offset)` returns
+ * one raw page. Stops when a page has fewer than `pageSize` rows (judged
+ * BEFORE dedup, so a full page containing duplicates doesn't end early) or
+ * when a page adds no new rows (no-progress guard). An exact multiple of
+ * `pageSize` costs one final empty-page request.
+ *
+ * Rows are deduped by pc_id + primary-key values (the whole row when the
+ * manifest has no primary key, so fully identical rows collapse into one).
+ * Offset paging has no snapshot isolation: inserts/deletes mid-export can
+ * still skip rows — best-effort, like the Inventory export.
+ */
+export async function fetchAllSearchRows(
+  fetchPage: (offset: number) => Promise<Record<string, unknown>[]>,
+  primaryKey: string[],
+  pageSize: number = SEARCH_EXPORT_PAGE_SIZE,
+): Promise<Record<string, unknown>[]> {
+  const out: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  let offset = 0;
+  for (;;) {
+    const page = await fetchPage(offset);
+    let added = 0;
+    for (const r of page) {
+      const key = JSON.stringify(primaryKey.length > 0 ? [r.pc_id, ...primaryKey.map((k) => r[k])] : r);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(r);
+      added++;
+    }
+    if (page.length < pageSize || added === 0) break;
+    offset += pageSize;
+  }
+  return out;
 }
 
 /** v0.35 / #87: cross-PC inventory search page. Drives
@@ -383,25 +479,13 @@ export function InventorySearch() {
   // Build the search query URL. `null` when not enough state to fire.
   const searchUrl = useMemo(() => {
     if (!manifestId || !field) return null;
-    const sp = new URLSearchParams();
     // Empty live filters bypass the debounce: a manifest/field switch
     // calls setFilters([]) synchronously, but dFilters would keep the
     // OLD tab's filters for 300 ms — pairing them with the new tab
     // fired one bogus request (and a flash of wrong data) before the
     // debounce settled (review PR #551, gemini).
     const activeFilters = filters.length === 0 ? filters : dFilters;
-    for (const f of activeFilters) {
-      const param = filterToParam(f);
-      if (param) sp.append(param[0], param[1]);
-    }
-    sp.set('limit', String(limit));
-    if (offset > 0) sp.set('offset', String(offset));
-    // #574: scalar tab hits the facts_json endpoint; explode tabs hit
-    // the derived-table one keyed by the array `field`.
-    const base = isScalar
-      ? `/api/inventory/${encodeURIComponent(manifestId)}/search-scalars`
-      : `/api/inventory/${encodeURIComponent(manifestId)}/search/${encodeURIComponent(field)}`;
-    return `${base}?${sp.toString()}`;
+    return buildSearchUrl({ manifestId, field, isScalar, filters: activeFilters, limit, offset });
   }, [manifestId, field, filters, dFilters, limit, offset, isScalar]);
 
   const searchQ = useQuery({
@@ -411,6 +495,41 @@ export function InventorySearch() {
   });
 
   const rows = searchQ.data ?? [];
+
+  // Export every row matching the current search (not just this page).
+  // Snapshot the request at click time so a mid-export UI change can't
+  // mix tabs/filters in the output.
+  const [exporting, setExporting] = useState(false);
+  const doExport = async () => {
+    if (!searchUrl) return;
+    const url = new URL(searchUrl, 'http://x');
+    const snapshot = {
+      path: url.pathname,
+      params: url.searchParams,
+      manifestId,
+      name: isScalar ? 'scalar' : field,
+      columns,
+      primaryKey: isScalar ? [] : (currentSpec?.primary_key ?? []),
+    };
+    setExporting(true);
+    try {
+      const all = await fetchAllSearchRows((off) => {
+        const sp = new URLSearchParams(snapshot.params);
+        sp.set('limit', String(SEARCH_EXPORT_PAGE_SIZE));
+        if (off > 0) sp.set('offset', String(off));
+        else sp.delete('offset');
+        return apiFetch<ResultRow[]>(`${snapshot.path}?${sp.toString()}`);
+      }, snapshot.primaryKey);
+      downloadCsv(
+        searchExportFilename(snapshot.manifestId, snapshot.name, new Date()),
+        searchRowsToCsv(snapshot.columns, all),
+      );
+    } catch (e) {
+      toast.error(formatError(e));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   function addFilter() {
     if (filterColumns.length === 0) return;
@@ -617,9 +736,20 @@ export function InventorySearch() {
       {hasView ? (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">
-              {currentJob?.manifest_id} · {isScalar ? t('scalarTab') : currentSpec?.field}
-            </CardTitle>
+            <div className="flex items-start justify-between gap-2">
+              <CardTitle className="text-base">
+                {currentJob?.manifest_id} · {isScalar ? t('scalarTab') : currentSpec?.field}
+              </CardTitle>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={doExport}
+                disabled={!searchUrl || searchQ.isLoading || exporting || rows.length === 0}
+              >
+                {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                {exporting ? t('export.exporting') : t('export.button')}
+              </Button>
+            </div>
             <CardDescription>
               {isScalar ? (
                 <span className="text-muted">{t('scalarSource')} · </span>
