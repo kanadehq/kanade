@@ -51,6 +51,16 @@ pub struct MetaEntry {
     pub value: String,
 }
 
+/// Response of the backend's single-key upsert / remove routes: the PC's
+/// attribute set as it stands afterwards, and whether the call actually
+/// wrote. An already-satisfied request answers `changed: false` without
+/// touching the KV row, so the revision does not move.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MetaUpdate {
+    pub meta: AgentMeta,
+    pub changed: bool,
+}
+
 impl MetaEntry {
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {

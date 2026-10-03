@@ -476,8 +476,13 @@ pub fn router(state: AppState) -> Router {
         )
         // Replace a PC's operator key/value metadata (operator+). GET
         // lives on the viewer router above; same path, different method,
-        // like the /groups routes.
+        // like the /groups routes. `meta/key` upserts / removes a single
+        // key (the key rides in the body / query: it is free-form).
         .route("/api/agents/{pc_id}/meta", put(agent_meta::put_meta))
+        .route(
+            "/api/agents/{pc_id}/meta/key",
+            put(agent_meta::set_key).delete(agent_meta::remove_key),
+        )
         .route(
             "/api/config",
             put(agent_config::put_global).delete(agent_config::delete_global),
