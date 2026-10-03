@@ -17,8 +17,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use kanade_shared::nats_client::{
-    NatsCredentials, NatsRole, connect_with_credentials,
-    connect_with_credentials_and_event_callback, is_dead, wait_until_dead_every,
+    NatsCredentials, NatsRole, connect_with_credentials, is_dead, wait_until_dead_every,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -247,39 +246,36 @@ async fn a_connected_client_follows_the_broker_to_users_and_back() {
     assert!(!is_dead(&client).await);
 }
 
-/// Connect with `creds` and an event sink, and report whether the client
-/// surfaced an authentication failure while never becoming usable.
-async fn fails_visibly(broker: &Broker, creds: NatsCredentials) -> bool {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let client = connect_with_credentials_and_event_callback(
-        NatsRole::Cli,
-        &broker.url(),
-        creds,
-        move |ev| {
-            let _ = tx.send(ev.to_string());
-            std::future::ready(())
-        },
-    )
-    .await
-    .unwrap();
-    // Never usable: the flush is bounded, so a client that cannot
-    // authenticate shows up as `false` here instead of hanging the caller.
-    let usable = round_trip(&client, Duration::from_secs(6)).await;
-    let mut reported = false;
-    while let Ok(ev) = rx.try_recv() {
-        reported |= ev.contains("authorization violation") || ev.contains("signing nonce");
+/// A client the broker keeps refusing must be declared failed — which is what
+/// makes the agent and backend exit and the CLI abort — rather than retrying
+/// quietly forever. The role is per test because the refusal state is kept
+/// per role and the tests run concurrently.
+async fn assert_reported_failed(role: NatsRole, broker: &Broker, creds: NatsCredentials) {
+    let client = connect_with_credentials(role, &broker.url(), creds)
+        .await
+        .unwrap();
+    tokio::select! {
+        () = wait_until_dead_every(role, &client, Duration::from_millis(250)) => {}
+        () = tokio::time::sleep(Duration::from_secs(45)) => {
+            panic!("a client the broker keeps refusing was never reported failed");
+        }
     }
-    !usable && reported && broker.authorized_user().await.is_none()
+    assert!(
+        broker.authorized_user().await.is_none(),
+        "the refused client must not hold a broker connection"
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
 async fn a_token_only_client_against_a_users_broker_fails_visibly() {
     let broker = broker_or_skip!(USERS_AUTH);
-    assert!(
-        fails_visibly(&broker, NatsCredentials::new(Some(TOKEN.into()), None)).await,
-        "a token the broker rejects must surface as an error event and never connect"
-    );
+    assert_reported_failed(
+        NatsRole::Backend,
+        &broker,
+        NatsCredentials::new(Some(TOKEN.into()), None),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -288,13 +284,12 @@ async fn a_user_only_client_against_a_token_broker_fails_visibly() {
     // The user is rejected and there is no token to fall back to: the
     // callback fails naming the missing credential on every attempt.
     let broker = broker_or_skip!(TOKEN_AUTH);
-    assert!(
-        fails_visibly(
-            &broker,
-            NatsCredentials::new(None, Some((USER.into(), PASSWORD.into())))
-        )
-        .await
-    );
+    assert_reported_failed(
+        NatsRole::Agent,
+        &broker,
+        NatsCredentials::new(None, Some((USER.into(), PASSWORD.into()))),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -312,7 +307,7 @@ async fn dead_client_detection_fires_once_the_connection_task_has_terminated() {
     client.drain().await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(20),
-        wait_until_dead_every(&client, Duration::from_millis(250)),
+        wait_until_dead_every(NatsRole::Cli, &client, Duration::from_millis(250)),
     )
     .await
     .expect("a client whose connection task ended must be reported dead");

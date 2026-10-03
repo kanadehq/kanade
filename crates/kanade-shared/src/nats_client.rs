@@ -48,7 +48,10 @@
 //! A wrong guess is thus survivable and the process keeps one `Client`.
 //! A client whose connection task has terminated for any reason (a panic in
 //! it, a drain, a version that treats a violation as terminal) is detected by
-//! [`wait_until_dead`] so its process can exit for a supervised restart.
+//! [`wait_until_dead`] so its process can exit for a supervised restart. The
+//! same call also reports a broker that refuses the credential on every
+//! attempt for a sustained period, since async-nats would otherwise retry it
+//! forever and leave a process that looks alive but can never talk.
 //!
 //! # Why roles exist here (#1155)
 //!
@@ -151,6 +154,14 @@ const PROBE_NAME: &str = "auth-probe";
 
 /// How often [`wait_until_dead`] checks the connection task is still there.
 const DEAD_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+
+/// A connection that has been refused this many times in a row, over at
+/// least [`AUTH_REJECTION_WINDOW`], with no successful connect in between, is
+/// treated as failed. async-nats retries a refused credential forever, which
+/// leaves a process that can never talk but looks alive; the window keeps a
+/// broker that is merely mid-reload (a few quick refusals) from counting.
+const AUTH_REJECTION_LIMIT: usize = 5;
+const AUTH_REJECTION_WINDOW: Duration = Duration::from_secs(10);
 
 /// Prefix every kanade connection announces in its `name`.
 const NAME_PREFIX: &str = "kanade-";
@@ -370,9 +381,39 @@ impl ProbeOutcome {
 #[derive(Default)]
 struct Live {
     decision: Mutex<Option<Choice>>,
+    /// Consecutive authentication refusals: when the first one happened and
+    /// how many there have been. Cleared by a successful connect.
+    refusals: Mutex<Option<(std::time::Instant, usize)>>,
 }
 
 impl Live {
+    /// Track the connection's events for [`Live::auth_failed`].
+    fn observe(&self, ev: &async_nats::Event) {
+        let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        match ev {
+            async_nats::Event::Connected => *refusals = None,
+            async_nats::Event::ClientError(async_nats::ClientError::Other(kind))
+                if *kind == async_nats::ConnectErrorKind::AuthorizationViolation.to_string()
+                    || *kind == async_nats::ConnectErrorKind::Authentication.to_string() =>
+            {
+                let (first, n) = refusals.unwrap_or((std::time::Instant::now(), 0));
+                *refusals = Some((first, n + 1));
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the broker has refused every attempt for long enough that
+    /// waiting longer is not going to help.
+    fn auth_failed(&self) -> bool {
+        match *self.refusals.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((first, n)) => {
+                n >= AUTH_REJECTION_LIMIT && first.elapsed() >= AUTH_REJECTION_WINDOW
+            }
+            None => false,
+        }
+    }
+
     fn get(&self) -> Option<Choice> {
         *self.decision.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -762,7 +803,9 @@ where
 
 /// Connect with explicitly supplied credentials instead of resolving them
 /// from the registry / environment, and with decision state private to this
-/// connection. For tests, which must not depend on process-global state.
+/// connection. For tests, which must not depend on process-global state
+/// (the per-role decision and refusal state is still shared, so concurrent
+/// tests should use different roles).
 pub async fn connect_with_credentials(
     role: NatsRole,
     url: &str,
@@ -774,7 +817,7 @@ pub async fn connect_with_credentials(
         None,
         None::<fn(async_nats::Event) -> std::future::Ready<()>>,
         creds,
-        Arc::new(Live::default()),
+        live_for(role),
     )
     .await
 }
@@ -791,7 +834,7 @@ where
     F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
 {
-    connect_inner(role, url, None, Some(cb), creds, Arc::new(Live::default())).await
+    connect_inner(role, url, None, Some(cb), creds, live_for(role)).await
 }
 
 async fn connect_inner<F, Fut>(
@@ -816,6 +859,7 @@ where
     // returns Err when a provider is already installed — ignore it.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let tracker = live.clone();
     // Only a provisioned user changes how the credential is presented; every
     // other host takes the token path untouched.
     let opts = match auth_plan(creds) {
@@ -867,10 +911,17 @@ where
         // identity it also carries the pc_id, so #1270 can join the broker's
         // per-connection `authorized_user` back onto the agents row.
         .name(client_name(role, identity));
-    let opts = match cb {
-        Some(cb) => opts.event_callback(cb),
-        None => opts,
-    };
+    // Always installed, even without a caller callback: it is how a refused
+    // credential is noticed, since async-nats only retries it.
+    let opts = opts.event_callback(move |ev| {
+        tracker.observe(&ev);
+        let forwarded = cb.as_ref().map(|cb| cb(ev));
+        async move {
+            if let Some(forwarded) = forwarded {
+                forwarded.await;
+            }
+        }
+    });
     opts.connect(url)
         .await
         .with_context(|| format!("connect to NATS at {url}"))
@@ -892,16 +943,33 @@ pub async fn is_dead(client: &async_nats::Client) -> bool {
     }
 }
 
-/// Resolve once `client`'s connection task has terminated (see [`is_dead`]),
-/// checking every `interval`. A process that depends on the client should
-/// treat this as fatal and exit non-zero so its service manager restarts it.
-pub async fn wait_until_dead_every(client: &async_nats::Client, interval: Duration) {
+/// Resolve once `client` can no longer be expected to work: its connection
+/// task has terminated (see [`is_dead`]), or the broker has refused its
+/// credential on every attempt for [`AUTH_REJECTION_WINDOW`]. Checked every
+/// `interval`. A process that depends on the client should treat this as
+/// fatal and exit non-zero so its service manager restarts it.
+///
+/// `role` names the connection the client was opened with.
+pub async fn wait_until_dead_every(
+    role: NatsRole,
+    client: &async_nats::Client,
+    interval: Duration,
+) {
+    let live = live_for(role);
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
+        if live.auth_failed() {
+            warn!(
+                role = role.as_str(),
+                "the NATS broker keeps refusing this role's credential; the client cannot connect"
+            );
+            return;
+        }
         if is_dead(client).await {
             warn!(
+                role = role.as_str(),
                 "NATS connection task has terminated; the client can no longer talk to the broker"
             );
             return;
@@ -910,8 +978,8 @@ pub async fn wait_until_dead_every(client: &async_nats::Client, interval: Durati
 }
 
 /// [`wait_until_dead_every`] at the production cadence.
-pub async fn wait_until_dead(client: &async_nats::Client) {
-    wait_until_dead_every(client, DEAD_CHECK_INTERVAL).await
+pub async fn wait_until_dead(role: NatsRole, client: &async_nats::Client) {
+    wait_until_dead_every(role, client, DEAD_CHECK_INTERVAL).await
 }
 
 #[cfg(test)]
@@ -1325,6 +1393,33 @@ mod tests {
         let rendered = format!("{probe:?}");
         assert!(!rendered.contains("tok-secret"), "{rendered}");
         assert!(rendered.contains("kanade-agent"), "{rendered}");
+    }
+
+    #[test]
+    fn sustained_refusals_fail_the_client_and_a_connect_clears_them() {
+        let refused = || {
+            async_nats::Event::ClientError(async_nats::ClientError::Other(
+                async_nats::ConnectErrorKind::AuthorizationViolation.to_string(),
+            ))
+        };
+        let live = Live::default();
+        for _ in 0..AUTH_REJECTION_LIMIT {
+            live.observe(&refused());
+        }
+        // Enough refusals, but not over a long enough window: a broker
+        // mid-reload must not count.
+        assert!(!live.auth_failed());
+        // Age the first refusal past the window.
+        let aged = std::time::Instant::now() - AUTH_REJECTION_WINDOW - Duration::from_secs(1);
+        *live.refusals.lock().unwrap() = Some((aged, AUTH_REJECTION_LIMIT));
+        assert!(live.auth_failed());
+        live.observe(&async_nats::Event::Connected);
+        assert!(!live.auth_failed());
+        // Unrelated errors are not refusals.
+        live.observe(&async_nats::Event::ClientError(
+            async_nats::ClientError::Other("io".into()),
+        ));
+        assert!(!live.auth_failed());
     }
 
     #[test]

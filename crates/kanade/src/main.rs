@@ -199,6 +199,21 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
             .await?;
     debug!("connected to NATS");
 
+    // A refused credential is retried forever by the client, which would
+    // leave a command waiting on the broker indefinitely. Fail it instead.
+    {
+        let watched = client.clone();
+        tokio::spawn(async move {
+            kanade_shared::nats_client::wait_until_dead(
+                kanade_shared::nats_client::NatsRole::Cli,
+                &watched,
+            )
+            .await;
+            eprintln!("error: cannot authenticate to NATS (credential refused or connection lost)");
+            std::process::exit(1);
+        });
+    }
+
     match command {
         SubCmd::Run(args) => cmd::run::execute(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,

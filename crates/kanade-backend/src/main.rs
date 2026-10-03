@@ -1765,7 +1765,7 @@ async fn run_backend_inner(
     // restarts it.
     tokio::select! {
         served = axum::serve(listener, app) => served.context("axum serve")?,
-        () = kanade_shared::nats_client::wait_until_dead(&nats_liveness) => {
+        () = kanade_shared::nats_client::wait_until_dead(kanade_shared::nats_client::NatsRole::Backend, &nats_liveness) => {
             anyhow::bail!("NATS connection task terminated; exiting for a supervised restart");
         }
     }

@@ -1047,7 +1047,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     };
     tokio::select! {
         () = loops => {}
-        () = kanade_shared::nats_client::wait_until_dead(&client) => {
+        () = kanade_shared::nats_client::wait_until_dead(kanade_shared::nats_client::NatsRole::Agent, &client) => {
             anyhow::bail!(
                 "NATS connection task terminated; exiting for a supervised restart"
             );
