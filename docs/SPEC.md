@@ -625,7 +625,7 @@ KV 値の wire format:
 
 `AgentGroups::new` で sort + dedup されるので、二人のオペレータが同じ論理集合を別順序で投入しても bit-identical JSON になる (= update-only-on-change を成立させる前提)。
 
-**バックログ**: YAML マニフェスト (`groups/*.yaml`) で動的クエリ (SQLite ベース) からメンバシップを生成して KV に流し込む reconciler は将来計画。最初の実装はオペレータが CLI / HTTP で直接 KV を書く形。
+**バックログ**: YAML マニフェスト (`groups/*.yaml`) で動的クエリ (SQLite ベース) からメンバシップを生成して KV に流し込む reconciler は将来計画。最初の実装はオペレータが CLI / HTTP で操作する形 (CLI も backend HTTP 経由で、認証・ロール・監査を通る)。
 
 ### 2.4.3 スケジュール定義 (schedules/*.yaml)
 
