@@ -1615,6 +1615,28 @@ mod tests {
         assert!(!wait_or_killed(&kill, None, std::time::Duration::from_millis(10)).await);
     }
 
+    #[tokio::test]
+    #[ignore = "requires a live nats-server"]
+    async fn remote_kill_interrupts_retry_backoff() {
+        let client = crate::kill::broker_test::connect().await;
+        let kill = crate::kill::KillSwitch::arm(Some(&client), Some("cmd-backoff-remote")).await;
+        let waiter = tokio::spawn(async move {
+            wait_or_killed(
+                &kill,
+                Some("cmd-backoff-remote"),
+                std::time::Duration::from_secs(300),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::kill::broker_test::publish_kill(&client, "cmd-backoff-remote").await;
+        let killed = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("backoff interrupted")
+            .unwrap();
+        assert!(killed);
+    }
+
     #[test]
     fn remote_kill_is_never_retried() {
         // The operator pressed stop — retrying would fight the signal.

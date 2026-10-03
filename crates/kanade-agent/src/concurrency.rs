@@ -298,4 +298,25 @@ mod tests {
         assert_eq!(limiter.state.lock().unwrap().active, 1);
         drop(active);
     }
+
+    #[tokio::test]
+    #[ignore = "requires a live nats-server"]
+    async fn remote_kill_releases_a_run_waiting_for_a_slot() {
+        let client = crate::kill::broker_test::connect().await;
+        let limiter = Limiter::new(1);
+        let active = limiter.acquire(false).await;
+        let switch = crate::kill::KillSwitch::arm(Some(&client), Some("conc-remote-kill")).await;
+        let waiter = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { wait_for_slot(&limiter, false, None, switch.killed()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        crate::kill::broker_test::publish_kill(&client, "conc-remote-kill").await;
+        let res = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter released")
+            .unwrap();
+        assert!(matches!(res, Err(ExecOutcome::Killed { .. })));
+        drop(active);
+    }
 }

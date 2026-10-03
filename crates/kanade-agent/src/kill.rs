@@ -169,6 +169,29 @@ impl Drop for KillSwitch {
     }
 }
 
+/// Broker helpers for the `#[ignore]`d remote-kill tests, which need a
+/// `nats-server` (default `127.0.0.1:4222`, override with
+/// `KANADE_TEST_NATS_URL`). Run them with
+/// `cargo test -p kanade-agent -- --ignored remote_kill`.
+#[cfg(test)]
+pub mod broker_test {
+    pub async fn connect() -> async_nats::Client {
+        let url = std::env::var("KANADE_TEST_NATS_URL").unwrap_or("127.0.0.1:4222".into());
+        async_nats::connect(url)
+            .await
+            .expect("connect to nats-server")
+    }
+
+    /// What the backend API / CLI does to stop an execution remotely.
+    pub async fn publish_kill(client: &async_nats::Client, exec_id: &str) {
+        client
+            .publish(kanade_shared::subject::kill(exec_id), bytes::Bytes::new())
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+    }
+}
+
 /// Number of exec ids currently registered (tests only).
 #[cfg(test)]
 pub fn registered(exec_id: &str) -> bool {
@@ -230,7 +253,7 @@ mod tests {
     /// The agent must never publish on the kill subject: a Client App
     /// cancel is delivered in-process, and publish rights on `kill.*`
     /// would let a compromised host stop any execution in the fleet.
-    /// Scans every source file (comments excluded) except this file's own
+    /// Scans every source file (comments and the test-only broker helper excluded) except this file's own
     /// test module, which publishes to prove the broker path.
     #[test]
     fn agent_sources_never_publish_to_the_kill_subject() {
@@ -255,6 +278,9 @@ mod tests {
                 .lines()
                 .take_while(|l| !(own && l.trim() == "#[cfg(test)]"))
                 .filter(|l| !l.trim_start().starts_with("//"))
+                // The ignored broker tests stop runs the way the backend
+                // does, through the test-only helper.
+                .filter(|l| !l.contains("broker_test::publish_kill"))
                 .collect();
             for (i, l) in lines.iter().enumerate() {
                 if !l.contains("publish") {
@@ -275,19 +301,12 @@ mod tests {
         );
     }
 
-    /// Needs a broker: `nats-server` listening on 127.0.0.1:4222.
     #[tokio::test]
-    #[ignore = "requires a live nats-server on 127.0.0.1:4222"]
-    async fn broker_kill_latches_the_switch() {
-        let client = async_nats::connect("127.0.0.1:4222")
-            .await
-            .expect("connect");
+    #[ignore = "requires a live nats-server"]
+    async fn remote_kill_latches_the_switch() {
+        let client = broker_test::connect().await;
         let sw = KillSwitch::arm(Some(&client), Some("k-nats")).await;
-        client
-            .publish(subject::kill("k-nats"), bytes::Bytes::new())
-            .await
-            .unwrap();
-        client.flush().await.unwrap();
+        broker_test::publish_kill(&client, "k-nats").await;
         tokio::time::timeout(Duration::from_secs(2), sw.killed())
             .await
             .expect("broker kill observed");

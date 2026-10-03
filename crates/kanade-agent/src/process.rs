@@ -1316,4 +1316,25 @@ mod process_tree_tests {
         assert!(matches!(outcome, ExecOutcome::Killed { .. }));
         assert!(!marker.exists());
     }
+
+    #[tokio::test]
+    #[ignore = "requires a live nats-server"]
+    async fn remote_kill_terminates_a_running_child() {
+        let client = crate::kill::broker_test::connect().await;
+        let mut cmd = sh_job("sleep 300", 600);
+        cmd.exec_id = Some("proc-remote-kill".into());
+        let switch = KillSwitch::arm(Some(&client), cmd.exec_id.as_deref()).await;
+        let run = tokio::spawn({
+            let cmd = cmd.clone();
+            async move { run_command_with_kill(&switch, &cmd, None).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        crate::kill::broker_test::publish_kill(&client, "proc-remote-kill").await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("run ends after remote kill")
+            .unwrap()
+            .expect("run");
+        assert!(matches!(outcome, ExecOutcome::Killed { .. }));
+    }
 }
