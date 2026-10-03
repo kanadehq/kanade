@@ -25,10 +25,10 @@ use async_nats::jetstream::consumer::DeliverPolicy;
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use futures::StreamExt;
 use kanade_shared::kv::STREAM_EXEC;
-use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+use crate::command_verify::Admission;
 use crate::commands::{CommandSource, DedupCache, handle_command};
 use crate::nats_retry;
 use crate::script_cache::ScriptCache;
@@ -269,13 +269,6 @@ async fn run(
             // redelivery.
             let _ = msg.ack().await;
 
-            let cmd: Command = match serde_json::from_slice(&msg.payload) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(error = %e, subject = %msg.subject, "deserialize replay command");
-                    continue;
-                }
-            };
             // Addressed-to-me runs BEFORE provenance, and the order became
             // load-bearing when refusals started producing an `ExecResult`
             // (#1165 stage 3). The race this check exists for — a group
@@ -304,22 +297,40 @@ async fn run(
             // #1155 measured *is* a JetStream consumer, so a verifier covering
             // only `command_loop` would leave the attack it exists to stop
             // running through the other door. That applies to the refusal
-            // below exactly as it applied to the observation.
-            let outcome = verifier.observe(
+            // below exactly as it applied to the observation, and to the v2
+            // envelope's recipient and expiry checks, which `admit` makes the
+            // same way for both paths.
+            //
+            // The legacy payload is decoded inside `admit`, after the
+            // addressed-to-me check above; an undecodable payload is dropped
+            // either way.
+            let (cmd, envelope_deadline) = match verifier.admit(
                 &msg.payload,
                 &crate::command_verify::headers_of(&msg),
-                &cmd.request_id,
-            );
-            if let Some(reason) = verifier.refusal(outcome) {
-                warn!(
-                    request_id = %cmd.request_id,
-                    subject = %msg.subject,
-                    reason,
-                    "REFUSED: replayed command did not verify",
-                );
-                crate::commands::publish_signature_refused(&pc_id, &cmd, reason);
-                continue;
-            }
+                msg.subject.as_str(),
+            ) {
+                Admission::Run {
+                    cmd,
+                    envelope_deadline,
+                } => (cmd, envelope_deadline),
+                Admission::Undecodable(e) => {
+                    warn!(error = %e, subject = %msg.subject, "deserialize replay command");
+                    continue;
+                }
+                Admission::RefusedLegacy { cmd, reason } => {
+                    warn!(
+                        request_id = %cmd.request_id,
+                        subject = %msg.subject,
+                        reason,
+                        "REFUSED: replayed command did not verify",
+                    );
+                    crate::commands::publish_signature_refused(&pc_id, &cmd, reason);
+                    continue;
+                }
+                // A refused envelope: logged and reported by `admit`; no result
+                // is published for a host that may never have been the recipient.
+                Admission::Refused => continue,
+            };
 
             // Dedup against the core-sub path: if we already saw
             // this request_id (because the core sub delivered it
@@ -356,6 +367,7 @@ async fn run(
                     sc,
                     cs,
                     CommandSource::Nats,
+                    envelope_deadline,
                 )
                 .await
                 {

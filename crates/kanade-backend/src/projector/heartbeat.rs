@@ -109,7 +109,7 @@ async fn flush(pool: &SqlitePool, buf: &mut HashMap<String, Heartbeat>) {
     buf.clear();
 }
 
-async fn upsert_baseline<'e, E>(executor: E, hb: &Heartbeat) -> Result<()>
+pub(crate) async fn upsert_baseline<'e, E>(executor: E, hb: &Heartbeat) -> Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -151,6 +151,13 @@ where
         .command_keys
         .as_ref()
         .map(|kids| serde_json::to_string(kids).expect("serialising Vec<String> is infallible"));
+    // The command protocols the agent can verify. Same storage rule as
+    // `command_keys`: an empty set stores `"[]"`, NOT NULL, so "reports and
+    // verifies nothing" stays apart from "did not say" (a ping reply, or a
+    // build that predates the field), which is what the COALESCE below keeps.
+    let command_protocols_json = hb.command_protocols.as_ref().map(|protocols| {
+        serde_json::to_string(protocols).expect("serialising Vec<String> is infallible")
+    });
     // #655: last signed-in account. COALESCE(excluded, agents) — the
     // OPPOSITE precedence to hostname/os_family below: a non-NULL value
     // the agent reports WINS, so a user switch is reflected on the next
@@ -166,9 +173,9 @@ where
              agent_disk_read_bytes, agent_disk_written_bytes,
              quarantined_versions,
              last_logon_user, last_logon_display_name,
-             command_keys, enforcing,
+             command_keys, enforcing, command_protocols,
              updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(pc_id) DO UPDATE SET
              hostname                  = COALESCE(agents.hostname, excluded.hostname),
              os_family                 = COALESCE(agents.os_family, excluded.os_family),
@@ -203,6 +210,9 @@ where
              -- has to survive, because was-enforcing-now-is-not is what an
              -- emergency disable looks like, and what a wiped ring looks like.
              enforcing                 = COALESCE(excluded.enforcing, agents.enforcing),
+             -- Same precedence: a ping reply reports NULL and must not erase
+             -- the set the last real heartbeat reported.
+             command_protocols         = COALESCE(excluded.command_protocols, agents.command_protocols),
              updated_at                = CURRENT_TIMESTAMP",
     )
     .bind(&hb.pc_id)
@@ -223,6 +233,7 @@ where
     .bind(&hb.last_logon_display_name)
     .bind(command_keys_json)
     .bind(hb.enforcing)
+    .bind(command_protocols_json)
     .execute(executor)
     .await?;
     Ok(())

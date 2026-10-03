@@ -152,7 +152,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use kanade_shared::signing::{KeyPolicy, KeyRing, SigHeaders, VerifyError, verify};
-use kanade_shared::wire::ObsEvent;
+use kanade_shared::wire::{Command, ENVELOPE_KIND_V2, EnvelopeError, ObsEvent, verify_envelope};
 use serde::Deserialize;
 use tracing::{error, info, warn};
 
@@ -566,6 +566,21 @@ pub enum Outcome {
     /// from `Invalid` because nothing is wrong with the message — a replayed
     /// break-glass command and a forgery need different responses.
     Stale,
+    /// A v2 envelope signed further in the future than the clock allowance:
+    /// the signer's clock and this host's disagree. Reported apart from
+    /// [`Outcome::Invalid`] so an operator can tell a clock problem from
+    /// tampering — the signature is genuine.
+    ClockAhead,
+    /// A genuine v2 envelope whose start deadline (or its key's age bound) has
+    /// passed. Also a clock-shaped refusal: a host with a clock running ahead
+    /// sees live envelopes as expired.
+    Expired,
+    /// A genuine v2 envelope for a different host.
+    Misaddressed,
+    /// A genuine v2 envelope that is structurally unacceptable: no recipient,
+    /// no or malformed expiry, a reversed range, a window over the ceiling, or
+    /// an unreadable body.
+    EnvelopeRejected,
 }
 
 impl Outcome {
@@ -615,6 +630,24 @@ impl Outcome {
                 "signature is outside its freshness window. Most often the clocks disagree — \
                  compare this host's time with the signing host's before assuming a replay."
             }
+            Outcome::ClockAhead => {
+                "envelope was signed further in the future than this host's clock allowance. \
+                 This host's clock is probably behind the signer's — check its time before \
+                 assuming tampering."
+            }
+            Outcome::Expired => {
+                "envelope's start deadline has passed. Re-issue the command; if it was issued \
+                 moments ago, this host's clock is probably ahead of the signer's."
+            }
+            Outcome::Misaddressed => {
+                "envelope names a different host as its recipient, so this host will not run \
+                 it. A captured command re-sent here is refused by design."
+            }
+            Outcome::EnvelopeRejected => {
+                "envelope is malformed or outside the accepted validity window (no recipient or \
+                 expiry, reversed range, or longer than the ceiling). Re-issue it from the \
+                 current backend key."
+            }
         }
     }
 
@@ -625,13 +658,17 @@ impl Outcome {
     /// without — which is exactly what happened when `Unprovisioned` was added.
     /// Sitting against the enum, it is in the diff you are already editing.
     #[cfg(test)]
-    const ALL: [Outcome; 6] = [
+    const ALL: [Outcome; 10] = [
         Outcome::Verified,
         Outcome::Unsigned,
         Outcome::Unprovisioned,
         Outcome::UnknownKid,
         Outcome::Invalid,
         Outcome::Stale,
+        Outcome::ClockAhead,
+        Outcome::Expired,
+        Outcome::Misaddressed,
+        Outcome::EnvelopeRejected,
     ];
 
     fn kind(self) -> &'static str {
@@ -642,6 +679,10 @@ impl Outcome {
             Outcome::UnknownKid => "command_signature_unknown_key",
             Outcome::Invalid => "command_signature_invalid",
             Outcome::Stale => "command_signature_stale",
+            Outcome::ClockAhead => "command_signature_clock_ahead",
+            Outcome::Expired => "command_signature_expired",
+            Outcome::Misaddressed => "command_signature_misaddressed",
+            Outcome::EnvelopeRejected => "command_signature_envelope_rejected",
         }
     }
 }
@@ -914,27 +955,14 @@ impl Verifier {
         lock(&self.ring).kid_fingerprints().collect()
     }
 
-    /// Check one message and report the outcome.
+    /// Check one legacy message and report the outcome, with the clock injected
+    /// so the freshness branch is reachable from a test.
     ///
     /// **Classifies; does not decide.** Acting on the answer is
     /// [`Verifier::refusal`], and the split is what lets a non-enforcing host
-    /// report exactly what an enforcing one would refuse — the reports are the
-    /// evidence an operator uses to judge whether flipping is safe.
-    ///
-    /// (This is a synchronous call and may do one local registry read — per
-    /// [`RELOAD_MIN_INTERVAL`], or unconditionally on an enforcing host. See
-    /// the module doc.)
-    pub fn observe(&self, body: &[u8], headers: &SigHeaders, request_id: &str) -> Outcome {
-        self.observe_at(
-            body,
-            headers,
-            request_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
-    }
-
-    /// [`Verifier::observe`] with the clock injected, so the freshness branch
-    /// is reachable from a test.
+    /// report exactly what an enforcing one would refuse. Production callers go
+    /// through [`Verifier::admit`].
+    #[cfg(test)]
     fn observe_at(
         &self,
         body: &[u8],
@@ -942,7 +970,18 @@ impl Verifier {
         request_id: &str,
         now_ms: i64,
     ) -> Outcome {
-        let outcome = self.classify(body, headers, request_id, now_ms, Instant::now());
+        self.observe_at_instant(body, headers, request_id, now_ms, Instant::now())
+    }
+
+    fn observe_at_instant(
+        &self,
+        body: &[u8],
+        headers: &SigHeaders,
+        request_id: &str,
+        now_ms: i64,
+        instant: Instant,
+    ) -> Outcome {
+        let outcome = self.classify(body, headers, request_id, now_ms, instant);
         self.report_transition(outcome);
         outcome
     }
@@ -960,8 +999,27 @@ impl Verifier {
         now_ms: i64,
         now: Instant,
     ) -> Outcome {
-        match self.check(body, headers, request_id, now_ms) {
-            Ok(outcome) => outcome,
+        self.with_reload(request_id, now, || {
+            self.check(body, headers, request_id, now_ms)
+        })
+        .unwrap_or_else(|missing| missing)
+    }
+
+    /// Run `check` against the ring, reloading it once if the only thing wrong
+    /// is that we do not hold the named key. `Err` is the outcome for a key we
+    /// still do not hold.
+    ///
+    /// Shared by the legacy and envelope paths so the reload rules — which are
+    /// security-relevant (the trigger is reachable by anyone who can put bytes
+    /// on a command subject) — exist once.
+    fn with_reload<T>(
+        &self,
+        request_id: &str,
+        now: Instant,
+        check: impl Fn() -> Result<T, String>,
+    ) -> Result<T, Outcome> {
+        match check() {
+            Ok(v) => Ok(v),
             // The one outcome a stale in-memory ring can explain. Everything
             // else — unsigned, malformed, bad signature, stale — means the same
             // thing whatever keys we hold, so it must not reach the store: the
@@ -984,17 +1042,17 @@ impl Verifier {
                 // look at the store again — the reload is how it recovers.
                 let reload = self.reload_if_due(now, self.enforce_requested);
                 if reload != Reload::Done {
-                    return self.report_missing(&kid, request_id, reload.as_str());
+                    return Err(self.report_missing(&kid, request_id, reload.as_str()));
                 }
-                match self.check(body, headers, request_id, now_ms) {
-                    Ok(outcome) => {
+                match check() {
+                    Ok(v) => {
                         info!(
                             kid,
                             request_id, "keyring reload resolved a previously unknown key"
                         );
-                        outcome
+                        Ok(v)
                     }
-                    Err(kid) => self.report_missing(&kid, request_id, "reloaded"),
+                    Err(kid) => Err(self.report_missing(&kid, request_id, "reloaded")),
                 }
             }
         }
@@ -1031,6 +1089,122 @@ impl Verifier {
                 warn!(error = %e, request_id, "command signature did not verify");
                 Ok(Outcome::Invalid)
             }
+        }
+    }
+
+    /// Decide what to do with one received command payload, whichever protocol
+    /// it uses. The single entry point both receive paths call, so the live
+    /// subscription and the replay consumer cannot disagree.
+    ///
+    /// A payload is an envelope if and only if it is a JSON object with a
+    /// `kind` key. No `kind` is the legacy form and takes exactly the old
+    /// path (parse, observe, refuse only on an enforcing host). A `kind` that
+    /// is null, not a string, or not [`ENVELOPE_KIND_V2`] is refused rather
+    /// than falling back to the legacy parse — otherwise a new-form payload
+    /// could be smuggled in under the old rules.
+    ///
+    /// An envelope is verified whether or not this host enforces: it is new
+    /// traffic, so there is nothing to stay compatible with.
+    ///
+    /// Pure of side effects beyond the existing signature-outcome report and
+    /// logging: no result is published for a refused envelope, because the
+    /// host may never have been its recipient, and the request id is not
+    /// consumed.
+    pub fn admit(&self, payload: &[u8], headers: &SigHeaders, subject: &str) -> Admission {
+        self.admit_at(
+            payload,
+            headers,
+            subject,
+            chrono::Utc::now(),
+            Instant::now(),
+        )
+    }
+
+    fn admit_at(
+        &self,
+        payload: &[u8],
+        headers: &SigHeaders,
+        subject: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        instant: Instant,
+    ) -> Admission {
+        if has_kind(payload) {
+            return self.admit_envelope(payload, headers, subject, now, instant);
+        }
+        let cmd: Command = match serde_json::from_slice(payload) {
+            Ok(c) => c,
+            Err(e) => return Admission::Undecodable(e),
+        };
+        let outcome = self.observe_at_instant(
+            payload,
+            headers,
+            &cmd.request_id,
+            now.timestamp_millis(),
+            instant,
+        );
+        match self.refusal(outcome) {
+            Some(reason) => Admission::RefusedLegacy { cmd, reason },
+            None => Admission::Run {
+                cmd,
+                envelope_deadline: None,
+            },
+        }
+    }
+
+    fn admit_envelope(
+        &self,
+        payload: &[u8],
+        headers: &SigHeaders,
+        subject: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        instant: Instant,
+    ) -> Admission {
+        // Before any signature work, and deliberately not reported as a
+        // signing-state transition: an unrecognised kind is reachable by
+        // anyone who can put bytes on the subject, so letting it move the
+        // reported state would hand them the fleet's event stream.
+        if kind_of(payload).as_deref() != Some(ENVELOPE_KIND_V2) {
+            warn!(
+                subject,
+                kind = ?kind_of(payload),
+                "REFUSED: payload has an unrecognised command kind"
+            );
+            return Admission::Refused;
+        }
+        let result = self.with_reload("", instant, || {
+            let ring = lock(&self.ring);
+            match verify_envelope(&ring, payload, headers, &self.pc_id, now) {
+                Err(EnvelopeError::Signature(VerifyError::UnknownKid { kid })) => Err(kid),
+                other => Ok(other),
+            }
+        });
+        let (outcome, verified) = match result {
+            Err(missing) => (missing, None),
+            Ok(Ok(v)) => {
+                if lock(&self.ring)
+                    .get(&v.kid)
+                    .is_some_and(|(_, _, p)| p.audit_every_use)
+                {
+                    warn!(
+                        kid = %v.kid,
+                        request_id = %v.command.request_id,
+                        "command signed by an audited key"
+                    );
+                }
+                (Outcome::Verified, Some(v))
+            }
+            Ok(Err(e)) => {
+                warn!(subject, error = %e, "REFUSED: command envelope did not verify");
+                (envelope_outcome(&e), None)
+            }
+        };
+        self.report_transition(outcome);
+        match verified {
+            Some(v) => Admission::Run {
+                envelope_deadline: Some(v.start_deadline),
+                cmd: v.command,
+            },
+            None => Admission::Refused,
         }
     }
 
@@ -1213,6 +1387,63 @@ impl Verifier {
                 "command_verify: enqueue failed — will retry on the next command"
             ),
         }
+    }
+}
+
+/// What the receive path should do with a payload.
+#[derive(Debug)]
+pub enum Admission {
+    /// Run it. `envelope_deadline` is the latest moment it may **start**, set
+    /// only for a verified v2 envelope; legacy commands carry none.
+    Run {
+        cmd: Command,
+        envelope_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// A legacy command refused by a host that enforces. The caller publishes
+    /// the signature-refusal result with `reason`, as it always has.
+    RefusedLegacy { cmd: Command, reason: &'static str },
+    /// An envelope (or a payload with an unrecognised `kind`) that was
+    /// refused. Already logged and reported; nothing is published, since the
+    /// host may never have been its recipient.
+    Refused,
+    /// A legacy payload that is not a `Command` at all.
+    Undecodable(serde_json::Error),
+}
+
+/// Whether the payload is a JSON object carrying a `kind` key, whatever its
+/// value. Malformed JSON is not an envelope: it falls to the legacy parse and
+/// fails there exactly as it always did.
+fn has_kind(payload: &[u8]) -> bool {
+    matches!(
+        serde_json::from_slice::<serde_json::Value>(payload),
+        Ok(serde_json::Value::Object(o)) if o.contains_key("kind")
+    )
+}
+
+/// The `kind` as a string, `None` when absent, null or not a string.
+fn kind_of(payload: &[u8]) -> Option<String> {
+    match serde_json::from_slice::<serde_json::Value>(payload) {
+        Ok(serde_json::Value::Object(o)) => o.get("kind")?.as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// Map an envelope refusal onto the coarse class that gets reported.
+fn envelope_outcome(e: &EnvelopeError) -> Outcome {
+    match e {
+        EnvelopeError::Signature(VerifyError::Unsigned) => Outcome::Unsigned,
+        EnvelopeError::Signature(VerifyError::Stale { .. }) => Outcome::Stale,
+        EnvelopeError::Signature(_) => Outcome::Invalid,
+        EnvelopeError::ClockAhead { .. } => Outcome::ClockAhead,
+        EnvelopeError::Expired { .. } | EnvelopeError::KeyAgeExceeded { .. } => Outcome::Expired,
+        EnvelopeError::Misaddressed { .. } => Outcome::Misaddressed,
+        EnvelopeError::UnknownKind(_)
+        | EnvelopeError::Malformed(_)
+        | EnvelopeError::MissingRecipient
+        | EnvelopeError::MissingExpiry
+        | EnvelopeError::MalformedExpiry(_)
+        | EnvelopeError::Reversed
+        | EnvelopeError::OverCeiling { .. } => Outcome::EnvelopeRejected,
     }
 }
 
@@ -2701,5 +2932,178 @@ mod tests {
         let sk = SigningKey::from_bytes(&[80u8; 32]);
         let v = enforcing_with(backend_ring("backend-1", &sk));
         assert!(v.enforcing_now());
+    }
+
+    // ---- v2 envelope admission ----
+
+    mod envelope {
+        use super::*;
+        use chrono::{DateTime, TimeZone, Utc};
+        use kanade_shared::signing::Signer;
+        use kanade_shared::wire::{RunAs, Shell, Staleness, sign_envelope};
+
+        fn t(secs: i64) -> DateTime<Utc> {
+            Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()
+        }
+
+        fn command() -> Command {
+            Command {
+                id: "echo".into(),
+                version: "1.0.0".into(),
+                request_id: "req-1".into(),
+                exec_id: None,
+                shell: Shell::Sh,
+                script: "echo hi".into(),
+                script_object: None,
+                script_object_sha256: None,
+                timeout_secs: 30,
+                bypass_local_limit: false,
+                jitter_secs: None,
+                run_as: RunAs::System,
+                cwd: None,
+                deadline_at: None,
+                staleness: Staleness::Cached,
+                emit: None,
+                check: None,
+                collect: None,
+                retry: None,
+                finalize: None,
+            }
+        }
+
+        fn setup(enforcing: bool) -> (Verifier, Signer) {
+            let sk = SigningKey::from_bytes(&[5u8; 32]);
+            let ring = backend_ring("k", &sk);
+            let v = if enforcing {
+                enforcing_with(ring)
+            } else {
+                verifier_with(ring)
+            };
+            (v, Signer::new(sk, "k"))
+        }
+
+        fn admit(v: &Verifier, body: &[u8], h: &SigHeaders, now: DateTime<Utc>) -> Admission {
+            v.admit_at(body, h, "commands.pc.PC1", now, Instant::now())
+        }
+
+        fn last(v: &Verifier) -> Option<Outcome> {
+            *lock(&v.last)
+        }
+
+        #[test]
+        fn a_valid_envelope_for_this_host_runs_with_its_deadline_in_either_mode() {
+            for enforcing in [false, true] {
+                let (v, s) = setup(enforcing);
+                let (body, h) = sign_envelope(&s, "PC1", t(3600), command(), t(0)).unwrap();
+                match admit(&v, &body, &h, t(5)) {
+                    Admission::Run {
+                        cmd,
+                        envelope_deadline,
+                    } => {
+                        assert_eq!(cmd.request_id, "req-1");
+                        assert_eq!(envelope_deadline, Some(t(3600)));
+                    }
+                    other => panic!("enforcing={enforcing}: {other:?}"),
+                }
+                assert_eq!(last(&v), Some(Outcome::Verified));
+            }
+        }
+
+        #[test]
+        fn an_envelope_for_another_host_is_refused_without_a_result_even_unenforced() {
+            for enforcing in [false, true] {
+                let (v, s) = setup(enforcing);
+                let (body, h) = sign_envelope(&s, "PC2", t(3600), command(), t(0)).unwrap();
+                assert!(matches!(admit(&v, &body, &h, t(5)), Admission::Refused));
+                assert_eq!(last(&v), Some(Outcome::Misaddressed));
+            }
+        }
+
+        #[test]
+        fn clock_refusals_are_reported_apart_from_tampering() {
+            let (v, s) = setup(false);
+            let (body, h) = sign_envelope(&s, "PC1", t(100), command(), t(0)).unwrap();
+            assert!(matches!(admit(&v, &body, &h, t(200)), Admission::Refused));
+            assert_eq!(last(&v), Some(Outcome::Expired));
+
+            let (body, h) = sign_envelope(&s, "PC1", t(10_000), command(), t(0)).unwrap();
+            assert!(matches!(
+                admit(&v, &body, &h, t(-4_000)),
+                Admission::Refused
+            ));
+            assert_eq!(last(&v), Some(Outcome::ClockAhead));
+
+            // Tampering is still a signature failure, not a clock one.
+            let tampered = String::from_utf8(body).unwrap().replace("PC1", "PC9");
+            assert!(matches!(
+                admit(&v, tampered.as_bytes(), &h, t(5)),
+                Admission::Refused
+            ));
+            assert_eq!(last(&v), Some(Outcome::Invalid));
+        }
+
+        #[test]
+        fn an_unsigned_envelope_is_refused_even_when_not_enforcing() {
+            let (v, s) = setup(false);
+            let (body, _) = sign_envelope(&s, "PC1", t(3600), command(), t(0)).unwrap();
+            assert!(matches!(
+                admit(&v, &body, &SigHeaders::default(), t(5)),
+                Admission::Refused
+            ));
+            assert_eq!(last(&v), Some(Outcome::Unsigned));
+        }
+
+        #[test]
+        fn an_unrecognised_kind_is_refused_and_never_falls_back_to_legacy() {
+            let (v, s) = setup(false);
+            let cmd = serde_json::to_string(&command()).unwrap();
+            for kind in [r#""kanade.command.v9""#, "null", "3", r#""""#] {
+                // A body that would also parse as a legacy command if the kind
+                // were ignored.
+                let mut obj: serde_json::Value = serde_json::from_str(&cmd).unwrap();
+                obj["kind"] = serde_json::from_str(kind).unwrap();
+                let body = serde_json::to_vec(&obj).unwrap();
+                let h = s.headers(&body, t(0).timestamp_millis());
+                assert!(
+                    matches!(admit(&v, &body, &h, t(5)), Admission::Refused),
+                    "kind {kind}"
+                );
+            }
+            // Refusing a kind is not a signing-state report: it is reachable by
+            // anyone who can put bytes on the subject.
+            assert_eq!(last(&v), None);
+        }
+
+        #[test]
+        fn legacy_commands_are_handled_exactly_as_before() {
+            let body = serde_json::to_vec(&command()).unwrap();
+
+            // Not enforcing: unsigned runs, with no envelope deadline.
+            let (v, s) = setup(false);
+            match admit(&v, &body, &SigHeaders::default(), t(5)) {
+                Admission::Run {
+                    envelope_deadline, ..
+                } => assert_eq!(envelope_deadline, None),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(last(&v), Some(Outcome::Unsigned));
+            // A signed legacy command for any recipient still verifies, however old.
+            let h = s.headers(&body, t(-30 * 86_400).timestamp_millis());
+            assert!(matches!(admit(&v, &body, &h, t(5)), Admission::Run { .. }));
+            assert_eq!(last(&v), Some(Outcome::Verified));
+
+            // Enforcing: unsigned is refused with a result to publish, as today.
+            let (v, _) = setup(true);
+            assert!(matches!(
+                admit(&v, &body, &SigHeaders::default(), t(5)),
+                Admission::RefusedLegacy { .. }
+            ));
+
+            // Not a command at all.
+            assert!(matches!(
+                admit(&v, b"not json", &SigHeaders::default(), t(5)),
+                Admission::Undecodable(_)
+            ));
+        }
     }
 }

@@ -2241,6 +2241,9 @@ async fn local_tick(
         // otherwise self-reject every tick after a bump. Revoke still
         // applies. See [`CommandSource`].
         CommandSource::LocalScheduler,
+        // No envelope: the agent's own fire has no recipient or expiry to
+        // enforce beyond the command's own `deadline_at`.
+        None,
     )
     .await
     {

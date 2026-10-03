@@ -1367,6 +1367,50 @@ Agent は `commands.pc.{自分のID}` `commands.all` `commands.group.*` に subs
 - `audit_log` テーブルに投影し、検索可能化
 - 操作者・対象・操作内容・時刻・IP を記録
 
+### 2.7.5 コマンド envelope (`kanade.command.v2`)
+
+従来のコマンド (legacy) は、シリアライズした `Command` のバイト列そのものに Ed25519 署名を付けたもので、署名は任意の宛先に対して、かつ (backend 鍵なら) 期限なしに有効である。そのため捕捉したコマンドを別ホストへ、あるいは後日に再送できる。v2 envelope は宛先と絶対期限を **署名対象のバイト列の内側** に入れてこの 2 点を塞ぐ。
+
+> 本節の時点では backend はまだ envelope を発行しない。Agent が先に検証できるようにして、切り替え前に Agent を更新できるようにするための段階である。legacy コマンドの扱いは変わらない。
+
+**形式** (`kanade-shared` の `CommandEnvelope`。ローカルで組み立てる `Command` とは別の型):
+
+```json
+{
+  "kind": "kanade.command.v2",
+  "target_pc_id": "PC001",
+  "expires_at": "2026-10-04T00:00:00Z",
+  "command": { "...既存の Command (request_id / exec_id / 実行オプション / retry / finalize / script か script_object の digest を含む)..." }
+}
+```
+
+- 署名は既存の仕組み (Ed25519、鍵リング、`Kanade-Sig*` ヘッダ、署名時刻 + body) をそのまま使い、**受信した body の生バイト列** に対して検証する。再シリアライズした値には検証しない。`sign_envelope` が一度だけシリアライズしたバイト列とヘッダを返す。
+- 受信側は `kind` で判別する。`kind` を持たないものは legacy `Command` で、従来どおりに扱う。`kind` が未知・null・文字列以外のものは、legacy にフォールバックせず拒否する。
+- 署名検証 → `kind` → `target_pc_id` → `expires_at` → 時刻検査の順で判定する。署名が通る前に時計や宛先の異常を報告しないので、偽造バイト列で報告を誘発できない。
+
+**宛先**: `target_pc_id` はその Agent の登録済み pc_id と **完全一致** (大文字小文字を区別) しなければならない。他ホスト宛の envelope は、自ホストの subject に届いても (攻撃者が作った push consumer 経由も含めて) 拒否する。欠落・空も拒否する。
+
+**期限**: `expires_at` は必須の絶対 UTC 時刻で、コマンドの **開始** 期限である。実行中のプロセスを止める指示ではない。実効的な開始期限は `expires_at` と `Command.deadline_at` の早い方。受信時と、起動直前 (jitter・スロット待ち・スクリプト取得の後、および認可された再試行の開始前) の 2 回以上確認する。再試行が期限切れで始められないときも、先行試行の実結果は破棄せず、その旨を stderr に追記して報告する。
+
+**検証失敗の扱い**: envelope が検証に失敗した場合は、enforcement の ON/OFF に関係なく拒否する (新しい経路なので互換性を保つ対象がない)。拒否時は警告ログと署名 outcome イベントだけを出し、`ExecResult` は発行せず、`request_id` の重複排除も消費しない。宛先でないホストについて実行結果を作らないためである。enforcement フラグの意味は legacy に対して従来どおり。
+
+**時計ポリシー** (ホストが締め出されないよう、保守的に定めている):
+
+| 規則 | 値 |
+|---|---|
+| 署名時刻の未来側許容 (`FUTURE_SKEW_ALLOWANCE`) | 1 時間 (break-glass 窓が既に必要としているものと同じ) |
+| 有効期間の上限 (`MAX_ENVELOPE_VALIDITY`、署名時刻から `expires_at` まで) | 7 日 (Agent が独立に強制する) |
+| 通常コマンドの過去側 | 上限なし。`expires_at` のみで制限される |
+| break-glass 鍵 | 鍵固有の `max_age` を上に重ねて適用する |
+
+- 許容を超えた未来の署名時刻、`expires_at` が署名時刻より前 (逆転)、上限超過の有効期間は拒否する。
+- 時計に関する拒否は、署名失敗とは別の outcome として既存の署名 outcome イベントに出す: `command_signature_clock_ahead` (署名時刻が未来すぎる)、`command_signature_expired` (開始期限または鍵の `max_age` 超過)、`command_signature_misaddressed` (宛先違い)、`command_signature_envelope_rejected` (宛先/期限の欠落・不正、逆転、上限超過など)。改ざんは従来どおり `command_signature_invalid`。
+- **前提**: ホストの時刻は信頼できるものとする。任意の時計巻き戻しは壁時計ベースの鮮度上限を破る (巻き戻したホストは、実際には失効した envelope を受理する)。本方式は再送可能な窓を狭めるものであって、時計を攻撃者が制御できるホストに対する保証ではない。
+- **運用上の注意**: Agent の時計が backend より 1 時間を超えて **遅れて** いると、正規の envelope が全て「未来の署名」として拒否される。envelope への切り替え前に、ホストの時刻ずれを観測しておくこと。
+- JetStream の保持は 7 日で、有効期間の上限と同じである。7 日を超えてオフラインだった Agent は、正規の replay でも失効した envelope を拒否する。これは意図した挙動である。
+
+**対応プロトコルの報告**: Agent は heartbeat の `command_protocols` に、自分が検証できるプロトコル (`["legacy", "kanade.command.v2"]`) を載せる。`command_keys` / `enforcing` と同じ三状態で扱う: 未報告 (NULL、ping 返信や旧 Agent) は「不明」であり「legacy のみ」とは推定しない / 空配列 (報告済みで何も検証できない) / 対応済みの集合。Backend は `agents.command_protocols` (JSON 配列、NULL 可、DEFAULT なし) に投影し (ping で省略されても保存済みの値は消さない)、`GET /api/agents` で `command_keys` / `enforcing` の隣に返す。これが後続のタスクで、ホストを envelope 受信に切り替える条件になる。
+
 ## 2.8 信頼性・可用性
 
 ### 2.8.1 メッセージ配信保証

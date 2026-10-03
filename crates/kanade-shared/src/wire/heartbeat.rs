@@ -160,6 +160,16 @@ pub struct Heartbeat {
     /// report memory rather than disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforcing: Option<bool>,
+    /// The command protocols this agent can verify (`legacy`,
+    /// `kanade.command.v2`). What later gates switching a host to receive the
+    /// envelope form: a host that cannot verify it must keep getting the old one.
+    ///
+    /// Three states, the same convention as [`Self::command_keys`]: `None` —
+    /// not reported (a ping reply, or a build that predates the field; NOT
+    /// "supports only legacy"); `Some(vec![])` — reported, supports none; or a
+    /// populated set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_protocols: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -184,6 +194,7 @@ mod tests {
             last_logon_display_name: Some("Yamada Taro".into()),
             command_keys: Some(vec!["backend-20260728".into()]),
             enforcing: Some(false),
+            command_protocols: Some(vec!["legacy".into(), "kanade.command.v2".into()]),
         };
         let json = serde_json::to_string(&hb).unwrap();
         let back: Heartbeat = serde_json::from_str(&json).unwrap();
@@ -200,6 +211,7 @@ mod tests {
         assert_eq!(back.last_logon_user, hb.last_logon_user);
         assert_eq!(back.last_logon_display_name, hb.last_logon_display_name);
         assert_eq!(back.command_keys, hb.command_keys);
+        assert_eq!(back.command_protocols, hb.command_protocols);
     }
 
     #[test]
@@ -219,6 +231,7 @@ mod tests {
             last_logon_display_name: None,
             command_keys: None,
             enforcing: None,
+            command_protocols: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -253,6 +266,7 @@ mod tests {
             last_logon_display_name: None,
             command_keys: Some(Vec::new()),
             enforcing: Some(false),
+            command_protocols: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -290,6 +304,7 @@ mod tests {
             last_logon_display_name: None,
             command_keys: Some(vec!["backend-20260728:75b4c8f44e18012d".into()]),
             enforcing: Some(false),
+            command_protocols: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(

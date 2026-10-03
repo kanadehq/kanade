@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::command_verify::Admission;
 use crate::outbox;
 use crate::process::{ExecOutcome, apply_jitter, run_command_with_kill};
 use crate::script_cache::ScriptCache;
@@ -149,36 +150,44 @@ pub async fn command_loop(
     }
 
     while let Some(msg) = sub.next().await {
-        let cmd: Command = match serde_json::from_slice(&msg.payload) {
-            Ok(c) => c,
-            Err(e) => {
+        // #1165: check provenance over the exact received bytes, report the
+        // outcome, and — on a host that is enforcing — refuse. `admit` also
+        // recognises the v2 envelope, which is verified (recipient, expiry)
+        // whether or not this host enforces.
+        let (cmd, envelope_deadline) = match verifier.admit(
+            &msg.payload,
+            &crate::command_verify::headers_of(&msg),
+            msg.subject.as_str(),
+        ) {
+            Admission::Run {
+                cmd,
+                envelope_deadline,
+            } => (cmd, envelope_deadline),
+            Admission::Undecodable(e) => {
                 warn!(error = %e, subject = %msg.subject, "deserialize command");
                 continue;
             }
+            Admission::RefusedLegacy { cmd, reason } => {
+                warn!(
+                    request_id = %cmd.request_id,
+                    subject = %msg.subject,
+                    reason,
+                    "REFUSED: command did not verify",
+                );
+                // Before the dedup insert below, deliberately. A refusal must not
+                // consume the request_id: the operator's fix (provision the key,
+                // correct the clock, sign it properly) produces a *retry*, and on
+                // the ad-hoc path that retry can legitimately carry the same id.
+                // Marking it seen would make the second attempt vanish silently —
+                // the exact failure this whole branch exists to end.
+                publish_signature_refused(&pc_id, &cmd, reason);
+                continue;
+            }
+            // A refused envelope: logged and reported by `admit`. No result is
+            // published — this host may never have been its recipient — and the
+            // request id is left unconsumed.
+            Admission::Refused => continue,
         };
-        // #1165: check provenance over the exact received bytes, report the
-        // outcome, and — on a host that is enforcing — refuse.
-        let outcome = verifier.observe(
-            &msg.payload,
-            &crate::command_verify::headers_of(&msg),
-            &cmd.request_id,
-        );
-        if let Some(reason) = verifier.refusal(outcome) {
-            warn!(
-                request_id = %cmd.request_id,
-                subject = %msg.subject,
-                reason,
-                "REFUSED: command did not verify",
-            );
-            // Before the dedup insert below, deliberately. A refusal must not
-            // consume the request_id: the operator's fix (provision the key,
-            // correct the clock, sign it properly) produces a *retry*, and on
-            // the ad-hoc path that retry can legitimately carry the same id.
-            // Marking it seen would make the second attempt vanish silently —
-            // the exact failure this whole branch exists to end.
-            publish_signature_refused(&pc_id, &cmd, reason);
-            continue;
-        }
         // Shared with command_replay: if the JetStream replay path
         // already ran this Command on an earlier reconnect (rare but
         // possible), drop the live duplicate here.
@@ -207,6 +216,7 @@ pub async fn command_loop(
                 script_cache,
                 check_sink,
                 CommandSource::Nats,
+                envelope_deadline,
             )
             .await
             {
@@ -350,6 +360,7 @@ pub enum CommandSource {
 /// Apply every gate whose answer can change while a command waits. Calling
 /// this both before jitter/admission and after admission preserves fail-fast
 /// skips while preventing a queued command from running on a stale decision.
+#[allow(clippy::too_many_arguments)]
 async fn command_is_gated(
     client: &async_nats::Client,
     pc_id: &str,
@@ -358,6 +369,7 @@ async fn command_is_gated(
     script_status: Option<&Store>,
     staleness: &Tracker,
     source: CommandSource,
+    envelope_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<bool> {
     // Spec §2.6 Layer 2: staleness comes first because a stale broker view
     // makes the KV answers below misleading.
@@ -434,9 +446,10 @@ async fn command_is_gated(
     }
 
     let now = chrono::Utc::now();
-    if let Some(deadline) = cmd.deadline_at
-        && should_skip_for_deadline(deadline, now)
-    {
+    // The envelope's expiry is a second start deadline, kept apart from
+    // `cmd.deadline_at` rather than folded into it so the command that is
+    // later reported and finalized is exactly the one that was signed.
+    if let Some(deadline) = start_deadline_blocking(cmd.deadline_at, envelope_deadline, now) {
         warn!(
             cmd_id = %cmd.id,
             request_id = %cmd.request_id,
@@ -462,6 +475,10 @@ pub async fn handle_command(
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
     source: CommandSource,
+    // The start deadline a verified v2 envelope carries; `None` for legacy
+    // commands and the agent's own scheduler fires. It bounds only when the
+    // command may START — a running process is never killed for it.
+    envelope_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<CommandOutcome> {
     if command_is_gated(
         &client,
@@ -471,6 +488,7 @@ pub async fn handle_command(
         script_status.as_ref(),
         &staleness,
         source,
+        envelope_deadline,
     )
     .await?
     {
@@ -512,6 +530,7 @@ pub async fn handle_command(
         script_status.as_ref(),
         &staleness,
         source,
+        envelope_deadline,
     )
     .await?
     {
@@ -558,6 +577,24 @@ pub async fn handle_command(
                 );
                 return Err(e);
             }
+        }
+    }
+
+    // Last look before launch. Fetching the script object can take a while,
+    // and jitter and slot waits sit upstream, so an envelope that was live at
+    // the gate may have expired by now.
+    if envelope_deadline.is_some() {
+        let now = chrono::Utc::now();
+        if let Some(deadline) = start_deadline_blocking(None, envelope_deadline, now) {
+            warn!(
+                cmd_id = %cmd.id,
+                request_id = %cmd.request_id,
+                %deadline,
+                %now,
+                "skip: envelope start deadline expired before launch",
+            );
+            publish_skipped(&client, &pc_id, &cmd, deadline, now).await?;
+            return Ok(CommandOutcome::Skipped);
         }
     }
 
@@ -632,6 +669,8 @@ pub async fn handle_command(
         .retry
         .map(|r| std::time::Duration::from_secs(r.backoff_secs));
     let mut attempt: u32 = 0;
+    // Set when a retry was authorised but its start deadline had passed.
+    let mut retry_not_started: Option<String> = None;
     let outcome = loop {
         let outcome = run_command_with_kill(&client, &cmd, Some(live_handle.tail())).await?;
         if !outcome_is_retryable(&outcome) || attempt >= max_retries {
@@ -666,6 +705,24 @@ pub async fn handle_command(
                 stdout: String::new(),
                 stderr: String::new(),
             };
+        }
+        // The retry is a new start, so the envelope's start deadline applies
+        // to it again after the backoff wait. The prior attempt's real outcome
+        // is kept and published; only the retry is abandoned.
+        if let Some(deadline) = start_deadline_blocking(None, envelope_deadline, chrono::Utc::now())
+        {
+            warn!(
+                cmd_id = %cmd.id,
+                request_id = %cmd.request_id,
+                attempt,
+                %deadline,
+                "envelope start deadline expired — retry not started",
+            );
+            attempt -= 1;
+            retry_not_started = Some(format!(
+                "retry not started: envelope start deadline {deadline} passed"
+            ));
+            break outcome;
         }
     };
     let finished_at = chrono::Utc::now();
@@ -703,16 +760,20 @@ pub async fn handle_command(
     // #418 Phase 4: append a retry summary so the Results page shows
     // the script eventually succeeded (or that the budget ran out)
     // rather than silently swallowing the earlier failures.
-    let stderr = [status_note, retry_note(attempt, exit_code, final_killed)]
-        .into_iter()
-        .flatten()
-        .fold(stderr, |acc, note| {
-            if acc.is_empty() {
-                note
-            } else {
-                format!("{acc}\n{note}")
-            }
-        });
+    let stderr = [
+        status_note,
+        retry_note(attempt, exit_code, final_killed),
+        retry_not_started,
+    ]
+    .into_iter()
+    .flatten()
+    .fold(stderr, |acc, note| {
+        if acc.is_empty() {
+            note
+        } else {
+            format!("{acc}\n{note}")
+        }
+    });
 
     // #290: if this job is an operator-defined health check, map its
     // result into the KLP `StateSnapshot.checks` for the Client App's
@@ -951,6 +1012,22 @@ async fn forward_obs_events(stdout: String, pc_id: String) {
         (0, 0)
     });
     debug!(ok, bad, pc_id = %pc_id_log, "obs: forwarded NDJSON stdout to obs-outbox");
+}
+
+/// The effective start deadline — the earlier of the command's own and the
+/// envelope's — if it has passed at `now`. Pure, so the same decision is made
+/// at receipt, after jitter and slot waits, before launch and before a retry,
+/// and each can be tested with its own clock reading.
+fn start_deadline_blocking(
+    command: Option<chrono::DateTime<chrono::Utc>>,
+    envelope: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let effective = match (command, envelope) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    effective.filter(|d| should_skip_for_deadline(*d, now))
 }
 
 /// Pure deadline check — boundary policy: `now > deadline` skips,
@@ -1367,6 +1444,41 @@ mod tests {
             None,
             "0.2.1"
         ));
+    }
+
+    #[test]
+    fn the_earlier_of_the_two_start_deadlines_blocks() {
+        assert_eq!(start_deadline_blocking(None, None, at(1_000)), None);
+        // Only the command's own deadline: unchanged legacy behaviour.
+        assert_eq!(start_deadline_blocking(Some(at(100)), None, at(99)), None);
+        assert_eq!(
+            start_deadline_blocking(Some(at(100)), None, at(101)),
+            Some(at(100))
+        );
+        // The envelope's is earlier, so it wins ...
+        assert_eq!(
+            start_deadline_blocking(Some(at(500)), Some(at(100)), at(101)),
+            Some(at(100))
+        );
+        // ... and so is the command's when that is earlier.
+        assert_eq!(
+            start_deadline_blocking(Some(at(100)), Some(at(500)), at(101)),
+            Some(at(100))
+        );
+    }
+
+    #[test]
+    fn an_envelope_that_expires_during_the_jitter_wait_is_caught_by_the_second_check() {
+        let deadline = Some(at(100));
+        // Receipt: still live.
+        assert_eq!(start_deadline_blocking(None, deadline, at(50)), None);
+        // After a 60s jitter / slot wait: the same inputs, a later clock.
+        assert_eq!(
+            start_deadline_blocking(None, deadline, at(110)),
+            Some(at(100))
+        );
+        // Exactly at the deadline still starts (inclusive, as for deadline_at).
+        assert_eq!(start_deadline_blocking(None, deadline, at(100)), None);
     }
 
     #[test]
