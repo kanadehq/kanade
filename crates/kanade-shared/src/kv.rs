@@ -101,9 +101,11 @@ pub const BUCKET_GROUP_DEFS_YAML: &str = "group_defs_yaml";
 
 /// Fleet-wide singleton settings that aren't per-agent (so they don't
 /// belong in `agent_config`'s layered scopes) and aren't per-schedule
-/// (so they don't belong in `schedules`). First and only key so far is
-/// [`KEY_FREEZE`] (#418 Phase 5 global change-freeze). One small bucket
-/// both the backend scheduler and every agent's local scheduler watch.
+/// (so they don't belong in `schedules`). Keys: [`KEY_FREEZE`] (#418 Phase 5
+/// global change-freeze) and [`KEY_SUPPORT_CODES`] (the agent-readable
+/// support-code projection). One small bucket every agent can already read;
+/// readers must address their own key rather than treat the bucket as a
+/// single document.
 pub const BUCKET_FLEET_CONFIG: &str = "fleet_config";
 
 /// Backend-side, operator-editable server settings that aren't per-agent
@@ -164,6 +166,16 @@ pub fn notifications_read_prefix(pc_id: &str, user_sid: &str) -> String {
 /// the freeze is a KV delete), so readers treat a missing key as "fire
 /// normally" and only evaluate `Freeze::is_active` when the key exists.
 pub const KEY_FREEZE: &str = "freeze";
+
+/// Key in [`BUCKET_FLEET_CONFIG`] holding the JSON-encoded
+/// [`crate::wire::SupportCodesProjection`] — only the support-code hashes the
+/// agent verifies against, written by the backend from `server_settings`.
+/// **Key absent ⇒ the backend has not published it yet** (older backend, or
+/// not reconciled), which an upgraded agent answers by falling back to the
+/// legacy `server_settings` document; an empty `support_codes` list is the
+/// authoritative "no codes configured" and is deliberately never deleted, so
+/// the key's presence stays a reliable "reconciled" marker.
+pub const KEY_SUPPORT_CODES: &str = "support_codes";
 
 /// KV bucket holding **per-(schedule, pc) last-dispatch marks** for the
 /// backend scheduler's in-flight suppression.

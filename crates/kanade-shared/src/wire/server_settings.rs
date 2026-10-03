@@ -282,6 +282,33 @@ impl SupportCode {
     }
 }
 
+/// The agent-readable projection of [`ServerSettings::support_codes`], stored
+/// under [`crate::kv::KEY_SUPPORT_CODES`] in `fleet_config`.
+///
+/// `server_settings` also carries secrets an agent has no business reading
+/// (the installer's NATS token, in clear at the KV layer, SMTP relay
+/// settings). The support-unlock check needs only the argon2id hashes, so the
+/// backend publishes just those here and agents read this instead. Keep it
+/// that way: [`Self::from_settings`] copies `support_codes` explicitly rather
+/// than cloning the settings and stripping fields, so a field added to
+/// `ServerSettings` later can never leak into this document by default.
+///
+/// Deliberately no `deny_unknown_fields`: a future field must not break
+/// agents that predate it.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct SupportCodesProjection {
+    pub support_codes: Vec<SupportCode>,
+}
+
+impl SupportCodesProjection {
+    pub fn from_settings(settings: &ServerSettings) -> Self {
+        Self {
+            support_codes: settings.support_codes.clone(),
+        }
+    }
+}
+
 /// Self-service agent-installer knobs (`GET /api/agents/installer`) —
 /// what the generated ZIP bakes in for a fresh PC. Kept server-side so the
 /// restricted "download user" (viewer + the `agent-install` feature only)

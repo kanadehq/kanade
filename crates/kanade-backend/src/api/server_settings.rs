@@ -863,6 +863,12 @@ pub async fn put_support_code(
             )
         })?;
 
+    // Only the support-code endpoints change what the projection holds; the
+    // generic settings PUT leaves `support_codes` alone, so it needs no sync.
+    // A failure must not change this response (the settings write succeeded);
+    // the periodic re-sync closes the gap.
+    crate::support_unlock_config::sync_or_warn(&s.jetstream).await;
+
     let merged = decode_merged(Value::Object(merged_map))?;
     info!(
         scope = %entry.scope,
@@ -914,6 +920,8 @@ pub async fn delete_support_code(
                 format!("delete support code: {e}"),
             )
         })?;
+
+    crate::support_unlock_config::sync_or_warn(&s.jetstream).await;
 
     let merged = decode_merged(Value::Object(merged_map))?;
     info!(scope = %scope, "support code deleted");
