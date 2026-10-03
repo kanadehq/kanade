@@ -86,10 +86,11 @@ enum SubCmd {
     /// on the backend host (`kanade-backend command-key-generate`), never here.
     CommandKey(cmd::command_key::CommandKeyArgs),
     /// Manage groups: list fleet-wide, add/remove PC memberships,
-    /// list PCs in a given group.
+    /// list PCs in a given group. Goes through the backend API (needs
+    /// KANADE_AUTH_TOKEN), not NATS.
     Group(cmd::group::GroupArgs),
     /// Manage per-PC operator metadata (free-form key/value attributes on
-    /// the agent_meta KV bucket). Sibling of `group`; NATS-direct.
+    /// the agent_meta KV bucket). NATS-direct.
     Meta(cmd::meta::MetaArgs),
     /// Log in with username/password; prints a JWT for KANADE_AUTH_TOKEN.
     Login(cmd::login::LoginArgs),
@@ -130,20 +131,11 @@ async fn main() -> Result<()> {
 }
 
 async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Result<()> {
-    // #1032: `kanade group def …` is HTTP manifest CRUD (backend), unlike the
-    // rest of `kanade group` which writes `agent_groups` KV over NATS. Route
-    // it here before the NATS connect below. A non-`Def` group subcommand
-    // doesn't match this pattern and falls through to the NATS path.
-    if let SubCmd::Group(cmd::group::GroupArgs {
-        sub: cmd::group::GroupSub::Def(def),
-    }) = command
-    {
-        return cmd::group::execute_def(&backend_url, def).await;
-    }
-
     // HTTP-only subcommands (no NATS connect required).
     if let SubCmd::Exec(args) = command {
         return cmd::exec::execute(&backend_url, args).await;
+    } else if let SubCmd::Group(args) = command {
+        return cmd::group::execute(&backend_url, args).await;
     } else if let SubCmd::Job(args) = command {
         return cmd::job::execute(&backend_url, args).await;
     } else if let SubCmd::Schedule(args) = command {
@@ -190,12 +182,12 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         SubCmd::App(args) => cmd::app::execute(client, args).await,
         SubCmd::Script(args) => cmd::script::execute(client, args).await,
         SubCmd::Config(args) => cmd::config::execute(client, args).await,
-        SubCmd::Group(args) => cmd::group::execute(client, args).await,
         SubCmd::Meta(args) => cmd::meta::execute(client, args).await,
         SubCmd::Exec(_)
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
         | SubCmd::View(_)
+        | SubCmd::Group(_)
         | SubCmd::Freeze(_)
         | SubCmd::Login(_)
         | SubCmd::Account(_)

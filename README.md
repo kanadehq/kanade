@@ -150,7 +150,7 @@ subscribes to `commands.all` + `commands.pc.{pc_id}`, then spawns the
 config_supervisor (watches `agent_config` + `agent_groups` KV) plus
 the heartbeat / inventory / self-update / groups-manager loops. Group
 membership and cadence settings are read from the KV buckets — see
-`kanade group` and `kanade config` to drive them.
+`kanade group` (via the backend API) and `kanade config` to drive them.
 
 ### 5 — drive it
 
@@ -206,6 +206,8 @@ kanade agent rollout <v> --group <name> [--jitter <d>]       # canary / wave
 kanade agent rollout <v> --pc    <pc_id> [--jitter <d>]      # single-host pin
 kanade agent current                             # read agent_config.global.target_version
 
+# `kanade group …` goes through the backend HTTP API (KANADE_AUTH_TOKEN; operator role to change
+# membership) — no NATS connection or broker token needed.
 kanade group list                                # fleet-wide: every known group + member count + config flag
 kanade group list --pc <pc_id>                   # one PC's memberships
 kanade group members <name>                      # PCs in this group
