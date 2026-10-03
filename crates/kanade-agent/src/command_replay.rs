@@ -13,11 +13,11 @@
 //! Reconnect / first-boot path (this module): a durable JetStream
 //! consumer with `DeliverPolicy::LastPerSubject` replays the latest
 //! retained Command per subject the agent cares about. Both paths
-//! feed into the same `handle_command` via a shared [`DedupCache`]
-//! that drops duplicates by `request_id` — the broker can deliver
-//! the same Command twice (once via core sub at fire time, once via
-//! the durable consumer on a later reconnect), and only one of them
-//! is acted on.
+//! feed into the same pipeline (`command_intake`) and the same durable
+//! admission ledger, which suppresses duplicates by `request_id` across
+//! restarts — the broker can deliver the same Command twice (once via
+//! core sub at fire time, once via the durable consumer on a later
+//! reconnect), and only one of them is acted on.
 
 use std::sync::Arc;
 
@@ -25,11 +25,11 @@ use async_nats::jetstream::consumer::DeliverPolicy;
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use futures::StreamExt;
 use kanade_shared::kv::STREAM_EXEC;
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::command_verify::Admission;
-use crate::commands::{CommandSource, DedupCache, handle_command};
+use crate::admission_ledger::Ledger;
+use crate::command_intake::{Delivery, Intake, JsAck, process_delivery};
+use crate::commands::{CommandSource, handle_command};
 use crate::nats_retry;
 use crate::script_cache::ScriptCache;
 
@@ -91,7 +91,7 @@ fn filter_subjects(pc_id: &str, groups: &[String]) -> Vec<String> {
 pub fn spawn(
     client: async_nats::Client,
     pc_id: String,
-    dedup: Arc<Mutex<DedupCache>>,
+    ledger: Arc<Ledger>,
     staleness: crate::staleness::Tracker,
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
@@ -102,7 +102,7 @@ pub fn spawn(
         run(
             client,
             pc_id,
-            dedup,
+            ledger,
             staleness,
             script_cache,
             check_sink,
@@ -122,7 +122,7 @@ pub fn spawn(
 async fn run(
     client: async_nats::Client,
     pc_id: String,
-    dedup: Arc<Mutex<DedupCache>>,
+    ledger: Arc<Ledger>,
     staleness: crate::staleness::Tracker,
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
@@ -264,84 +264,32 @@ async fn run(
                     None => break,
                 },
             };
-            // Ack early — even if we decide to skip below (not for
-            // me, duplicate, etc.), we don't want broker
-            // redelivery.
-            let _ = msg.ack().await;
-
             // Addressed-to-me runs BEFORE provenance, and the order became
             // load-bearing when refusals started producing an `ExecResult`
-            // (#1165 stage 3). The race this check exists for — a group
-            // command in flight while a membership removal propagates — would
-            // otherwise have this host publish a REFUSED result under its own
-            // pc_id for a command it was never responsible for, and report a
-            // signing-state transition it has no business reporting.
+            // (#1165 stage 3): a group command in flight while a membership
+            // removal propagates would otherwise have this host publish a
+            // REFUSED result for a command it was never responsible for.
             //
-            // Verifying first bought nothing anyway: a command not addressed
-            // here is dropped whatever its signature says.
-            if !is_for_me(&msg.subject, &pc_id, &groups) {
-                // warn, not debug: with server-side filter_subjects
-                // narrowing delivery, anything landing here is the
-                // rare race window (group command in flight while a
-                // membership removal propagates) — and the early ack
-                // above has already consumed it permanently, so the
-                // drop should be operator-visible (PR #540 review).
-                warn!(
-                    subject = %msg.subject,
-                    "replay msg not addressed to this agent; dropping (already acked)",
-                );
-                continue;
-            }
-
-            // #1165. This path matters more than the live one: the bypass
-            // #1155 measured *is* a JetStream consumer, so a verifier covering
-            // only `command_loop` would leave the attack it exists to stop
-            // running through the other door. That applies to the refusal
-            // below exactly as it applied to the observation, and to the v2
-            // envelope's recipient and expiry checks, which `admit` makes the
-            // same way for both paths.
-            //
-            // The legacy payload is decoded inside `admit`, after the
-            // addressed-to-me check above; an undecodable payload is dropped
-            // either way.
-            let (cmd, envelope_deadline) = match verifier.admit(
-                &msg.payload,
-                &crate::command_verify::headers_of(&msg),
-                msg.subject.as_str(),
-            ) {
-                Admission::Run {
-                    cmd,
-                    envelope_deadline,
-                } => (cmd, envelope_deadline),
-                Admission::Undecodable(e) => {
-                    warn!(error = %e, subject = %msg.subject, "deserialize replay command");
-                    continue;
-                }
-                Admission::RefusedLegacy { cmd, reason } => {
-                    warn!(
-                        request_id = %cmd.request_id,
-                        subject = %msg.subject,
-                        reason,
-                        "REFUSED: replayed command did not verify",
-                    );
-                    crate::commands::publish_signature_refused(&pc_id, &cmd, reason);
-                    continue;
-                }
-                // A refused envelope: logged and reported by `admit`; no result
-                // is published for a host that may never have been the recipient.
-                Admission::Refused => continue,
+            // The delivery is acknowledged only after the shared pipeline has
+            // admitted it to the durable ledger or reached a terminal refusal.
+            // A ledger that cannot be written leaves it unacknowledged, so the
+            // broker redelivers it rather than the command being lost.
+            let addressed = is_for_me(&msg.subject, &pc_id, &groups_rx.borrow());
+            let delivery = Delivery {
+                subject: msg.subject.as_str(),
+                payload: &msg.payload,
+                headers: crate::command_verify::headers_of(&msg),
+                addressed,
             };
-
-            // Dedup against the core-sub path: if we already saw
-            // this request_id (because the core sub delivered it
-            // live), drop it here.
-            if !dedup.lock().await.insert(cmd.request_id.clone()) {
-                debug!(
-                    request_id = %cmd.request_id,
-                    "replay dedup: already seen via core sub or earlier replay",
-                );
-                continue;
-            }
+            let admitted = match process_delivery(&delivery, &verifier, &ledger, &JsAck(&msg)).await
+            {
+                Intake::Launch(a) => a,
+                Intake::Settled(why) => {
+                    debug!(?why, "command delivery settled without launching");
+                    continue;
+                }
+                Intake::Held => continue,
+            };
 
             let client_for_task = client.clone();
             let pc_for_task = pc_id.clone();
@@ -351,8 +299,8 @@ async fn run(
             let sc = script_cache.clone();
             let cs = check_sink.clone();
             info!(
-                cmd_id = %cmd.id,
-                request_id = %cmd.request_id,
+                cmd_id = %admitted.cmd.id,
+                request_id = %admitted.cmd.request_id,
                 subject = %msg.subject,
                 "replay: handling missed command",
             );
@@ -360,14 +308,15 @@ async fn run(
                 if let Err(e) = handle_command(
                     client_for_task,
                     pc_for_task,
-                    cmd,
+                    admitted.cmd,
                     cur,
                     sta,
                     stl,
                     sc,
                     cs,
                     CommandSource::Nats,
-                    envelope_deadline,
+                    admitted.envelope_deadline,
+                    Some(admitted.ticket),
                 )
                 .await
                 {

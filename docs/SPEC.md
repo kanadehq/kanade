@@ -1323,8 +1323,39 @@ SPA の Schedule ページに「無効化」 (default = soft) と「無効化 + 
 | Layer 2 cascade on job delete / schedule hard-disable | backend HTTP API + CLI |
 | Layer 3 `kill.{exec_id}` subscribe + child kill | agent (`process::run_command_with_kill`) |
 | 最終 connectivity timestamp 追跡 | agent (`async_nats::Client::state()` watcher) |
-| Exit code 規約 (予約コード `122`, `124–127` = agent が実行を見送った理由、`123` = 署名検証で拒否。skip の判定は `ExecResult.skipped` フラグのみで終了コードでは行わず、123 の拒否は failure として数える) | shared (`kanade-shared/src/wire/result.rs`) |
+| Exit code 規約 (予約コード `121` = 実行中に agent が再起動し結果不明、`122`, `124–127` = agent が実行を見送った理由、`123` = 署名検証で拒否。skip の判定は `ExecResult.skipped` フラグのみで終了コードでは行わず、121 と 123 は failure として数える) | shared (`kanade-shared/src/wire/result.rs`) |
 | SPA UI (revoke / kill / cascade ボタン + 進行中 job 一覧) | `kanade-backend/web/src/pages/` (Jobs / Schedules / Results) |
+
+### 2.6.6a 命令受理台帳 (durable admission ledger)
+
+NATS で届いた命令 (`CommandSource::Nats`。live 購読と JetStream replay の両方) は、agent 再起動をまたいで「受理済み」を覚えるローカルの台帳 (`<data_dir>/admission/`) を経由する。メモリ上の request_id キャッシュ (FIFO 1,024 件) は廃止した。agent 自身の local scheduler が合成する命令は対象外で、従来どおりの扱い。
+
+**受信順序** (live / replay 共通。`command_intake`):
+
+1. 宛先確認 (自ホスト宛か)。
+2. 来歴検証 (既存の verifier と enforcement の挙動は不変)。
+3. 台帳へ受理記録。
+4. JetStream メッセージを ack。
+
+検証は記録の前に行うので、不正・未署名のメッセージが正規の request_id を予約することはない。ack は受理記録の後、または終端の拒否判断 (宛先外 / verifier による拒否 / 受理済み id の重複 / 解釈不能) の後だけ。台帳に書けない場合 (disk full、権限) は受理でも起動の許可でもなく、起動せず ack もしない (ログと obs event `command_admission_unavailable` で可視化。JetStream は未 ack として再配信する)。
+
+**台帳**: キーは `(pc_id, request_id)`、1 request 1 ファイル (結果 outbox と同じ tmp → fsync → rename、unix ではディレクトリも fsync)。レコードは受信 payload の SHA-256 fingerprint、受信バイト列と署名ヘッダ、検証済み command、`result_id` (受理時に固定)、状態を持つ。同じ id が同時に live と replay から届いても受理は 1 回。同じ id で fingerprint が異なるものは conflict で、実行せず、obs event `command_admission_conflict` (security 診断) を出す。
+
+**状態**: `pending` (受理済み・未起動) → `launching` (副作用の直前に永続化。launching / running を兼ねる) → `finished` (結果 + outbox 投入済みフラグ)。結果は先に台帳へ書いてから outbox へ入れ、その後に投入済みにするので、「台帳にも outbox にも無い結果」は生じない。重複配信は起動せず、`finished` で未投入の結果は再投入するだけ。結果アップロードの失敗が再実行を起こすことはない。
+
+**クラッシュ境界** (agent 起動時、NATS 接続を待たずに実行):
+
+| 状態 | 起動時の扱い |
+|---|---|
+| `pending` | 保存した payload を現在の鍵で再検証し、deadline / staleness / revoke / version pin を起動時点で再評価してローカルで実行。鍵の失効などで検証に通らなければ拒否結果 (exit 123) で終端する |
+| `launching` | 結果不明。プロセスがまだ動いているか、終わっているかを区別できないので**自動で再起動しない**。`exit 121` (`EXIT_RESTARTED_OUTCOME_UNKNOWN`、`skipped=false` なので failure) を 1 回だけ報告する。メッセージは「agent restarted during execution; outcome unknown」。`result_id` は (request_id, pc_id) から決定的に導くので、再起動を繰り返しても 1 行に収束する |
+| `finished` + 未投入 | outbox へ再投入 |
+
+意図的な再実行は新しい request_id で行う。署名付きの in-process retry policy (1 回の受理 = 1 回の実行の内側) は従来どおり。
+
+**保持と容量**: 終端レコード (tombstone) は、`COMMAND_STREAM_MAX_AGE` (broker の保持 7 日) に `ADMISSION_CLOCK_ALLOWANCE` (1 日) を足した期間、受理または完了の遅い方から数えて保持する。legacy 命令は自前の期限を持たないため、broker が再配信しうる間は id を覚えておく必要がある。未解決のレコード、未投入の結果、読めないレコードは GC しない。時計が巻き戻った場合も削除しない。上限は件数 (100,000) とバイト数 (1 GiB) で、到達したら GC を 1 回試し、それでも空かなければ新規の受理を可視的に拒否する (生きているレコードは退避しない)。
+
+**保証と限界**: これは durable な重複抑止であって、副作用の exactly-once 保証ではない。起動前に記録するので、記録後・起動前にクラッシュすると何も起動していないのに `launching` として残る窓があり (その場合も 121 で報告し、再起動はしない)、起動が不確かな命令は保守的に再起動しない。disk のロールバック、台帳の削除、agent の再インストールは保証の範囲外 (台帳が失われると、broker に残っている命令は再び受理されうる)。
 
 ### 2.6.7 まとめ表 (operator 視点)
 

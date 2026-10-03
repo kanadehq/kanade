@@ -782,6 +782,27 @@ impl Verifier {
         )
     }
 
+    /// An enforcing verifier trusting one key, for tests of the receive path.
+    #[cfg(test)]
+    pub(crate) fn enforcing_for_test(
+        pc_id: &str,
+        obs_dir: std::path::PathBuf,
+        kid: &str,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Self {
+        let raw = serde_json::to_string(&[serde_json::json!({
+            "kid": kid,
+            "public_key": kanade_shared::signing::encode_public(key),
+        })])
+        .expect("serialising a ring is infallible");
+        Self::with_loader_and_policy(
+            pc_id.to_string(),
+            obs_dir,
+            Box::new(move || Ok(Some(raw.clone()))),
+            true,
+        )
+    }
+
     /// The ring's source is a single argument so the initial load and every
     /// reload cannot drift apart — the caller can no longer hand in one ring
     /// and have it silently refreshed from somewhere else.

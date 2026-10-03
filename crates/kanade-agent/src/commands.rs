@@ -1,6 +1,3 @@
-use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_nats::jetstream::kv::Store;
 use futures::StreamExt;
@@ -11,56 +8,73 @@ use kanade_shared::wire::{
     Command, EXIT_REJECTED_UNSIGNED, EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS,
     EXIT_SKIP_VERSION_PIN, signature_refusal_result_id,
 };
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::command_verify::Admission;
+use crate::admission_ledger::{Ledger, LedgerError, Ticket};
+use crate::command_intake::{Delivery, Intake, NoAck, process_delivery};
 use crate::outbox;
 use crate::process::{ExecOutcome, apply_jitter, run_command_with_start_deadline};
 use crate::script_cache::ScriptCache;
 use crate::staleness::{StalenessDecision, Tracker, decide as staleness_decide};
 
-/// FIFO-bounded set of recently-seen `request_id`s. Shared between
-/// the core-sub `command_loop` and the JetStream-replay
-/// `command_replay::run`. Either path may receive a given Command
-/// first (live publish via core sub for online agents; replay on
-/// reconnect for offline agents); the second arrival is dropped via
-/// [`Self::insert`] returning `false`.
-pub struct DedupCache {
-    seen: HashSet<String>,
-    order: VecDeque<String>,
-    cap: usize,
+/// Where a command's outcome goes. A command delivered over NATS has a
+/// ledger ticket, and its outcome is recorded in the admission ledger *and*
+/// queued for upload as one step; anything else (the local scheduler) keeps the
+/// best-effort enqueue it always had.
+pub(crate) struct Sink {
+    ticket: Option<Ticket>,
+    reported: std::sync::atomic::AtomicBool,
 }
 
-impl DedupCache {
-    pub fn new(cap: usize) -> Self {
+impl Sink {
+    fn new(ticket: Option<Ticket>) -> Self {
         Self {
-            seen: HashSet::with_capacity(cap),
-            order: VecDeque::with_capacity(cap),
-            cap,
+            ticket,
+            reported: std::sync::atomic::AtomicBool::new(false),
         }
     }
-    /// Returns `true` when `id` is newly inserted, `false` when it
-    /// was already present (= duplicate, caller should drop).
-    pub fn insert(&mut self, id: String) -> bool {
-        if self.seen.contains(&id) {
-            return false;
-        }
-        self.seen.insert(id.clone());
-        self.order.push_back(id);
-        while self.order.len() > self.cap {
-            if let Some(old) = self.order.pop_front() {
-                self.seen.remove(&old);
-            }
-        }
-        true
-    }
-}
 
-pub fn shared_dedup_cache() -> Arc<Mutex<DedupCache>> {
-    // 4 KB of RAM gets us ~ 128 request_ids; 1024 is generous.
-    Arc::new(Mutex::new(DedupCache::new(1024)))
+    fn is_ledgered(&self) -> bool {
+        self.ticket.is_some()
+    }
+
+    fn is_reported(&self) -> bool {
+        self.reported.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The id the result is published under: fixed at admission for a ledgered
+    /// command so a re-published outcome lands on the same row.
+    fn result_id(&self) -> String {
+        match &self.ticket {
+            Some(t) => t.result_id().to_string(),
+            None => Uuid::new_v4().to_string(),
+        }
+    }
+
+    /// Record and queue the outcome. For a ledgered command this is the only
+    /// way a result leaves, so a crash can never leave an outcome that is in
+    /// neither the ledger nor the outbox.
+    async fn emit(&self, result: ExecResult, note: &'static str) {
+        let Some(ticket) = &self.ticket else {
+            enqueue_result_best_effort(result, note);
+            return;
+        };
+        let t = ticket.clone();
+        let request_id = result.request_id.clone();
+        // Set whatever happens next: on failure the outcome is either in the
+        // ledger (recovery re-queues it) or was queued directly, and a second
+        // report on top would only duplicate it.
+        self.reported
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        match tokio::task::spawn_blocking(move || t.finish(result)).await {
+            Ok(Ok(())) => debug!(request_id = %request_id, "{note}"),
+            Ok(Err(e)) => {
+                error!(request_id = %request_id, error = %e, "outcome could not be fully recorded")
+            }
+            Err(e) => error!(request_id = %request_id, error = %e, "outcome recording task failed"),
+        }
+    }
 }
 
 /// Enqueue a finished (or synthetic-skip) run's `ExecResult` to the
@@ -126,7 +140,7 @@ pub(crate) fn enqueue_result_best_effort_in(
 pub async fn command_loop(
     client: async_nats::Client,
     pc_id: String,
-    dedup: Arc<Mutex<DedupCache>>,
+    ledger: std::sync::Arc<Ledger>,
     staleness: Tracker,
     mut sub: async_nats::Subscriber,
     script_cache: ScriptCache,
@@ -150,54 +164,23 @@ pub async fn command_loop(
     }
 
     while let Some(msg) = sub.next().await {
-        // #1165: check provenance over the exact received bytes, report the
-        // outcome, and — on a host that is enforcing — refuse. `admit` also
-        // recognises the v2 envelope, which is verified (recipient, expiry)
-        // whether or not this host enforces.
-        let (cmd, envelope_deadline) = match verifier.admit(
-            &msg.payload,
-            &crate::command_verify::headers_of(&msg),
-            msg.subject.as_str(),
-        ) {
-            Admission::Run {
-                cmd,
-                envelope_deadline,
-            } => (cmd, envelope_deadline),
-            Admission::Undecodable(e) => {
-                warn!(error = %e, subject = %msg.subject, "deserialize command");
-                continue;
-            }
-            Admission::RefusedLegacy { cmd, reason } => {
-                warn!(
-                    request_id = %cmd.request_id,
-                    subject = %msg.subject,
-                    reason,
-                    "REFUSED: command did not verify",
-                );
-                // Before the dedup insert below, deliberately. A refusal must not
-                // consume the request_id: the operator's fix (provision the key,
-                // correct the clock, sign it properly) produces a *retry*, and on
-                // the ad-hoc path that retry can legitimately carry the same id.
-                // Marking it seen would make the second attempt vanish silently —
-                // the exact failure this whole branch exists to end.
-                publish_signature_refused(&pc_id, &cmd, reason);
-                continue;
-            }
-            // A refused envelope: logged and reported by `admit`. No result is
-            // published — this host may never have been its recipient — and the
-            // request id is left unconsumed.
-            Admission::Refused => continue,
+        // Verify, admit to the durable ledger, then launch. A core
+        // subscription has nothing to acknowledge; the replay consumer shares
+        // this pipeline and acknowledges after admission.
+        let delivery = Delivery {
+            subject: msg.subject.as_str(),
+            payload: &msg.payload,
+            headers: crate::command_verify::headers_of(&msg),
+            addressed: true,
         };
-        // Shared with command_replay: if the JetStream replay path
-        // already ran this Command on an earlier reconnect (rare but
-        // possible), drop the live duplicate here.
-        if !dedup.lock().await.insert(cmd.request_id.clone()) {
-            debug!(
-                request_id = %cmd.request_id,
-                "core-sub dedup: already seen via replay or earlier delivery",
-            );
-            continue;
-        }
+        let admitted = match process_delivery(&delivery, &verifier, &ledger, &NoAck).await {
+            Intake::Launch(a) => a,
+            Intake::Settled(why) => {
+                debug!(?why, "command delivery settled without launching");
+                continue;
+            }
+            Intake::Held => continue,
+        };
         let client = client.clone();
         let pc_id = pc_id.clone();
         let cur = script_current.clone();
@@ -209,14 +192,15 @@ pub async fn command_loop(
             if let Err(e) = handle_command(
                 client,
                 pc_id,
-                cmd,
+                admitted.cmd,
                 cur,
                 sta,
                 staleness,
                 script_cache,
                 check_sink,
                 CommandSource::Nats,
-                envelope_deadline,
+                admitted.envelope_deadline,
+                Some(admitted.ticket),
             )
             .await
             {
@@ -355,6 +339,7 @@ async fn command_is_gated(
     staleness: &Tracker,
     source: CommandSource,
     envelope_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    sink: &Sink,
 ) -> Result<bool> {
     // Spec §2.6 Layer 2: staleness comes first because a stale broker view
     // makes the KV answers below misleading.
@@ -368,7 +353,7 @@ async fn command_is_gated(
                 allowed_s = allowed.as_secs(),
                 "skip: staleness policy (mode=strict) exceeded — broker view too old",
             );
-            publish_staleness_skipped(pc_id, cmd, observed, allowed).await?;
+            publish_staleness_skipped(pc_id, cmd, observed, allowed, sink).await?;
             return Ok(true);
         }
     }
@@ -388,7 +373,7 @@ async fn command_is_gated(
                 request_id = %cmd.request_id,
                 "skip stale command (version mismatch)",
             );
-            publish_version_mismatch_skipped(pc_id, cmd, &expected).await?;
+            publish_version_mismatch_skipped(pc_id, cmd, &expected, sink).await?;
             return Ok(true);
         }
     }
@@ -402,7 +387,7 @@ async fn command_is_gated(
             request_id = %cmd.request_id,
             "skip revoked command",
         );
-        publish_revoked_skipped(pc_id, cmd).await?;
+        publish_revoked_skipped(pc_id, cmd, sink).await?;
         return Ok(true);
     }
 
@@ -417,7 +402,7 @@ async fn command_is_gated(
             cmd.run_as
         );
         warn!(cmd_id = %cmd.id, run_as = ?cmd.run_as, "skip: run_as unsupported on this OS");
-        enqueue_result_best_effort(
+        sink.emit(
             skip_result(
                 pc_id,
                 cmd,
@@ -426,7 +411,8 @@ async fn command_is_gated(
                 now,
             ),
             "unsupported run_as skip result enqueued to outbox",
-        );
+        )
+        .await;
         return Ok(true);
     }
 
@@ -442,18 +428,22 @@ async fn command_is_gated(
             %now,
             "skip: starting deadline expired",
         );
-        publish_skipped(client, pc_id, cmd, deadline, now).await?;
+        publish_skipped(client, pc_id, cmd, deadline, now, sink).await?;
         return Ok(true);
     }
 
     Ok(false)
 }
 
+/// Run one command. `ticket` is the admission-ledger licence a NATS-delivered
+/// command arrives with; it makes the run restart-safe (the ledger says
+/// `launching` before anything starts and holds the outcome until it is
+/// queued). The local scheduler passes `None` and keeps its own handling.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     client: async_nats::Client,
     pc_id: String,
-    mut cmd: Command,
+    cmd: Command,
     script_current: Option<Store>,
     script_status: Option<Store>,
     staleness: Tracker,
@@ -464,6 +454,68 @@ pub async fn handle_command(
     // commands and the agent's own scheduler fires. It bounds only when the
     // command may START — a running process is never killed for it.
     envelope_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    ticket: Option<Ticket>,
+) -> Result<CommandOutcome> {
+    let sink = Sink::new(ticket);
+    let for_report = sink.is_ledgered().then(|| (pc_id.clone(), cmd.clone()));
+    let outcome = handle_command_inner(
+        client,
+        pc_id,
+        cmd,
+        script_current,
+        script_status,
+        staleness,
+        script_cache,
+        check_sink,
+        source,
+        envelope_deadline,
+        &sink,
+    )
+    .await;
+    // An admitted command must end in a recorded outcome. An error after
+    // admission (the script could not be fetched, the process could not be
+    // created) is a failure to report, not a reason to leave the record open
+    // for a relaunch. The one exception is the ledger itself being unwritable:
+    // then nothing can be recorded, and the command stays pending for recovery.
+    if let (Err(e), Some((pc_id, cmd))) = (&outcome, for_report)
+        && !sink.is_reported()
+        && !e.is::<LedgerError>()
+    {
+        sink.emit(
+            failure_result(
+                &pc_id,
+                &cmd,
+                &format!("command failed before it produced an outcome: {e:#}"),
+            ),
+            "failure outcome recorded",
+        )
+        .await;
+    }
+    outcome
+}
+
+/// A failure result for an admitted command that errored out. Not a skip: the
+/// command was admitted and did not complete.
+fn failure_result(pc_id: &str, cmd: &Command, message: &str) -> ExecResult {
+    ExecResult {
+        skipped: Some(false),
+        ..skip_result(pc_id, cmd, -1, message.to_string(), chrono::Utc::now())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_command_inner(
+    client: async_nats::Client,
+    pc_id: String,
+    mut cmd: Command,
+    script_current: Option<Store>,
+    script_status: Option<Store>,
+    staleness: Tracker,
+    script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
+    source: CommandSource,
+    envelope_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    sink: &Sink,
 ) -> Result<CommandOutcome> {
     if command_is_gated(
         &client,
@@ -474,6 +526,7 @@ pub async fn handle_command(
         &staleness,
         source,
         envelope_deadline,
+        sink,
     )
     .await?
     {
@@ -499,7 +552,7 @@ pub async fn handle_command(
     tokio::select! {
         _ = apply_jitter(&cmd) => {}
         _ = kill.killed() => {
-            enqueue_result_best_effort(
+            sink.emit(
                 admission_cancelled_result(
                     &pc_id,
                     &cmd,
@@ -509,7 +562,8 @@ pub async fn handle_command(
                     },
                 ),
                 "local admission cancellation enqueued",
-            );
+            )
+            .await;
             return Ok(CommandOutcome::Skipped);
         }
     }
@@ -517,10 +571,11 @@ pub async fn handle_command(
     let _local_slot = match crate::concurrency::admit(&kill, &cmd).await {
         Ok(permit) => permit,
         Err(outcome) => {
-            enqueue_result_best_effort(
+            sink.emit(
                 admission_cancelled_result(&pc_id, &cmd, outcome),
                 "local admission cancellation enqueued",
-            );
+            )
+            .await;
             return Ok(CommandOutcome::Skipped);
         }
     };
@@ -536,6 +591,7 @@ pub async fn handle_command(
         &staleness,
         source,
         envelope_deadline,
+        sink,
     )
     .await?
     {
@@ -598,9 +654,17 @@ pub async fn handle_command(
                 %now,
                 "skip: envelope start deadline expired before launch",
             );
-            publish_skipped(&client, &pc_id, &cmd, deadline, now).await?;
+            publish_skipped(&client, &pc_id, &cmd, deadline, now, sink).await?;
             return Ok(CommandOutcome::Skipped);
         }
+    }
+
+    // Durable before any side effect (the started event, the process): if the
+    // agent dies from here on, recovery sees `launching` and reports the
+    // outcome as unknown instead of running the command a second time. If the
+    // record cannot be written, nothing starts.
+    if let Some(ticket) = &sink.ticket {
+        ticket.mark_launching().map_err(anyhow::Error::from)?;
     }
 
     info!(
@@ -616,7 +680,8 @@ pub async fn handle_command(
     // (script-spawn lifecycle event) and the ExecResult so the
     // backend's UPSERT against `execution_results.result_id`
     // coalesces both into a single row regardless of arrival order.
-    let result_id = Uuid::new_v4().to_string();
+    // A ledgered command's id was fixed at admission instead.
+    let result_id = sink.result_id();
 
     // Register an in-memory live-tail buffer so the
     // `job.tail.<pc_id>` handler can serve this job's stdout/stderr to
@@ -716,7 +781,7 @@ pub async fn handle_command(
                             %deadline,
                             "skip: envelope start deadline expired at launch",
                         );
-                        publish_skipped(&client, &pc_id, &cmd, deadline, now).await?;
+                        publish_skipped(&client, &pc_id, &cmd, deadline, now, sink).await?;
                         return Ok(CommandOutcome::Skipped);
                     }
                 }
@@ -939,10 +1004,11 @@ pub async fn handle_command(
         // this job carried a `collect:` hint and the run succeeded).
         collect_object,
     };
-    enqueue_result_best_effort(
+    sink.emit(
         result,
         "result enqueued to outbox (drain task delivers via JetStream)",
-    );
+    )
+    .await;
 
     if exit_code == 0 {
         crate::local_scheduler::record_job_success(&cmd.id, finished_at).await;
@@ -1113,6 +1179,7 @@ fn version_pin_rejects(source: CommandSource, pinned: Option<&str>, cmd_version:
 ///
 /// | Code | Meaning                                | Helper                            |
 /// |------|----------------------------------------|-----------------------------------|
+/// | 121  | agent restarted mid-run, outcome unknown | `admission_ledger` recovery       |
 /// | 122  | schedule feature unsupported on this OS | `local_scheduler` (require / when.on) |
 /// | 123  | command signature refused (#1165)      | `publish_signature_refused`       |
 /// | 124  | Layer 2 version-pin mismatch (#271)    | `publish_version_mismatch_skipped`|
@@ -1129,6 +1196,7 @@ async fn publish_staleness_skipped(
     cmd: &Command,
     observed: std::time::Duration,
     allowed: std::time::Duration,
+    sink: &Sink,
 ) -> Result<()> {
     let now = chrono::Utc::now();
     let stderr = format!(
@@ -1136,10 +1204,11 @@ async fn publish_staleness_skipped(
         humantime::format_duration(observed),
         humantime::format_duration(allowed),
     );
-    enqueue_result_best_effort(
+    sink.emit(
         skip_result(pc_id, cmd, EXIT_SKIP_STALENESS, stderr, now),
         "staleness-skip result enqueued to outbox",
-    );
+    )
+    .await;
     Ok(())
 }
 
@@ -1205,11 +1274,17 @@ fn admission_cancelled_result(pc_id: &str, cmd: &Command, outcome: ExecOutcome) 
 /// Shared by the live subscription and the JetStream replay, because both
 /// decode the same bytes and a refusal reachable through only one of them is
 /// the #1155 bypass with extra steps.
-pub(crate) fn publish_signature_refused(pc_id: &str, cmd: &Command, reason: &str) {
-    enqueue_result_best_effort(
+pub(crate) fn publish_signature_refused(
+    outbox_dir: std::path::PathBuf,
+    pc_id: &str,
+    cmd: &Command,
+    reason: &str,
+) -> tokio::task::JoinHandle<()> {
+    enqueue_result_best_effort_in(
+        outbox_dir,
         signature_refusal_result(pc_id, cmd, reason, chrono::Utc::now()),
         "signature-refusal result enqueued to outbox",
-    );
+    )
 }
 
 /// The refusal [`publish_signature_refused`] publishes. The script never ran,
@@ -1229,7 +1304,7 @@ pub(crate) fn publish_signature_refused(pc_id: &str, cmd: &Command, reason: &str
 /// and the projector's `ON CONFLICT(result_id) DO UPDATE` collapses it. Chosen
 /// over an in-memory "already refused" set because that set dies with the
 /// process — and an agent restart is exactly when the replay re-delivers.
-fn signature_refusal_result(
+pub(crate) fn signature_refusal_result(
     pc_id: &str,
     cmd: &Command,
     reason: &str,
@@ -1259,6 +1334,7 @@ async fn publish_skipped(
     cmd: &Command,
     deadline: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
+    sink: &Sink,
 ) -> Result<()> {
     let lateness = now - deadline;
     let stderr = format!(
@@ -1271,10 +1347,11 @@ async fn publish_skipped(
         deadline,
         now,
     );
-    enqueue_result_best_effort(
+    sink.emit(
         skip_result(pc_id, cmd, EXIT_SKIP_DEADLINE, stderr, now),
         "synthetic skipped-result enqueued to outbox",
-    );
+    )
+    .await;
     Ok(())
 }
 
@@ -1292,16 +1369,18 @@ async fn publish_version_mismatch_skipped(
     pc_id: &str,
     cmd: &Command,
     expected: &str,
+    sink: &Sink,
 ) -> Result<()> {
     let now = chrono::Utc::now();
     let stderr = format!(
         "skipped: version-pin mismatch — script_current[{}] = {expected}, command brought {}",
         cmd.id, cmd.version,
     );
-    enqueue_result_best_effort(
+    sink.emit(
         skip_result(pc_id, cmd, EXIT_SKIP_VERSION_PIN, stderr, now),
         "version-mismatch skip result enqueued to outbox",
-    );
+    )
+    .await;
     Ok(())
 }
 
@@ -1313,16 +1392,17 @@ async fn publish_version_mismatch_skipped(
 ///
 /// Same `executions`-row rationale as
 /// [`publish_version_mismatch_skipped`].
-async fn publish_revoked_skipped(pc_id: &str, cmd: &Command) -> Result<()> {
+async fn publish_revoked_skipped(pc_id: &str, cmd: &Command, sink: &Sink) -> Result<()> {
     let now = chrono::Utc::now();
     let stderr = format!(
         "skipped: command was revoked (script_status[{}] = revoked)",
         cmd.id,
     );
-    enqueue_result_best_effort(
+    sink.emit(
         skip_result(pc_id, cmd, EXIT_SKIP_REVOKED, stderr, now),
         "revoked skip result enqueued to outbox",
-    );
+    )
+    .await;
     Ok(())
 }
 

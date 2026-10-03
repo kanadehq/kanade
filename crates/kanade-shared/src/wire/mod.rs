@@ -40,8 +40,9 @@ pub use remote::{
     RemoteInput, TileEncoding, frame_kind, gap_headers, header as remote_header, resumed_headers,
 };
 pub use result::{
-    EXIT_REJECTED_UNSIGNED, EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS,
-    EXIT_SKIP_UNSUPPORTED, EXIT_SKIP_VERSION_PIN, ExecResult, signature_refusal_result_id,
+    EXIT_REJECTED_UNSIGNED, EXIT_RESTARTED_OUTCOME_UNKNOWN, EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED,
+    EXIT_SKIP_STALENESS, EXIT_SKIP_UNSUPPORTED, EXIT_SKIP_VERSION_PIN, ExecResult,
+    restart_unknown_result_id, signature_refusal_result_id,
 };
 pub use server_settings::{
     AgentInstallSection, DEFAULT_AGENT_RELEASES_CAP_MIB, DEFAULT_APP_PACKAGES_CAP_MIB,

@@ -32,6 +32,8 @@ mod self_update;
 #[cfg(target_os = "windows")]
 mod klp;
 
+mod admission_ledger;
+mod command_intake;
 mod command_replay;
 mod command_verify;
 mod events_outbox;
@@ -850,11 +852,20 @@ pub(crate) async fn run_agent() -> Result<()> {
             "agent.toml::[agent] groups is deprecated; use `kanade agent groups set` instead — local value is ignored",
         );
     }
-    // v0.22.1: dedup cache shared between core sub (live online
-    // path) and the JetStream replay consumer (reconnect catch-up).
-    // Either path can be the first to deliver a given Command's
-    // request_id; the second arrival is dropped.
-    let dedup = commands::shared_dedup_cache();
+    // v0.22.1: the core sub (live online path) and the JetStream replay
+    // consumer (reconnect catch-up) share one admission ledger. Either path
+    // can be the first to deliver a given Command's request_id; the second
+    // arrival is a duplicate.
+    // The authority on "already admitted" is the durable admission ledger, not
+    // memory: it survives restarts, so a retained or replayed command is not
+    // launched again after one. Opening never fails; a ledger that cannot be
+    // written refuses admission visibly instead.
+    let ledger = admission_ledger::Ledger::open(
+        default_paths::data_dir().join("admission"),
+        default_paths::data_dir().join("outbox"),
+        obs_outbox::default_dir(),
+        pc_id.clone(),
+    );
 
     // #210: OBJECT_SCRIPTS-backed manifest scripts. Constructed
     // once here (cheap Clone — jetstream::Context is Arc-internal)
@@ -866,6 +877,34 @@ pub(crate) async fn run_agent() -> Result<()> {
         default_paths::data_dir().join("script_cache"),
     );
 
+    // Reconcile the ledger with what the previous run left behind, before any
+    // command is accepted: unsent outcomes are queued, a command caught
+    // mid-run is reported as outcome-unknown (never relaunched), and commands
+    // admitted but never started are re-verified and run locally. None of this
+    // waits for the broker.
+    {
+        let recovery_ledger = ledger.clone();
+        let recovery = tokio::task::spawn_blocking(move || recovery_ledger.recover())
+            .await
+            .context("admission ledger recovery task")?;
+        info!(
+            pending = recovery.pending.len(),
+            unknown_outcome = recovery.unknown_reported,
+            requeued = recovery.requeued,
+            "admission ledger recovered",
+        );
+        tokio::spawn(command_intake::run_recovered(
+            recovery.pending,
+            client.clone(),
+            pc_id.clone(),
+            verifier.clone(),
+            staleness_tracker.clone(),
+            script_cache.clone(),
+            check_sink.clone(),
+        ));
+        admission_ledger::spawn_maintenance(ledger.clone());
+    }
+
     // v0.24: groups::spawn returns a watch::Receiver<Vec<String>>
     // carrying the current membership list. `local_scheduler`
     // subscribes to it so `runs_on: agent` schedules targeting a
@@ -874,7 +913,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     let (groups_rx, _groups_handle) = groups::spawn(
         client.clone(),
         pc_id.clone(),
-        dedup.clone(),
+        ledger.clone(),
         staleness_tracker.clone(),
         script_cache.clone(),
         check_sink.clone(),
@@ -904,7 +943,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     command_replay::spawn(
         client.clone(),
         pc_id.clone(),
-        dedup.clone(),
+        ledger.clone(),
         staleness_tracker.clone(),
         script_cache.clone(),
         check_sink.clone(),
@@ -983,7 +1022,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         commands::command_loop(
             client.clone(),
             pc_id.clone(),
-            dedup.clone(),
+            ledger.clone(),
             staleness_tracker.clone(),
             cmd_all,
             script_cache.clone(),
@@ -993,7 +1032,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         commands::command_loop(
             client.clone(),
             pc_id.clone(),
-            dedup.clone(),
+            ledger.clone(),
             staleness_tracker.clone(),
             cmd_self,
             script_cache.clone(),

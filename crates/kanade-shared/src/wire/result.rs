@@ -158,6 +158,18 @@ pub const EXIT_REJECTED_UNSIGNED: i32 = 123;
 /// script never ran.
 pub const EXIT_SKIP_UNSUPPORTED: i32 = 122;
 
+/// Synthetic exit code: the agent restarted while this command was
+/// launching or running, so what became of the script is **unknown**.
+///
+/// Reported once, at the next start, for an admitted command whose durable
+/// record says it had begun but whose outcome never reached disk. The process
+/// may still be running, may have finished, or may never have started; the
+/// agent does not relaunch it, because a second launch could repeat a side
+/// effect. Sits just below the skip block (122..=127) on purpose: the result is
+/// published with [`ExecResult::skipped`] `Some(false)`, so it is a failure in
+/// every tally, never a skip and never a success.
+pub const EXIT_RESTARTED_OUTCOME_UNKNOWN: i32 = 121;
+
 /// The deterministic `result_id` of the signature refusal for
 /// `(request_id, pc_id)` (#1165). Deterministic because a refusal is the one
 /// result that repeats — the replay re-delivers the same unverifiable command
@@ -168,6 +180,17 @@ pub fn signature_refusal_result_id(request_id: &str, pc_id: &str) -> String {
     Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         format!("{request_id}|{pc_id}|signature-refused").as_bytes(),
+    )
+    .to_string()
+}
+
+/// The deterministic `result_id` of the "restarted, outcome unknown" report for
+/// `(request_id, pc_id)`. Deterministic so that however many times the agent is
+/// restarted before the report is uploaded, it lands on one row.
+pub fn restart_unknown_result_id(request_id: &str, pc_id: &str) -> String {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("{request_id}|{pc_id}|restarted-outcome-unknown").as_bytes(),
     )
     .to_string()
 }
@@ -249,6 +272,26 @@ mod tests {
             manifest_id: None,
             collect_object: None,
         }
+    }
+
+    #[test]
+    fn restart_outcome_unknown_is_a_failure_outside_the_skip_block() {
+        assert!(
+            !(EXIT_SKIP_UNSUPPORTED..=EXIT_SKIP_STALENESS)
+                .contains(&EXIT_RESTARTED_OUTCOME_UNKNOWN)
+        );
+        let r = sample(EXIT_RESTARTED_OUTCOME_UNKNOWN, Some(false));
+        assert!(!r.is_reported_skip());
+        assert!(!r.skips_check_projection());
+        // One row however often the agent restarts before upload.
+        assert_eq!(
+            restart_unknown_result_id("req", "PC1"),
+            restart_unknown_result_id("req", "PC1")
+        );
+        assert_ne!(
+            restart_unknown_result_id("req", "PC1"),
+            signature_refusal_result_id("req", "PC1")
+        );
     }
 
     #[test]
