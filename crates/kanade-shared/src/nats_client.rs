@@ -18,6 +18,41 @@
 //!   4. No token — connect unauthenticated. Works against a broker started
 //!      without `authorization { … }`.
 //!
+//! # Per-role users, with the token as fallback
+//!
+//! A role may also hold a NATS *user*: `NatsUser` and `NatsPassword`
+//! (`REG_SZ`) under its **own** registry key, or `$KANADE_NATS_USER` /
+//! `$KANADE_NATS_PASSWORD`. There is deliberately no shared user — the shared
+//! credential is the token. A pair with only one half is a configuration
+//! error that fails the connect, never a silent fallback.
+//!
+//! With no user provisioned nothing below applies: the connection presents
+//! the token (or nothing) exactly as before and no probe is ever made.
+//!
+//! With a user provisioned the broker may be on either side of the
+//! token → `users` switch, and the switch is atomic on the broker, so the
+//! credential is chosen per connection attempt (initial and every reconnect)
+//! from an auth callback. Whether a rejected attempt is retried is up to the
+//! async-nats version (0.50 keeps retrying, and re-runs the callback, while
+//! another version may end the connection task for good, leaving a `Client`
+//! that never talks again), so "present the user, and on rejection retry with
+//! the token" is not left to its retry loop. Instead each attempt first opens
+//! a short-lived *probe* connection with the user, which does not retry:
+//!
+//!   * accepted → present the user;
+//!   * rejected (authorization violation) → present the token, or fail
+//!     naming the missing token if there is none;
+//!   * anything else (unreachable, timeout) → reuse whichever credential
+//!     last worked, defaulting to the user.
+//!
+//! A wrong guess is thus survivable and the process keeps one `Client`.
+//! A client whose connection task has terminated for any reason (a panic in
+//! it, a drain, a version that treats a violation as terminal) is detected by
+//! [`wait_until_dead`] so its process can exit for a supervised restart. The
+//! same call also reports a broker that refuses the credential on every
+//! attempt for a sustained period, since async-nats would otherwise retry it
+//! forever and leave a process that looks alive but can never talk.
+//!
 //! # Why roles exist here (#1155)
 //!
 //! The broker authorises a *connection*, and a connection is only as
@@ -92,12 +127,41 @@
 //! to grow `ConnectOptions` here so every binary picks up the upgrade for
 //! free. Same for mTLS.
 
-use anyhow::{Context, Result};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use tracing::{debug, info, warn};
 
 use crate::secrets;
 
 const ENV_TOKEN: &str = "KANADE_NATS_TOKEN";
 const REG_VALUE: &str = "NatsToken";
+const ENV_USER: &str = "KANADE_NATS_USER";
+const ENV_PASSWORD: &str = "KANADE_NATS_PASSWORD";
+const REG_USER: &str = "NatsUser";
+const REG_PASSWORD: &str = "NatsPassword";
+
+/// How long the credential probe may take. Short on purpose: it runs inside
+/// the reconnect path, so a black-holed broker must not stall every attempt.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Name of the probe connection. Deliberately *not* a `kanade-` name: the
+/// backend attributes `kanade-<role>` connections to hosts, and a transient
+/// probe must not show up there as an unknown role.
+const PROBE_NAME: &str = "auth-probe";
+
+/// How often [`wait_until_dead`] checks the connection task is still there.
+const DEAD_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+
+/// A connection that has been refused this many times in a row, over at
+/// least [`AUTH_REJECTION_WINDOW`], with no successful connect in between, is
+/// treated as failed. async-nats retries a refused credential forever, which
+/// leaves a process that can never talk but looks alive; the window keeps a
+/// broker that is merely mid-reload (a few quick refusals) from counting.
+const AUTH_REJECTION_LIMIT: usize = 5;
+const AUTH_REJECTION_WINDOW: Duration = Duration::from_secs(10);
 
 /// Prefix every kanade connection announces in its `name`.
 const NAME_PREFIX: &str = "kanade-";
@@ -171,6 +235,312 @@ fn resolve_token(role: NatsRole) -> Option<String> {
         secrets::read_hklm_value,
         std::env::var(ENV_TOKEN).ok(),
     )
+}
+
+/// A named NATS user. The password is never shown by `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+struct UserCredential {
+    name: String,
+    password: String,
+}
+
+impl std::fmt::Debug for UserCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserCredential")
+            .field("name", &self.name)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Turn the two halves of a user pair into a credential, or a configuration
+/// error naming what is missing and where (never a value).
+fn pair(
+    name: Option<String>,
+    password: Option<String>,
+    source: &str,
+) -> Result<Option<UserCredential>> {
+    match (name, password) {
+        (Some(name), Some(password)) => Ok(Some(UserCredential { name, password })),
+        (None, None) => Ok(None),
+        (Some(_), None) => bail!("NATS user is set but its password is missing ({source})"),
+        (None, Some(_)) => bail!("NATS password is set but its user name is missing ({source})"),
+    }
+}
+
+/// Resolve a role's user pair: its own registry key first, then the
+/// environment. Unlike the token there is no shared-key step.
+///
+/// The registry is judged as a whole before the environment is consulted: a
+/// half pair there is an error even when the environment is complete,
+/// because quietly mixing sources would hide a half-provisioned host.
+fn resolve_user_with(
+    role: NatsRole,
+    read_reg: impl Fn(&str, &str) -> Option<String>,
+    env_user: Option<String>,
+    env_password: Option<String>,
+) -> Result<Option<UserCredential>> {
+    let subkey = role.reg_subkey();
+    let reg_user = read_reg(&subkey, REG_USER);
+    let reg_password = read_reg(&subkey, REG_PASSWORD);
+    if reg_user.is_some() || reg_password.is_some() {
+        let source = format!(r"HKLM\{subkey}: {REG_USER} / {REG_PASSWORD}");
+        return pair(reg_user, reg_password, &source);
+    }
+    let source = format!("${ENV_USER} / ${ENV_PASSWORD}");
+    pair(
+        env_user.filter(|v| !v.is_empty()),
+        env_password.filter(|v| !v.is_empty()),
+        &source,
+    )
+}
+
+fn resolve_user(role: NatsRole) -> Result<Option<UserCredential>> {
+    resolve_user_with(
+        role,
+        secrets::read_hklm_value,
+        std::env::var(ENV_USER).ok(),
+        std::env::var(ENV_PASSWORD).ok(),
+    )
+}
+
+/// The credentials a connection is built from.
+///
+/// [`connect`] resolves them from the registry / environment; this type
+/// exists so a caller (tests, chiefly) can supply them directly without
+/// touching process-global state. `Debug` never prints a secret.
+#[derive(Clone, Default)]
+pub struct NatsCredentials {
+    token: Option<String>,
+    user: Option<UserCredential>,
+}
+
+impl NatsCredentials {
+    pub fn new(token: Option<String>, user: Option<(String, String)>) -> Self {
+        Self {
+            token,
+            user: user.map(|(name, password)| UserCredential { name, password }),
+        }
+    }
+
+    fn resolve(role: NatsRole) -> Result<Self> {
+        Ok(Self {
+            token: resolve_token(role),
+            user: resolve_user(role)?,
+        })
+    }
+}
+
+impl std::fmt::Debug for NatsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NatsCredentials")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("user", &self.user)
+            .finish()
+    }
+}
+
+/// Which credential a connection attempt presents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    User,
+    Token,
+}
+
+impl Choice {
+    fn label(self) -> &'static str {
+        match self {
+            Choice::User => "user",
+            Choice::Token => "token",
+        }
+    }
+}
+
+/// What the probe connection learned about the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    Accepted,
+    Rejected,
+    Unreachable,
+}
+
+impl ProbeOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            ProbeOutcome::Accepted => "accepted",
+            ProbeOutcome::Rejected => "rejected",
+            ProbeOutcome::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// The credential the broker last *proved* it accepts or rejects for a role,
+/// shared between the connection (which writes it on every attempt) and the
+/// [`CredentialProbe`] (which reads it). Only a probe answer is recorded — a
+/// guess made while the broker was unreachable is not evidence.
+#[derive(Default)]
+struct Live {
+    decision: Mutex<Option<Choice>>,
+    /// Consecutive authentication refusals: when the first one happened and
+    /// how many there have been. Cleared by a successful connect.
+    refusals: Mutex<Option<(std::time::Instant, usize)>>,
+}
+
+impl Live {
+    /// Track the connection's events for [`Live::auth_failed`].
+    fn observe(&self, ev: &async_nats::Event) {
+        let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        match ev {
+            // A successful connect, a drop, or any other kind of failed
+            // attempt (broker unreachable, timeout) ends a run of refusals:
+            // only an unbroken run is evidence the credential itself is bad,
+            // and an offline broker is something to wait out.
+            async_nats::Event::Connected | async_nats::Event::Disconnected => *refusals = None,
+            async_nats::Event::ClientError(async_nats::ClientError::Other(kind))
+                if *kind == async_nats::ConnectErrorKind::AuthorizationViolation.to_string()
+                    || *kind == async_nats::ConnectErrorKind::Authentication.to_string() =>
+            {
+                let (first, n) = refusals.unwrap_or((std::time::Instant::now(), 0));
+                *refusals = Some((first, n + 1));
+            }
+            async_nats::Event::ClientError(_) => *refusals = None,
+            _ => {}
+        }
+    }
+
+    /// Whether the broker has refused every attempt for long enough that
+    /// waiting longer is not going to help.
+    fn auth_failed(&self) -> bool {
+        match *self.refusals.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((first, n)) => {
+                n >= AUTH_REJECTION_LIMIT && first.elapsed() >= AUTH_REJECTION_WINDOW
+            }
+            None => false,
+        }
+    }
+
+    fn get(&self) -> Option<Choice> {
+        *self.decision.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set(&self, c: Choice) {
+        *self.decision.lock().unwrap_or_else(|e| e.into_inner()) = Some(c);
+    }
+}
+
+/// Process-wide per-role state, so [`CredentialProbe::for_role`] sees the
+/// decision the already-open connection made without the callers having to
+/// thread anything through.
+fn live_for(role: NatsRole) -> Arc<Live> {
+    static LIVE: OnceLock<Mutex<HashMap<&'static str, Arc<Live>>>> = OnceLock::new();
+    let mut map = LIVE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.entry(role.as_str()).or_default().clone()
+}
+
+/// Pick the credential for one attempt from the probe's answer.
+///
+/// Pure so the whole decision table is testable without a broker. `Err`
+/// carries the credential that is missing.
+fn select(
+    outcome: ProbeOutcome,
+    last_worked: Option<Choice>,
+    have_token: bool,
+) -> std::result::Result<Choice, &'static str> {
+    match outcome {
+        ProbeOutcome::Accepted => Ok(Choice::User),
+        ProbeOutcome::Rejected if have_token => Ok(Choice::Token),
+        ProbeOutcome::Rejected => {
+            Err("the broker rejected the NATS user and no NatsToken is provisioned")
+        }
+        ProbeOutcome::Unreachable => Ok(last_worked.unwrap_or(Choice::User)),
+    }
+}
+
+/// Try the user on a connection of its own, which does not retry, so a
+/// rejection costs this throwaway connection and nothing else.
+///
+/// Runs on a spawned task because the auth callback's future must be `Sync`
+/// and async-nats' connect future is not; a join handle is.
+async fn probe_user(url: &str, user: &UserCredential) -> ProbeOutcome {
+    let (url, name, password) = (url.to_string(), user.name.clone(), user.password.clone());
+    let probe = tokio::spawn(async move {
+        let attempt = async_nats::ConnectOptions::new()
+            .name(PROBE_NAME)
+            .connection_timeout(PROBE_TIMEOUT)
+            .user_and_password(name, password)
+            .connect(url);
+        match tokio::time::timeout(PROBE_TIMEOUT + Duration::from_secs(1), attempt).await {
+            Ok(Ok(_client)) => ProbeOutcome::Accepted,
+            Ok(Err(e)) if e.kind() == async_nats::ConnectErrorKind::AuthorizationViolation => {
+                ProbeOutcome::Rejected
+            }
+            Ok(Err(_)) | Err(_) => ProbeOutcome::Unreachable,
+        }
+    });
+    probe.await.unwrap_or(ProbeOutcome::Unreachable)
+}
+
+/// Probe, decide, record. `probe` is injected so the unit tests can drive
+/// every outcome.
+async fn choose<P, Fut>(
+    role: NatsRole,
+    have_token: bool,
+    live: &Live,
+    probe: P,
+) -> std::result::Result<Choice, &'static str>
+where
+    P: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ProbeOutcome>,
+{
+    let outcome = probe().await;
+    let previous = live.get();
+    let choice = select(outcome, previous, have_token)?;
+    if outcome != ProbeOutcome::Unreachable {
+        live.set(choice);
+    }
+    // Log what was selected and the outcome class, never a value; quiet when
+    // nothing changed so a flapping broker does not fill the log.
+    if previous == Some(choice) {
+        debug!(
+            role = role.as_str(),
+            credential = choice.label(),
+            probe = outcome.label(),
+            "NATS credential selected"
+        );
+    } else {
+        info!(
+            role = role.as_str(),
+            credential = choice.label(),
+            probe = outcome.label(),
+            "NATS credential selected"
+        );
+    }
+    Ok(choice)
+}
+
+/// Whether a connection needs per-attempt selection at all.
+enum AuthPlan {
+    /// No user: present the token (or nothing), exactly as before roles had
+    /// users. No callback, no probe.
+    Static(Option<String>),
+    /// A user is provisioned: select per attempt.
+    Select {
+        token: Option<String>,
+        user: UserCredential,
+    },
+}
+
+fn auth_plan(creds: NatsCredentials) -> AuthPlan {
+    match creds.user {
+        None => AuthPlan::Static(creds.token),
+        Some(user) => AuthPlan::Select {
+            token: creds.token,
+            user,
+        },
+    }
 }
 
 /// The `name` a kanade process announces on its NATS connection.
@@ -249,18 +619,11 @@ pub fn parse_client_name(name: &str) -> Option<ClientName<'_>> {
 /// Constructed once and reused: [`resolve_token`] hits the Windows registry,
 /// and the caller compares against every connection on the broker.
 pub struct CredentialProbe {
-    presented: Credential,
-}
-
-/// What a process presents when it connects.
-enum Credential {
-    /// Nothing — the dev path, against a broker with no `authorization`.
-    None,
-    /// A bearer token. The only shape [`connect`] can present today.
-    Token(String),
-    /// A named user. Reserved for the client half of #1266; see
-    /// [`CredentialKind::User`] for why the distinction matters here.
-    User { name: String },
+    token: Option<String>,
+    user: Option<String>,
+    /// The connection's own decision, when this probe belongs to one. `None`
+    /// for the explicit constructors, which describe a fixed credential.
+    live: Option<Arc<Live>>,
 }
 
 /// Which shape of credential a [`CredentialProbe`] holds.
@@ -287,26 +650,36 @@ pub enum CredentialKind {
 /// A username is not a secret and is shown; a token never is.
 impl std::fmt::Debug for CredentialProbe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let rendered = match &self.presented {
-            Credential::None => "<none>".to_string(),
-            Credential::Token(_) => "<redacted token>".to_string(),
-            Credential::User { name } => format!("user {name}"),
+        let mut held = Vec::new();
+        if self.token.is_some() {
+            held.push("<redacted token>".to_string());
+        }
+        if let Some(name) = &self.user {
+            held.push(format!("user {name}"));
+        }
+        let rendered = if held.is_empty() {
+            "<none>".to_string()
+        } else {
+            held.join(" + ")
         };
         f.debug_struct("CredentialProbe")
             .field("presented", &rendered)
+            .field("kind", &self.kind())
             .finish()
     }
 }
 
 impl CredentialProbe {
     /// Resolve the credential `role` would present, exactly as [`connect`]
-    /// does.
+    /// does, and follow the decision that role's open connection makes.
+    ///
+    /// A half-provisioned user pair is ignored here — [`connect`] is where
+    /// it fails loudly.
     pub fn for_role(role: NatsRole) -> Self {
         Self {
-            presented: match resolve_token(role) {
-                Some(t) => Credential::Token(t),
-                None => Credential::None,
-            },
+            token: resolve_token(role),
+            user: resolve_user(role).ok().flatten().map(|u| u.name),
+            live: Some(live_for(role)),
         }
     }
 
@@ -318,31 +691,45 @@ impl CredentialProbe {
     /// probing the real fleet token that `for_role` would find there.
     pub fn from_token(token: Option<String>) -> Self {
         Self {
-            presented: match token {
-                Some(t) => Credential::Token(t),
-                None => Credential::None,
-            },
+            token,
+            user: None,
+            live: None,
         }
     }
 
     /// Build a probe for a process that authenticates as a named user.
     ///
-    /// Nothing constructs this in production yet — [`connect`] cannot
-    /// present a user (#1266). It exists so the consumers of
-    /// [`CredentialKind::User`] are testable now rather than written blind
-    /// later.
+    /// Describes a fixed user credential, for testing the consumers of
+    /// [`CredentialKind::User`] without a connection.
     pub fn from_user(name: impl Into<String>) -> Self {
         Self {
-            presented: Credential::User { name: name.into() },
+            token: None,
+            user: Some(name.into()),
+            live: None,
         }
     }
 
-    /// Which shape of credential this process presents.
+    /// Which shape of credential this process is presenting **right now**.
+    ///
+    /// A role that holds a user but is on the token fallback reports
+    /// [`CredentialKind::Token`]; the user shape is reported only once the
+    /// broker has accepted it. Before any decision a role holding a token
+    /// reports the token, and one holding only a user reports `None`: the
+    /// user shape is proof of the broker's mode and is not claimed on a
+    /// guess.
     pub fn kind(&self) -> CredentialKind {
-        match &self.presented {
-            Credential::None => CredentialKind::None,
-            Credential::Token(_) => CredentialKind::Token,
-            Credential::User { .. } => CredentialKind::User,
+        let decided = self.live.as_ref().and_then(|l| l.get());
+        match decided {
+            Some(Choice::User) if self.user.is_some() => return CredentialKind::User,
+            Some(Choice::Token) if self.token.is_some() => return CredentialKind::Token,
+            _ => {}
+        }
+        if self.live.is_none() && self.user.is_some() {
+            CredentialKind::User
+        } else if self.token.is_some() {
+            CredentialKind::Token
+        } else {
+            CredentialKind::None
         }
     }
 
@@ -357,16 +744,14 @@ impl CredentialProbe {
     /// connections it already authenticated, not from an attacker-chosen
     /// input, so there is no oracle to time.
     pub fn is_ours(&self, candidate: &str) -> bool {
-        match &self.presented {
-            Credential::Token(t) => t == candidate,
-            Credential::None | Credential::User { .. } => false,
-        }
+        self.token.as_deref() == Some(candidate)
     }
 }
 
-/// Connect to NATS at `url` as `role`. Resolves the bearer token from the
-/// registry (Windows) or `$KANADE_NATS_TOKEN`; connects unauthenticated when
-/// neither is set.
+/// Connect to NATS at `url` as `role`. Resolves the credential from the
+/// registry (Windows) or the environment: a user pair when one is
+/// provisioned (with the token as fallback, see the module docs), otherwise
+/// the bearer token; connects unauthenticated when neither is set.
 ///
 /// The connection is announced as `kanade-<role>` with no host identity —
 /// right for the backend and the CLI, which are not per-host. A role that
@@ -378,6 +763,8 @@ pub async fn connect(role: NatsRole, url: &str) -> Result<async_nats::Client> {
         url,
         None,
         None::<fn(async_nats::Event) -> std::future::Ready<()>>,
+        NatsCredentials::resolve(role)?,
+        live_for(role),
     )
     .await
 }
@@ -408,7 +795,51 @@ where
     F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
 {
-    connect_inner(role, url, identity, Some(cb)).await
+    connect_inner(
+        role,
+        url,
+        identity,
+        Some(cb),
+        NatsCredentials::resolve(role)?,
+        live_for(role),
+    )
+    .await
+}
+
+/// Connect with explicitly supplied credentials instead of resolving them
+/// from the registry / environment, and with decision state private to this
+/// connection. For tests, which must not depend on process-global state
+/// (the per-role decision and refusal state is still shared, so concurrent
+/// tests should use different roles).
+pub async fn connect_with_credentials(
+    role: NatsRole,
+    url: &str,
+    creds: NatsCredentials,
+) -> Result<async_nats::Client> {
+    connect_inner(
+        role,
+        url,
+        None,
+        None::<fn(async_nats::Event) -> std::future::Ready<()>>,
+        creds,
+        live_for(role),
+    )
+    .await
+}
+
+/// [`connect_with_credentials`] with an event callback, so a test can observe
+/// what the connection reports while it cannot authenticate.
+pub async fn connect_with_credentials_and_event_callback<F, Fut>(
+    role: NatsRole,
+    url: &str,
+    creds: NatsCredentials,
+    cb: F,
+) -> Result<async_nats::Client>
+where
+    F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
+{
+    connect_inner(role, url, None, Some(cb), creds, live_for(role)).await
 }
 
 async fn connect_inner<F, Fut>(
@@ -416,6 +847,8 @@ async fn connect_inner<F, Fut>(
     url: &str,
     identity: Option<&str>,
     cb: Option<F>,
+    creds: NatsCredentials,
+    live: Arc<Live>,
 ) -> Result<async_nats::Client>
 where
     F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
@@ -431,6 +864,40 @@ where
     // returns Err when a provider is already installed — ignore it.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let tracker = live.clone();
+    // Only a provisioned user changes how the credential is presented; every
+    // other host takes the token path untouched.
+    let opts = match auth_plan(creds) {
+        AuthPlan::Static(token) => {
+            let opts = async_nats::ConnectOptions::new();
+            match token {
+                Some(token) => opts.token(token),
+                None => opts,
+            }
+        }
+        AuthPlan::Select { token, user } => {
+            let url = url.to_string();
+            async_nats::ConnectOptions::with_auth_callback(move |_nonce| {
+                let (url, token, user, live) =
+                    (url.clone(), token.clone(), user.clone(), live.clone());
+                async move {
+                    let choice = choose(role, token.is_some(), &live, || probe_user(&url, &user))
+                        .await
+                        .map_err(async_nats::AuthError::new)?;
+                    let mut auth = async_nats::Auth::new();
+                    match choice {
+                        Choice::User => {
+                            auth.username = Some(user.name);
+                            auth.password = Some(user.password);
+                        }
+                        Choice::Token => auth.token = token,
+                    }
+                    Ok(auth)
+                }
+            })
+        }
+    };
+
     // v0.38 / #137: offline-tolerant boot. Without
     // `retry_on_initial_connect`, `opts.connect(url).await` blocks-then-
     // errors when the broker is unreachable at startup — the agent
@@ -439,7 +906,7 @@ where
     // With this flag, connect() returns `Ok(Client)` immediately and
     // async-nats does the reconnect in the background; subscribe()
     // calls queue the SUB frame until the link is up.
-    let opts = async_nats::ConnectOptions::new()
+    let opts = opts
         .retry_on_initial_connect()
         // Names the connection in `nats server report connections`, in the
         // broker's own logs, and in `/connz`. Free observability while the
@@ -449,17 +916,75 @@ where
         // identity it also carries the pc_id, so #1270 can join the broker's
         // per-connection `authorized_user` back onto the agents row.
         .name(client_name(role, identity));
-    let opts = match resolve_token(role) {
-        Some(token) => opts.token(token),
-        None => opts,
-    };
-    let opts = match cb {
-        Some(cb) => opts.event_callback(cb),
-        None => opts,
-    };
+    // Always installed, even without a caller callback: it is how a refused
+    // credential is noticed, since async-nats only retries it.
+    let opts = opts.event_callback(move |ev| {
+        tracker.observe(&ev);
+        let forwarded = cb.as_ref().map(|cb| cb(ev));
+        async move {
+            if let Some(forwarded) = forwarded {
+                forwarded.await;
+            }
+        }
+    });
     opts.connect(url)
         .await
         .with_context(|| format!("connect to NATS at {url}"))
+}
+
+/// Whether the client's connection task has terminated.
+///
+/// When that task ends (a panic inside it, a drain, exhausted reconnects) the
+/// `Client` stays alive and never talks again — a silent zombie. The observable difference from an ordinary disconnect is
+/// that a publish is *buffered* while disconnected but fails with a send
+/// error once the task is gone, so one empty publish to an unused inbox is
+/// the probe. A publish that merely blocks (the buffer is full behind a
+/// live task) is not death.
+pub async fn is_dead(client: &async_nats::Client) -> bool {
+    let publish = client.publish(client.new_inbox(), Default::default());
+    match tokio::time::timeout(Duration::from_secs(5), publish).await {
+        Ok(Err(e)) => e.kind() == async_nats::client::PublishErrorKind::Send,
+        Ok(Ok(())) | Err(_) => false,
+    }
+}
+
+/// Resolve once `client` can no longer be expected to work: its connection
+/// task has terminated (see [`is_dead`]), or the broker has refused its
+/// credential on every attempt for [`AUTH_REJECTION_WINDOW`]. Checked every
+/// `interval`. A process that depends on the client should treat this as
+/// fatal and exit non-zero so its service manager restarts it.
+///
+/// `role` names the connection the client was opened with.
+pub async fn wait_until_dead_every(
+    role: NatsRole,
+    client: &async_nats::Client,
+    interval: Duration,
+) {
+    let live = live_for(role);
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if live.auth_failed() {
+            warn!(
+                role = role.as_str(),
+                "the NATS broker keeps refusing this role's credential; the client cannot connect"
+            );
+            return;
+        }
+        if is_dead(client).await {
+            warn!(
+                role = role.as_str(),
+                "NATS connection task has terminated; the client can no longer talk to the broker"
+            );
+            return;
+        }
+    }
+}
+
+/// [`wait_until_dead_every`] at the production cadence.
+pub async fn wait_until_dead(role: NatsRole, client: &async_nats::Client) {
+    wait_until_dead_every(role, client, DEAD_CHECK_INTERVAL).await
 }
 
 #[cfg(test)]
@@ -662,6 +1187,248 @@ mod tests {
             format!("{:?}", CredentialProbe::from_user("kanade-backend"))
                 .contains("kanade-backend"),
         );
+    }
+
+    // ── per-role users ───────────────────────────────────────────────
+
+    fn user(r: Result<Option<UserCredential>>) -> Option<(String, String)> {
+        r.unwrap().map(|u| (u.name, u.password))
+    }
+
+    #[test]
+    fn a_users_registry_pair_comes_from_the_roles_own_key() {
+        let registry = reg(&[
+            (r"SOFTWARE\kanade\backend\NatsUser", "kanade-backend"),
+            (r"SOFTWARE\kanade\backend\NatsPassword", "pw"),
+        ]);
+        assert_eq!(
+            user(resolve_user_with(NatsRole::Backend, &registry, None, None)),
+            Some(("kanade-backend".into(), "pw".into()))
+        );
+        // No shared user: another role does not inherit it, not even the
+        // agent's key (which is where the shared *token* lives).
+        for role in [NatsRole::Agent, NatsRole::Cli] {
+            assert_eq!(user(resolve_user_with(role, &registry, None, None)), None);
+        }
+        let agent = reg(&[
+            (r"SOFTWARE\kanade\agent\NatsUser", "a"),
+            (r"SOFTWARE\kanade\agent\NatsPassword", "b"),
+        ]);
+        assert_eq!(
+            user(resolve_user_with(NatsRole::Cli, &agent, None, None)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_registry_pair_outranks_the_environment_pair() {
+        let registry = reg(&[
+            (r"SOFTWARE\kanade\cli\NatsUser", "reg-user"),
+            (r"SOFTWARE\kanade\cli\NatsPassword", "reg-pw"),
+        ]);
+        assert_eq!(
+            user(resolve_user_with(
+                NatsRole::Cli,
+                &registry,
+                Some("env-user".into()),
+                Some("env-pw".into())
+            )),
+            Some(("reg-user".into(), "reg-pw".into()))
+        );
+    }
+
+    #[test]
+    fn the_environment_serves_a_user_pair_when_the_registry_has_none() {
+        assert_eq!(
+            user(resolve_user_with(
+                NatsRole::Cli,
+                reg(&[]),
+                Some("u".into()),
+                Some("p".into())
+            )),
+            Some(("u".into(), "p".into()))
+        );
+        // Empty values are not a credential.
+        assert_eq!(
+            user(resolve_user_with(
+                NatsRole::Cli,
+                reg(&[]),
+                Some(String::new()),
+                Some(String::new())
+            )),
+            None
+        );
+        assert_eq!(
+            user(resolve_user_with(NatsRole::Cli, reg(&[]), None, None)),
+            None
+        );
+    }
+
+    #[test]
+    fn half_a_pair_is_an_error_not_a_fallback() {
+        let err = |r: Result<Option<UserCredential>>| format!("{:#}", r.unwrap_err());
+        // Registry halves.
+        let only_user = reg(&[(r"SOFTWARE\kanade\cli\NatsUser", "u")]);
+        assert!(
+            err(resolve_user_with(NatsRole::Cli, &only_user, None, None))
+                .contains("password is missing")
+        );
+        let only_pw = reg(&[(r"SOFTWARE\kanade\cli\NatsPassword", "secret-pw")]);
+        let e = err(resolve_user_with(NatsRole::Cli, &only_pw, None, None));
+        assert!(e.contains("user name is missing"), "{e}");
+        assert!(!e.contains("secret-pw"), "{e}");
+        // A half registry pair is not rescued by a complete environment pair.
+        assert!(
+            resolve_user_with(
+                NatsRole::Cli,
+                &only_user,
+                Some("u".into()),
+                Some("p".into())
+            )
+            .is_err()
+        );
+        // Environment halves.
+        assert!(resolve_user_with(NatsRole::Cli, reg(&[]), Some("u".into()), None).is_err());
+        assert!(resolve_user_with(NatsRole::Cli, reg(&[]), None, Some("p".into())).is_err());
+    }
+
+    #[test]
+    fn credentials_never_print_a_secret() {
+        let creds = NatsCredentials::new(
+            Some("tok-secret".into()),
+            Some(("kanade-agent".into(), "pw-secret".into())),
+        );
+        let rendered = format!("{creds:?}");
+        assert!(!rendered.contains("tok-secret"), "{rendered}");
+        assert!(!rendered.contains("pw-secret"), "{rendered}");
+        assert!(rendered.contains("kanade-agent"), "{rendered}");
+    }
+
+    #[test]
+    fn no_user_means_the_static_token_path_with_no_selection() {
+        match auth_plan(NatsCredentials::new(Some("t".into()), None)) {
+            AuthPlan::Static(Some(t)) => assert_eq!(t, "t"),
+            _ => panic!("a token-only host must take the static path"),
+        }
+        assert!(matches!(
+            auth_plan(NatsCredentials::new(None, None)),
+            AuthPlan::Static(None)
+        ));
+        assert!(matches!(
+            auth_plan(NatsCredentials::new(
+                Some("t".into()),
+                Some(("u".into(), "p".into()))
+            )),
+            AuthPlan::Select { .. }
+        ));
+    }
+
+    #[test]
+    fn selection_follows_the_probe() {
+        use Choice::{Token, User};
+        use ProbeOutcome::*;
+        assert_eq!(select(Accepted, None, true), Ok(User));
+        assert_eq!(select(Accepted, Some(Token), false), Ok(User));
+        assert_eq!(select(Rejected, Some(User), true), Ok(Token));
+        let missing = select(Rejected, None, false).unwrap_err();
+        assert!(missing.contains("NatsToken"), "{missing}");
+        // Unreachable keeps what last worked, defaulting to the user.
+        assert_eq!(select(Unreachable, None, true), Ok(User));
+        assert_eq!(select(Unreachable, Some(Token), true), Ok(Token));
+        assert_eq!(select(Unreachable, Some(User), true), Ok(User));
+    }
+
+    #[tokio::test]
+    async fn only_a_probe_answer_is_remembered() {
+        let live = Live::default();
+        let role = NatsRole::Cli;
+        let run = |o| choose(role, true, &live, move || async move { o });
+        // An unreachable broker is a guess, not evidence.
+        assert_eq!(run(ProbeOutcome::Unreachable).await, Ok(Choice::User));
+        assert_eq!(live.get(), None);
+        assert_eq!(run(ProbeOutcome::Rejected).await, Ok(Choice::Token));
+        assert_eq!(live.get(), Some(Choice::Token));
+        // The broker goes away: the token that last worked is reused.
+        assert_eq!(run(ProbeOutcome::Unreachable).await, Ok(Choice::Token));
+        // ...and the flip back is followed.
+        assert_eq!(run(ProbeOutcome::Accepted).await, Ok(Choice::User));
+        assert_eq!(live.get(), Some(Choice::User));
+        // A rejection with no token fails and leaves the cache alone.
+        let err = choose(role, false, &live, || async { ProbeOutcome::Rejected })
+            .await
+            .unwrap_err();
+        assert!(err.contains("NatsToken"));
+        assert_eq!(live.get(), Some(Choice::User));
+    }
+
+    #[test]
+    fn the_probe_reports_the_shape_in_use_right_now() {
+        let live = Arc::new(Live::default());
+        let probe = CredentialProbe {
+            token: Some("tok".into()),
+            user: Some("kanade-agent".into()),
+            live: Some(live.clone()),
+        };
+        // Nothing proven yet: not the user shape.
+        assert_eq!(probe.kind(), CredentialKind::Token);
+        live.set(Choice::User);
+        assert_eq!(probe.kind(), CredentialKind::User);
+        // Holding a user while on the token fallback is the token shape.
+        live.set(Choice::Token);
+        assert_eq!(probe.kind(), CredentialKind::Token);
+        assert!(probe.is_ours("tok"));
+
+        let user_only = CredentialProbe {
+            token: None,
+            user: Some("u".into()),
+            live: Some(Arc::new(Live::default())),
+        };
+        assert_eq!(user_only.kind(), CredentialKind::None);
+        user_only.live.as_ref().unwrap().set(Choice::User);
+        assert_eq!(user_only.kind(), CredentialKind::User);
+    }
+
+    #[test]
+    fn a_probe_holding_both_credentials_prints_neither_secret() {
+        let probe = CredentialProbe {
+            token: Some("tok-secret".into()),
+            user: Some("kanade-agent".into()),
+            live: None,
+        };
+        let rendered = format!("{probe:?}");
+        assert!(!rendered.contains("tok-secret"), "{rendered}");
+        assert!(rendered.contains("kanade-agent"), "{rendered}");
+    }
+
+    #[test]
+    fn sustained_refusals_fail_the_client_and_a_connect_clears_them() {
+        let refused = || {
+            async_nats::Event::ClientError(async_nats::ClientError::Other(
+                async_nats::ConnectErrorKind::AuthorizationViolation.to_string(),
+            ))
+        };
+        let live = Live::default();
+        for _ in 0..AUTH_REJECTION_LIMIT {
+            live.observe(&refused());
+        }
+        // Enough refusals, but not over a long enough window: a broker
+        // mid-reload must not count.
+        assert!(!live.auth_failed());
+        // Age the first refusal past the window.
+        let aged = std::time::Instant::now() - AUTH_REJECTION_WINDOW - Duration::from_secs(1);
+        *live.refusals.lock().unwrap() = Some((aged, AUTH_REJECTION_LIMIT));
+        assert!(live.auth_failed());
+        live.observe(&async_nats::Event::Connected);
+        assert!(!live.auth_failed());
+        // A different kind of failure (broker gone) ends the run, so refusals
+        // from before an outage cannot add up to a failure after it.
+        *live.refusals.lock().unwrap() = Some((aged, AUTH_REJECTION_LIMIT));
+        live.observe(&async_nats::Event::ClientError(
+            async_nats::ClientError::Other("io".into()),
+        ));
+        assert!(!live.auth_failed());
+        live.observe(&refused());
+        assert!(!live.auth_failed());
     }
 
     #[test]

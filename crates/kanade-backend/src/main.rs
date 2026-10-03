@@ -1279,6 +1279,9 @@ async fn run_backend_inner(
     )
     .await?;
     info!("connected to NATS");
+    // Kept for the liveness check at the end: `nats` itself moves into the
+    // app state.
+    let nats_liveness = nats.clone();
     let jetstream = async_nats::jetstream::new(nats.clone());
 
     // Self-bootstrap every JetStream resource the fleet expects.
@@ -1755,7 +1758,17 @@ async fn run_backend_inner(
         }
     });
 
-    axum::serve(listener, app).await.context("axum serve")?;
+    // A broker connection whose task has terminated never recovers and fails
+    // silently, so a
+    // backend that keeps serving HTTP on top of it looks healthy while every
+    // projector is deaf. Exit non-zero instead so the service manager
+    // restarts it.
+    tokio::select! {
+        served = axum::serve(listener, app) => served.context("axum serve")?,
+        () = kanade_shared::nats_client::wait_until_dead(kanade_shared::nats_client::NatsRole::Backend, &nats_liveness) => {
+            anyhow::bail!("NATS connection task terminated; exiting for a supervised restart");
+        }
+    }
     Ok(())
 }
 
