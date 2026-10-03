@@ -73,9 +73,11 @@ not consume one. Two different credentials — a broker token here, a \
 login JWT there — which is why one set of subcommands can work while \
 the other does not.\n\
 \n\
-Confirm the connection and the exact pc_id spelling first:\n\
-\n\
-  kanade ping <pc_id>\n\
+Get the exact pc_id spelling right before you run: with the backend up, \
+the SPA's Inventory page or `kanade ping <pc_id>` (which needs the backend \
+and KANADE_AUTH_TOKEN) confirms it. During a backend outage neither is \
+available, so pass the exact pc_id you confirmed earlier; `run` itself \
+reports when the agent does not answer.\n\
 \n\
 SIGNING (optional)\n\
 \n\
@@ -108,9 +110,10 @@ pub struct RunArgs {
     /// That is the host's OS hostname, VERBATIM. NATS subjects are
     /// case-sensitive and casing is not uniform across a fleet, so
     /// `kanade-pc-0001` and `KANADE-PC-0001` are different targets —
-    /// and the wrong one does not error, it just times out. Confirm the
-    /// spelling with `kanade ping <pc_id>` or the SPA's Inventory page,
-    /// and do not case-fold it.
+    /// and the wrong one does not error, it just times out. While the
+    /// backend is up, confirm the spelling with the SPA's Inventory page
+    /// or `kanade ping <pc_id>` (both need the backend); during a backend
+    /// outage use the exact pc_id you confirmed earlier. Do not case-fold it.
     pub pc_id: String,
     /// Interpreter on the target [powershell, pwsh, cmd, sh].
     ///

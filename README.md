@@ -162,7 +162,7 @@ kanade run $env:COMPUTERNAME -- 'echo hello from kanade'
 # emits an audit event, broadcasts the Command).
 kanade exec jobs/echo-test.yaml
 
-# Heartbeat probe.
+# Liveness probe (the backend asks the agent; needs KANADE_AUTH_TOKEN).
 kanade ping $env:COMPUTERNAME
 
 # Inspect via curl…
@@ -178,13 +178,13 @@ start http://127.0.0.1:8080
 
 ```text
 kanade run    <pc_id> -- <script>                # request/reply via NATS
-kanade ping   <pc_id>                            # wait for one heartbeat
+kanade ping   <pc_id> [--wait N]                 # ask the agent for a fresh heartbeat (via backend API)
 kanade kill   <job_id>                           # publish kill.{job_id}
-kanade revoke <cmd_id>                           # script_status = REVOKED
-kanade unrevoke <cmd_id>                         # → ACTIVE
+kanade revoke <cmd_id>                           # script_status = REVOKED (via backend API)
+kanade unrevoke <cmd_id>                         # → ACTIVE (via backend API)
 
 kanade jetstream setup                           # create streams + KV + Object Store (optional; backend auto-bootstraps on startup)
-kanade jetstream status                          # health snapshot
+kanade jetstream status                          # health snapshot (via backend API; setup/delete/reset are NATS-direct)
 
 kanade job create   <path...>                    # upsert into the jobs catalog; accepts files / dirs / globs (configs/jobs/*.yaml)
 kanade job export <id> [--out-dir <dir>]         # dump registered YAML to stdout (or <dir>/<id>.yaml)
@@ -436,7 +436,7 @@ it down for production with token auth:
 
    ```powershell
    $env:KANADE_NATS_TOKEN = '<your-fleet-token>'
-   kanade jetstream status
+   kanade jetstream setup
    ```
 
    **(3) No token → unauthenticated connect.** Works against a broker

@@ -172,8 +172,7 @@ The job (`configs/jobs/collect-broker-health.yaml`) samples the broker
 over ~3 minutes and uploads a bundle to `OBJECT_COLLECTIONS`; download it
 from the SPA **Collect** page (or hand the zip to your reviewer). It is
 read-only and needs **zero pre-setup**: it reads NATS' unauthenticated
-HTTP monitoring port (default 8222 — the same `/jsz` endpoint kanade
-already curls for `jetstream status`), so no `nats` CLI on the SYSTEM
+HTTP monitoring port (default 8222, the `/jsz` endpoint), so no `nats` CLI on the SYSTEM
 PATH and no token are required. Tune the window with `KANADE_BH_SAMPLES` /
 `KANADE_BH_INTERVAL_SEC` (and `KANADE_BH_MON_PORT` if the broker's
 `http_port` differs) on the target if needed.

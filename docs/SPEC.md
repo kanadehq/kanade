@@ -1133,7 +1133,7 @@ js.create_or_update_stream(StreamConfig {
 Agent は `handle_command` の冒頭で常に 2 つの KV を引いて判定する:
 
 - `BUCKET_SCRIPT_CURRENT` (`script_current`) — `cmd_id → version` を保持。backend が `kanade exec` 時に `kv.put(manifest.id, manifest.version)` で更新する。受信した `Command.version` と KV 値が一致しなければ skip。
-- `BUCKET_SCRIPT_STATUS` (`script_status`) — `cmd_id → "ACTIVE" | "REVOKED"`。`kanade revoke <cmd_id>` / `POST /api/scripts/{cmd_id}/revoke` で REVOKED に更新。REVOKED なら skip。
+- `BUCKET_SCRIPT_STATUS` (`script_status`) — `cmd_id → "ACTIVE" | "REVOKED"`。`kanade revoke <cmd_id>` (backend API 経由。audit は backend が呼び出しアカウント付きで記録) / `POST /api/scripts/{cmd_id}/revoke` で REVOKED に更新。REVOKED なら skip。
 
 ```rust
 // crates/kanade-agent/src/commands.rs::handle_command (抜粋)
