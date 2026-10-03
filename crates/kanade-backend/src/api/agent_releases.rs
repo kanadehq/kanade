@@ -49,6 +49,43 @@ pub struct PublishResponse {
     pub digest: Option<String>,
 }
 
+/// Label for a Windows PE: the embedded VERSIONINFO wins and an explicit
+/// field must agree with it; without VERSIONINFO the field is the label.
+fn windows_label(pe: Option<String>, field: Option<&str>) -> Result<String, (StatusCode, String)> {
+    Ok(match (pe, field) {
+        // The CLI's "must agree" rule (resolve_publish_version):
+        // a form field that contradicts the embedded version is
+        // rejected rather than silently ignored. Comparison ignores
+        // a leading `v` and surrounding whitespace, like the CLI.
+        (Some(pe), Some(v))
+            if v.trim().trim_start_matches('v') != pe.trim().trim_start_matches('v') =>
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "version field '{v}' disagrees with the binary's embedded version '{pe}'; \
+                     omit the field to use the embedded one, or pass the matching label"
+                ),
+            ));
+        }
+        (Some(pe), _) => pe,
+        // A PE without a VERSIONINFO resource (a build older than
+        // v0.13.1) can still be published under an explicit label,
+        // as the CLI always allowed.
+        (None, Some(v)) => v.to_owned(),
+        (None, None) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "couldn't extract VERSIONINFO from the uploaded binary — \
+                 is it a Windows PE built with `winres`? Kanade ≥ v0.13.1 \
+                 embeds the resource automatically; for an older binary \
+                 include a 'version' form field with the label to use."
+                    .to_owned(),
+            ));
+        }
+    })
+}
+
 pub async fn publish(
     State(state): State<AppState>,
     caller: Caller,
@@ -63,25 +100,27 @@ pub async fn publish(
     let mut bytes: Option<Vec<u8>> = None;
     let mut version_field: Option<String> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("read multipart field: {e}"),
-        )
-    })? {
+    // A multipart read error carries its own status: the body-limit layer
+    // surfaces as 413, which the CLI explains; a blanket 400 would hide that
+    // an oversized upload is the problem.
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (e.status(), format!("read multipart field: {e}")))?
+    {
         match field.name().unwrap_or("") {
             "file" => {
                 let buf = field
                     .bytes()
                     .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read file field: {e}")))?;
+                    .map_err(|e| (e.status(), format!("read file field: {e}")))?;
                 bytes = Some(buf.to_vec());
             }
             "version" => {
                 let text = field
                     .text()
                     .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read version field: {e}")))?;
+                    .map_err(|e| (e.status(), format!("read version field: {e}")))?;
                 let text = text.trim().to_string();
                 if !text.is_empty() {
                     version_field = Some(text);
@@ -101,30 +140,7 @@ pub async fn publish(
     let platform = AgentPlatform::detect(&bytes).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let version = match platform {
         AgentPlatform::WindowsX86_64 | AgentPlatform::WindowsAarch64 => {
-            let pe = extract_pe_version(&bytes).ok_or((
-                StatusCode::BAD_REQUEST,
-                "couldn't extract VERSIONINFO from the uploaded binary — \
-                 is it a Windows PE built with `winres`? Kanade ≥ v0.13.1 \
-                 embeds the resource automatically; older binaries need to \
-                 be re-published from a current build."
-                    .to_owned(),
-            ))?;
-            // The CLI's "must agree" rule (#270-era, resolve_publish_version):
-            // a form field that contradicts the embedded version is rejected
-            // rather than silently ignored. Comparison ignores a leading `v`
-            // and surrounding whitespace, like the CLI.
-            if let Some(v) = version_field.as_deref()
-                && v.trim().trim_start_matches('v') != pe.trim().trim_start_matches('v')
-            {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "version field '{v}' disagrees with the binary's embedded version '{pe}'; \
-                         omit the field to use the embedded one, or pass the matching label"
-                    ),
-                ));
-            }
-            pe
+            windows_label(extract_pe_version(&bytes), version_field.as_deref())?
         }
         AgentPlatform::LinuxX86_64 | AgentPlatform::LinuxAarch64 | AgentPlatform::MacOSAarch64 => {
             let format = match platform {
@@ -493,4 +509,28 @@ pub async fn rollout(
         scope_label: label,
         jitter: body.jitter,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pe_without_versioninfo_takes_the_explicit_label() {
+        assert_eq!(windows_label(None, Some("1.2.3")).unwrap(), "1.2.3");
+        let (code, msg) = windows_label(None, None).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("'version' form field"), "{msg}");
+    }
+
+    #[test]
+    fn embedded_version_wins_and_a_contradicting_field_is_rejected() {
+        assert_eq!(windows_label(Some("1.2.3".into()), None).unwrap(), "1.2.3");
+        assert_eq!(
+            windows_label(Some("1.2.3".into()), Some("v1.2.3")).unwrap(),
+            "1.2.3"
+        );
+        let (code, _) = windows_label(Some("1.2.3".into()), Some("9.9.9")).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
 }

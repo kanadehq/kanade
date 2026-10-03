@@ -71,7 +71,7 @@ pub fn object_url(base: &str, route: &str, name: &str, version: &str) -> Result<
     Ok(url)
 }
 
-fn collection_url(base: &str, route: &str) -> Result<Url> {
+pub(super) fn collection_url(base: &str, route: &str) -> Result<Url> {
     let mut url = Url::parse(base).with_context(|| format!("invalid backend URL {base:?}"))?;
     url.path_segments_mut()
         .map_err(|_| anyhow!("backend URL {base:?} cannot carry a path"))?
@@ -83,7 +83,11 @@ fn collection_url(base: &str, route: &str) -> Result<Url> {
 /// Turn a non-success response into the operator-facing error. The backend's
 /// own reason is always kept; 401 / 403 and 413 get a hint because those are
 /// the two rejections an operator can act on.
-async fn rejected(op: &str, resp: reqwest::Response, limit_note: Option<&str>) -> anyhow::Error {
+pub(super) async fn rejected(
+    op: &str,
+    resp: reqwest::Response,
+    limit_note: Option<&str>,
+) -> anyhow::Error {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     let mut msg = format!("{op} failed: {status} — {body}");
@@ -102,6 +106,28 @@ async fn rejected(op: &str, resp: reqwest::Response, limit_note: Option<&str>) -
     anyhow!(msg)
 }
 
+/// Open `file` as a multipart part that is read from disk as it is sent, with
+/// its length declared up front so the request carries a `Content-Length`
+/// rather than being chunked.
+pub(super) async fn file_part(file: &Path) -> Result<Part> {
+    let handle = tokio::fs::File::open(file)
+        .await
+        .with_context(|| format!("open {file:?}"))?;
+    let len = handle
+        .metadata()
+        .await
+        .with_context(|| format!("stat {file:?}"))?
+        .len();
+    Part::stream_with_length(Body::wrap_stream(ReaderStream::new(handle)), len)
+        .file_name(
+            file.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".into()),
+        )
+        .mime_str("application/octet-stream")
+        .context("build multipart part")
+}
+
 /// Stream `file` to `POST <route>/<name>/<version>` as the multipart `file`
 /// field. The file is read from disk as it is sent and its length is declared
 /// up front, so a package near the bucket ceiling never sits in memory and
@@ -115,22 +141,7 @@ pub async fn upload(
     file: &Path,
 ) -> Result<Published> {
     let url = object_url(base, bucket.route, name, version)?;
-    let handle = tokio::fs::File::open(file)
-        .await
-        .with_context(|| format!("open {file:?}"))?;
-    let len = handle
-        .metadata()
-        .await
-        .with_context(|| format!("stat {file:?}"))?
-        .len();
-    let part = Part::stream_with_length(Body::wrap_stream(ReaderStream::new(handle)), len)
-        .file_name(
-            file.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "file".into()),
-        )
-        .mime_str("application/octet-stream")
-        .context("build multipart part")?;
+    let part = file_part(file).await?;
     let resp = client
         .post(url.clone())
         .multipart(Form::new().part("file", part))

@@ -22,7 +22,7 @@ const DEFAULT_BACKEND: &str = "http://127.0.0.1:8080";
 struct Cli {
     /// NATS broker URL (not the backend).
     ///
-    /// Used by the broker subcommands: `run`, `kill`, `agent`,
+    /// Used by the broker subcommands: `run`, `kill`,
     /// `group` (except `group def`, which is HTTP — see --backend-url),
     /// `script`, `app`, `jetstream` (except `jetstream status`,
     /// which is HTTP). Its credential is NOT a flag — the CLI reads
@@ -37,7 +37,7 @@ struct Cli {
     /// Backend HTTP base URL.
     ///
     /// Used by the HTTP subcommands: `job`, `schedule`, `exec`, `view`,
-    /// `query`, `freeze`, `account`, `group def`, `config`, `meta`, `ping`,
+    /// `query`, `freeze`, `account`, `agent`, `group def`, `config`, `meta`, `ping`,
     /// `revoke`, `unrevoke`, `jetstream status`. They authenticate
     /// WITH `$KANADE_AUTH_TOKEN`, a JWT — a different credential from
     /// the broker token above, which is the usual source of confusion
@@ -77,7 +77,9 @@ enum SubCmd {
     View(cmd::view::ViewArgs),
     /// Fleet-wide change-freeze: stop all schedule fires (#418 Phase 5).
     Freeze(cmd::freeze::FreezeArgs),
-    /// Manage agent releases (publish a new binary, query the target version).
+    /// Manage agent releases (publish a new binary, roll it out, query the
+    /// target version, tail an agent's log). Goes through the backend API
+    /// (needs KANADE_AUTH_TOKEN), not NATS.
     Agent(cmd::agent::AgentArgs),
     /// CRUD the generic app-package Object Store (`OBJECT_APP_PACKAGES`, #207).
     /// Goes through the backend API (needs KANADE_AUTH_TOKEN), not NATS.
@@ -150,6 +152,8 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::schedule::execute(&backend_url, args).await;
     } else if let SubCmd::View(args) = command {
         return cmd::view::execute(&backend_url, args).await;
+    } else if let SubCmd::Agent(args) = command {
+        return cmd::agent::execute(&backend_url, args).await;
     } else if let SubCmd::App(args) = command {
         return cmd::app::execute(&backend_url, args).await;
     } else if let SubCmd::Script(args) = command {
@@ -202,11 +206,11 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         SubCmd::Run(args) => cmd::run::execute(client, args).await,
         SubCmd::Jetstream(args) => cmd::jetstream::execute(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
-        SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
         SubCmd::Exec(_)
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
         | SubCmd::View(_)
+        | SubCmd::Agent(_)
         | SubCmd::Group(_)
         | SubCmd::Meta(_)
         | SubCmd::App(_)
@@ -281,6 +285,58 @@ mod tests {
             cmd::meta::MetaSub::Clear { pc_id: pc_id() },
         ] {
             let cmd = SubCmd::Meta(cmd::meta::MetaArgs { sub });
+            dispatch(dead_nats.clone(), base.clone(), cmd)
+                .await
+                .unwrap();
+        }
+        assert_eq!(seen(&log).len(), 4);
+    }
+
+    /// `agent` is HTTP-only: every subcommand must succeed against a broker
+    /// address nothing listens on.
+    #[tokio::test]
+    async fn agent_dispatches_without_connecting_to_nats() {
+        let dead_nats = "nats://127.0.0.1:1".to_string();
+        let (base, log) = fake_backend(vec![
+            (200, r#"{"target_version":"1.0.0"}"#),
+            (200, "log"),
+            (
+                200,
+                r#"{"version":"1.0.0","scope_key":"global","scope_label":"global","jitter":null}"#,
+            ),
+            (
+                200,
+                r#"{"version":"1.0.0","key":"1.0.0-linux-x86_64","platform":"linux-x86_64","size":20,"digest":null}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("agent");
+        let mut elf = vec![0u8; 20];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[18..20].copy_from_slice(&0x3Eu16.to_le_bytes());
+        std::fs::write(&bin, &elf).unwrap();
+        for sub in [
+            cmd::agent::AgentSub::Current,
+            cmd::agent::AgentSub::Logs {
+                pc_id: "PC-01".into(),
+                tail: 5,
+            },
+            cmd::agent::AgentSub::Rollout(cmd::agent::RolloutArgs {
+                version: "1.0.0".into(),
+                global: true,
+                group: None,
+                pc: None,
+                jitter: None,
+            }),
+            cmd::agent::AgentSub::Publish {
+                binary: bin.clone(),
+                version: Some("1.0.0".into()),
+            },
+        ] {
+            let cmd = SubCmd::Agent(cmd::agent::AgentArgs { sub });
             dispatch(dead_nats.clone(), base.clone(), cmd)
                 .await
                 .unwrap();

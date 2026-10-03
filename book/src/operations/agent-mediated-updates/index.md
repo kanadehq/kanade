@@ -24,13 +24,15 @@ Common machinery used by all of them:
 
 The CLI surface:
 
-`kanade app` and `kanade script` (publish / list / delete) talk to the
+`kanade app`, `kanade script` and `kanade agent` (publish / rollout /
+current / logs) talk to the
 backend HTTP API, not to NATS: they need `KANADE_AUTH_TOKEN` (see
 `kanade login`) for an account with the operator role, and no broker
 token. Publishes and deletes are audited against that account by the
 backend. Operators who previously relied on the NATS token alone must now
 export `KANADE_AUTH_TOKEN`; without it the backend answers 401 / 403.
-`app publish` additionally downloads the package back from the backend
+`kanade agent publish` is capped by the backend at 64 MB for the whole
+upload (a normal agent binary is well under that). `app publish` additionally downloads the package back from the backend
 and checks its digest before reporting success.
 
 | Command | What it does |
@@ -39,5 +41,7 @@ and checks its digest before reporting success.
 | `kanade script publish <name> <version> <file>` | Upload to `OBJECT_SCRIPTS` through the backend API. |
 | `kanade job create <yaml>` | Upsert a job manifest into the `jobs` KV. |
 | `kanade exec <job-id> --pcs <pc> [--pcs <pc> …]` | Fire a registered job at a set of PCs. |
-| `kanade agent publish <file>` | Upload an agent binary (version extracted from PE VERSIONINFO). |
-| `kanade agent rollout <version> --pc \| --group \| --global` | Flip `target_version` on the chosen scope; agents pick it up via their self-update watcher. |
+| `kanade agent publish <file> [--version <version>]` | Upload an agent binary through the backend API (version extracted from PE VERSIONINFO; `--version` for a Linux / macOS binary). |
+| `kanade agent rollout <version> --pc \| --group \| --global` | Flip `target_version` on the chosen scope; agents pick it up via their self-update watcher. Goes through the backend API. |
+| `kanade agent current` | Print the global `target_version` (group / pc overlays are not shown; use `kanade config get --group/--pc`). |
+| `kanade agent logs <pc_id> [--tail <n>]` | Tail an online agent's log via the backend API. |

@@ -61,7 +61,7 @@ broker" — which everyone reinvents from scratch.
 | `kanade-shared`  | lib  | wire types (`Command` / `ExecResult` / `Heartbeat` / `HwInventory`), NATS subject + KV helpers, YAML manifest schema, [teravars]-backed config loader |
 | `kanade-agent`   | bin  | Windows-side resident daemon: subscribes to `commands.*`, runs child processes, publishes results + heartbeats + WMI inventory; watches the layered `agent_config` + `agent_groups` KV buckets and reacts live to cadence / membership / target_version changes |
 | `kanade-backend` | bin  | axum HTTP server: `/health`, `/api/{agents,results,audit,deploy,schedules,config,…}`, embedded SPA at `/`. Auto-bootstraps every required JetStream resource at startup, runs durable projectors (INVENTORY/RESULTS/AUDIT → SQLite) and a `tokio-cron-scheduler` driven by the schedules KV |
-| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`kill`/`jetstream`/`agent` and to the backend over HTTP for `ping`/`revoke`/`config`/`deploy`/`schedule` |
+| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`kill`/`jetstream` and to the backend over HTTP for `agent`/`ping`/`revoke`/`config`/`deploy`/`schedule` |
 
 ## Install
 
@@ -205,11 +205,15 @@ kanade schedule export --all --out-dir <dir>     # dump every registered schedul
 kanade schedule list
 kanade schedule delete <id>
 
+# `kanade agent …` goes through the backend HTTP API (KANADE_AUTH_TOKEN; operator role to publish
+# or roll out) — no NATS connection or broker token needed. `publish` is capped by the backend at
+# 64 MB for the whole upload.
 kanade agent publish <binary> [--version <v>]    # upload binary to Object Store (no KV touch)
 kanade agent rollout <v> --global  [--jitter <d>]            # fleet-wide
 kanade agent rollout <v> --group <name> [--jitter <d>]       # canary / wave
 kanade agent rollout <v> --pc    <pc_id> [--jitter <d>]      # single-host pin
-kanade agent current                             # read agent_config.global.target_version
+kanade agent current                             # read agent_config.global.target_version (global scope only)
+kanade agent logs <pc_id> [--tail <n>]           # tail an online agent's log file (via the backend)
 
 # `kanade group …` goes through the backend HTTP API (KANADE_AUTH_TOKEN; operator role to change
 # membership) — no NATS connection or broker token needed.
