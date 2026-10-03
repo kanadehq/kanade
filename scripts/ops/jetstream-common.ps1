@@ -56,10 +56,12 @@ function Get-DisplayServer($Conn) {
 }
 
 function Hide-Secrets([string]$Text, $Conn) {
+    # URL userinfo first: replacing the username on its own would otherwise
+    # leave a password behind in a URL that no longer matches the original.
+    $Text = $Text -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@,\s]*@', '$1'
     foreach ($s in @($Conn.Password, $Conn.User)) {
         if ($s -and $s.Length -ge 1) { $Text = $Text.Replace($s, '***') }
     }
-    if ($Conn.Server) { $Text = $Text.Replace($Conn.Server, (Get-DisplayServer $Conn)) }
     return $Text
 }
 

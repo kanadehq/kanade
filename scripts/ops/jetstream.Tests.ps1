@@ -33,7 +33,7 @@ function global:nats {
     switch -Wildcard (`$global:Mode) {
         'ok' { `$global:LASTEXITCODE = 0; 'removed'; return }
         'notfound' { 'nats: error: nats: stream not found'; `$global:LASTEXITCODE = 1; return }
-        'authfail' { 'nats: error: nats: Authorization Violation ' + `$pw; `$global:LASTEXITCODE = 1; return }
+        'authfail' { 'nats: error: nats: Authorization Violation ' + `$pw + ' ' + (`$args -join ' '); `$global:LASTEXITCODE = 1; return }
         'failone:*' {
             `$target = `$global:Mode.Substring(8)
             if (`$args -contains `$target) { 'nats: error: permissions violation ' + `$pw; `$global:LASTEXITCODE = 1; return }
@@ -101,6 +101,8 @@ $r = Invoke-Case $reset @('-Yes', '-Server', 'nats://u:' + $secret + '@h:4222')
 Check 'password inside server URL never printed' (-not $r.Out.Contains($secret))
 $r = Invoke-Case $reset @('-Yes', '-Server', 'nats://a:one-' + $secret + '@h1:4222,nats://b:two-' + $secret + '@h2:4222')
 Check 'credentials in every URL of a server list never printed' (-not $r.Out.Contains($secret))
+$r = Invoke-Case $reset @('-Yes', '-User', 'admin', '-Server', 'nats://admin:' + $secret + '@h:4222') 'authfail'
+Check 'URL password hidden even when -User matches the URL user' (-not $r.Out.Contains($secret))
 
 $credFile = Join-Path $tmp 'my admin.creds'
 Set-Content -LiteralPath $credFile -Value 'x'
