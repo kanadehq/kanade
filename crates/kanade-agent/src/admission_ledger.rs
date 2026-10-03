@@ -538,6 +538,32 @@ impl Ledger {
                 State::Launching { at } => {
                     let mut rec = rec.clone();
                     let now = self.now();
+                    // The run may have finished and queued its real outcome
+                    // directly (the ledger write failed, the outbox write did
+                    // not). That file is the outcome, not "unknown": adopt it
+                    // rather than overwrite it with a placeholder.
+                    match self.queued_outcome(&rec.request_id) {
+                        Ok(Some(result)) => {
+                            let finished_at = result.finished_at;
+                            rec.state = State::Finished {
+                                result: Box::new(result),
+                                outbox_enqueued: true,
+                                finished_at,
+                            };
+                            match self.write(&mut stats, &path, &rec) {
+                                Ok(()) => out.requeued += 1,
+                                Err(e) => {
+                                    warn!(error = %e, "admission ledger: could not adopt a queued outcome; will retry next start")
+                                }
+                            }
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(request_id = %rec.request_id, error = %e, "admission ledger: an outbox result exists but cannot be read; leaving the record for the next start");
+                            continue;
+                        }
+                    }
                     let result = self.unknown_result(&rec, *at, now);
                     rec.state = State::Finished {
                         result: Box::new(result),
@@ -706,15 +732,31 @@ impl Ledger {
     /// be published, still holds a result for `request_id`.
     fn outbox_holds(&self, request_id: &str) -> bool {
         let name = format!("{request_id}.json");
-        if self.outbox_dir.join(&name).exists() {
-            return true;
+        // Anything other than a definite "not there" counts as held: a
+        // directory that cannot be inspected must never be read as empty.
+        match self.outbox_dir.join(&name).try_exists() {
+            Ok(false) => {}
+            _ => return true,
         }
-        std::fs::read_dir(self.outbox_dir.join(crate::outbox_retry::STUCK_DIR))
-            .map(|rd| {
-                rd.flatten()
-                    .any(|e| e.file_name().to_string_lossy().starts_with(&name))
-            })
-            .unwrap_or(false)
+        match std::fs::read_dir(self.outbox_dir.join(crate::outbox_retry::STUCK_DIR)) {
+            Ok(rd) => rd.into_iter().any(|e| match e {
+                Ok(e) => e.file_name().to_string_lossy().starts_with(&name),
+                Err(_) => true,
+            }),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        }
+    }
+
+    /// The result already sitting in the outbox for `request_id`, if any.
+    fn queued_outcome(&self, request_id: &str) -> Result<Option<ExecResult>, LedgerError> {
+        let path = self.outbox_dir.join(format!("{request_id}.json"));
+        match std::fs::read(&path) {
+            Ok(b) => serde_json::from_slice::<ExecResult>(&b)
+                .map(Some)
+                .map_err(|e| LedgerError::Corrupt(format!("{}: {e}", path.display()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_err(&format!("read {}", path.display()), e)),
+        }
     }
 
     /// Collect tombstones past their retention. Returns how many were removed.
@@ -1491,5 +1533,31 @@ mod tests {
         assert_eq!(l.gc(late), 0, "result still queued in the outbox");
         std::fs::remove_file(fx.outbox_dir().join("req-1.json")).unwrap();
         assert_eq!(l.gc(late), 1, "uploaded and past retention");
+    }
+
+    #[test]
+    fn recovery_adopts_an_outcome_already_queued_instead_of_overwriting_it() {
+        let fx = Fixture::new();
+        {
+            let l = fx.open();
+            let t = admitted(&l, "req-1");
+            t.mark_launching().unwrap();
+            // The ledger could not take the outcome but the outbox did.
+            l.set_fault(true);
+            assert!(t.finish(result_for("req-1", 5)).is_err());
+        }
+        let l = fx.open();
+        let r = l.recover();
+        assert_eq!(r.unknown_reported, 0);
+        let out = fx.outbox_files();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].exit_code, 5, "the real outcome survives the restart");
+        assert!(matches!(
+            l.state_of("req-1"),
+            Some(State::Finished {
+                outbox_enqueued: true,
+                ..
+            })
+        ));
     }
 }
