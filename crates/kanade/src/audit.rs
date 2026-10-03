@@ -3,10 +3,9 @@
 //!
 //! The backend records an audit event for every state-changing HTTP
 //! call (`kanade-backend::audit::record`), but the CLI's fleet
-//! mutations — `agent publish/rollout`, `app publish`, `script
-//! publish`, `job create`, `exec` — go STRAIGHT to NATS and never
-//! touch the backend, so they used to leave no trace in the SPA's
-//! audit log. This module closes that gap by publishing the same
+//! mutations that still go STRAIGHT to NATS and never touch the
+//! backend (`agent publish/rollout`, `run`, `kill`) would leave no
+//! trace in the SPA's audit log. This module closes that gap by publishing the same
 //! wire shape onto the same `audit.{actor}.{action}[.{target}]`
 //! subjects (captured by the AUDIT stream's `audit.>` filter and
 //! mirrored into `audit_log` by the backend's audit projector).

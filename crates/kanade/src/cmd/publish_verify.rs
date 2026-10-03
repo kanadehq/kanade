@@ -1,6 +1,7 @@
-//! Shared post-`put` read-back verification for the two CLI commands
-//! that publish to a NATS JetStream Object Store (`agent publish` →
-//! `OBJECT_AGENT_RELEASES`, `app publish` → `OBJECT_APP_PACKAGES`).
+//! Shared post-publish read-back verification. `agent publish` reads the
+//! `OBJECT_AGENT_RELEASES` object store back over NATS; `app publish`
+//! (which uploads through the backend) reads the package back through the
+//! backend's download endpoint, i.e. the same path agents fetch it by.
 //!
 //! Works around #277 / upstream investigation in #278: on at least
 //! single-node JetStream, `ObjectStore::put(...).await` can return
@@ -35,6 +36,26 @@ use tracing::warn;
 /// next to the typical `cargo build` ahead of the publish.
 const MAX_ATTEMPTS: u32 = 5;
 
+/// Run `once` up to `MAX_ATTEMPTS` times with a short, growing sleep between
+/// tries; `true` as soon as one attempt reports success.
+async fn with_backoff<F, Fut>(mut once: F) -> bool
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let mut delay = Duration::from_millis(200);
+    for attempt in 1..=MAX_ATTEMPTS {
+        if once(attempt).await {
+            return true;
+        }
+        if attempt < MAX_ATTEMPTS {
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(3));
+        }
+    }
+    false
+}
+
 /// Confirm `store.get(key)` returns the same bytes `put` just wrote.
 /// `expected_digest` is the digest field from `put`'s returned
 /// `ObjectInfo` (the NATS-encoded `"SHA-256=<base64url>"` form);
@@ -60,12 +81,11 @@ pub async fn verify_readback(
         return verify_size_only(store, key, expected_size).await;
     };
 
-    let mut delay = Duration::from_millis(200);
-    for attempt in 1..=MAX_ATTEMPTS {
+    let ok = with_backoff(|attempt| async move {
         match read_and_hash(store, key).await {
             Ok((got_digest, got_size)) => {
                 if got_digest == expected_digest && got_size == expected_size {
-                    return Ok(());
+                    return true;
                 }
                 warn!(
                     attempt,
@@ -80,10 +100,11 @@ pub async fn verify_readback(
                 warn!(attempt, error = %e, "publish read-back: get failed (transient?)");
             }
         }
-        if attempt < MAX_ATTEMPTS {
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(3));
-        }
+        false
+    })
+    .await;
+    if ok {
+        return Ok(());
     }
     bail!(
         "publish read-back: object_store key {key:?} still inconsistent after {MAX_ATTEMPTS} attempts \
@@ -114,9 +135,76 @@ async fn read_and_hash(store: &ObjectStore, key: &str) -> Result<(String, usize)
     // used `URL_SAFE_NO_PAD` and made the verify exhaust every retry
     // because the `=` padding was always missing (CodeRabbit #279
     // CRITICAL).
+    Ok((nats_digest(hasher), total))
+}
+
+/// Render a finished hasher as the NATS object-store digest string.
+fn nats_digest(hasher: Sha256) -> String {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::URL_SAFE.encode(hasher.finalize());
-    Ok((format!("SHA-256={b64}"), total))
+    format!("SHA-256={b64}")
+}
+
+/// HTTP twin of [`verify_readback`] for objects published through the
+/// backend: download `url` (authenticated, streamed, never buffered) and
+/// compare size and, when the backend reported one, the digest. The backend
+/// reports the digest the broker computed, in the same NATS format, so the
+/// comparison stays a string equality. Without a digest only the byte count
+/// is checked.
+pub async fn verify_http_readback(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    key: &str,
+    expected_digest: Option<&str>,
+    expected_size: u64,
+) -> Result<()> {
+    let ok = with_backoff(|attempt| async move {
+        match http_read_and_hash(client, url).await {
+            Ok((got_digest, got_size)) => {
+                if got_size == expected_size && expected_digest.is_none_or(|d| d == got_digest) {
+                    return true;
+                }
+                warn!(
+                    attempt,
+                    ?expected_digest,
+                    got_digest = %got_digest,
+                    expected_size,
+                    got_size,
+                    "publish read-back mismatch — object store not yet consistent (#277)"
+                );
+            }
+            Err(e) => {
+                warn!(attempt, error = %e, "publish read-back: download failed (transient?)");
+            }
+        }
+        false
+    })
+    .await;
+    if ok {
+        return Ok(());
+    }
+    bail!(
+        "publish read-back: {key:?} still inconsistent after {MAX_ATTEMPTS} attempts \
+         — JetStream race (#277). Retry the publish in a few seconds; if it persists, check broker health."
+    );
+}
+
+async fn http_read_and_hash(client: &reqwest::Client, url: &reqwest::Url) -> Result<(String, u64)> {
+    use futures::StreamExt;
+
+    let resp = client.get(url.clone()).send().await?;
+    if !resp.status().is_success() {
+        bail!("GET {url}: {}", resp.status());
+    }
+    let mut hasher = Sha256::new();
+    let mut total: u64 = 0;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        hasher.update(&chunk);
+        total += chunk.len() as u64;
+    }
+    Ok((nats_digest(hasher), total))
 }
 
 /// Fallback when the server didn't compute a digest — just confirm
@@ -126,8 +214,7 @@ async fn read_and_hash(store: &ObjectStore, key: &str) -> Result<(String, usize)
 /// double-allocate on the heap (Gemini #279 HIGH); the size is all
 /// we needed, never the bytes themselves.
 async fn verify_size_only(store: &ObjectStore, key: &str, expected_size: usize) -> Result<()> {
-    let mut delay = Duration::from_millis(200);
-    for attempt in 1..=MAX_ATTEMPTS {
+    let ok = with_backoff(|attempt| async move {
         let res = async {
             let mut obj = store.get(key).await?;
             let n = io::copy(&mut obj, &mut io::sink()).await?;
@@ -135,17 +222,18 @@ async fn verify_size_only(store: &ObjectStore, key: &str, expected_size: usize) 
         }
         .await;
         match res {
-            Ok(got) if got as usize == expected_size => return Ok(()),
+            Ok(got) if got as usize == expected_size => return true,
             Ok(got) => warn!(
                 attempt,
                 expected_size, got, "publish read-back size mismatch (#277, no digest)"
             ),
             Err(e) => warn!(attempt, error = %e, "publish read-back: get failed (transient?)"),
         }
-        if attempt < MAX_ATTEMPTS {
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(3));
-        }
+        false
+    })
+    .await;
+    if ok {
+        return Ok(());
     }
     bail!(
         "publish read-back: object_store key {key:?} size still wrong after {MAX_ATTEMPTS} attempts"

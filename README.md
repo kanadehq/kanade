@@ -194,6 +194,11 @@ kanade job delete <id>                           # refuses if any schedule refer
 
 kanade exec     <job-id>                         # fire a registered job ad-hoc (POST /api/exec/<id>)
 
+kanade app    publish <name> <file> [--version V] # upload an installer to the app-packages store (via backend API; operator role)
+kanade app    list | delete <name> <version>     # (via backend API)
+kanade script publish <name> <version> <file>    # upload a manifest script body, 4 MB max (via backend API; operator role)
+kanade script list | delete <name> <version>     # (via backend API)
+
 kanade schedule create <path...>                 # cron yaml { id, cron, job_id, enabled }; accepts files / dirs / globs
 kanade schedule export <id> [--out-dir <dir>]    # dump registered YAML to stdout (or <dir>/<id>.yaml)
 kanade schedule export --all --out-dir <dir>     # dump every registered schedule

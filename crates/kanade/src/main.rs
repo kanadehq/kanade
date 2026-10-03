@@ -80,10 +80,11 @@ enum SubCmd {
     /// Manage agent releases (publish a new binary, query the target version).
     Agent(cmd::agent::AgentArgs),
     /// CRUD the generic app-package Object Store (`OBJECT_APP_PACKAGES`, #207).
-    /// Sibling of `agent` — different bucket, same NATS-direct shape.
+    /// Goes through the backend API (needs KANADE_AUTH_TOKEN), not NATS.
     App(cmd::app::AppArgs),
     /// CRUD the manifest-script Object Store (`OBJECT_SCRIPTS`, #211).
-    /// Bodies referenced by `execute.script_object` (#213 / #214).
+    /// Bodies referenced by `execute.script_object` (#213 / #214). Goes
+    /// through the backend API (needs KANADE_AUTH_TOKEN), not NATS.
     Script(cmd::script::ScriptArgs),
     /// Manage the layered agent config (global / per-group / per-pc). Goes
     /// through the backend API (needs KANADE_AUTH_TOKEN), not NATS.
@@ -148,6 +149,10 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::schedule::execute(&backend_url, args).await;
     } else if let SubCmd::View(args) = command {
         return cmd::view::execute(&backend_url, args).await;
+    } else if let SubCmd::App(args) = command {
+        return cmd::app::execute(&backend_url, args).await;
+    } else if let SubCmd::Script(args) = command {
+        return cmd::script::execute(&backend_url, args).await;
     } else if let SubCmd::Freeze(args) = command {
         return cmd::freeze::execute(&backend_url, args).await;
     } else if let SubCmd::Login(args) = command {
@@ -195,14 +200,14 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         SubCmd::Jetstream(args) => cmd::jetstream::execute(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
         SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
-        SubCmd::App(args) => cmd::app::execute(client, args).await,
-        SubCmd::Script(args) => cmd::script::execute(client, args).await,
         SubCmd::Meta(args) => cmd::meta::execute(client, args).await,
         SubCmd::Exec(_)
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
         | SubCmd::View(_)
         | SubCmd::Group(_)
+        | SubCmd::App(_)
+        | SubCmd::Script(_)
         | SubCmd::Config(_)
         | SubCmd::Freeze(_)
         | SubCmd::Ping(_)
@@ -215,5 +220,33 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         | SubCmd::CommandKey(_) => {
             unreachable!("handled above")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_http::{fake_backend, seen};
+
+    /// `app` / `script` must be served without ever touching NATS: with a
+    /// broker address nothing listens on, a NATS-first dispatch would fail
+    /// to connect before sending any HTTP request.
+    #[tokio::test]
+    async fn app_and_script_dispatch_without_connecting_to_nats() {
+        let dead_nats = "nats://127.0.0.1:1".to_string();
+        let (base, log) = fake_backend(vec![(200, "[]"), (200, "[]")]).await;
+        let app = SubCmd::App(cmd::app::AppArgs {
+            sub: cmd::app::AppSub::List,
+        });
+        dispatch(dead_nats.clone(), base.clone(), app)
+            .await
+            .unwrap();
+        let script = SubCmd::Script(cmd::script::ScriptArgs {
+            sub: cmd::script::ScriptSub::List,
+        });
+        dispatch(dead_nats, base, script).await.unwrap();
+        let got = seen(&log);
+        assert_eq!(got[0].target, "/api/app-packages");
+        assert_eq!(got[1].target, "/api/script-objects");
     }
 }

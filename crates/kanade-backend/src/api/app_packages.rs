@@ -18,8 +18,9 @@
 //!   HTTP.
 //! - `DELETE /api/app-packages/{name}/{version}` — gc.
 //!
-//! No auth gate today (the rest of the backend is the same — see
-//! the agent_releases module for the same posture).
+//! Writes (publish, delete) require the operator role and are audited
+//! against the authenticated account; the CLI's `kanade app` goes
+//! through these routes.
 //!
 //! Naming rules: the upload endpoint validates that both `name`
 //! and `version` are non-empty and slash-free, matching the
