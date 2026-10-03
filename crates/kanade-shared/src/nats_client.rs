@@ -391,7 +391,11 @@ impl Live {
     fn observe(&self, ev: &async_nats::Event) {
         let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
         match ev {
-            async_nats::Event::Connected => *refusals = None,
+            // A successful connect, a drop, or any other kind of failed
+            // attempt (broker unreachable, timeout) ends a run of refusals:
+            // only an unbroken run is evidence the credential itself is bad,
+            // and an offline broker is something to wait out.
+            async_nats::Event::Connected | async_nats::Event::Disconnected => *refusals = None,
             async_nats::Event::ClientError(async_nats::ClientError::Other(kind))
                 if *kind == async_nats::ConnectErrorKind::AuthorizationViolation.to_string()
                     || *kind == async_nats::ConnectErrorKind::Authentication.to_string() =>
@@ -399,6 +403,7 @@ impl Live {
                 let (first, n) = refusals.unwrap_or((std::time::Instant::now(), 0));
                 *refusals = Some((first, n + 1));
             }
+            async_nats::Event::ClientError(_) => *refusals = None,
             _ => {}
         }
     }
@@ -1415,10 +1420,14 @@ mod tests {
         assert!(live.auth_failed());
         live.observe(&async_nats::Event::Connected);
         assert!(!live.auth_failed());
-        // Unrelated errors are not refusals.
+        // A different kind of failure (broker gone) ends the run, so refusals
+        // from before an outage cannot add up to a failure after it.
+        *live.refusals.lock().unwrap() = Some((aged, AUTH_REJECTION_LIMIT));
         live.observe(&async_nats::Event::ClientError(
             async_nats::ClientError::Other("io".into()),
         ));
+        assert!(!live.auth_failed());
+        live.observe(&refused());
         assert!(!live.auth_failed());
     }
 
