@@ -99,3 +99,6 @@ jobs:
 
       - name: Offline-boot integration tests
         run: cargo test -p kanade-agent --test offline_boot -- --ignored
+
+      - name: NATS auth (user / token fallback) integration tests
+        run: cargo test -p kanade-shared --test nats_auth_live -- --ignored

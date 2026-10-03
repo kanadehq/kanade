@@ -1018,28 +1018,41 @@ pub(crate) async fn run_agent() -> Result<()> {
         check_sink.clone(),
     );
 
-    tokio::join!(
-        commands::command_loop(
-            client.clone(),
-            pc_id.clone(),
-            ledger.clone(),
-            staleness_tracker.clone(),
-            cmd_all,
-            script_cache.clone(),
-            check_sink.clone(),
-            verifier.clone(),
-        ),
-        commands::command_loop(
-            client.clone(),
-            pc_id.clone(),
-            ledger.clone(),
-            staleness_tracker.clone(),
-            cmd_self,
-            script_cache.clone(),
-            check_sink.clone(),
-            verifier.clone(),
-        ),
-    );
+    // `wait_until_dead` covers the case the subscriptions do not: a connection
+    // task that ended on an authorization violation leaves the subscription
+    // streams open, so without it the agent would sit idle forever.
+    let loops = async {
+        tokio::join!(
+            commands::command_loop(
+                client.clone(),
+                pc_id.clone(),
+                ledger.clone(),
+                staleness_tracker.clone(),
+                cmd_all,
+                script_cache.clone(),
+                check_sink.clone(),
+                verifier.clone(),
+            ),
+            commands::command_loop(
+                client.clone(),
+                pc_id.clone(),
+                ledger.clone(),
+                staleness_tracker.clone(),
+                cmd_self,
+                script_cache.clone(),
+                check_sink.clone(),
+                verifier.clone(),
+            ),
+        );
+    };
+    tokio::select! {
+        () = loops => {}
+        () = kanade_shared::nats_client::wait_until_dead(&client) => {
+            anyhow::bail!(
+                "NATS connection task terminated (no credential accepted?); exiting for a supervised restart"
+            );
+        }
+    }
 
     // The command subscriptions only end when the NATS client itself is gone
     // — e.g. a panic in async-nats' connection task (#1187's missing rustls
