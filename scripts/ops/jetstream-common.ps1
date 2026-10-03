@@ -51,8 +51,8 @@ function Resolve-Connection($Server, $Creds, $User, $Password) {
 
 function Get-DisplayServer($Conn) {
     if (-not $Conn.Server) { return '(from nats context / environment)' }
-    # Drop any user:pass@ so a credential in the URL is never printed.
-    return ($Conn.Server -replace '^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@]*@', '$1')
+    # Drop user:pass@ from every URL (the server option may be a comma-separated list).
+    return ($Conn.Server -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@,\s]*@', '$1')
 }
 
 function Hide-Secrets([string]$Text, $Conn) {

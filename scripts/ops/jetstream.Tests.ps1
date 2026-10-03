@@ -99,6 +99,8 @@ Check 'password from environment never printed' (-not $r.Out.Contains($secret))
 
 $r = Invoke-Case $reset @('-Yes', '-Server', 'nats://u:' + $secret + '@h:4222')
 Check 'password inside server URL never printed' (-not $r.Out.Contains($secret))
+$r = Invoke-Case $reset @('-Yes', '-Server', 'nats://a:one-' + $secret + '@h1:4222,nats://b:two-' + $secret + '@h2:4222')
+Check 'credentials in every URL of a server list never printed' (-not $r.Out.Contains($secret))
 
 $credFile = Join-Path $tmp 'my admin.creds'
 Set-Content -LiteralPath $credFile -Value 'x'
