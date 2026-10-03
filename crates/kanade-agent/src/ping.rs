@@ -83,6 +83,7 @@ pub async fn serve(
                 // rather than "not answering".
                 command_keys: None,
                 enforcing: None,
+                command_protocols: None,
             };
             let payload = match serde_json::to_vec(&hb) {
                 Ok(b) => b,

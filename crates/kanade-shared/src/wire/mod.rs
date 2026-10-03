@@ -2,6 +2,7 @@ mod agent_config;
 mod agent_groups;
 mod agent_meta;
 mod command;
+mod envelope;
 mod event;
 mod group_contacts;
 mod heartbeat;
@@ -20,6 +21,11 @@ pub use agent_config::{ConfigScope, EffectiveConfig, ResolutionWarning, resolve}
 pub use agent_groups::AgentGroups;
 pub use agent_meta::{AgentMeta, MetaEntry, MetaUpdate};
 pub use command::{Command, FinalizeCommand, RetrySpec, RunAs, Shell};
+pub use envelope::{
+    CommandEnvelope, ENVELOPE_KIND_V2, EnvelopeError, FUTURE_SKEW_ALLOWANCE, MAX_ENVELOPE_VALIDITY,
+    PROTOCOL_LEGACY, PROTOCOL_V2, VerifiedEnvelope, sign_envelope, start_deadline_passed,
+    supported_command_protocols, verify_envelope,
+};
 pub use event::EventStarted;
 pub use group_contacts::GroupContacts;
 pub use heartbeat::Heartbeat;

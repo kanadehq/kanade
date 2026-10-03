@@ -322,18 +322,27 @@ impl SigHeaders {
     }
 }
 
-/// Verify `body` against the signature headers using `ring`.
+/// A message whose signature holds, before any freshness policy is applied.
 ///
-/// Verification is over the **exact received bytes**; deserialization happens
-/// afterwards, at the caller. That ordering is what removes canonicalisation
-/// from the problem — there is no need for serde to produce byte-identical
-/// output on both sides, only for the bytes to arrive unchanged.
-pub fn verify<'a>(
+/// The cryptographic half of [`verify`], exposed so a caller with a different
+/// time policy (the command envelope, which bounds the future side by a clock
+/// allowance rather than by the key's `max_age`) can apply its own without
+/// re-implementing key lookup and signature checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Authentic<'a> {
+    pub kid: &'a str,
+    pub policy: &'a KeyPolicy,
+    /// The signing time the signature covers, milliseconds since the epoch.
+    pub at_ms: i64,
+}
+
+/// Check only that `body` was signed by a key on `ring`, over the exact
+/// received bytes. No freshness policy is applied here.
+pub fn verify_signature<'a>(
     ring: &'a KeyRing,
     body: &[u8],
     headers: &SigHeaders,
-    now_ms: i64,
-) -> Result<Verified<'a>, VerifyError> {
+) -> Result<Authentic<'a>, VerifyError> {
     if headers.is_absent() {
         return Err(VerifyError::Unsigned);
     }
@@ -380,6 +389,27 @@ pub fn verify<'a>(
             kid: kid.to_owned(),
         })?;
 
+    Ok(Authentic {
+        kid: ring_kid,
+        policy,
+        at_ms,
+    })
+}
+
+/// Verify `body` against the signature headers using `ring`.
+///
+/// Verification is over the **exact received bytes**; deserialization happens
+/// afterwards, at the caller. That ordering is what removes canonicalisation
+/// from the problem — there is no need for serde to produce byte-identical
+/// output on both sides, only for the bytes to arrive unchanged.
+pub fn verify<'a>(
+    ring: &'a KeyRing,
+    body: &[u8],
+    headers: &SigHeaders,
+    now_ms: i64,
+) -> Result<Verified<'a>, VerifyError> {
+    let Authentic { kid, policy, at_ms } = verify_signature(ring, body, headers)?;
+
     // Freshness is checked only AFTER the signature holds, so a stale verdict
     // is always about a genuine message. Checking it first would let anyone
     // provoke a `Stale` report by sending garbage with an old timestamp.
@@ -408,10 +438,7 @@ pub fn verify<'a>(
         }
     }
 
-    Ok(Verified {
-        kid: ring_kid,
-        policy,
-    })
+    Ok(Verified { kid, policy })
 }
 
 /// Sign `body`, producing the headers to publish alongside it.

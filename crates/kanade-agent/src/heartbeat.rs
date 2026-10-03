@@ -189,6 +189,7 @@ pub async fn heartbeat_loop(
                     // one produces, and describe a machine that never existed.
                     command_keys: Some(command_keys),
                     enforcing: Some(enforcing),
+                    command_protocols: Some(kanade_shared::wire::supported_command_protocols()),
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,

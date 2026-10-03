@@ -79,6 +79,18 @@ pub struct AgentRow {
     /// not be enforcing, which is what the whole fleet is doing today.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enforcing: Option<bool>,
+    /// The command protocols this agent can verify (`legacy`,
+    /// `kanade.command.v2`). What gates switching a host to the envelope form.
+    ///
+    /// Same three states and the same reason as [`Self::command_keys`]:
+    ///
+    /// * absent — never reported (predates the field). Unknown, NOT "legacy
+    ///   only": inferring that would hold back hosts that may already be able
+    ///   to verify v2, or — worse — the reverse.
+    /// * `[]` — reporting, verifies nothing.
+    /// * `[..]` — what it accepts right now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_protocols: Option<Vec<String>>,
     /// #1270: the NATS credential this host's live connection authenticated
     /// with, as reported by the **broker** — not by the agent, which knows
     /// only which token it was handed.
@@ -915,6 +927,14 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
         // `Err` on an older DB, which `.ok().flatten()` folds into `None` —
         // the correct answer there, since the agent genuinely has not said.
         enforcing: r.try_get::<Option<bool>, _>("enforcing").ok().flatten(),
+        // NULL stays `None`, and a malformed blob degrades to `None` — "we
+        // cannot say" — never to a supported set, so a corrupt row cannot
+        // read as a host that is ready to be switched.
+        command_protocols: r
+            .try_get::<Option<String>, _>("command_protocols")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()),
         // #1270: NULL (never correlated) stays `None`, and an empty string
         // — which no classifier produces, but which a hand-edited row
         // could hold — is folded into it rather than shown as a credential
@@ -1269,6 +1289,82 @@ mod tests {
             by_id("WS-9"),
             None,
             "never reported must stay distinguishable from not-enforcing"
+        );
+    }
+
+    /// The protocol set goes heartbeat → projector → row → API with its three
+    /// states intact, and a ping reply does not erase it.
+    #[tokio::test]
+    async fn command_protocols_travel_from_heartbeat_to_api() {
+        use kanade_shared::wire::{Heartbeat, supported_command_protocols};
+
+        let pool = seeded_pool().await;
+        let beat = |pc: &str, protocols: Option<Vec<String>>| Heartbeat {
+            pc_id: pc.into(),
+            at: chrono::Utc::now(),
+            agent_version: "0.0.0".into(),
+            hostname: None,
+            os_family: None,
+            agent_cpu_pct: None,
+            agent_rss_bytes: None,
+            agent_disk_read_bytes: None,
+            agent_disk_written_bytes: None,
+            quarantined_versions: Vec::new(),
+            last_logon_user: None,
+            last_logon_display_name: None,
+            command_keys: None,
+            enforcing: None,
+            command_protocols: protocols,
+        };
+        let project = |hb: Heartbeat| {
+            let pool = pool.clone();
+            async move {
+                crate::projector::heartbeat::upsert_baseline(&pool, &hb)
+                    .await
+                    .unwrap()
+            }
+        };
+        project(beat("PC001", Some(supported_command_protocols()))).await;
+        project(beat("PC002", Some(Vec::new()))).await;
+        // WS-9 never reports; PC001 then sends a ping-shaped beat with None.
+        project(beat("PC001", None)).await;
+
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r.pc_id == id)
+                .unwrap()
+                .command_protocols
+                .clone()
+        };
+        assert_eq!(
+            by_id("PC001"),
+            Some(vec!["legacy".to_string(), "kanade.command.v2".to_string()]),
+            "a beat that omits the field must not erase the stored set"
+        );
+        assert_eq!(
+            by_id("PC002"),
+            Some(Vec::new()),
+            "reported-empty stays empty"
+        );
+        assert_eq!(by_id("WS-9"), None, "never reported stays unknown");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_command_protocols_blob_reads_as_unknown() {
+        let pool = seeded_pool().await;
+        sqlx::query("UPDATE agents SET command_protocols = ? WHERE pc_id = 'PC001'")
+            .bind("not json")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.pc_id == "PC001")
+                .unwrap()
+                .command_protocols,
+            None
         );
     }
 

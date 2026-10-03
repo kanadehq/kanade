@@ -1,0 +1,19 @@
+-- The command protocols each agent can verify (`legacy`, `kanade.command.v2`),
+-- as reported by its heartbeat.
+--
+-- This is what gates switching a host over to the envelope form: a host that
+-- cannot verify it must keep receiving the old one, so "does not support v2"
+-- and "has not said" have to stay different answers.
+--
+-- NULLable with no DEFAULT, deliberately, exactly as `command_keys` and
+-- `enforcing` are. JSON array of protocol names. The states are:
+--
+--   NULL   -- never reported. The agent predates the field, or has not sent a
+--             heartbeat since being upgraded. Unknown, NOT "legacy only".
+--   '[]'   -- reporting, and verifies no protocol.
+--   '[..]' -- the protocols it will accept right now.
+--
+-- A DEFAULT of '["legacy"]' would claim the whole fleet had answered before a
+-- single agent had said anything. Existing rows backfill to NULL and fill in
+-- on the next heartbeat.
+ALTER TABLE agents ADD COLUMN command_protocols TEXT;

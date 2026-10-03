@@ -77,6 +77,7 @@ pub async fn run_command_in_user_session(
     timeout: Duration,
     mut kill: oneshot::Receiver<()>,
     live: Option<Arc<LiveTail>>,
+    start_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ExecOutcome> {
     debug_assert!(matches!(run_as, RunAs::User | RunAs::SystemGui));
 
@@ -91,9 +92,11 @@ pub async fn run_command_in_user_session(
         job,
         stdout_read,
         stderr_read,
-    } = tokio::task::spawn_blocking(move || spawn_native(&cmd_line, run_as, cwd.as_deref()))
-        .await
-        .map_err(|e| anyhow!("spawn-blocking join: {e}"))??;
+    } = tokio::task::spawn_blocking(move || {
+        spawn_native(&cmd_line, run_as, cwd.as_deref(), start_deadline)
+    })
+    .await
+    .map_err(|e| anyhow!("spawn-blocking join: {e}"))??;
     let process = Arc::new(process);
 
     // 2) Pipe drain on dedicated threads (anonymous pipes are
@@ -203,7 +206,12 @@ unsafe impl Sync for SafeHandle {}
 
 // ── Synchronous Win32 building blocks ─────────────────────────────
 
-fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<SpawnHandles> {
+fn spawn_native(
+    cmd_line: &[u16],
+    run_as: RunAs,
+    cwd: Option<&str>,
+    start_deadline: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<SpawnHandles> {
     unsafe {
         let session = WTSGetActiveConsoleSessionId();
         if session == u32::MAX {
@@ -281,6 +289,13 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
             Some(v) => PWSTR(v.as_ptr() as *mut _),
             None => PWSTR::null(),
         };
+
+        // The last point before the process exists. Waiting for a blocking
+        // thread, acquiring the token, building the environment and expanding
+        // the cwd can each take long enough to carry a command past its start
+        // deadline, so it is checked here and not earlier. The guards above
+        // release everything on this early return.
+        crate::process::ensure_start_deadline(start_deadline)?;
 
         let result = CreateProcessAsUserW(
             Some(token.raw()),
