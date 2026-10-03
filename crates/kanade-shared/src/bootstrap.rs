@@ -320,8 +320,8 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     info!(bucket = BUCKET_AGENT_GROUPS_DERIVED, "ready");
 
     // agent_meta — per-PC operator-managed key/value annotations
-    // (edited via the SPA agent detail page / the `kanade meta` CLI, and
-    // typically bulk-populated by an operator AD-sync job). history: 5 —
+    // (edited via the SPA agent detail page / the `kanade meta` CLI, both
+    // through the backend API, and typically bulk-populated by an operator AD-sync job). history: 5 —
     // a few revisions of operator edit history, like group_contacts;
     // nothing replays it, so the exact depth is not load-bearing.
     js.create_or_update_key_value(KvConfig {

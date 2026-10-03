@@ -24,7 +24,7 @@ struct Cli {
     ///
     /// Used by the broker subcommands: `run`, `kill`, `agent`,
     /// `group` (except `group def`, which is HTTP — see --backend-url),
-    /// `meta`, `script`, `app`, `jetstream` (except `jetstream status`,
+    /// `script`, `app`, `jetstream` (except `jetstream status`,
     /// which is HTTP). Its credential is NOT a flag — the CLI reads
     /// `HKLM\SOFTWARE\kanade\cli\NatsToken` (Windows; no installer
     /// writes this today — a manual reg add), then
@@ -37,8 +37,8 @@ struct Cli {
     /// Backend HTTP base URL.
     ///
     /// Used by the HTTP subcommands: `job`, `schedule`, `exec`, `view`,
-    /// `query`, `freeze`, `account`, `group def`, `config`, `ping`, `revoke`,
-    /// `unrevoke`, `jetstream status`. They authenticate
+    /// `query`, `freeze`, `account`, `group def`, `config`, `meta`, `ping`,
+    /// `revoke`, `unrevoke`, `jetstream status`. They authenticate
     /// WITH `$KANADE_AUTH_TOKEN`, a JWT — a different credential from
     /// the broker token above, which is the usual source of confusion
     /// when one set of subcommands works and the other does not.
@@ -97,7 +97,8 @@ enum SubCmd {
     /// KANADE_AUTH_TOKEN), not NATS.
     Group(cmd::group::GroupArgs),
     /// Manage per-PC operator metadata (free-form key/value attributes on
-    /// the agent_meta KV bucket). NATS-direct.
+    /// the agent_meta KV bucket). Goes through the backend API (needs
+    /// KANADE_AUTH_TOKEN), not NATS.
     Meta(cmd::meta::MetaArgs),
     /// Log in with username/password; prints a JWT for KANADE_AUTH_TOKEN.
     Login(cmd::login::LoginArgs),
@@ -159,6 +160,8 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::login::execute(&backend_url, args).await;
     } else if let SubCmd::Account(args) = command {
         return cmd::account::execute(&backend_url, args).await;
+    } else if let SubCmd::Meta(args) = command {
+        return cmd::meta::execute(&backend_url, args).await;
     } else if let SubCmd::Config(args) = command {
         return cmd::config::execute(&backend_url, args).await;
     } else if let SubCmd::Query(args) = command {
@@ -200,12 +203,12 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         SubCmd::Jetstream(args) => cmd::jetstream::execute(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
         SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
-        SubCmd::Meta(args) => cmd::meta::execute(client, args).await,
         SubCmd::Exec(_)
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
         | SubCmd::View(_)
         | SubCmd::Group(_)
+        | SubCmd::Meta(_)
         | SubCmd::App(_)
         | SubCmd::Script(_)
         | SubCmd::Config(_)
@@ -248,5 +251,40 @@ mod tests {
         let got = seen(&log);
         assert_eq!(got[0].target, "/api/app-packages");
         assert_eq!(got[1].target, "/api/script-objects");
+    }
+
+    /// `meta` is HTTP-only too: every operation must succeed against a
+    /// broker address nothing listens on.
+    #[tokio::test]
+    async fn meta_dispatches_without_connecting_to_nats() {
+        let dead_nats = "nats://127.0.0.1:1".to_string();
+        let ok = (200, r#"{"meta":{"entries":[]},"changed":true}"#);
+        let (base, log) = fake_backend(vec![
+            (200, r#"{"entries":[]}"#),
+            ok,
+            ok,
+            (200, r#"{"entries":[]}"#),
+        ])
+        .await;
+        let pc_id = || "PC-01".to_string();
+        for sub in [
+            cmd::meta::MetaSub::Get { pc_id: pc_id() },
+            cmd::meta::MetaSub::Set {
+                pc_id: pc_id(),
+                key: "k".into(),
+                value: "v".into(),
+            },
+            cmd::meta::MetaSub::Rm {
+                pc_id: pc_id(),
+                key: "k".into(),
+            },
+            cmd::meta::MetaSub::Clear { pc_id: pc_id() },
+        ] {
+            let cmd = SubCmd::Meta(cmd::meta::MetaArgs { sub });
+            dispatch(dead_nats.clone(), base.clone(), cmd)
+                .await
+                .unwrap();
+        }
+        assert_eq!(seen(&log).len(), 4);
     }
 }

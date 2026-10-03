@@ -35,8 +35,10 @@ pub const BUCKET_AGENT_GROUPS_DERIVED: &str = "agent_groups_derived";
 /// [`AgentMeta`](crate::wire::AgentMeta). Durable operator metadata —
 /// distinct from the volatile `agents` heartbeat projection and from
 /// `agent_groups` membership. Edited via the SPA agent detail page or the
-/// `kanade meta` CLI (and typically bulk-populated by an operator AD-sync
-/// job that resolves the last-logon user's directory attributes).
+/// `kanade meta` CLI (both through the backend API, which is the only
+/// writer of this bucket for them), and typically bulk-populated by an
+/// operator AD-sync job that resolves the last-logon user's directory
+/// attributes.
 pub const BUCKET_AGENT_META: &str = "agent_meta";
 
 /// `group_contacts` — per-group notification email addresses, keyed by

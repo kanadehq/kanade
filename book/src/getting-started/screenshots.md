@@ -59,6 +59,12 @@ the API — which is how a directory-sync job keeps `display_name` and
 `department` current without anyone typing them. Once set, they are columns
 you can show and search on across the fleet.
 
+The writes go through the backend API (`kanade meta set` / `rm` / `clear`, or
+the per-key endpoint behind them), so they are authenticated, role-checked
+(operator or above) and audited. A directory-sync job that calls
+`kanade meta set` therefore needs a `KANADE_AUTH_TOKEN` even when it runs on
+the backend host; it touches only its own keys, so hand-entered ones survive.
+
 ### Watching the screen
 
 Sometimes the only way to understand a report is to look. From the host's own

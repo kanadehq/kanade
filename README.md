@@ -228,6 +228,16 @@ kanade config set  <field>=<value> [...]         # set one field (target_version
 kanade config unset <field> [...]                # clear one field
 kanade config clear [--group <name>|--pc <pc_id>] # delete the whole scope row
 kanade config effective <pc_id>                  # resolved view for a PC (built-in -> global -> groups -> pc)
+
+# `kanade meta …` (per-PC operator key/value metadata) goes through the backend HTTP API
+# (KANADE_AUTH_TOKEN; operator role to change anything) — no NATS connection or broker token
+# needed, and the backend must be up. A directory-sync job that calls `kanade meta set` from the
+# backend host authenticates with an auth token too. `set` / `rm` touch only their own key (the
+# backend does the compare-and-swap), so they never drop keys written concurrently.
+kanade meta get   <pc_id>                        # all attributes
+kanade meta set   <pc_id> <key> <value>          # upsert one key (empty value keeps the key, blank)
+kanade meta rm    <pc_id> <key>                  # drop one key (idempotent)
+kanade meta clear <pc_id>                        # drop every key
 ```
 
 `kanade <subcommand> --help` for argument details.

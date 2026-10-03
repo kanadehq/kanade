@@ -3,7 +3,8 @@
 //! filter by metadata in SQL.
 //!
 //! The KV bucket is the source of truth — the SPA `PUT
-//! /api/agents/{pc_id}/meta` and the `kanade meta` CLI write it. This
+//! /api/agents/{pc_id}/meta` and the `kanade meta` CLI (through that same
+//! API) write it. This
 //! table is a **read-only** rebuild owned by a single supervised task
 //! ([`run`]): it reconciles the full KV snapshot after every watch
 //! (re)attach and then tails live updates. Mirrors the `schedules`
