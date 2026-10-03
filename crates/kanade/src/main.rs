@@ -24,8 +24,7 @@ struct Cli {
     ///
     /// Used by the broker subcommands: `run`, `kill`,
     /// `group` (except `group def`, which is HTTP — see --backend-url),
-    /// `script`, `app`, `jetstream` (except `jetstream status`,
-    /// which is HTTP). Its credential is NOT a flag — the CLI reads
+    /// `script`, `app`. Its credential is NOT a flag — the CLI reads
     /// `HKLM\SOFTWARE\kanade\cli\NatsToken` (Windows; no installer
     /// writes this today — a manual reg add), then
     /// `HKLM\SOFTWARE\kanade\agent\NatsToken`, then
@@ -57,8 +56,7 @@ enum SubCmd {
     Run(cmd::run::RunArgs),
     /// Ask the target PC's agent for a fresh heartbeat (via the backend API).
     Ping(cmd::ping::PingArgs),
-    /// Manage JetStream streams + KV buckets (`status` goes through the
-    /// backend API; setup / delete / reset are NATS-direct).
+    /// Show the state of JetStream streams + KV buckets (via the backend API).
     Jetstream(cmd::jetstream::JetstreamArgs),
     /// Mark a command id as REVOKED so agents skip it (spec §2.6 Layer 2).
     /// Goes through the backend API (needs KANADE_AUTH_TOKEN), not NATS.
@@ -176,11 +174,10 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::revoke::revoke(&backend_url, args).await;
     } else if let SubCmd::Unrevoke(args) = command {
         return cmd::revoke::unrevoke(&backend_url, args).await;
-    } else if let SubCmd::Jetstream(cmd::jetstream::JetstreamArgs {
-        sub: cmd::jetstream::JetstreamSub::Status,
-    }) = command
-    {
-        return cmd::jetstream::status(&backend_url).await;
+    } else if let SubCmd::Jetstream(args) = command {
+        return match args.sub {
+            cmd::jetstream::JetstreamSub::Status => cmd::jetstream::status(&backend_url).await,
+        };
     } else if let SubCmd::SelfUpdate(args) = command {
         return cmd::self_update::execute(args).await;
     } else if let SubCmd::CommandKey(args) = command {
@@ -204,9 +201,9 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
 
     match command {
         SubCmd::Run(args) => cmd::run::execute(client, args).await,
-        SubCmd::Jetstream(args) => cmd::jetstream::execute(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
         SubCmd::Exec(_)
+        | SubCmd::Jetstream(_)
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
         | SubCmd::View(_)
@@ -342,5 +339,33 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(seen(&log).len(), 4);
+    }
+
+    /// `jetstream status` is HTTP-only: it must succeed against a broker
+    /// address nothing listens on.
+    #[tokio::test]
+    async fn jetstream_status_dispatches_without_connecting_to_nats() {
+        let dead_nats = "nats://127.0.0.1:1".to_string();
+        let body = r#"{"streams":[],"kv_buckets":[],"object_stores":[]}"#;
+        let (base, log) = fake_backend(vec![(200, body)]).await;
+        let cmd = SubCmd::Jetstream(cmd::jetstream::JetstreamArgs {
+            sub: cmd::jetstream::JetstreamSub::Status,
+        });
+        dispatch(dead_nats, base, cmd).await.unwrap();
+        assert_eq!(seen(&log)[0].target, "/api/jetstream/status");
+    }
+
+    /// The broker-mutating `jetstream` subcommands are gone; only `status`
+    /// parses.
+    #[test]
+    fn jetstream_only_accepts_status() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["kanade", "jetstream", "status"]).is_ok());
+        for removed in ["setup", "delete", "reset"] {
+            assert!(
+                Cli::try_parse_from(["kanade", "jetstream", removed]).is_err(),
+                "{removed} must not parse"
+            );
+        }
     }
 }

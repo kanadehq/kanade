@@ -115,5 +115,5 @@ Adds:
 - It doesn't touch NATS-side state when you remove the agent —
   the agent's `target_version` entry under `agent_config.pcs.<pc>`
   stays in the KV. Clean those up server-side with
-  `kanade jetstream kv del agent_config pcs.<pc>.target_version`
-  if needed.
+  `nats kv del agent_config pcs.<pc>.target_version` (using an
+  administrative broker credential) if needed.

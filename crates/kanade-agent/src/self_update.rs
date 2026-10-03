@@ -68,7 +68,7 @@ pub async fn run(
     // Retry with backoff. `wait_for_object_store` returns as soon as
     // the bucket is reachable (which the broker reconnect path wakes
     // the tracker for), so recovery is essentially instant once the
-    // operator runs `kanade jetstream setup`.
+    // a backend starts against this broker and creates the store.
     let store = crate::nats_retry::wait_for_object_store(
         &js,
         &client,

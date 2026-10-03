@@ -149,7 +149,7 @@ pub async fn publish(
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!(
-                    "Object Store '{OBJECT_APP_PACKAGES}' missing — run `kanade jetstream setup`"
+                    "Object Store '{OBJECT_APP_PACKAGES}' not found — the backend creates it at startup, so it was removed since or this broker is not the one expected; check `GET /api/jetstream/status` (restarting the backend recreates it)"
                 ),
             )
         })?;

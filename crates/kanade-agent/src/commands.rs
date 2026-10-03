@@ -138,13 +138,13 @@ pub async fn command_loop(
     if script_current.is_none() {
         warn!(
             bucket = BUCKET_SCRIPT_CURRENT,
-            "KV bucket missing — version-pinning skipped (run `kanade jetstream setup`)"
+            "KV bucket missing — version-pinning skipped (the backend creates it at startup; no backend may have started against this broker yet — see `kanade jetstream status`)"
         );
     }
     if script_status.is_none() {
         warn!(
             bucket = BUCKET_SCRIPT_STATUS,
-            "KV bucket missing — revoke check skipped (run `kanade jetstream setup`)"
+            "KV bucket missing — revoke check skipped (the backend creates it at startup; no backend may have started against this broker yet — see `kanade jetstream status`)"
         );
     }
 
