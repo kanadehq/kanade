@@ -58,7 +58,7 @@ macro_rules! broker_or_skip {
 /// A throwaway broker whose authorization block can be swapped at runtime.
 struct Broker {
     child: tokio::process::Child,
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
     port: u16,
     http_port: u16,
 }
@@ -74,7 +74,7 @@ impl Broker {
         let child = spawn_server(dir.path(), port, http_port, auth).await;
         Some(Self {
             child,
-            dir,
+            _dir: dir,
             port,
             http_port,
         })
@@ -87,7 +87,7 @@ impl Broker {
     #[cfg(unix)]
     async fn restart(&mut self, auth: &str) {
         self.child.kill().await.expect("stop broker");
-        self.child = spawn_server(self.dir.path(), self.port, self.http_port, auth).await;
+        self.child = spawn_server(self._dir.path(), self.port, self.http_port, auth).await;
     }
 
     fn url(&self) -> String {
@@ -97,7 +97,7 @@ impl Broker {
     /// Rewrite the authorization block and signal a config reload.
     #[cfg(unix)]
     fn reload(&self, auth: &str) {
-        write_config(self.dir.path(), self.port, self.http_port, auth);
+        write_config(self._dir.path(), self.port, self.http_port, auth);
         let pid = self.child.id().expect("nats-server pid").to_string();
         let status = std::process::Command::new("kill")
             .args(["-HUP", &pid])
