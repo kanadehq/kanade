@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::command_verify::Admission;
 use crate::outbox;
-use crate::process::{ExecOutcome, apply_jitter, run_command_with_kill};
+use crate::process::{ExecOutcome, apply_jitter, run_command_with_start_deadline};
 use crate::script_cache::ScriptCache;
 use crate::staleness::{StalenessDecision, Tracker, decide as staleness_decide};
 
@@ -671,8 +671,53 @@ pub async fn handle_command(
     let mut attempt: u32 = 0;
     // Set when a retry was authorised but its start deadline had passed.
     let mut retry_not_started: Option<String> = None;
+    // The previous attempt's real outcome, kept so a retry refused at the
+    // moment of launch does not lose it.
+    let mut prior: Option<ExecOutcome> = None;
     let outcome = loop {
-        let outcome = run_command_with_kill(&client, &cmd, Some(live_handle.tail())).await?;
+        let outcome = match run_command_with_start_deadline(
+            &client,
+            &cmd,
+            Some(live_handle.tail()),
+            envelope_deadline,
+        )
+        .await
+        {
+            Ok(o) => o,
+            // The deadline passed between our check and the process actually
+            // being created. Nothing ran.
+            Err(e) if e.is::<crate::process::StartDeadlineExpired>() => {
+                let deadline = envelope_deadline.unwrap_or_else(chrono::Utc::now);
+                match prior.take() {
+                    Some(previous) => {
+                        warn!(
+                            cmd_id = %cmd.id,
+                            request_id = %cmd.request_id,
+                            attempt,
+                            %deadline,
+                            "envelope start deadline expired at launch — retry not started",
+                        );
+                        attempt -= 1;
+                        retry_not_started = Some(format!(
+                            "retry not started: envelope start deadline {deadline} passed"
+                        ));
+                        break previous;
+                    }
+                    None => {
+                        let now = chrono::Utc::now();
+                        warn!(
+                            cmd_id = %cmd.id,
+                            request_id = %cmd.request_id,
+                            %deadline,
+                            "skip: envelope start deadline expired at launch",
+                        );
+                        publish_skipped(&client, &pc_id, &cmd, deadline, now).await?;
+                        return Ok(CommandOutcome::Skipped);
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        };
         if !outcome_is_retryable(&outcome) || attempt >= max_retries {
             break outcome;
         }
@@ -724,6 +769,7 @@ pub async fn handle_command(
             ));
             break outcome;
         }
+        prior = Some(outcome);
     };
     let finished_at = chrono::Utc::now();
     // Capture before the match below moves `outcome`: a final Killed

@@ -77,6 +77,7 @@ pub async fn run_command_in_user_session(
     timeout: Duration,
     mut kill: oneshot::Receiver<()>,
     live: Option<Arc<LiveTail>>,
+    start_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ExecOutcome> {
     debug_assert!(matches!(run_as, RunAs::User | RunAs::SystemGui));
 
@@ -91,9 +92,15 @@ pub async fn run_command_in_user_session(
         job,
         stdout_read,
         stderr_read,
-    } = tokio::task::spawn_blocking(move || spawn_native(&cmd_line, run_as, cwd.as_deref()))
-        .await
-        .map_err(|e| anyhow!("spawn-blocking join: {e}"))??;
+    } = tokio::task::spawn_blocking(move || {
+        // Checked on the blocking thread itself: a congested blocking pool can
+        // hold this closure well past the caller's own deadline check, and this
+        // is the last point before `CreateProcessAsUserW`.
+        crate::process::ensure_start_deadline(start_deadline)?;
+        spawn_native(&cmd_line, run_as, cwd.as_deref())
+    })
+    .await
+    .map_err(|e| anyhow!("spawn-blocking join: {e}"))??;
     let process = Arc::new(process);
 
     // 2) Pipe drain on dedicated threads (anonymous pipes are

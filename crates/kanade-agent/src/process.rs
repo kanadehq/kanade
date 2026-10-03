@@ -315,10 +315,48 @@ pub async fn apply_jitter(cmd: &Command) {
 /// SPA. `None` for paths that don't want live capture (e.g. ad-hoc
 /// `kanade run` from the CLI). It never affects the final captured
 /// strings — those are still the complete byte stream.
+/// The command's start deadline had passed at the moment the process would
+/// have been created, so nothing was launched. Returned (inside an
+/// `anyhow::Error`) rather than folded into [`ExecOutcome`] because no process
+/// ran and the caller must tell "never started" apart from any real outcome.
+#[derive(Debug)]
+pub struct StartDeadlineExpired(pub chrono::DateTime<chrono::Utc>);
+
+impl std::fmt::Display for StartDeadlineExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "start deadline {} passed before launch", self.0)
+    }
+}
+
+impl std::error::Error for StartDeadlineExpired {}
+
+/// Refuse to launch past `deadline`. Called at the last point before the
+/// process is actually created, so waits between the caller's own check and
+/// here (kill-listener setup, a busy blocking pool) cannot carry a command
+/// over its deadline. Inclusive, like every other start-deadline check.
+pub(crate) fn ensure_start_deadline(deadline: Option<chrono::DateTime<chrono::Utc>>) -> Result<()> {
+    match deadline {
+        Some(d) if chrono::Utc::now() > d => Err(StartDeadlineExpired(d).into()),
+        _ => Ok(()),
+    }
+}
+
 pub async fn run_command_with_kill(
     client: &async_nats::Client,
     cmd: &Command,
     live: Option<Arc<LiveTail>>,
+) -> Result<ExecOutcome> {
+    run_command_with_start_deadline(client, cmd, live, None).await
+}
+
+/// [`run_command_with_kill`] that also enforces a start deadline immediately
+/// before the process is created. The deadline bounds the launch only; a
+/// process that has started is never killed for it.
+pub async fn run_command_with_start_deadline(
+    client: &async_nats::Client,
+    cmd: &Command,
+    live: Option<Arc<LiveTail>>,
+    start_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ExecOutcome> {
     // v0.21: on Windows, run_as: user / system_gui take a separate Win32
     // path (CreateProcessAsUserW). System (default) stays on tokio::process
@@ -328,7 +366,7 @@ pub async fn run_command_with_kill(
     // machinery below.
     #[cfg(not(target_os = "macos"))]
     if !matches!(cmd.run_as, RunAs::System) {
-        return run_in_user_session_dispatch(client, cmd, live).await;
+        return run_in_user_session_dispatch(client, cmd, live, start_deadline).await;
     }
 
     // #43: belt-and-braces. The tolerant decoder (below, around the
@@ -422,6 +460,7 @@ pub async fn run_command_with_kill(
         .kill_on_drop(true);
     #[cfg(unix)]
     spawn_in_own_session(&mut builder);
+    ensure_start_deadline(start_deadline)?;
     let mut child = builder
         .spawn()
         .with_context(|| format!("spawn {program}"))?;
@@ -833,11 +872,13 @@ async fn run_in_user_session_dispatch(
     client: &async_nats::Client,
     cmd: &Command,
     live: Option<Arc<LiveTail>>,
+    start_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ExecOutcome> {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = client;
         let _ = live;
+        let _ = start_deadline;
         warn!(
             run_as = ?cmd.run_as,
             "run_as: user / system_gui is not supported on Linux agents — skipping the script",
@@ -885,7 +926,12 @@ async fn run_in_user_session_dispatch(
 
         let timeout = Duration::from_secs(cmd.timeout_secs.max(1));
         let outcome = crate::process_as_user::run_command_in_user_session(
-            cmd, cmd.run_as, timeout, kill_rx, live,
+            cmd,
+            cmd.run_as,
+            timeout,
+            kill_rx,
+            live,
+            start_deadline,
         )
         .await;
 
@@ -893,6 +939,21 @@ async fn run_in_user_session_dispatch(
             b.abort();
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod start_deadline_tests {
+    use super::{StartDeadlineExpired, ensure_start_deadline};
+
+    #[test]
+    fn a_passed_deadline_blocks_the_launch_and_no_deadline_does_not() {
+        assert!(ensure_start_deadline(None).is_ok());
+        let future = chrono::Utc::now() + chrono::Duration::seconds(60);
+        assert!(ensure_start_deadline(Some(future)).is_ok());
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let err = ensure_start_deadline(Some(past)).unwrap_err();
+        assert!(err.is::<StartDeadlineExpired>());
     }
 }
 
