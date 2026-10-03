@@ -785,4 +785,24 @@ mod tests {
             "{err}"
         );
     }
+
+    /// A PE with no VERSIONINFO (a build predating the embedded resource) must
+    /// still reach the backend under the explicit label.
+    #[tokio::test]
+    async fn publish_of_a_pe_without_versioninfo_sends_the_explicit_label() {
+        let mut pe = vec![0u8; 0x90];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        let reply = r#"{"version":"0.1.0","key":"0.1.0","platform":"windows-x86_64","size":144,"digest":null}"#;
+        let (base, log) = fake_backend(vec![(200, reply)]).await;
+        let (_dir, path) = file_with(&pe);
+        execute(&base, publish_sub(&path, Some("0.1.0")))
+            .await
+            .unwrap();
+        let got = seen(&log);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].body.contains("\r\n\r\n0.1.0\r\n"), "{}", got[0].body);
+    }
 }
