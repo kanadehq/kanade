@@ -46,7 +46,7 @@ use chrono::{DateTime, Utc};
 use kanade_shared::ExecResult;
 use kanade_shared::bootstrap::COMMAND_STREAM_MAX_AGE;
 use kanade_shared::signing::SigHeaders;
-use kanade_shared::wire::{Command, EXIT_RESTARTED_OUTCOME_UNKNOWN, restart_unknown_result_id};
+use kanade_shared::wire::{Command, EXIT_RESTARTED_OUTCOME_UNKNOWN};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
@@ -256,6 +256,10 @@ pub struct Ledger {
     /// Whether the last write failed, so the failure is announced on the
     /// transition rather than once per delivery.
     unavailable: AtomicBool,
+    /// Outcomes whose ledger write and outbox write both failed. Held in
+    /// memory and retried by maintenance, because the alternative is to drop a
+    /// real result and let the next start replace it with "outcome unknown".
+    unsaved: Mutex<Vec<(String, ExecResult)>>,
     #[cfg(test)]
     fault: AtomicBool,
 }
@@ -324,6 +328,7 @@ impl Ledger {
             limits,
             clock,
             unavailable: AtomicBool::new(false),
+            unsaved: Mutex::new(Vec::new()),
             #[cfg(test)]
             fault: AtomicBool::new(false),
         })
@@ -385,7 +390,15 @@ impl Ledger {
             let _ = std::fs::remove_file(&tmp);
             io_err(&format!("rename to {}", path.display()), e)
         })?;
-        sync_dir(&self.dir);
+        if let Err(e) = crate::outbox::sync_dir(&self.dir) {
+            // Durability of the rename is unconfirmed, so this is not a commit.
+            // A brand-new record is withdrawn so the id is not left reserved by
+            // an admission that was never acknowledged or launched.
+            if old_len.is_none() {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(io_err(&format!("sync {}", self.dir.display()), e));
+        }
         match old_len {
             Some(old) => stats.bytes = stats.bytes.saturating_sub(old) + bytes.len() as u64,
             None => {
@@ -574,7 +587,7 @@ impl Ledger {
     /// Queue every `Finished` outcome that has not reached the outbox. Run
     /// periodically so a transient outbox failure does not wait for a restart.
     pub fn requeue_unsent(&self) -> usize {
-        let mut n = 0;
+        let mut n = self.retry_unsaved();
         for path in self.record_paths() {
             let mut stats = lock(&self.inner);
             if let Ok(Some(rec)) = self.read(&path)
@@ -591,6 +604,42 @@ impl Ledger {
             }
         }
         n
+    }
+
+    /// Retry outcomes that could not be recorded when their run finished.
+    fn retry_unsaved(&self) -> usize {
+        let held = std::mem::take(&mut *lock(&self.unsaved));
+        let mut n = 0;
+        for (request_id, result) in held {
+            match self.persist_finished(&request_id, &result) {
+                Ok(()) | Err(LedgerError::State(_)) => {
+                    if self.republish(&request_id).is_ok() {
+                        n += 1;
+                    }
+                }
+                Err(_) => lock(&self.unsaved).push((request_id, result)),
+            }
+        }
+        n
+    }
+
+    fn persist_finished(&self, request_id: &str, result: &ExecResult) -> Result<(), LedgerError> {
+        let finished_at = self.now();
+        self.transition(request_id, |rec| {
+            if matches!(rec.state, State::Finished { .. }) {
+                return Err(LedgerError::State(format!(
+                    "{} already has an outcome",
+                    rec.request_id
+                )));
+            }
+            rec.state = State::Finished {
+                result: Box::new(result.clone()),
+                outbox_enqueued: false,
+                finished_at,
+            };
+            Ok(())
+        })
+        .map(|_| ())
     }
 
     fn requeue_locked(
@@ -620,7 +669,9 @@ impl Ledger {
         now: DateTime<Utc>,
     ) -> ExecResult {
         ExecResult {
-            result_id: restart_unknown_result_id(&rec.request_id, &self.pc_id),
+            // The id fixed at admission, which the started event also used, so
+            // the report closes the row the start opened instead of adding one.
+            result_id: rec.result_id.clone(),
             request_id: rec.request_id.clone(),
             exec_id: rec.command.exec_id.clone(),
             parent_result_id: None,
@@ -649,6 +700,21 @@ impl Ledger {
                 Vec::new()
             }
         }
+    }
+
+    /// Whether the result outbox, or its quarantine of results that could not
+    /// be published, still holds a result for `request_id`.
+    fn outbox_holds(&self, request_id: &str) -> bool {
+        let name = format!("{request_id}.json");
+        if self.outbox_dir.join(&name).exists() {
+            return true;
+        }
+        std::fs::read_dir(self.outbox_dir.join(crate::outbox_retry::STUCK_DIR))
+            .map(|rd| {
+                rd.flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with(&name))
+            })
+            .unwrap_or(false)
     }
 
     /// Collect tombstones past their retention. Returns how many were removed.
@@ -681,6 +747,12 @@ impl Ledger {
             };
             let horizon = rec.admitted_at.max(*finished_at);
             if horizon > now || now - horizon <= retention {
+                continue;
+            }
+            // `outbox_enqueued` only says the file was queued, not that it was
+            // uploaded. While the outbox (or its quarantine) still holds the
+            // result, this record is its only other copy.
+            if self.outbox_holds(&rec.request_id) {
                 continue;
             }
             let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -822,18 +894,6 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     Err(last.expect("loop ran at least once"))
 }
 
-/// fsync the directory so the rename itself survives a power cut. Not
-/// available on Windows, where the rename is journalled by the filesystem.
-#[cfg(unix)]
-fn sync_dir(dir: &Path) {
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
-    }
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_dir: &Path) {}
-
 /// The licence to launch one admitted command, and the only way to move its
 /// record forward. Held by whoever runs the command.
 #[derive(Clone)]
@@ -900,7 +960,17 @@ impl Ticket {
                 error = %e,
                 "admission ledger: could not record the outcome; queueing it directly",
             );
-            let _ = crate::outbox::enqueue(&self.ledger.outbox_dir, &result);
+            let queued = crate::outbox::enqueue(&self.ledger.outbox_dir, &result);
+            // Whether or not the direct queue worked, the ledger still says
+            // `launching`; keep the real outcome so maintenance can record it
+            // once the disk recovers, instead of a restart replacing it with
+            // "outcome unknown".
+            if !matches!(e, LedgerError::State(_)) {
+                lock(&self.ledger.unsaved).push((self.request_id.clone(), result));
+            }
+            if let Err(qe) = queued {
+                error!(request_id = %self.request_id, error = %qe, "outcome could not be queued directly either; holding it in memory for retry");
+            }
             self.ledger.report_failure(&self.request_id, &e);
             return Err(e);
         }
@@ -909,23 +979,7 @@ impl Ticket {
 
     /// Step one of finishing: the outcome becomes durable in the ledger.
     fn persist_outcome(&self, result: &ExecResult) -> Result<(), LedgerError> {
-        let finished_at = self.ledger.now();
-        self.ledger
-            .transition(&self.request_id, |rec| {
-                if matches!(rec.state, State::Finished { .. }) {
-                    return Err(LedgerError::State(format!(
-                        "{} already has an outcome",
-                        rec.request_id
-                    )));
-                }
-                rec.state = State::Finished {
-                    result: Box::new(result.clone()),
-                    outbox_enqueued: false,
-                    finished_at,
-                };
-                Ok(())
-            })
-            .map(|_| ())
+        self.ledger.persist_finished(&self.request_id, result)
     }
 
     /// Step two: queue the recorded outcome and mark it queued.
@@ -1171,9 +1225,12 @@ mod tests {
     #[test]
     fn crash_after_launching_reports_an_unknown_outcome_once_and_never_relaunches() {
         let fx = Fixture::new();
+        let rid: String;
         {
             let l = fx.open();
-            admitted(&l, "req-1").mark_launching().unwrap();
+            let t = admitted(&l, "req-1");
+            rid = t.result_id().to_string();
+            t.mark_launching().unwrap();
         }
         let l = fx.open();
         let r = l.recover();
@@ -1187,6 +1244,10 @@ mod tests {
         assert_eq!(out[0].exit_code, EXIT_RESTARTED_OUTCOME_UNKNOWN);
         assert_eq!(out[0].skipped, Some(false), "a failure, not a skip");
         assert!(out[0].stderr.contains("outcome unknown"));
+        assert_eq!(
+            out[0].result_id, rid,
+            "closes the row the start event opened"
+        );
 
         // Restarting again reports nothing further.
         let r = fx.open().recover();
@@ -1297,6 +1358,8 @@ mod tests {
         ));
         // Clock moved backwards: never collect.
         assert_eq!(l.gc(t0 - chrono::Duration::days(30)), 0);
+        // The drain uploaded and removed the queued result.
+        std::fs::remove_file(fx.outbox_dir().join("done.json")).unwrap();
         assert_eq!(l.gc(t0 + retention + chrono::Duration::seconds(1)), 1);
         assert_eq!(l.stats().0, 0);
     }
@@ -1389,5 +1452,44 @@ mod tests {
         admitted(&l, "../../escape");
         assert!(l.path_for("../../escape").starts_with(fx.ledger_dir()));
         assert_eq!(l.stats().0, 1);
+    }
+
+    #[test]
+    fn an_outcome_that_could_not_be_recorded_is_retained_and_retried() {
+        let fx = Fixture::new();
+        let l = fx.open();
+        let t = admitted(&l, "req-1");
+        t.mark_launching().unwrap();
+        l.set_fault(true);
+        // Ledger write fails; make the outbox fail too.
+        std::fs::write(fx.outbox_dir(), b"not a directory").unwrap();
+        assert!(t.finish(result_for("req-1", 7)).is_err());
+        l.set_fault(false);
+        std::fs::remove_file(fx.outbox_dir()).unwrap();
+        assert_eq!(l.requeue_unsent(), 1);
+        let out = fx.outbox_files();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].exit_code, 7);
+        assert!(matches!(
+            l.state_of("req-1"),
+            Some(State::Finished {
+                outbox_enqueued: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn gc_keeps_a_record_while_the_outbox_still_holds_its_result() {
+        let fx = Fixture::new();
+        let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let l = fx.open_at(t0);
+        let t = admitted(&l, "req-1");
+        t.mark_launching().unwrap();
+        t.finish(result_for("req-1", 0)).unwrap();
+        let late = t0 + chrono::Duration::days(3650);
+        assert_eq!(l.gc(late), 0, "result still queued in the outbox");
+        std::fs::remove_file(fx.outbox_dir().join("req-1.json")).unwrap();
+        assert_eq!(l.gc(late), 1, "uploaded and past retention");
     }
 }

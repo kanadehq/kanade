@@ -1348,12 +1348,12 @@ NATS で届いた命令 (`CommandSource::Nats`。live 購読と JetStream replay
 | 状態 | 起動時の扱い |
 |---|---|
 | `pending` | 保存した payload を現在の鍵で再検証し、deadline / staleness / revoke / version pin を起動時点で再評価してローカルで実行。鍵の失効などで検証に通らなければ拒否結果 (exit 123) で終端する |
-| `launching` | 結果不明。プロセスがまだ動いているか、終わっているかを区別できないので**自動で再起動しない**。`exit 121` (`EXIT_RESTARTED_OUTCOME_UNKNOWN`、`skipped=false` なので failure) を 1 回だけ報告する。メッセージは「agent restarted during execution; outcome unknown」。`result_id` は (request_id, pc_id) から決定的に導くので、再起動を繰り返しても 1 行に収束する |
+| `launching` | 結果不明。プロセスがまだ動いているか、終わっているかを区別できないので**自動で再起動しない**。`exit 121` (`EXIT_RESTARTED_OUTCOME_UNKNOWN`、`skipped=false` なので failure) を 1 回だけ報告する。メッセージは「agent restarted during execution; outcome unknown」。`result_id` は受理時に固定した値 (started イベントと同じ) を使うので、開始イベントが作った行を閉じ、再起動を繰り返しても 1 行に収束する |
 | `finished` + 未投入 | outbox へ再投入 |
 
 意図的な再実行は新しい request_id で行う。署名付きの in-process retry policy (1 回の受理 = 1 回の実行の内側) は従来どおり。
 
-**保持と容量**: 終端レコード (tombstone) は、`COMMAND_STREAM_MAX_AGE` (broker の保持 7 日) に `ADMISSION_CLOCK_ALLOWANCE` (1 日) を足した期間、受理または完了の遅い方から数えて保持する。legacy 命令は自前の期限を持たないため、broker が再配信しうる間は id を覚えておく必要がある。未解決のレコード、未投入の結果、読めないレコードは GC しない。時計が巻き戻った場合も削除しない。上限は件数 (100,000) とバイト数 (1 GiB) で、到達したら GC を 1 回試し、それでも空かなければ新規の受理を可視的に拒否する (生きているレコードは退避しない)。
+**保持と容量**: 終端レコード (tombstone) は、結果が outbox (および隔離領域) から無くなっていることを条件に、`COMMAND_STREAM_MAX_AGE` (broker の保持 7 日) に `ADMISSION_CLOCK_ALLOWANCE` (1 日) を足した期間、受理または完了の遅い方から数えて保持する。legacy 命令は自前の期限を持たないため、broker が再配信しうる間は id を覚えておく必要がある。未解決のレコード、未投入の結果、読めないレコードは GC しない。時計が巻き戻った場合も削除しない。上限は件数 (100,000) とバイト数 (1 GiB) で、到達したら GC を 1 回試し、それでも空かなければ新規の受理を可視的に拒否する (生きているレコードは退避しない)。
 
 **保証と限界**: これは durable な重複抑止であって、副作用の exactly-once 保証ではない。起動前に記録するので、記録後・起動前にクラッシュすると何も起動していないのに `launching` として残る窓があり (その場合も 121 で報告し、再起動はしない)、起動が不確かな命令は保守的に再起動しない。disk のロールバック、台帳の削除、agent の再インストールは保証の範囲外 (台帳が失われると、broker に残っている命令は再び受理されうる)。
 

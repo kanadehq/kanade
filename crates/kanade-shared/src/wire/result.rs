@@ -184,17 +184,6 @@ pub fn signature_refusal_result_id(request_id: &str, pc_id: &str) -> String {
     .to_string()
 }
 
-/// The deterministic `result_id` of the "restarted, outcome unknown" report for
-/// `(request_id, pc_id)`. Deterministic so that however many times the agent is
-/// restarted before the report is uploaded, it lands on one row.
-pub fn restart_unknown_result_id(request_id: &str, pc_id: &str) -> String {
-    Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        format!("{request_id}|{pc_id}|restarted-outcome-unknown").as_bytes(),
-    )
-    .to_string()
-}
-
 impl ExecResult {
     /// Return the `result_id` if the agent supplied one (v0.29+
     /// payloads always do), otherwise derive a stable UUIDv5 from
@@ -283,15 +272,6 @@ mod tests {
         let r = sample(EXIT_RESTARTED_OUTCOME_UNKNOWN, Some(false));
         assert!(!r.is_reported_skip());
         assert!(!r.skips_check_projection());
-        // One row however often the agent restarts before upload.
-        assert_eq!(
-            restart_unknown_result_id("req", "PC1"),
-            restart_unknown_result_id("req", "PC1")
-        );
-        assert_ne!(
-            restart_unknown_result_id("req", "PC1"),
-            signature_refusal_result_id("req", "PC1")
-        );
     }
 
     #[test]
