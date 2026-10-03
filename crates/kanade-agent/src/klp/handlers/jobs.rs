@@ -12,9 +12,10 @@
 //!   `jobs.progress` pushes (Running → Completed/Failed/Killed) on the
 //!   connection's push channel.
 //! - `jobs.kill` — request termination of a `run_id` started ON THIS
-//!   connection (cross-connection kill → `Unauthorized`). Publishes
-//!   `subject::kill(run_id)`; the run's terminal `jobs.progress`
-//!   (status = Killed) follows asynchronously once the child exits.
+//!   connection (cross-connection kill → `Unauthorized`). Cancels the
+//!   run in-process (no broker involved); the run's terminal
+//!   `jobs.progress` (status = Killed) follows asynchronously once the
+//!   child exits.
 //!
 //! `jobs.subscribe` / `jobs.unsubscribe` (an explicit progress
 //! subscription) and incremental stdout/stderr streaming land in a
@@ -56,7 +57,7 @@ use kanade_shared::kv::{
 };
 use kanade_shared::manifest::Manifest;
 use kanade_shared::wire::Command;
-use kanade_shared::{ExecResult, default_paths, subject};
+use kanade_shared::{ExecResult, default_paths};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -446,13 +447,16 @@ pub async fn handle_jobs_execute(
     let cmd = build_command(&manifest, &run_id, &request_id)?;
 
     // Record the run BEFORE spawning so a near-instant `jobs.kill`
-    // can't race ahead of the registry insert.
+    // can't race ahead of the registry insert, and arm the kill switch
+    // before the response goes out for the same reason: a local kill
+    // issued right after `jobs.execute` returns must reach the run.
     conn.register_run(run_id.clone());
+    let kill = crate::kill::KillSwitch::arm(Some(&client), cmd.exec_id.as_deref()).await;
 
     let push_tx = conn.push_tx.clone();
     let pc_id = conn.pc_id.clone();
     let spawned_run_id = run_id.clone();
-    tokio::spawn(run_job(client, cmd, spawned_run_id, push_tx, pc_id));
+    tokio::spawn(run_job(client, cmd, kill, spawned_run_id, push_tx, pc_id));
 
     Ok(JobsExecuteResult { run_id })
 }
@@ -534,8 +538,8 @@ fn valid_job_id(id: &str) -> bool {
 /// Build the wire [`Command`] the run path executes from a manifest.
 /// Genuinely pure (no I/O, no id minting) so it's deterministically
 /// unit-testable — the caller passes both ids. `run_id` doubles as the
-/// `exec_id` so `run_command_with_kill` subscribes to
-/// `subject::kill(run_id)` and `jobs.kill` can target it; `request_id`
+/// `exec_id` so the run's kill switch is registered under it and
+/// `jobs.kill` can target it; `request_id`
 /// is the per-run correlation id stamped on the wire Command.
 ///
 /// Inline-`script:` only for now — `script_object` jobs (Object Store
@@ -585,7 +589,7 @@ pub fn build_command(
         id: manifest.id.clone(),
         version: manifest.version.clone(),
         request_id: request_id.to_string(),
-        // run_id == exec_id: the kill subject the run subscribes to.
+        // run_id == exec_id: the id the run's kill switch is registered under.
         exec_id: Some(run_id.to_string()),
         // KLP Client runs bypass admission by choosing the direct run_job
         // path below, regardless of the manifest's automation setting.
@@ -635,6 +639,7 @@ pub fn build_command(
 async fn run_job(
     client: async_nats::Client,
     cmd: Command,
+    kill: crate::kill::KillSwitch,
     run_id: String,
     push_tx: mpsc::Sender<Vec<u8>>,
     pc_id: String,
@@ -712,7 +717,7 @@ async fn run_job(
     };
 
     let started_at = Utc::now();
-    let outcome = run_command_with_kill(&client, &cmd, Some(live_handle.tail())).await;
+    let outcome = run_command_with_kill(&kill, &cmd, Some(live_handle.tail())).await;
     let finished_at = Utc::now();
 
     // Stop the streamer and let its final tick flush before the terminal
@@ -1121,8 +1126,12 @@ fn try_push_progress(push_tx: &mpsc::Sender<Vec<u8>>, progress: JobProgress) {
 /// connection. SPEC §2.12.4 forbids cross-connection kill, so a
 /// `run_id` this connection never started → `Unauthorized` (NOT
 /// `NotFound`, which would leak whether the id exists on another
-/// connection). Publishes `subject::kill(run_id)`; the run's terminal
-/// `jobs.progress` (status = Killed) follows once the child exits.
+/// connection). The cancel is delivered in-process through the agent's
+/// kill registry, so it needs no broker connection and the agent never
+/// publishes on `kill.*`; remote kill over `kill.<exec_id>` (backend API,
+/// CLI) is a separate path and unchanged. A run that already finished is
+/// a harmless no-op. The result arrives as the run's terminal
+/// `jobs.progress` (status = Killed) once the child exits.
 pub async fn handle_jobs_kill(
     conn: &ConnectionState,
     params: JobsKillParams,
@@ -1133,22 +1142,8 @@ pub async fn handle_jobs_kill(
             format!("run '{}' was not started on this connection", params.run_id),
         ));
     }
-    let client = conn.nats.as_ref().ok_or_else(|| {
-        RpcError::new(
-            ErrorKind::InternalError,
-            "jobs.kill: NATS client not wired into the connection",
-        )
-    })?;
-    client
-        .publish(subject::kill(&params.run_id), bytes::Bytes::new())
-        .await
-        .map_err(|e| {
-            warn!(run_id = %params.run_id, error = %e, "jobs.kill: publish failed");
-            RpcError::new(
-                ErrorKind::InternalError,
-                format!("jobs.kill: publish kill signal: {e}"),
-            )
-        })?;
+    let reached = crate::kill::trigger_local(&params.run_id);
+    debug!(run_id = %params.run_id, reached, "jobs.kill: local kill triggered");
     Ok(JobsKillResult {
         requested_at: Utc::now(),
     })
@@ -1767,22 +1762,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kill_owned_run_passes_authorization() {
-        // A registered run_id passes the same-connection gate; it then
-        // fails at the NATS publish (no client wired in this test),
-        // which proves authorization succeeded rather than being
-        // rejected up front.
+    async fn kill_owned_run_triggers_the_local_registry_without_a_broker() {
         let mut conn = fresh_conn();
         conn.register_run("run-mine".into());
-        let err = handle_jobs_kill(
+        let switch = crate::kill::KillSwitch::arm(None, Some("run-mine")).await;
+        handle_jobs_kill(
             &conn,
             JobsKillParams {
                 run_id: "run-mine".into(),
             },
         )
         .await
-        .expect_err("no nats wired → InternalError after auth passes");
-        assert_eq!(err.data.unwrap().kind, ErrorKind::InternalError);
+        .expect("owned run is killed locally");
+        assert!(switch.is_killed());
+        drop(switch);
+        // Finished run: still owned by the connection, but a no-op.
+        handle_jobs_kill(
+            &conn,
+            JobsKillParams {
+                run_id: "run-mine".into(),
+            },
+        )
+        .await
+        .expect("kill of a finished run is a no-op");
+        assert!(!crate::kill::registered("run-mine"));
+    }
+
+    #[tokio::test]
+    async fn kill_of_an_unowned_run_does_not_reach_the_registry() {
+        let conn = fresh_conn();
+        let switch = crate::kill::KillSwitch::arm(None, Some("run-theirs")).await;
+        let err = handle_jobs_kill(
+            &conn,
+            JobsKillParams {
+                run_id: "run-theirs".into(),
+            },
+        )
+        .await
+        .expect_err("not owned");
+        assert_eq!(err.data.unwrap().kind, ErrorKind::Unauthorized);
+        assert!(!switch.is_killed());
     }
 
     // ---------- build_exec_result (#478 operator visibility) ----------

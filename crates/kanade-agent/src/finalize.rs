@@ -150,7 +150,11 @@ pub async fn run_finalize(
 
     // Stamp around the run so the finalize row carries a real duration.
     let started_at = chrono::Utc::now();
-    let outcome = run_command_with_kill(client, &fin_cmd, None).await;
+    // A fresh switch, not the parent's: a kill that already stopped the
+    // parent run must not also skip its cleanup hook, while one arriving
+    // during the hook still stops it.
+    let kill = crate::kill::KillSwitch::arm(Some(client), fin_cmd.exec_id.as_deref()).await;
+    let outcome = run_command_with_kill(&kill, &fin_cmd, None).await;
     let finished_at = chrono::Utc::now();
 
     // Map the outcome to the (exit_code, stdout, stderr) recorded on the

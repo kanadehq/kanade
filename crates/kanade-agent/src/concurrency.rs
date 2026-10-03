@@ -3,7 +3,6 @@
 //! A permit covers the entire job, including retries, collection and finalize.
 use std::sync::{Arc, Mutex, OnceLock};
 
-use futures::StreamExt;
 use kanade_shared::wire::{Command, EXIT_SKIP_DEADLINE, EffectiveConfig};
 use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
 
@@ -111,39 +110,23 @@ pub fn watch_config(mut config: watch::Receiver<EffectiveConfig>) {
 
 /// Wait without consuming the job's runtime timeout. No start event is emitted
 /// until admission. Kills and starting deadlines also apply while queued.
-pub async fn admit(client: &async_nats::Client, cmd: &Command) -> Result<Permit, ExecOutcome> {
+pub async fn admit(kill: &crate::kill::KillSwitch, cmd: &Command) -> Result<Permit, ExecOutcome> {
     if cmd.deadline_at.is_some_and(|at| chrono::Utc::now() > at) {
         return Err(deadline_expired());
+    }
+    if kill.is_killed() {
+        return Err(killed_while_queued());
     }
     if let Some(permit) = shared().try_acquire(cmd.bypass_local_limit) {
         return Ok(permit);
     }
-    let mut kill = if let Some(exec_id) = &cmd.exec_id {
-        match client
-            .subscribe(kanade_shared::subject::kill(exec_id))
-            .await
-        {
-            Ok(sub) => Some(sub),
-            Err(e) => {
-                tracing::warn!(
-                    request_id = %cmd.request_id,
-                    error = %e,
-                    "kill subscribe failed while waiting for local slot; continuing without kill delivery",
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
     tracing::info!(request_id = %cmd.request_id, "waiting for local job slot");
-    wait_for_slot(shared(), cmd.bypass_local_limit, cmd.deadline_at, async {
-        if let Some(sub) = &mut kill {
-            sub.next().await;
-        } else {
-            std::future::pending::<()>().await;
-        }
-    })
+    wait_for_slot(
+        shared(),
+        cmd.bypass_local_limit,
+        cmd.deadline_at,
+        kill.killed(),
+    )
     .await
 }
 
@@ -167,11 +150,15 @@ async fn wait_for_slot(
     tokio::select! {
         biased;
         _ = deadline => Err(deadline_expired()),
-        _ = killed => Err(ExecOutcome::Killed {
-            stdout: String::new(),
-            stderr: "killed while waiting for local job slot".into(),
-        }),
+        _ = killed => Err(killed_while_queued()),
         permit = limiter.acquire(bypass) => Ok(permit),
+    }
+}
+
+fn killed_while_queued() -> ExecOutcome {
+    ExecOutcome::Killed {
+        stdout: String::new(),
+        stderr: "killed while waiting for local job slot".into(),
     }
 }
 
@@ -290,5 +277,46 @@ mod tests {
             .unwrap();
         assert_eq!(limiter.state.lock().unwrap().active, 2);
         drop((second, third));
+    }
+
+    #[tokio::test]
+    async fn local_kill_releases_a_run_waiting_for_a_slot_without_a_broker() {
+        let limiter = Limiter::new(1);
+        let active = limiter.acquire(false).await;
+        let switch = crate::kill::KillSwitch::arm(None, Some("conc-local-kill")).await;
+        let waiter = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { wait_for_slot(&limiter, false, None, switch.killed()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(crate::kill::trigger_local("conc-local-kill"));
+        let res = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter released")
+            .unwrap();
+        assert!(matches!(res, Err(ExecOutcome::Killed { .. })));
+        assert_eq!(limiter.state.lock().unwrap().active, 1);
+        drop(active);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live nats-server"]
+    async fn remote_kill_releases_a_run_waiting_for_a_slot() {
+        let client = crate::kill::broker_test::connect().await;
+        let limiter = Limiter::new(1);
+        let active = limiter.acquire(false).await;
+        let switch = crate::kill::KillSwitch::arm(Some(&client), Some("conc-remote-kill")).await;
+        let waiter = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { wait_for_slot(&limiter, false, None, switch.killed()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        crate::kill::broker_test::publish_kill(&client, "conc-remote-kill").await;
+        let res = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter released")
+            .unwrap();
+        assert!(matches!(res, Err(ExecOutcome::Killed { .. })));
+        drop(active);
     }
 }
