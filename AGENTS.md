@@ -513,7 +513,7 @@ Gotchas (each has cost a session): the exec target is `--pcs <id>` /
 (`$env:COMPUTERNAME`) as-is, casing is **not** uniform across the fleet
 (some boxes upper-, some lower-case), and NATS subjects are
 case-sensitive, so target the exact registered casing (check the SPA
-Inventory / `kanade ping`); do **not** case-fold it. Dev
+Inventory, or `kanade ping` while the backend is up); do **not** case-fold it. Dev
 tokens are the literal `dev`. A squashed-migration upgrade needs
 `-WipeDb`; a plain upgrade does not (no
 new files under `crates/kanade-backend/migrations/`).

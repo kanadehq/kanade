@@ -2,6 +2,8 @@ mod audit;
 mod cli_config;
 mod cmd;
 mod http_client;
+#[cfg(test)]
+mod test_http;
 mod updater;
 
 use anyhow::Result;
@@ -20,10 +22,10 @@ const DEFAULT_BACKEND: &str = "http://127.0.0.1:8080";
 struct Cli {
     /// NATS broker URL (not the backend).
     ///
-    /// Used by the broker subcommands: `run`, `ping`, `kill`, `revoke`,
-    /// `unrevoke`, `agent`, `config`, `group` (except `group def`,
-    /// which is HTTP — see --backend-url), `meta`, `script`, `app`,
-    /// `jetstream`. Its credential is NOT a flag — the CLI reads
+    /// Used by the broker subcommands: `run`, `kill`, `agent`, `config`,
+    /// `group` (except `group def`, which is HTTP — see --backend-url),
+    /// `meta`, `script`, `app`, `jetstream` (except `jetstream status`,
+    /// which is HTTP). Its credential is NOT a flag — the CLI reads
     /// `HKLM\SOFTWARE\kanade\cli\NatsToken` (Windows; no installer
     /// writes this today — a manual reg add), then
     /// `HKLM\SOFTWARE\kanade\agent\NatsToken`, then
@@ -35,7 +37,8 @@ struct Cli {
     /// Backend HTTP base URL.
     ///
     /// Used by the HTTP subcommands: `job`, `schedule`, `exec`, `view`,
-    /// `query`, `freeze`, `account`, `group def`. They authenticate
+    /// `query`, `freeze`, `account`, `group def`, `ping`, `revoke`,
+    /// `unrevoke`, `jetstream status`. They authenticate
     /// WITH `$KANADE_AUTH_TOKEN`, a JWT — a different credential from
     /// the broker token above, which is the usual source of confusion
     /// when one set of subcommands works and the other does not.
@@ -52,11 +55,13 @@ struct Cli {
 enum SubCmd {
     /// Run a script on a target PC directly via NATS and wait for the result.
     Run(cmd::run::RunArgs),
-    /// Wait for one heartbeat from the target PC.
+    /// Ask the target PC's agent for a fresh heartbeat (via the backend API).
     Ping(cmd::ping::PingArgs),
-    /// Manage JetStream streams + KV buckets.
+    /// Manage JetStream streams + KV buckets (`status` goes through the
+    /// backend API; setup / delete / reset are NATS-direct).
     Jetstream(cmd::jetstream::JetstreamArgs),
     /// Mark a command id as REVOKED so agents skip it (spec §2.6 Layer 2).
+    /// Goes through the backend API (needs KANADE_AUTH_TOKEN), not NATS.
     Revoke(cmd::revoke::RevokeArgs),
     /// Re-mark a previously revoked command id as ACTIVE.
     Unrevoke(cmd::revoke::UnrevokeArgs),
@@ -150,6 +155,17 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::account::execute(&backend_url, args).await;
     } else if let SubCmd::Query(args) = command {
         return cmd::query::execute(&backend_url, args).await;
+    } else if let SubCmd::Ping(args) = command {
+        return cmd::ping::execute(&backend_url, args).await;
+    } else if let SubCmd::Revoke(args) = command {
+        return cmd::revoke::revoke(&backend_url, args).await;
+    } else if let SubCmd::Unrevoke(args) = command {
+        return cmd::revoke::unrevoke(&backend_url, args).await;
+    } else if let SubCmd::Jetstream(cmd::jetstream::JetstreamArgs {
+        sub: cmd::jetstream::JetstreamSub::Status,
+    }) = command
+    {
+        return cmd::jetstream::status(&backend_url).await;
     } else if let SubCmd::SelfUpdate(args) = command {
         return cmd::self_update::execute(args).await;
     } else if let SubCmd::CommandKey(args) = command {
@@ -173,10 +189,7 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
 
     match command {
         SubCmd::Run(args) => cmd::run::execute(client, args).await,
-        SubCmd::Ping(args) => cmd::ping::execute(client, args).await,
         SubCmd::Jetstream(args) => cmd::jetstream::execute(client, args).await,
-        SubCmd::Revoke(args) => cmd::revoke::revoke(client, args).await,
-        SubCmd::Unrevoke(args) => cmd::revoke::unrevoke(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
         SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
         SubCmd::App(args) => cmd::app::execute(client, args).await,
@@ -189,6 +202,9 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         | SubCmd::View(_)
         | SubCmd::Group(_)
         | SubCmd::Freeze(_)
+        | SubCmd::Ping(_)
+        | SubCmd::Revoke(_)
+        | SubCmd::Unrevoke(_)
         | SubCmd::Login(_)
         | SubCmd::Account(_)
         | SubCmd::Query(_)
