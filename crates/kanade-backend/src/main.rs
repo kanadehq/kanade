@@ -12,6 +12,7 @@ mod mfa;
 mod projector;
 mod scheduler;
 mod shutdown;
+mod support_unlock_config;
 mod web;
 
 #[cfg(target_os = "windows")]
@@ -1289,6 +1290,13 @@ async fn run_backend_inner(
         .context("ensure_jetstream_resources")?;
     info!("jetstream resources ready");
 
+    // Publish the agent-readable support-code projection now, so a deployment
+    // that configured codes before the projection existed (or whose settings
+    // document was edited by hand) is correct before agents ask. Non-fatal:
+    // agents fall back to the legacy document while the key is absent, and
+    // the periodic task below retries.
+    support_unlock_config::sync_or_warn(&jetstream).await;
+
     // Reconcile the collect-bundle Object Store retention to the
     // operator-configured window (`ServerSettings::collect_retention_days`).
     // bootstrap just created the bucket with the built-in default; this
@@ -1584,6 +1592,7 @@ async fn run_backend_inner(
     // Jobs page live chip indefinitely. 5 min cadence; the function
     // body details the policy.
     resources.track(cleanup::spawn(pool.clone(), jetstream.clone()));
+    resources.track(support_unlock_config::spawn(jetstream.clone()));
 
     // v0.35 / #88: prewarm + watcher for the explode-spec / manifest
     // cache constructed above (before the projector spawns). Prewarm

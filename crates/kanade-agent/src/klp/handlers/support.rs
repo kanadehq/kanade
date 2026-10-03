@@ -13,9 +13,15 @@
 //! from appearing in front of end users, not to protect a capability.
 //!
 //! Verification is **local**: the argon2id hashes live in the
-//! `server_settings` KV document, which every agent can read, so a desk can
-//! still unlock a machine while the backend is down — which is exactly when
-//! they are most likely to need to. The KV document is reachable only with
+//! `support_codes` key of the `fleet_config` KV bucket — a projection the
+//! backend derives from `server_settings` carrying nothing but the codes — so
+//! a desk can still unlock a machine while the backend is down, which is
+//! exactly when they are most likely to need to. The agent deliberately does
+//! not read `server_settings` itself: that document also holds the installer's
+//! NATS token and other operator secrets. (Only while the projection key is
+//! absent — a backend that has not published it yet — does it fall back to
+//! that legacy document, so the broker cannot deny it until every agent and
+//! the backend are upgraded.) The KV is reachable only with
 //! the NATS token, which lives under an HKLM key ACL'd to SYSTEM +
 //! Administrators, so an ordinary end user cannot read the hashes at all.
 //! (A local *administrator* can, and already holds far stronger capabilities
@@ -31,8 +37,10 @@ use kanade_shared::ipc::support::{
     SupportLockParams, SupportLockResult, SupportStatusParams, SupportStatusResult,
     SupportUnlockParams, SupportUnlockResult,
 };
-use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
-use kanade_shared::wire::{ObsEvent, ServerSettings, SupportCode};
+use kanade_shared::kv::{
+    BUCKET_FLEET_CONFIG, BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS, KEY_SUPPORT_CODES,
+};
+use kanade_shared::wire::{ObsEvent, ServerSettings, SupportCode, SupportCodesProjection};
 use tracing::{info, warn};
 
 use super::super::connection::ConnectionState;
@@ -85,14 +93,9 @@ pub async fn handle_support_unlock(
             "support.unlock: NATS client not wired into the connection",
         )
     })?;
-    let settings = read_server_settings(client).await?;
+    let codes = read_support_codes(client).await?;
 
-    let usable: Vec<SupportCode> = settings
-        .support_codes
-        .iter()
-        .filter(|c| c.is_usable())
-        .cloned()
-        .collect();
+    let usable: Vec<SupportCode> = codes.iter().filter(|c| c.is_usable()).cloned().collect();
 
     // argon2 is CPU-bound by design (tens of ms per verify). Off the async
     // worker it would stall every other connection's handlers on this
@@ -198,12 +201,70 @@ fn match_code(code: &str, codes: &[SupportCode]) -> Option<SupportCode> {
     hit
 }
 
-/// Read the `server_settings` document. A missing key is the normal
-/// "never configured" state (all-default ⇒ no codes ⇒ nothing unlockable);
-/// a read or decode failure is surfaced so the desk sees "couldn't check"
-/// rather than an indistinguishable "wrong code".
-async fn read_server_settings(client: &async_nats::Client) -> HandlerResult<ServerSettings> {
+/// Read the configured support codes. A missing projection *and* a missing
+/// legacy document both mean "never configured" (no codes ⇒ nothing
+/// unlockable); a read or decode failure is surfaced so the desk sees
+/// "couldn't check" rather than an indistinguishable "wrong code".
+async fn read_support_codes(client: &async_nats::Client) -> HandlerResult<Vec<SupportCode>> {
     let js = async_nats::jetstream::new(client.clone());
+    let projection = read_projection_bytes(&js).await;
+    select_codes(projection, || read_legacy_codes(&js)).await
+}
+
+/// Choose the code source from what the projection read produced.
+///
+/// The legacy `server_settings` read happens **only** when the projection key
+/// is strictly absent: an unreadable or corrupt projection is an outage to
+/// report, not a licence to reach for the broader document, and a present
+/// projection — even an empty one — is the backend's authoritative answer.
+async fn select_codes<F, Fut>(
+    projection: HandlerResult<Option<Vec<u8>>>,
+    legacy: F,
+) -> HandlerResult<Vec<SupportCode>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = HandlerResult<Vec<SupportCode>>>,
+{
+    match projection? {
+        Some(bytes) => serde_json::from_slice::<SupportCodesProjection>(&bytes)
+            .map(|p| p.support_codes)
+            .map_err(|e| {
+                warn!(error = %e, "support.unlock: decode support_codes projection");
+                RpcError::new(
+                    ErrorKind::InternalError,
+                    "support.unlock: server settings are corrupt",
+                )
+            }),
+        None => legacy().await,
+    }
+}
+
+/// `Ok(None)` ⇒ the projection key does not exist.
+async fn read_projection_bytes(
+    js: &async_nats::jetstream::Context,
+) -> HandlerResult<Option<Vec<u8>>> {
+    let kv = js.get_key_value(BUCKET_FLEET_CONFIG).await.map_err(|e| {
+        warn!(error = %e, "support.unlock: open fleet_config bucket");
+        RpcError::new(
+            ErrorKind::InternalError,
+            "support.unlock: server settings unavailable",
+        )
+    })?;
+    match kv.get(KEY_SUPPORT_CODES).await {
+        Ok(v) => Ok(v.map(|b| b.to_vec())),
+        Err(e) => {
+            warn!(error = %e, "support.unlock: read support_codes projection");
+            Err(RpcError::new(
+                ErrorKind::InternalError,
+                "support.unlock: server settings unavailable",
+            ))
+        }
+    }
+}
+
+/// Pre-projection source, kept only for a backend that has not published the
+/// projection yet. Same failure semantics the agent always had.
+async fn read_legacy_codes(js: &async_nats::jetstream::Context) -> HandlerResult<Vec<SupportCode>> {
     let kv = js
         .get_key_value(BUCKET_SERVER_SETTINGS)
         .await
@@ -215,14 +276,16 @@ async fn read_server_settings(client: &async_nats::Client) -> HandlerResult<Serv
             )
         })?;
     match kv.get(KEY_SERVER_SETTINGS).await {
-        Ok(Some(bytes)) => serde_json::from_slice(&bytes).map_err(|e| {
-            warn!(error = %e, "support.unlock: decode server_settings");
-            RpcError::new(
-                ErrorKind::InternalError,
-                "support.unlock: server settings are corrupt",
-            )
-        }),
-        Ok(None) => Ok(ServerSettings::default()),
+        Ok(Some(bytes)) => serde_json::from_slice::<ServerSettings>(&bytes)
+            .map(|s| s.support_codes)
+            .map_err(|e| {
+                warn!(error = %e, "support.unlock: decode server_settings");
+                RpcError::new(
+                    ErrorKind::InternalError,
+                    "support.unlock: server settings are corrupt",
+                )
+            }),
+        Ok(None) => Ok(Vec::new()),
         Err(e) => {
             warn!(error = %e, "support.unlock: read server_settings");
             Err(RpcError::new(
@@ -330,5 +393,108 @@ mod tests {
         // sneaking back in and shadowing scopes past the first.
         let codes = vec![code("a", "aaa"), code("b", "bbb"), code("c", "ccc")];
         assert_eq!(match_code("ccc", &codes).unwrap().scope, "c");
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn projection_bytes(codes: Vec<SupportCode>) -> Vec<u8> {
+        serde_json::to_vec(&SupportCodesProjection {
+            support_codes: codes,
+        })
+        .unwrap()
+    }
+
+    /// Run `select_codes` and report how many times the legacy source was hit.
+    async fn select(
+        projection: HandlerResult<Option<Vec<u8>>>,
+        legacy: HandlerResult<Vec<SupportCode>>,
+    ) -> (HandlerResult<Vec<SupportCode>>, usize) {
+        let hits = AtomicUsize::new(0);
+        let out = select_codes(projection, || async {
+            hits.fetch_add(1, Ordering::SeqCst);
+            legacy
+        })
+        .await;
+        (out, hits.load(Ordering::SeqCst))
+    }
+
+    fn unavailable() -> RpcError {
+        RpcError::new(ErrorKind::InternalError, "unavailable")
+    }
+
+    /// Select, then run the same filter + match the handler does.
+    async fn unlock_with(typed: &str, projection: Vec<SupportCode>) -> Option<String> {
+        let (codes, _) = select(Ok(Some(projection_bytes(projection))), Err(unavailable())).await;
+        let usable: Vec<SupportCode> = codes
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.is_usable())
+            .collect();
+        match_code(typed, &usable).map(|c| c.scope)
+    }
+
+    #[tokio::test]
+    async fn projection_unlocks_with_the_right_code_and_refuses_a_wrong_one() {
+        let codes = vec![code("support", "hunter2")];
+        assert_eq!(
+            unlock_with("hunter2", codes.clone()).await.as_deref(),
+            Some("support")
+        );
+        assert_eq!(unlock_with("hunter3", codes).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_disabled_scope_does_not_unlock() {
+        let mut c = code("support", "hunter2");
+        c.disabled = true;
+        assert_eq!(unlock_with("hunter2", vec![c]).await, None);
+    }
+
+    #[tokio::test]
+    async fn present_projection_never_touches_the_legacy_document() {
+        let (out, hits) = select(
+            Ok(Some(projection_bytes(vec![code("a", "aaa")]))),
+            Ok(vec![code("old", "old")]),
+        )
+        .await;
+        assert_eq!(out.unwrap()[0].scope, "a");
+        assert_eq!(hits, 0);
+    }
+
+    #[tokio::test]
+    async fn empty_projection_is_authoritative() {
+        // Cleared codes must not resurrect from the legacy document.
+        let (out, hits) = select(
+            Ok(Some(projection_bytes(vec![]))),
+            Ok(vec![code("old", "o")]),
+        )
+        .await;
+        assert!(out.unwrap().is_empty());
+        assert_eq!(hits, 0);
+    }
+
+    #[tokio::test]
+    async fn unreadable_projection_is_unavailable_without_fallback() {
+        let (out, hits) = select(Err(unavailable()), Ok(vec![code("old", "o")])).await;
+        assert!(out.is_err());
+        assert_eq!(hits, 0);
+    }
+
+    #[tokio::test]
+    async fn corrupt_projection_is_surfaced_without_fallback() {
+        let (out, hits) = select(Ok(Some(b"{not json".to_vec())), Ok(vec![code("old", "o")])).await;
+        assert!(out.is_err());
+        assert_eq!(hits, 0);
+    }
+
+    #[tokio::test]
+    async fn absent_projection_falls_back_to_the_legacy_document() {
+        let (out, hits) = select(Ok(None), Ok(vec![code("old", "o")])).await;
+        assert_eq!(out.unwrap()[0].scope, "old");
+        assert_eq!(hits, 1);
+        // The legacy source keeps its own failure semantics.
+        let (out, hits) = select(Ok(None), Err(unavailable())).await;
+        assert!(out.is_err());
+        assert_eq!(hits, 1);
     }
 }

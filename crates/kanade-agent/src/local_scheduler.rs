@@ -1371,11 +1371,10 @@ fn spawn_freeze_watch_task(
                 Ok(None) => state.lock().await.freeze = None,
                 Err(e) => warn!(error = %e, "freeze watch: re-seed get failed; keeping last-known"),
             }
-            // `fleet_config` holds only KEY_FREEZE, so a single-key watch
-            // is equivalent to the old `watch_all()` + client-side
-            // `entry.key != KEY_FREEZE` filter — and #512: it scopes the
-            // server-side consumer to the one key the scheduler cares
-            // about instead of the whole bucket.
+            // `fleet_config` also holds other keys (e.g. the support-code
+            // projection), so watch the one key the scheduler cares about
+            // instead of the whole bucket: other keys' updates must never
+            // be decoded as a freeze.
             let mut watch = match kv.watch(KEY_FREEZE).await {
                 Ok(w) => w,
                 Err(e) => {

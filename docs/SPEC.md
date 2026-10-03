@@ -1936,6 +1936,22 @@ check を用意し、更新ジョブを `is: [fail]` でゲートする。
   設定は専用エンドポイント `PUT/DELETE /api/server-settings/support-codes/{scope}`
   (operator+)。**汎用の `PUT /api/server-settings` はこのフィールドを触らない** —
   API 応答はハッシュをマスクするので、フォームの往復で生きたコードを消せない構造にする。
+- **Agent 向け projection**: `server_settings` には installer 用の NATS トークン
+  (KV 上は平文) や SMTP などの operator secret も入っているため、Agent には読ませない。
+  backend が `support_codes` だけを `fleet_config` バケットの `support_codes` キー
+  (`{"support_codes":[{scope, hash, label, ttl_minutes, disabled}]}`) に書き出し、
+  Agent の `support.unlock` はこれだけを読む。サポートコード API の成功後と backend
+  起動時、および定期 (5 分) に `server_settings` の最新値から再導出する。コードを
+  全消去しても**キーは削除せず空リストを書く** (キーの存在が「backend が reconcile
+  済み」の印になる)。キーが無いとき**だけ** (旧 backend / 未 reconcile) 新 Agent は
+  従来どおり `server_settings/current` を読む。読取・デコード失敗は fallback せず
+  「確認できない」として返す。
+- **`server_settings` の閉じ方**: 旧 Agent は `server_settings` を直接読むため、
+  backend は文書をそのまま保つ。全 Agent を更新し、`fleet_config` に `support_codes`
+  キーが存在することを確認したら、broker 側で Agent から `server_settings` への
+  アクセスを全面 deny できる。これで installer の NATS トークン等が全 Agent から
+  読めなくなる。照合は引き続きローカルなので、backend 停止中でも desk からの解錠は動く。
+  それまでは (旧 Agent が読むため) deny してはならない。
 - **照合は Agent 側 (ローカル)**。backend 停止中でも解錠できる (= 最も必要な場面)。
   KV は NATS トークン (HKLM の SYSTEM+Administrators ACL) がないと読めないため、
   標準ユーザーはハッシュにも到達できない。ローカル管理者は元より上位の権限を持つ

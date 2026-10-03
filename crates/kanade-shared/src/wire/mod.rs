@@ -52,5 +52,6 @@ pub use server_settings::{
     MAX_CHECK_STATUS_STALE_DAYS, MAX_COLLECT_RETENTION_DAYS, MAX_OBJECT_STORE_CAP_MIB,
     MAX_OBJECT_STORE_TOTAL_MIB, MAX_RESULT_OUTPUT_RETENTION_DAYS, MAX_SESSION_TTL_HOURS,
     MAX_SUPPORT_UNLOCK_TTL_MINUTES, ObjectStoreCaps, ServerSettings, SupportCode,
+    SupportCodesProjection,
 };
 pub use staleness::Staleness;
