@@ -657,7 +657,7 @@ mod tests {
         _storage: tempfile::TempDir,
     }
 
-    async fn harness() -> Harness {
+    async fn spawn_broker() -> (async_nats::Client, tokio::process::Child, tempfile::TempDir) {
         let port = portpicker::pick_unused_port().expect("pick port");
         let storage = tempfile::TempDir::new().expect("storage tempdir");
         let server = tokio::process::Command::new("nats-server")
@@ -682,7 +682,16 @@ mod tests {
                 Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
-        let js = async_nats::jetstream::new(client.expect("nats-server did not come up in 5s"));
+        (
+            client.expect("nats-server did not come up in 5s"),
+            server,
+            storage,
+        )
+    }
+
+    async fn harness() -> Harness {
+        let (client, server, storage) = spawn_broker().await;
+        let js = async_nats::jetstream::new(client);
         let kv = js
             .create_key_value(async_nats::jetstream::kv::Config {
                 bucket: BUCKET_AGENT_CONFIG.to_string(),
@@ -830,5 +839,436 @@ mod tests {
         }
         assert!(validate_field("heartbeat_interval", Some("15s")).is_ok());
         assert!(validate_field("heartbeat_interval", None).is_ok());
+    }
+
+    // ---- through the real router ----
+    //
+    // The tests above call the helpers directly. These go through
+    // `api::router` with the auth middleware layered on exactly as in
+    // `main.rs`, so route registration, scope dispatch, the role and page
+    // gates, the HTTP error bodies and the audit event are all covered.
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    struct App {
+        router: Router,
+        nats: async_nats::Client,
+        kv: async_nats::jetstream::kv::Store,
+        groups_kv: async_nats::jetstream::kv::Store,
+        _server: tokio::process::Child,
+        _storage: tempfile::TempDir,
+    }
+
+    fn mint(sub: &str) -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+        let claims = crate::auth::Claims {
+            sub: sub.into(),
+            exp: 4_102_444_800,
+            aud: Some(crate::auth::EXPECTED_AUDIENCE.to_string()),
+            roles: Vec::new(),
+            allowed_features: None,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(crate::auth::signing_secret().as_bytes()),
+        )
+        .expect("mint")
+    }
+
+    /// Accounts: `op` (operator), `view` (viewer), `locked` (operator whose
+    /// page allow-list is empty, i.e. no Config page).
+    async fn app() -> App {
+        let (nats, server, storage) = spawn_broker().await;
+        let js = async_nats::jetstream::new(nats.clone());
+        let mk = |bucket: &'static str| {
+            let js = js.clone();
+            async move {
+                js.create_key_value(async_nats::jetstream::kv::Config {
+                    bucket: bucket.to_string(),
+                    history: 5,
+                    ..Default::default()
+                })
+                .await
+                .expect("create bucket")
+            }
+        };
+        let kv = mk(BUCKET_AGENT_CONFIG).await;
+        let groups_kv = mk(BUCKET_AGENT_GROUPS).await;
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        for (name, role, features) in [
+            ("op", "operator", None),
+            ("view", "viewer", None),
+            ("locked", "operator", Some("[]")),
+        ] {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, role, allowed_features) VALUES (?, 'x', ?, ?)",
+            )
+            .bind(name)
+            .bind(role)
+            .bind(features)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let state = AppState {
+            pool: pool.clone(),
+            query_pool: pool.clone(),
+            commands: std::sync::Arc::new(crate::command_publisher::CommandPublisher::new(
+                nats.clone(),
+                None,
+            )),
+            nats: nats.clone(),
+            jetstream: js,
+            explode_spec_cache: Default::default(),
+            sql_view_cache: crate::api::view_sql::new_cache(),
+            group_cache: crate::api::group_sql::new_cache(),
+            mailer: None,
+            public_url: None,
+            nats_url: String::new(),
+            login_throttle: Default::default(),
+        };
+        let router = crate::api::router(state).layer(axum::middleware::from_fn_with_state(
+            pool,
+            crate::auth::verify,
+        ));
+        App {
+            router,
+            nats,
+            kv,
+            groups_kv,
+            _server: server,
+            _storage: storage,
+        }
+    }
+
+    async fn call(
+        app: &App,
+        method: &str,
+        uri: &str,
+        who: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(who) = who {
+            req = req.header("authorization", format!("Bearer {}", mint(who)));
+        }
+        req = req.header("x-kanade-source", "cli");
+        let body = match body {
+            Some(v) => {
+                req = req.header("content-type", "application/json");
+                Body::from(v.to_string())
+            }
+            None => Body::empty(),
+        };
+        let resp = app
+            .router
+            .clone()
+            .oneshot(req.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn field_url(scope: &str, field: &str) -> String {
+        match scope {
+            "global" => format!("/api/config/fields/{field}"),
+            s => format!("{}/fields/{field}", scope_url(s)),
+        }
+    }
+
+    fn scope_url(scope: &str) -> String {
+        match scope.split_once(':') {
+            None => "/api/config".to_string(),
+            Some(("group", n)) => format!("/api/groups/{n}/config"),
+            Some(("pc", n)) => format!("/api/pcs/{n}/config"),
+            _ => unreachable!(),
+        }
+    }
+
+    fn key_of(scope: &str) -> String {
+        match scope.split_once(':') {
+            None => KEY_AGENT_CONFIG_GLOBAL.to_string(),
+            Some(("group", n)) => agent_config_group_key(n),
+            Some(("pc", n)) => agent_config_pc_key(n),
+            _ => unreachable!(),
+        }
+    }
+
+    fn update(body: &str) -> FieldUpdate {
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body}"))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn field_routes_set_unset_and_skip_no_ops_on_every_scope() {
+        let app = app().await;
+        for scope in ["global", "group:canary", "pc:PC-01"] {
+            let key = key_of(scope);
+            let url = field_url(scope, "heartbeat_interval");
+            let set = || {
+                call(
+                    &app,
+                    "PUT",
+                    &url,
+                    Some("op"),
+                    Some(serde_json::json!({"value": "15s"})),
+                )
+            };
+
+            let (st, body) = set().await;
+            assert_eq!(st, StatusCode::OK, "{scope}: {body}");
+            let u = update(&body);
+            assert!(u.changed, "{scope}");
+            assert_eq!(u.scope.heartbeat_interval.as_deref(), Some("15s"));
+            let rev = revision(&app.kv, &key).await.unwrap();
+
+            // Same value again: answered, but nothing is written.
+            let (st, body) = set().await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(!update(&body).changed, "{scope}");
+            assert_eq!(revision(&app.kv, &key).await, Some(rev), "{scope}");
+
+            // The scope GET sees it.
+            let (st, body) = call(&app, "GET", &scope_url(scope), Some("view"), None).await;
+            assert_eq!(st, StatusCode::OK);
+            let got: ConfigScope = serde_json::from_str(&body).unwrap();
+            assert_eq!(got.heartbeat_interval.as_deref(), Some("15s"));
+
+            // Unset writes once, then is a no-op; an unrelated unset never writes.
+            let (st, body) = call(&app, "DELETE", &url, Some("op"), None).await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(update(&body).changed);
+            let rev = revision(&app.kv, &key).await.unwrap();
+            let (_, body) = call(&app, "DELETE", &url, Some("op"), None).await;
+            assert!(!update(&body).changed);
+            let other = field_url(scope, "target_version");
+            let (_, body) = call(&app, "DELETE", &other, Some("op"), None).await;
+            assert!(!update(&body).changed);
+            assert_eq!(revision(&app.kv, &key).await, Some(rev), "{scope}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn concurrent_field_puts_through_the_router_keep_every_write() {
+        let app = std::sync::Arc::new(app().await);
+        let mut tasks = Vec::new();
+        for (field, value) in [
+            ("target_version", "1.2.3"),
+            ("heartbeat_interval", "15s"),
+            ("host_perf_interval", "2m"),
+            ("target_version_jitter", "30m"),
+            ("process_perf_top_n", "20"),
+            ("client_display_name", "tool"),
+        ] {
+            let app = app.clone();
+            tasks.push(tokio::spawn(async move {
+                call(
+                    &app,
+                    "PUT",
+                    &field_url("group:canary", field),
+                    Some("op"),
+                    Some(serde_json::json!({ "value": value })),
+                )
+                .await
+            }));
+        }
+        for t in tasks {
+            let (st, body) = t.await.unwrap();
+            assert_eq!(st, StatusCode::OK, "{body}");
+        }
+        let (_, body) = call(&app, "GET", "/api/groups/canary/config", Some("view"), None).await;
+        let scope: ConfigScope = serde_json::from_str(&body).unwrap();
+        assert_eq!(scope.target_version.as_deref(), Some("1.2.3"));
+        assert_eq!(scope.heartbeat_interval.as_deref(), Some("15s"));
+        assert_eq!(scope.host_perf_interval.as_deref(), Some("2m"));
+        assert_eq!(scope.target_version_jitter.as_deref(), Some("30m"));
+        assert_eq!(scope.process_perf_top_n, Some(20));
+        assert_eq!(scope.client_display_name.as_deref(), Some("tool"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn invalid_field_is_a_400_over_http_and_writes_nothing() {
+        let app = app().await;
+        for (field, value, needle) in [
+            ("nope", "x", "unknown field 'nope'"),
+            ("heartbeat_interval", "soon", "humantime duration"),
+            ("process_perf_enabled", "maybe", "expected true|false"),
+        ] {
+            let (st, body) = call(
+                &app,
+                "PUT",
+                &field_url("pc:PC-01", field),
+                Some("op"),
+                Some(serde_json::json!({ "value": value })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(body.contains(needle), "{field}: {body}");
+        }
+        let (st, body) = call(
+            &app,
+            "DELETE",
+            &field_url("pc:PC-01", "nope"),
+            Some("op"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(body.contains("unknown field 'nope'"), "{body}");
+        assert_eq!(revision(&app.kv, &key_of("pc:PC-01")).await, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn mutations_need_an_operator_with_the_config_page() {
+        let app = app().await;
+        let body = || Some(serde_json::json!({"value": "15s"}));
+        for scope in ["global", "group:canary", "pc:PC-01"] {
+            let url = field_url(scope, "heartbeat_interval");
+            // No token → 401; viewer and a Config-less account → 403.
+            let (st, _) = call(&app, "PUT", &url, None, body()).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{scope}");
+            for who in ["view", "locked"] {
+                let (st, _) = call(&app, "PUT", &url, Some(who), body()).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{scope} PUT as {who}");
+                let (st, _) = call(&app, "DELETE", &url, Some(who), None).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{scope} DELETE as {who}");
+                let (st, _) = call(&app, "DELETE", &scope_url(scope), Some(who), None).await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "{scope} clear as {who}");
+            }
+            assert_eq!(revision(&app.kv, &key_of(scope)).await, None, "{scope}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn global_scope_can_be_cleared() {
+        let app = app().await;
+        call(
+            &app,
+            "PUT",
+            "/api/config/fields/target_version",
+            Some("op"),
+            Some(serde_json::json!({"value": "1.0.0"})),
+        )
+        .await;
+        let (st, _) = call(&app, "DELETE", "/api/config", Some("op"), None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, body) = call(&app, "GET", "/api/config", Some("view"), None).await;
+        let scope: ConfigScope = serde_json::from_str(&body).unwrap();
+        assert_eq!(scope, ConfigScope::default());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn every_mutation_is_audited_under_the_callers_account() {
+        use futures::StreamExt;
+        let app = app().await;
+        let mut sub = app.nats.subscribe("audit.>").await.unwrap();
+        app.nats.flush().await.unwrap();
+
+        let value = |v: &str| Some(serde_json::json!({ "value": v }));
+        call(
+            &app,
+            "PUT",
+            "/api/groups/canary/config/fields/heartbeat_interval",
+            Some("op"),
+            value("15s"),
+        )
+        .await;
+        // A no-op set is still audited, with changed=false.
+        call(
+            &app,
+            "PUT",
+            "/api/groups/canary/config/fields/heartbeat_interval",
+            Some("op"),
+            value("15s"),
+        )
+        .await;
+        call(
+            &app,
+            "DELETE",
+            "/api/groups/canary/config/fields/heartbeat_interval",
+            Some("op"),
+            None,
+        )
+        .await;
+        call(
+            &app,
+            "PUT",
+            "/api/pcs/PC-01/config",
+            Some("op"),
+            Some(serde_json::json!({"target_version": "2.0.0"})),
+        )
+        .await;
+        call(&app, "DELETE", "/api/pcs/PC-01/config", Some("op"), None).await;
+        call(&app, "DELETE", "/api/config", Some("op"), None).await;
+
+        let expected = [
+            ("audit.operator.config_field_set.groups.canary", Some(true)),
+            ("audit.operator.config_field_set.groups.canary", Some(false)),
+            (
+                "audit.operator.config_field_unset.groups.canary",
+                Some(true),
+            ),
+            ("audit.operator.config_scope_put.pcs.PC-01", None),
+            ("audit.operator.config_scope_clear.pcs.PC-01", None),
+            ("audit.operator.config_scope_clear.global", None),
+        ];
+        for (subject, changed) in expected {
+            let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
+                .await
+                .expect("audit event")
+                .expect("subscription open");
+            assert_eq!(msg.subject.as_str(), subject);
+            let v: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap();
+            assert_eq!(v["payload"]["sub"], "op", "{v}");
+            assert_eq!(v["payload"]["source"], "cli", "{v}");
+            if let Some(c) = changed {
+                assert_eq!(v["payload"]["changed"], c, "{v}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn effective_config_reports_the_pcs_groups() {
+        let app = app().await;
+        app.groups_kv
+            .put("PC-01", br#"{"groups":["canary"]}"#.as_slice().into())
+            .await
+            .unwrap();
+        call(
+            &app,
+            "PUT",
+            "/api/groups/canary/config/fields/heartbeat_interval",
+            Some("op"),
+            Some(serde_json::json!({"value": "15s"})),
+        )
+        .await;
+        let (st, body) = call(
+            &app,
+            "GET",
+            "/api/agents/PC-01/effective_config",
+            Some("view"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["my_groups"], serde_json::json!(["canary"]));
     }
 }
