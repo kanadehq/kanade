@@ -47,7 +47,12 @@ kanade agent publish target/release/kanade-agent.exe
 ```
 
 The CLI extracts the version from the PE VERSIONINFO resource — no
-`--version` flag, no chance of a label / binary mismatch.
+`--version` flag, no chance of a label / binary mismatch. It then streams
+the file to the backend API, so `KANADE_AUTH_TOKEN` (see `kanade login`)
+for an account with the operator role is required; no NATS broker token
+is involved, and the backend records the publish against that account.
+The backend caps the whole upload at 64 MB. A Linux ELF or macOS Mach-O
+carries no VERSIONINFO, so pass `--version` for those.
 
 ### 3. Roll out
 
@@ -80,7 +85,7 @@ kanade agent rollout 0.42.2 --global --jitter 30m
 
 ```pwsh
 kanade agent current
-# → target_version = 0.42.2 (global)
+# → global.target_version = 0.42.2
 ```
 
 Then a fleet-wide spot-check via the SPA Agents page (or

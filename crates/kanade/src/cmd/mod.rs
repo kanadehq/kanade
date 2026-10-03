@@ -20,10 +20,9 @@ pub(crate) async fn prompt_version_if_interactive(
 ) -> anyhow::Result<Option<String>> {
     use anyhow::Context;
 
-    // `read_line` is blocking stdin I/O. The callers are `async fn`s
-    // holding a live NATS client, so run the read off the runtime's
+    // `read_line` is blocking stdin I/O, so run the read off the runtime's
     // worker threads via spawn_blocking — otherwise a slow operator
-    // could starve tasks sharing that thread (e.g. NATS keep-alives).
+    // could starve other tasks sharing that thread.
     // The returned label is validated by the caller via
     // `validate_segment`, so no key-shape checks are duplicated here.
     tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
@@ -58,7 +57,7 @@ pub(crate) async fn prompt_version_if_interactive(
 /// copy is fine: the constraint set is small, stable, and lives outside
 /// the wire crate today.
 ///
-/// Shared by `app publish`, `agent publish` (#270 — the new interactive
+/// Shared by `app publish`, `agent publish` (the interactive
 /// prompt can feed an unvalidated label here) and `script` so all three
 /// validate identically.
 pub(crate) fn validate_segment(label: &str, value: &str) -> anyhow::Result<()> {

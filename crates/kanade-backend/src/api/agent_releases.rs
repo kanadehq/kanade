@@ -63,25 +63,27 @@ pub async fn publish(
     let mut bytes: Option<Vec<u8>> = None;
     let mut version_field: Option<String> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("read multipart field: {e}"),
-        )
-    })? {
+    // A multipart read error carries its own status: the body-limit layer
+    // surfaces as 413, which the CLI explains; a blanket 400 would hide that
+    // an oversized upload is the problem.
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (e.status(), format!("read multipart field: {e}")))?
+    {
         match field.name().unwrap_or("") {
             "file" => {
                 let buf = field
                     .bytes()
                     .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read file field: {e}")))?;
+                    .map_err(|e| (e.status(), format!("read file field: {e}")))?;
                 bytes = Some(buf.to_vec());
             }
             "version" => {
                 let text = field
                     .text()
                     .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read version field: {e}")))?;
+                    .map_err(|e| (e.status(), format!("read version field: {e}")))?;
                 let text = text.trim().to_string();
                 if !text.is_empty() {
                     version_field = Some(text);
