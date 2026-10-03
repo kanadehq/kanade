@@ -1019,8 +1019,8 @@ pub(crate) async fn run_agent() -> Result<()> {
     );
 
     // `wait_until_dead` covers the case the subscriptions do not: a connection
-    // task that ended on an authorization violation leaves the subscription
-    // streams open, so without it the agent would sit idle forever.
+    // task that has ended can leave the subscription streams open, so without
+    // it the agent would sit idle forever.
     let loops = async {
         tokio::join!(
             commands::command_loop(
@@ -1049,7 +1049,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         () = loops => {}
         () = kanade_shared::nats_client::wait_until_dead(&client) => {
             anyhow::bail!(
-                "NATS connection task terminated (no credential accepted?); exiting for a supervised restart"
+                "NATS connection task terminated; exiting for a supervised restart"
             );
         }
     }

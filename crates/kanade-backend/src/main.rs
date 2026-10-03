@@ -1758,8 +1758,8 @@ async fn run_backend_inner(
         }
     });
 
-    // A broker connection whose task has terminated (an authorization
-    // violation, a failed reconnect) never recovers and fails silently, so a
+    // A broker connection whose task has terminated never recovers and fails
+    // silently, so a
     // backend that keeps serving HTTP on top of it looks healthy while every
     // projector is deaf. Exit non-zero instead so the service manager
     // restarts it.
