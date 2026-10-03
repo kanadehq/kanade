@@ -12,6 +12,7 @@ mod idle_sampler;
 #[cfg(target_os = "windows")]
 mod job_object;
 mod job_tail;
+mod kill;
 mod live_tail;
 mod log_tail;
 mod logs;

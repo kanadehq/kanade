@@ -1232,7 +1232,7 @@ if matches!(policy.mode, Mode::Strict) && staleness > policy.max_cache_age {
 
 ### 2.6.3 第3層: 実行中の緊急停止
 
-Agent は子プロセス起動と同時に `kill.{exec_id}` を subscribe し、`tokio::select!` で `child.wait()` / `kill_sub.next()` / timeout を競争させる。kill / timeout ではホストと子孫をまとめて終了し (Windows: Job Object、unix: ホストを `setsid` で専用プロセスグループに置き、グループへ SIGTERM → 最大 5 秒後に SIGKILL)、結果は `ExecOutcome::Killed` (timeout なら `ExecOutcome::Timeout`) として publish される。正常終了時はツリーに触れないので、スクリプトが意図的に切り離したデーモンは残る (`run_as: user / system_gui` の Win32 path も oneshot bridge 経由で同じ経路に集約。macOS はこの tokio::process 経路そのものを `launchctl asuser` で包む)。
+Agent は run ごとに 1 つの kill switch (`kill.rs`) を最外殻 (jitter より前) で arm する。switch は `kill.{exec_id}` の NATS subscribe (backend API / CLI の remote kill 用) と、プロセス内 registry (Client App の `jobs.kill` 用。broker 不要) の両方を 1 つの latch に合流させ、jitter・local slot 待ち・子プロセス実行・retry backoff のどの状態でも同じ switch で kill を受ける。子プロセス実行中は `tokio::select!` で `child.wait()` / switch / timeout を競争させる。registry の entry は run 終了 (switch の Drop) で除去される。kill / timeout ではホストと子孫をまとめて終了し (Windows: Job Object、unix: ホストを `setsid` で専用プロセスグループに置き、グループへ SIGTERM → 最大 5 秒後に SIGKILL)、結果は `ExecOutcome::Killed` (timeout なら `ExecOutcome::Timeout`) として publish される。正常終了時はツリーに触れないので、スクリプトが意図的に切り離したデーモンは残る (`run_as: user / system_gui` の Win32 path も oneshot bridge 経由で同じ経路に集約。macOS はこの tokio::process 経路そのものを `launchctl asuser` で包む)。
 
 ```rust
 // crates/kanade-agent/src/process.rs::run_command_with_kill (抜粋)
@@ -1827,7 +1827,7 @@ Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可
 - **Payload に user_id を入れない** (Agent は OS 由来の SID/UID を真とみなす)
 - 各 method ごとに以下を強制:
   - `jobs.execute`: manifest に `user_invokable: true` 必須 (false なら `IpcError::Unauthorized`)
-  - `jobs.kill`: 自分の接続で投げた `run_id` のみ kill 可
+  - `jobs.kill`: 自分の接続で投げた `run_id` のみ kill 可 (それ以外は `Unauthorized`)。cancel は agent プロセス内の kill registry へ直接伝えるため broker に依存せず、agent は `kill.*` を publish しない (broker 越しの `kill.{exec_id}` による remote kill は backend API / CLI 用に従来どおり)。結果は run の終端 `jobs.progress` (status = Killed) で届く。終了済み・未知の run への kill は no-op
   - `notifications.ack`: 自分宛 (`pc` / 自分の所属 `group` / `all`) のみ ack 可
 - レート制限: 1 接続あたり 60 req/min を超えたら `-32003 RateLimit`
 

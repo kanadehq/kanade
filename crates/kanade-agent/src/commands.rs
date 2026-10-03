@@ -265,37 +265,22 @@ fn retry_note(attempt: u32, exit_code: i32, killed: bool) -> Option<String> {
 /// Between attempts the run's own kill listener (inside
 /// `run_command_with_kill`) is gone, so without this the backoff wait
 /// would be deaf to an operator stop and fire another attempt anyway
-/// (gemini HIGH / claude #466). An ad-hoc run with no `exec_id` has no
-/// kill subject → plain sleep, always `false`. A failed subscribe
-/// degrades to a plain sleep (best-effort, matching how the main kill
-/// listener treats a subscribe failure).
+/// (gemini HIGH / claude #466). The run's shared kill switch stays armed
+/// across attempts, so a kill is seen whichever source it came from. An
+/// ad-hoc run with no `exec_id` has no kill target → plain sleep, always
+/// `false`.
 async fn wait_or_killed(
-    client: &async_nats::Client,
+    kill: &crate::kill::KillSwitch,
     exec_id: Option<&str>,
     backoff: std::time::Duration,
 ) -> bool {
-    let Some(eid) = exec_id else {
+    if exec_id.is_none() {
         tokio::time::sleep(backoff).await;
         return false;
-    };
-    let kill_subject = kanade_shared::subject::kill(eid);
-    match client.subscribe(kill_subject.clone()).await {
-        Ok(mut kill_sub) => {
-            tokio::select! {
-                _ = tokio::time::sleep(backoff) => false,
-                _ = kill_sub.next() => true,
-            }
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                exec_id = %eid,
-                subject = %kill_subject,
-                "kill subscribe failed during retry backoff; sleeping deaf to kill",
-            );
-            tokio::time::sleep(backoff).await;
-            false
-        }
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(backoff) => false,
+        _ = kill.killed() => true,
     }
 }
 
@@ -507,9 +492,29 @@ pub async fn handle_command(
     // anything ran. apply_jitter emits its own "applying jitter" line,
     // so the wait is still visible in the logs. The "実行中" view
     // likewise no longer lights up during the jitter wait.
-    apply_jitter(&cmd).await;
+    // One kill switch for the whole run, armed before the jitter wait so a
+    // kill is never lost between phases (jitter, slot wait, attempt,
+    // retry backoff).
+    let kill = crate::kill::KillSwitch::arm(Some(&client), cmd.exec_id.as_deref()).await;
+    tokio::select! {
+        _ = apply_jitter(&cmd) => {}
+        _ = kill.killed() => {
+            enqueue_result_best_effort(
+                admission_cancelled_result(
+                    &pc_id,
+                    &cmd,
+                    ExecOutcome::Killed {
+                        stdout: String::new(),
+                        stderr: "killed during start jitter".into(),
+                    },
+                ),
+                "local admission cancellation enqueued",
+            );
+            return Ok(CommandOutcome::Skipped);
+        }
+    }
 
-    let _local_slot = match crate::concurrency::admit(&client, &cmd).await {
+    let _local_slot = match crate::concurrency::admit(&kill, &cmd).await {
         Ok(permit) => permit,
         Err(outcome) => {
             enqueue_result_best_effort(
@@ -676,7 +681,7 @@ pub async fn handle_command(
     let mut prior: Option<ExecOutcome> = None;
     let outcome = loop {
         let outcome = match run_command_with_start_deadline(
-            &client,
+            &kill,
             &cmd,
             Some(live_handle.tail()),
             envelope_deadline,
@@ -738,7 +743,7 @@ pub async fn handle_command(
         // HIGH / claude #466). Race the wait against a kill: if one
         // arrives, abandon the retry sequence as Killed.
         if let Some(b) = backoff
-            && wait_or_killed(&client, cmd.exec_id.as_deref(), b).await
+            && wait_or_killed(&kill, cmd.exec_id.as_deref(), b).await
         {
             info!(
                 cmd_id = %cmd.id,
@@ -1582,6 +1587,32 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
+    }
+
+    #[tokio::test]
+    async fn local_kill_interrupts_retry_backoff_without_a_broker() {
+        let kill = crate::kill::KillSwitch::arm(None, Some("cmd-backoff-kill")).await;
+        let waiter = tokio::spawn(async move {
+            wait_or_killed(
+                &kill,
+                Some("cmd-backoff-kill"),
+                std::time::Duration::from_secs(300),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(crate::kill::trigger_local("cmd-backoff-kill"));
+        let killed = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("backoff interrupted")
+            .unwrap();
+        assert!(killed);
+    }
+
+    #[tokio::test]
+    async fn backoff_without_a_kill_runs_its_full_length() {
+        let kill = crate::kill::KillSwitch::inert();
+        assert!(!wait_or_killed(&kill, None, std::time::Duration::from_millis(10)).await);
     }
 
     #[test]

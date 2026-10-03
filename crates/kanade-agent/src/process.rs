@@ -4,12 +4,11 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::kill::KillSwitch;
 use crate::live_tail::LiveTail;
 use crate::output_cap::{CappedOutput, MAX_CAPTURE_BYTES};
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
-use kanade_shared::subject;
 use kanade_shared::wire::{Command, RunAs, Shell};
 use rand::RngExt;
 use tokio::io::AsyncReadExt;
@@ -342,18 +341,18 @@ pub(crate) fn ensure_start_deadline(deadline: Option<chrono::DateTime<chrono::Ut
 }
 
 pub async fn run_command_with_kill(
-    client: &async_nats::Client,
+    kill: &KillSwitch,
     cmd: &Command,
     live: Option<Arc<LiveTail>>,
 ) -> Result<ExecOutcome> {
-    run_command_with_start_deadline(client, cmd, live, None).await
+    run_command_with_start_deadline(kill, cmd, live, None).await
 }
 
 /// [`run_command_with_kill`] that also enforces a start deadline immediately
 /// before the process is created. The deadline bounds the launch only; a
 /// process that has started is never killed for it.
 pub async fn run_command_with_start_deadline(
-    client: &async_nats::Client,
+    kill: &KillSwitch,
     cmd: &Command,
     live: Option<Arc<LiveTail>>,
     start_deadline: Option<chrono::DateTime<chrono::Utc>>,
@@ -366,7 +365,7 @@ pub async fn run_command_with_start_deadline(
     // machinery below.
     #[cfg(not(target_os = "macos"))]
     if !matches!(cmd.run_as, RunAs::System) {
-        return run_in_user_session_dispatch(client, cmd, live, start_deadline).await;
+        return run_in_user_session_dispatch(kill, cmd, live, start_deadline).await;
     }
 
     // #43: belt-and-braces. The tolerant decoder (below, around the
@@ -461,6 +460,14 @@ pub async fn run_command_with_start_deadline(
     #[cfg(unix)]
     spawn_in_own_session(&mut builder);
     ensure_start_deadline(start_deadline)?;
+    // A kill that arrived while the run was waiting (jitter, slot, backoff)
+    // must not cost a process launch.
+    if kill.is_killed() {
+        return Ok(ExecOutcome::Killed {
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+    }
     let mut child = builder
         .spawn()
         .with_context(|| format!("spawn {program}"))?;
@@ -518,16 +525,6 @@ pub async fn run_command_with_start_deadline(
 
     let inner = match &cmd.exec_id {
         Some(eid) => {
-            let kill_subject = subject::kill(eid);
-            let mut kill_sub = client
-                .subscribe(kill_subject.clone())
-                .await
-                .with_context(|| format!("subscribe {kill_subject}"))?;
-            // Flush so the server has registered our SUB before any publish
-            // can race past us.
-            client.flush().await.ok();
-            debug!(exec_id = %eid, subject = %kill_subject, "kill listener armed");
-
             tokio::select! {
                 // A clean host exit never touches the tree: a daemon the
                 // script detached on purpose keeps running.
@@ -536,8 +533,8 @@ pub async fn run_command_with_start_deadline(
                     let s = status?;
                     OutcomeInner::Completed(s.code().unwrap_or(-1))
                 }
-                msg = kill_sub.next() => {
-                    info!(exec_id = %eid, has_msg = msg.is_some(), "kill arm fired");
+                _ = kill.killed() => {
+                    info!(exec_id = %eid, "kill arm fired");
                     // Terminate the whole tree (host + descendants) so
                     // orphaned grandchildren can't keep the pipes open
                     // and hang the drain.
@@ -861,22 +858,21 @@ where
     (buf.finish(), err)
 }
 
-/// Glue between the main `run_command_with_kill` (which expects a
-/// NATS subscriber-based kill signal) and `process_as_user`'s
-/// `oneshot::Receiver<()>` kill channel. We subscribe to `kill.{exec_id}`
-/// here and forward "fired" into the channel, so the Win32 path's
-/// inner `tokio::select!` can use a plain oneshot. macOS never gets here
+/// Glue between the run's shared [`KillSwitch`] and `process_as_user`'s
+/// `oneshot::Receiver<()>` kill channel. We forward "fired" into the
+/// channel, so the Win32 path's inner `tokio::select!` can use a plain
+/// oneshot. macOS never gets here
 /// (see `host_command`); Linux has no user-session launch yet.
 #[cfg(not(target_os = "macos"))]
 async fn run_in_user_session_dispatch(
-    client: &async_nats::Client,
+    kill: &KillSwitch,
     cmd: &Command,
     live: Option<Arc<LiveTail>>,
     start_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ExecOutcome> {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = client;
+        let _ = kill;
         let _ = live;
         let _ = start_deadline;
         warn!(
@@ -899,30 +895,15 @@ async fn run_in_user_session_dispatch(
     #[cfg(target_os = "windows")]
     {
         let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
-        // Spawn the kill bridge only when there's an exec_id to listen
-        // for — ad-hoc / scheduler-less exec paths skip it.
-        let bridge = if let Some(eid) = cmd.exec_id.clone() {
-            let nats = client.clone();
-            let subject = subject::kill(&eid);
-            Some(tokio::spawn(async move {
-                match nats.subscribe(subject.clone()).await {
-                    Ok(mut sub) => {
-                        // flush before await so the broker has SUB
-                        nats.flush().await.ok();
-                        debug!(exec_id = %eid, subject = %subject, "kill listener armed (user-session path)");
-                        if sub.next().await.is_some() {
-                            info!(exec_id = %eid, "kill received → forwarding to user-session waiter");
-                            let _ = kill_tx.send(());
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, %subject, "subscribe kill failed (user-session path)")
-                    }
-                }
-            }))
-        } else {
-            None
-        };
+        // Forward the run's shared kill switch into the oneshot the
+        // Win32 waiter selects on. An inert switch (no exec_id) never
+        // fires, so the bridge just parks until it is aborted.
+        let rx = kill.receiver();
+        let bridge = tokio::spawn(async move {
+            crate::kill::wait_killed(rx).await;
+            info!("kill received → forwarding to user-session waiter");
+            let _ = kill_tx.send(());
+        });
 
         let timeout = Duration::from_secs(cmd.timeout_secs.max(1));
         let outcome = crate::process_as_user::run_command_in_user_session(
@@ -935,9 +916,7 @@ async fn run_in_user_session_dispatch(
         )
         .await;
 
-        if let Some(b) = bridge {
-            b.abort();
-        }
+        bridge.abort();
         outcome
     }
 }
@@ -1219,16 +1198,7 @@ mod process_tree_tests {
     use std::time::{Duration, Instant};
 
     use super::{ExecOutcome, run_command_with_kill};
-
-    /// No `exec_id`, so the run never touches NATS: nothing listens on
-    /// port 1 and the client just keeps retrying in the background.
-    async fn client() -> async_nats::Client {
-        async_nats::ConnectOptions::new()
-            .retry_on_initial_connect()
-            .connect("127.0.0.1:1")
-            .await
-            .expect("lazy client")
-    }
+    use crate::kill::{KillSwitch, trigger_local};
 
     fn sh_job(script: &str, timeout_secs: u64) -> kanade_shared::wire::Command {
         serde_json::from_value(serde_json::json!({
@@ -1274,7 +1244,7 @@ mod process_tree_tests {
         let pid_file = dir.path().join("grandchild.pid");
         let script = format!("sleep 300 & echo $! > '{}'; sleep 300", pid_file.display());
 
-        let outcome = run_command_with_kill(&client().await, &sh_job(&script, 1), None)
+        let outcome = run_command_with_kill(&KillSwitch::inert(), &sh_job(&script, 1), None)
             .await
             .expect("run");
 
@@ -1301,7 +1271,7 @@ mod process_tree_tests {
             pid_file.display()
         );
 
-        let outcome = run_command_with_kill(&client().await, &sh_job(&script, 60), None)
+        let outcome = run_command_with_kill(&KillSwitch::inert(), &sh_job(&script, 60), None)
             .await
             .expect("run");
 
@@ -1312,5 +1282,38 @@ mod process_tree_tests {
             ExecOutcome::Completed { exit_code: 0, .. }
         ));
         assert!(alive(daemon), "daemon {daemon} was killed on a clean exit");
+    }
+
+    #[tokio::test]
+    async fn local_kill_terminates_a_running_child_without_a_broker() {
+        let mut cmd = sh_job("sleep 300", 600);
+        cmd.exec_id = Some("proc-local-kill".into());
+        let switch = KillSwitch::arm(None, cmd.exec_id.as_deref()).await;
+        let run = tokio::spawn({
+            let cmd = cmd.clone();
+            async move { run_command_with_kill(&switch, &cmd, None).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(trigger_local("proc-local-kill"));
+        let outcome = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("run ends after kill")
+            .unwrap()
+            .expect("run");
+        assert!(matches!(outcome, ExecOutcome::Killed { .. }));
+        assert!(!crate::kill::registered("proc-local-kill"));
+    }
+
+    #[tokio::test]
+    async fn a_kill_latched_before_launch_prevents_the_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let mut cmd = sh_job(&format!("touch '{}'", marker.display()), 60);
+        cmd.exec_id = Some("proc-pre-kill".into());
+        let switch = KillSwitch::arm(None, cmd.exec_id.as_deref()).await;
+        trigger_local("proc-pre-kill");
+        let outcome = run_command_with_kill(&switch, &cmd, None).await.unwrap();
+        assert!(matches!(outcome, ExecOutcome::Killed { .. }));
+        assert!(!marker.exists());
     }
 }
