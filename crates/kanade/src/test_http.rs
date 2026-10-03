@@ -15,6 +15,9 @@ pub struct Seen {
     /// Request target, query string included.
     pub target: String,
     pub body: String,
+    /// The body exactly as received. `body` is lossy UTF-8, which cannot tell
+    /// a faithful binary upload from a mangled one.
+    pub raw: Vec<u8>,
     /// Lower-cased header block, one `name: value` per line.
     pub headers: String,
 }
@@ -22,6 +25,17 @@ pub struct Seen {
 /// Serve on an ephemeral port: the Nth request gets the Nth `(status, body)`.
 /// Returns the base URL and the log of what was received.
 pub async fn fake_backend(replies: Vec<(u16, &'static str)>) -> (String, Arc<Mutex<Vec<Seen>>>) {
+    fake_backend_bytes(
+        replies
+            .into_iter()
+            .map(|(status, body)| (status, body.as_bytes().to_vec()))
+            .collect(),
+    )
+    .await
+}
+
+/// Same as [`fake_backend`] with raw reply bodies, for download endpoints.
+pub async fn fake_backend_bytes(replies: Vec<(u16, Vec<u8>)>) -> (String, Arc<Mutex<Vec<Seen>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let base = format!("http://{}", listener.local_addr().expect("addr"));
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
@@ -57,8 +71,8 @@ pub async fn fake_backend(replies: Vec<(u16, &'static str)>) -> (String, Arc<Mut
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
-            let text = String::from_utf8_lossy(&buf).to_string();
-            let head_txt = &text[..head_end.min(text.len())];
+            let head_txt = String::from_utf8_lossy(&buf[..head_end.min(buf.len())]).to_string();
+            let head_txt = head_txt.as_str();
             let mut first = head_txt.lines().next().unwrap_or("").split_whitespace();
             let method = first.next().unwrap_or("").to_string();
             let target = first.next().unwrap_or("").to_string();
@@ -68,18 +82,21 @@ pub async fn fake_backend(replies: Vec<(u16, &'static str)>) -> (String, Arc<Mut
                 .collect::<Vec<_>>()
                 .join("\n")
                 .to_lowercase();
-            let body_txt = text[head_end.min(text.len())..].to_string();
+            let raw = buf[head_end.min(buf.len())..].to_vec();
             log.lock().unwrap().push(Seen {
                 method,
                 target,
-                body: body_txt,
+                body: String::from_utf8_lossy(&raw).to_string(),
+                raw,
                 headers,
             });
-            let resp = format!(
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            let mut resp = format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                 body.len()
-            );
-            let _ = sock.write_all(resp.as_bytes()).await;
+            )
+            .into_bytes();
+            resp.extend_from_slice(&body);
+            let _ = sock.write_all(&resp).await;
         }
     });
     (base, seen)
@@ -88,4 +105,15 @@ pub async fn fake_backend(replies: Vec<(u16, &'static str)>) -> (String, Arc<Mut
 /// Snapshot of the requests received so far.
 pub fn seen(log: &Arc<Mutex<Vec<Seen>>>) -> Vec<Seen> {
     log.lock().unwrap().clone()
+}
+
+/// Token the tests export so the Bearer header is observable. It is set once
+/// and never removed: every test sees the same value, so concurrent tests
+/// cannot disturb each other.
+pub const TEST_TOKEN: &str = "test-operator-token";
+
+pub fn export_test_token() {
+    // SAFETY: only ever writes the same constant, and nothing in the test
+    // binary reads this variable expecting it to be absent.
+    unsafe { std::env::set_var("KANADE_AUTH_TOKEN", TEST_TOKEN) };
 }

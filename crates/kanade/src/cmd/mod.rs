@@ -125,6 +125,7 @@ pub mod job;
 pub mod kill;
 pub mod login;
 pub mod meta;
+pub mod object_http;
 pub mod ping;
 pub mod provenance;
 pub mod publish_verify;

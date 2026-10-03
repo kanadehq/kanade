@@ -24,10 +24,19 @@ Common machinery used by all of them:
 
 The CLI surface:
 
+`kanade app` and `kanade script` (publish / list / delete) talk to the
+backend HTTP API, not to NATS: they need `KANADE_AUTH_TOKEN` (see
+`kanade login`) for an account with the operator role, and no broker
+token. Publishes and deletes are audited against that account by the
+backend. Operators who previously relied on the NATS token alone must now
+export `KANADE_AUTH_TOKEN`; without it the backend answers 401 / 403.
+`app publish` additionally downloads the package back from the backend
+and checks its digest before reporting success.
+
 | Command | What it does |
 |---------|--------------|
-| `kanade app publish <name> <version> <file>` | Upload to `OBJECT_APP_PACKAGES`. |
-| `kanade script publish <name> <version> <file>` | Upload to `OBJECT_SCRIPTS`. |
+| `kanade app publish <name> <file> [--version <version>]` | Upload to `OBJECT_APP_PACKAGES` through the backend API. |
+| `kanade script publish <name> <version> <file>` | Upload to `OBJECT_SCRIPTS` through the backend API. |
 | `kanade job create <yaml>` | Upsert a job manifest into the `jobs` KV. |
 | `kanade exec <job-id> --pcs <pc> [--pcs <pc> …]` | Fire a registered job at a set of PCs. |
 | `kanade agent publish <file>` | Upload an agent binary (version extracted from PE VERSIONINFO). |
