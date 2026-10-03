@@ -100,6 +100,7 @@ pub async fn sync_support_codes_projection(js: &Context) -> anyhow::Result<bool>
         .await
         .context("open fleet_config bucket")?;
 
+    let mut wrote = false;
     let mut last_err = None;
     for _ in 0..MAX_ATTEMPTS {
         // Revision first, settings second: if the settings change in between,
@@ -107,7 +108,7 @@ pub async fn sync_support_codes_projection(js: &Context) -> anyhow::Result<bool>
         let (current, revision) = live_bytes(&fleet_kv, KEY_SUPPORT_CODES).await?;
         let (settings, _) = live_bytes(&settings_kv, KEY_SERVER_SETTINGS).await?;
         let body = match plan(settings.as_deref(), current.as_deref())? {
-            Plan::Unchanged => return Ok(false),
+            Plan::Unchanged => return Ok(wrote),
             Plan::Write(b) => b,
         };
         let res = match revision {
@@ -125,13 +126,19 @@ pub async fn sync_support_codes_projection(js: &Context) -> anyhow::Result<bool>
         match res {
             Ok(()) => {
                 info!("support code projection published");
-                return Ok(true);
+                // Do not stop at a successful write: the revision guard covers
+                // only the projection key, so a settings change that landed
+                // after our read (and whose own sync saw nothing to do) would
+                // otherwise be overwritten with the stale codes. Loop to
+                // re-derive from the latest settings and finish only on an
+                // observed match.
+                wrote = true;
             }
             Err(e) => last_err = Some(e),
         }
     }
     Err(last_err
-        .expect("loop ran at least once")
+        .unwrap_or_else(|| anyhow::anyhow!("projection kept changing"))
         .context("publish support codes projection"))
 }
 
