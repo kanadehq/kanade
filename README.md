@@ -100,7 +100,7 @@ own working dir if you'd rather not clone).
 > `--path` at a time, or repeat the command three times). That path
 > matters if you're hacking on the crates.
 
-## Quick start (5 terminals, ~2 minutes)
+## Quick start (4 terminals, ~2 minutes)
 
 Run each step in its own PowerShell window so the daemons stay up. All
 of them assume `cd` into the repo root (which holds `configs/agent.toml`
@@ -112,34 +112,21 @@ of them assume `cd` into the repo root (which holds `configs/agent.toml`
 nats-server -js -p 4222
 ```
 
-### 2 — provision JetStream (optional)
-
-```powershell
-kanade jetstream setup
-```
-
-Creates every stream (`INVENTORY` / `RESULTS` / `DEPLOY` / `EVENTS` /
-`AUDIT`), KV bucket (`script_current` / `script_status` / `agents_state`
-/ `agent_config` / `agent_groups` / `schedules`), and the
-`agent_releases` Object Store. This step is **optional** as of v0.3.1:
-`kanade-backend` auto-bootstraps the same set at startup, so a fresh
-NATS server + `kanade-backend` is enough to get a working fleet. The
-CLI command is still useful for re-running setup against a different
-broker, or for inspecting what would be created (`kanade jetstream
-status`).
-
-### 3 — start the backend
+### 2 — start the backend
 
 ```powershell
 $env:KANADE_AUTH_DISABLE = "1"   # JWT off for development
 kanade-backend
 ```
 
-Serves the dashboard at <http://127.0.0.1:8080> and the JSON API at
+The first time it starts against a broker it creates every stream, KV
+bucket and Object Store itself, so a fresh NATS server + `kanade-backend`
+is enough to get a working fleet (`kanade jetstream status` shows what
+exists). Serves the dashboard at <http://127.0.0.1:8080> and the JSON API at
 `/api/*`. SQLite is created at `./backend.db`. Both projectors and the
 cron scheduler start in the background.
 
-### 4 — start the agent
+### 3 — start the agent
 
 ```powershell
 kanade-agent
@@ -152,7 +139,7 @@ the heartbeat / inventory / self-update / groups-manager loops. Group
 membership and cadence settings are read from the KV buckets — see
 `kanade group` (via the backend API) and `kanade config` to drive them.
 
-### 5 — drive it
+### 4 — drive it
 
 ```powershell
 # Round-trip a script via NATS, request/reply.
@@ -183,8 +170,7 @@ kanade kill   <job_id>                           # publish kill.{job_id}
 kanade revoke <cmd_id>                           # script_status = REVOKED (via backend API)
 kanade unrevoke <cmd_id>                         # → ACTIVE (via backend API)
 
-kanade jetstream setup                           # create streams + KV + Object Store (optional; backend auto-bootstraps on startup)
-kanade jetstream status                          # health snapshot (via backend API; setup/delete/reset are NATS-direct)
+kanade jetstream status                          # health snapshot (via backend API)
 
 kanade job create   <path...>                    # upsert into the jobs catalog; accepts files / dirs / globs (configs/jobs/*.yaml)
 kanade job export <id> [--out-dir <dir>]         # dump registered YAML to stdout (or <dir>/<id>.yaml)
@@ -458,7 +444,7 @@ it down for production with token auth:
 
    ```powershell
    $env:KANADE_NATS_TOKEN = '<your-fleet-token>'
-   kanade jetstream setup
+   kanade run <pc_id> -- hostname
    ```
 
    **(3) No token → unauthenticated connect.** Works against a broker

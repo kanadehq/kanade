@@ -3,7 +3,8 @@
 //! Every subsystem that needs JetStream KV / stream / consumer access
 //! at boot used to call `get_key_value().await?` or
 //! `get_stream().await?` directly. When the broker was unreachable —
-//! either because operations hadn't run `kanade jetstream setup` yet or
+//! either because no backend had started against the broker yet (the backend
+//! creates the resources at startup) or
 //! because the agent booted before the broker process did — those
 //! calls failed and the subsystem either crashed the agent process
 //! (Category A, see #137) or killed its own task forever (Category B)
@@ -61,8 +62,9 @@
 //!   treat every error the same (back off, retry). A genuinely
 //!   missing bucket and a transient timeout look identical to the
 //!   helper, which is fine — the *operator-visible* surface is a
-//!   warn log either way, and the cure is the same (run
-//!   `kanade jetstream setup` or fix the broker).
+//!   warn log either way, and the cure is the same (start a
+//!   backend against this broker, or fix the broker; `kanade jetstream
+//!   status` shows what exists).
 //! - **Bounded retry.** No "give up after N attempts" knob. The
 //!   subsystem is designed to outlive transient outages of arbitrary
 //!   length; bounding retries would just turn long outages into

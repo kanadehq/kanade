@@ -117,6 +117,11 @@ So every resource must carry a cap, and it does:
   reservation ≈ 13.5 GiB — sized, with the streams, to sit well inside
   50 GB.
 
+- **Recovery.** If a stream or bucket has drifted from its expected
+  config or is corrupted, repair it with the `nats` CLI and an
+  administrative credential, not with `kanade`. The backend recreates
+  anything missing the next time it starts.
+
 - **SQLite (the projection)** is *not* unbounded either: the backend
   cleanup task prunes on a 5-minute tick in bounded batches —
   `execution_results` / `executions` / `obs_events` /

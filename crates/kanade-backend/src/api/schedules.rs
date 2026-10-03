@@ -1241,7 +1241,8 @@ pub async fn disable(
     // Cascade Layer 2: revoke the underlying Manifest so already-
     // published Commands get caught at agent fire time. Same pattern
     // as `jobs::delete`: revoke is idempotent, status KV missing in
-    // dev is a 503 so callers can `kanade jetstream setup` and retry.
+    // missing (e.g. a different broker than expected) is a 503; check
+    // `GET /api/jetstream/status`.
     let cascade_applied = if q.cascade {
         let status_kv = s
             .jetstream
