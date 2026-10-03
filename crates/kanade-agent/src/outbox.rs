@@ -59,11 +59,35 @@ pub fn enqueue(outbox_dir: &Path, result: &ExecResult) -> Result<PathBuf> {
     let final_path = outbox_dir.join(format!("{}.json", result.request_id));
     let tmp_path = outbox_dir.join(format!("{}.json.tmp", result.request_id));
     let bytes = serde_json::to_vec(result).context("serialise ExecResult")?;
-    std::fs::write(&tmp_path, &bytes)
-        .with_context(|| format!("write tmp outbox file {tmp_path:?}"))?;
+    // Synced before the rename: the admission ledger marks an outcome as
+    // queued once this returns, so the file must not exist only in the page
+    // cache.
+    let write_tmp = || -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(&bytes)?;
+        f.sync_all()
+    };
+    write_tmp().with_context(|| format!("write tmp outbox file {tmp_path:?}"))?;
     std::fs::rename(&tmp_path, &final_path)
         .with_context(|| format!("rename tmp → {final_path:?}"))?;
+    // The new name must be durable too, or a power cut can lose the file the
+    // admission ledger has just been told is queued. A failure is an error:
+    // the caller then keeps the obligation to queue the result again.
+    sync_dir(outbox_dir).with_context(|| format!("sync outbox dir {outbox_dir:?}"))?;
     Ok(final_path)
+}
+
+/// fsync a directory so a rename into it survives a power cut. A no-op where
+/// the platform journals renames itself (Windows).
+#[cfg(unix)]
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Spawn the drain task. Lives for the agent process's lifetime;

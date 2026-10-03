@@ -2244,6 +2244,9 @@ async fn local_tick(
         // No envelope: the agent's own fire has no recipient or expiry to
         // enforce beyond the command's own `deadline_at`.
         None,
+        // No ledger ticket: a locally synthesised command is not a delivery
+        // and keeps the scheduler's own completion bookkeeping.
+        None,
     )
     .await
     {

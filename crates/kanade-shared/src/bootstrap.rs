@@ -25,6 +25,11 @@ use async_nats::jetstream::{
 };
 use tracing::{info, warn};
 
+/// How long the broker retains a command on `STREAM_EXEC`. Agents size their
+/// admission tombstones from this: a record must outlive the last moment the
+/// broker could redeliver the command it guards.
+pub const COMMAND_STREAM_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENT_GROUPS_DERIVED, BUCKET_AGENT_META,
     BUCKET_AGENTS_STATE, BUCKET_FLEET_CONFIG, BUCKET_GROUP_CONTACTS, BUCKET_JOBS, BUCKET_JOBS_YAML,
@@ -148,7 +153,7 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         name: STREAM_EXEC.into(),
         subjects: vec!["commands.>".into()],
         max_messages_per_subject: 1,
-        max_age: Duration::from_secs(7 * 24 * 60 * 60),
+        max_age: COMMAND_STREAM_MAX_AGE,
         // Latest-per-subject keeps this tiny (one Command per
         // group/pc subject); the cap is a backstop against subject
         // cardinality bugs, not a working budget.
