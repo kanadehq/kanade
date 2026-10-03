@@ -1,0 +1,10 @@
+{
+  "streams": ["INVENTORY", "RESULTS", "EXEC", "EVENTS", "AUDIT", "OBS_EVENTS", "NOTIFICATIONS"],
+  "kv": [
+    "script_current", "script_status", "agents_state", "agent_config", "agent_groups",
+    "agent_groups_derived", "agent_meta", "group_contacts", "schedules", "jobs",
+    "fleet_config", "notifications_read", "jobs_yaml", "schedules_yaml"
+  ],
+  "object": ["agent_releases", "app_packages", "scripts", "result_output", "collections"],
+  "lazy_kv": ["group_defs", "group_defs_yaml", "scheduler_dispatch", "server_settings", "views", "views_yaml"]
+}
