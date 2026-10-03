@@ -93,11 +93,7 @@ pub async fn run_command_in_user_session(
         stdout_read,
         stderr_read,
     } = tokio::task::spawn_blocking(move || {
-        // Checked on the blocking thread itself: a congested blocking pool can
-        // hold this closure well past the caller's own deadline check, and this
-        // is the last point before `CreateProcessAsUserW`.
-        crate::process::ensure_start_deadline(start_deadline)?;
-        spawn_native(&cmd_line, run_as, cwd.as_deref())
+        spawn_native(&cmd_line, run_as, cwd.as_deref(), start_deadline)
     })
     .await
     .map_err(|e| anyhow!("spawn-blocking join: {e}"))??;
@@ -210,7 +206,12 @@ unsafe impl Sync for SafeHandle {}
 
 // ── Synchronous Win32 building blocks ─────────────────────────────
 
-fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<SpawnHandles> {
+fn spawn_native(
+    cmd_line: &[u16],
+    run_as: RunAs,
+    cwd: Option<&str>,
+    start_deadline: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<SpawnHandles> {
     unsafe {
         let session = WTSGetActiveConsoleSessionId();
         if session == u32::MAX {
@@ -288,6 +289,13 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
             Some(v) => PWSTR(v.as_ptr() as *mut _),
             None => PWSTR::null(),
         };
+
+        // The last point before the process exists. Waiting for a blocking
+        // thread, acquiring the token, building the environment and expanding
+        // the cwd can each take long enough to carry a command past its start
+        // deadline, so it is checked here and not earlier. The guards above
+        // release everything on this early return.
+        crate::process::ensure_start_deadline(start_deadline)?;
 
         let result = CreateProcessAsUserW(
             Some(token.raw()),
