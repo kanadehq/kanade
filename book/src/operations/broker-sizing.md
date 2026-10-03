@@ -120,7 +120,24 @@ So every resource must carry a cap, and it does:
 - **Recovery.** If a stream or bucket has drifted from its expected
   config or is corrupted, repair it with the `nats` CLI and an
   administrative credential, not with `kanade`. The backend recreates
-  anything missing the next time it starts.
+  anything missing the next time it starts. This works even when the
+  backend cannot start (a drifted stream config makes its startup
+  bootstrap fail), because the scripts talk to the broker directly.
+  **Stop `kanade-backend` first** (its projectors hold durable
+  consumers) and start it again afterwards:
+
+  ```powershell
+  # delete one stream / KV bucket / object store (asks you to type the name)
+  ./scripts/ops/jetstream-delete.ps1 -Kind stream -Name RESULTS -Server nats://127.0.0.1:4222 -Creds ./admin.creds
+
+  # wipe everything kanade uses: dry run first, then add -Yes
+  ./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4222 -Creds ./admin.creds
+  ./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4222 -Creds ./admin.creds -Yes
+  ```
+
+  Both need the `nats` CLI on `PATH` and also read `NATS_URL`,
+  `NATS_CREDS`, `NATS_USER` and `NATS_PASSWORD`. Deleting a resource
+  deletes its data.
 
 - **SQLite (the projection)** is *not* unbounded either: the backend
   cleanup task prunes on a 5-minute tick in bounded batches —

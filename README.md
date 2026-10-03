@@ -122,7 +122,17 @@ kanade-backend
 The first time it starts against a broker it creates every stream, KV
 bucket and Object Store itself, so a fresh NATS server + `kanade-backend`
 is enough to get a working fleet (`kanade jetstream status` shows what
-exists). Serves the dashboard at <http://127.0.0.1:8080> and the JSON API at
+exists). If a stream has drifted or is corrupted so the backend cannot
+start, stop it and use the `nats` CLI with an administrative credential
+(not `kanade`) via the operator scripts, then start it again:
+
+```powershell
+./scripts/ops/jetstream-delete.ps1 -Kind stream -Name RESULTS -Server nats://127.0.0.1:4222 -Creds ./admin.creds
+./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4222 -Creds ./admin.creds        # dry run
+./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4222 -Creds ./admin.creds -Yes   # wipe all kanade resources
+```
+
+The backend serves the dashboard at <http://127.0.0.1:8080> and the JSON API at
 `/api/*`. SQLite is created at `./backend.db`. Both projectors and the
 cron scheduler start in the background.
 
