@@ -61,7 +61,7 @@ broker" — which everyone reinvents from scratch.
 | `kanade-shared`  | lib  | wire types (`Command` / `ExecResult` / `Heartbeat` / `HwInventory`), NATS subject + KV helpers, YAML manifest schema, [teravars]-backed config loader |
 | `kanade-agent`   | bin  | Windows-side resident daemon: subscribes to `commands.*`, runs child processes, publishes results + heartbeats + WMI inventory; watches the layered `agent_config` + `agent_groups` KV buckets and reacts live to cadence / membership / target_version changes |
 | `kanade-backend` | bin  | axum HTTP server: `/health`, `/api/{agents,results,audit,deploy,schedules,config,…}`, embedded SPA at `/`. Auto-bootstraps every required JetStream resource at startup, runs durable projectors (INVENTORY/RESULTS/AUDIT → SQLite) and a `tokio-cron-scheduler` driven by the schedules KV |
-| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`ping`/`kill`/`revoke`/`jetstream`/`agent`/`config` and to the backend over HTTP for `deploy`/`schedule` |
+| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`kill`/`jetstream`/`agent` and to the backend over HTTP for `ping`/`revoke`/`config`/`deploy`/`schedule` |
 
 ## Install
 
@@ -215,6 +215,9 @@ kanade group add  <pc_id> <name>                 # add membership (idempotent)
 kanade group rm   <pc_id> <name>                 # drop membership
 kanade group set  <pc_id> <name> ...             # replace whole list
 
+# `kanade config …` goes through the backend HTTP API (KANADE_AUTH_TOKEN; operator role to change
+# anything) — no NATS connection or broker token needed. Automation that calls it authenticates
+# with an auth token like the other HTTP subcommands.
 kanade config get  [--group <name>|--pc <pc_id>] # ConfigScope at this scope (default: global)
 kanade config set  <field>=<value> [...]         # set one field (target_version / inventory_* / heartbeat_*)
 kanade config unset <field> [...]                # clear one field

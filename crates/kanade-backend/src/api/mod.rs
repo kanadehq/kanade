@@ -478,10 +478,25 @@ pub fn router(state: AppState) -> Router {
         // lives on the viewer router above; same path, different method,
         // like the /groups routes.
         .route("/api/agents/{pc_id}/meta", put(agent_meta::put_meta))
-        .route("/api/config", put(agent_config::put_global))
+        .route(
+            "/api/config",
+            put(agent_config::put_global).delete(agent_config::delete_global),
+        )
+        // Single-field set (PUT) / unset (DELETE) on one scope, done as a
+        // compare-and-swap on the server. Separate from the whole-scope
+        // PUT above so a field edit never has to round-trip the scope
+        // through the client, where it would race other writers.
+        .route(
+            "/api/config/fields/{field}",
+            put(agent_config::set_field_global).delete(agent_config::unset_field_global),
+        )
         .route(
             "/api/groups/{name}/config",
             put(agent_config::put_group).delete(agent_config::delete_group),
+        )
+        .route(
+            "/api/groups/{name}/config/fields/{field}",
+            put(agent_config::set_field_group).delete(agent_config::unset_field_group),
         )
         .route(
             "/api/groups/{name}/email",
@@ -504,6 +519,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/pcs/{pc_id}/config",
             put(agent_config::put_pc).delete(agent_config::delete_pc),
+        )
+        .route(
+            "/api/pcs/{pc_id}/config/fields/{field}",
+            put(agent_config::set_field_pc).delete(agent_config::unset_field_pc),
         )
         .route("/api/exec/{job_id}", post(exec::create))
         // Phase E (KLP notifications): publish an end-user notification
@@ -791,9 +810,12 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         "/api/agents/{pc_id}/effective_config"
         | "/api/config"
         | "/api/config/defaults"
+        | "/api/config/fields/{field}"
         | "/api/groups/{name}/config"
+        | "/api/groups/{name}/config/fields/{field}"
         | "/api/groups/{name}/config/inherited"
         | "/api/pcs/{pc_id}/config"
+        | "/api/pcs/{pc_id}/config/fields/{field}"
         | "/api/pcs/{pc_id}/config/inherited" => Feature::Config,
 
         // --- JetStream ---
@@ -1202,6 +1224,20 @@ mod feature_map_tests {
         // `GET` and `PUT` on `/api/config` share a MatchedPath, so both are
         // gated under Config (the vertical role gate handles read-vs-write).
         assert_eq!(feature_for_path("/api/config"), Some(Feature::Config));
+    }
+
+    #[test]
+    fn config_field_routes_are_gated_by_the_config_feature() {
+        // A route missing from `feature_for_path` falls into commons, which
+        // a restricted account may write to — so each field route must be
+        // named here or an account without Config could edit fleet settings.
+        for path in [
+            "/api/config/fields/{field}",
+            "/api/groups/{name}/config/fields/{field}",
+            "/api/pcs/{pc_id}/config/fields/{field}",
+        ] {
+            assert_eq!(feature_for_path(path), Some(Feature::Config), "{path}");
+        }
     }
 }
 

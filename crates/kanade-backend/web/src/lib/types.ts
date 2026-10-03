@@ -126,6 +126,7 @@ export type EffectiveConfigResponse = {
   pc_id: string;
   effective: EffectiveConfig;
   warnings: string[];
+  my_groups: string[];
 };
 
 export type JetstreamProbe = {
