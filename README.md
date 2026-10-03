@@ -132,7 +132,7 @@ start, stop it and use the `nats` CLI with an administrative credential
 ./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4222 -Creds ./admin.creds -Yes   # wipe all kanade resources
 ```
 
-Serves the dashboard at <http://127.0.0.1:8080> and the JSON API at
+The backend serves the dashboard at <http://127.0.0.1:8080> and the JSON API at
 `/api/*`. SQLite is created at `./backend.db`. Both projectors and the
 cron scheduler start in the background.
 
