@@ -1,20 +1,29 @@
-//! `kanade config …` — operate the layered agent_config KV bucket
-//! (Sprint 6).
+//! `kanade config …` — operate the layered agent_config scopes (global /
+//! per-group / per-pc), all through the backend HTTP API
+//! (`/api/config`, `/api/groups/{name}/config`, `/api/pcs/{pc_id}/config`,
+//! `/api/agents/{pc_id}/effective_config`).
 //!
-//! Goes straight at JetStream KV (same pattern as `agent publish` /
-//! `agent groups`) so the operator workstation doesn't need a
-//! reachable backend.
+//! Going through the backend (rather than the KV bucket over NATS) means
+//! every change passes its authentication, role check and audit trail —
+//! these settings include `target_version`, i.e. which agent binary the
+//! fleet runs — and the CLI needs only `KANADE_AUTH_TOKEN`, never a broker
+//! credential. Automation that calls `kanade config` therefore
+//! authenticates with an auth token like the other HTTP subcommands.
+//!
+//! `set` / `unset` send one field to the backend's field routes rather
+//! than fetching, merging and PUT-ing the scope: the backend does the
+//! read-modify-write as a compare-and-swap, so a concurrent writer of
+//! another field on the same scope (a rollout writing `target_version`)
+//! is not clobbered by a stale copy held by the CLI. The field grammar
+//! lives in `kanade_shared::config_field` and is checked here first so a
+//! typo fails without a round-trip.
 
-use std::collections::BTreeMap;
-
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use futures::StreamExt;
-use kanade_shared::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, KEY_AGENT_CONFIG_GLOBAL, agent_config_group_key,
-    agent_config_pc_key, parse_agent_config_group_key,
-};
-use kanade_shared::wire::{AgentGroups, ConfigScope, resolve};
+use kanade_shared::config_field::{FieldUpdate, FieldValue, apply_field, parse_set_spec};
+use kanade_shared::kv::{KEY_AGENT_CONFIG_GLOBAL, agent_config_group_key, agent_config_pc_key};
+use kanade_shared::wire::{ConfigScope, EffectiveConfig};
+use serde::Deserialize;
 
 #[derive(Args, Debug)]
 pub struct ConfigArgs {
@@ -61,30 +70,38 @@ pub enum ConfigSub {
         #[command(flatten)]
         scope: ScopeSel,
     },
-    /// Delete the whole scope row from the bucket.
+    /// Delete the whole scope row.
     Clear {
         #[command(flatten)]
         scope: ScopeSel,
     },
-    /// Print the resolved EffectiveConfig for one pc_id — the same
-    /// view the agent's config_supervisor computes locally.
+    /// Print the resolved EffectiveConfig for one pc_id — the backend's
+    /// view, the same resolution the agent's config_supervisor computes
+    /// locally.
     Effective { pc_id: String },
 }
 
-pub async fn execute(client: async_nats::Client, args: ConfigArgs) -> Result<()> {
-    let js = async_nats::jetstream::new(client);
-    let kv = js
-        .get_key_value(BUCKET_AGENT_CONFIG)
-        .await
-        .with_context(|| {
-            format!("KV '{BUCKET_AGENT_CONFIG}' missing — run `kanade jetstream setup`")
-        })?;
+/// `GET /api/agents/{pc_id}/effective_config`, the fields the CLI prints.
+#[derive(Deserialize)]
+struct EffectiveResponse {
+    pc_id: String,
+    effective: EffectiveConfig,
+    /// Rendered by the backend (the CLI no longer sees the raw resolver
+    /// output). Absent from a backend that predates the field.
+    #[serde(default)]
+    warnings: Vec<String>,
+    #[serde(default)]
+    my_groups: Vec<String>,
+}
+
+pub async fn execute(backend_url: &str, args: ConfigArgs) -> Result<()> {
+    let base = backend_url.trim_end_matches('/');
     match args.sub {
-        ConfigSub::Get { scope } => get(&kv, &scope).await,
-        ConfigSub::Set { spec, scope } => set(&kv, &scope, &spec).await,
-        ConfigSub::Unset { field, scope } => unset(&kv, &scope, &field).await,
-        ConfigSub::Clear { scope } => clear(&kv, &scope).await,
-        ConfigSub::Effective { pc_id } => effective(&js, pc_id).await,
+        ConfigSub::Get { scope } => get(base, &scope).await,
+        ConfigSub::Set { spec, scope } => set(base, &scope, &spec).await,
+        ConfigSub::Unset { field, scope } => unset(base, &scope, &field).await,
+        ConfigSub::Clear { scope } => clear(base, &scope).await,
+        ConfigSub::Effective { pc_id } => effective(base, &pc_id).await,
     }
 }
 
@@ -107,194 +124,138 @@ fn scope_label(sel: &ScopeSel) -> String {
     }
 }
 
-async fn get(kv: &async_nats::jetstream::kv::Store, sel: &ScopeSel) -> Result<()> {
+/// Build the scope's config URL, optionally followed by `tail` segments
+/// (`["fields", field]`). Every user-supplied name is pushed as one
+/// percent-encoded path segment, so a name containing `/` or `?` cannot
+/// change which endpoint is hit.
+fn scope_url(base: &str, sel: &ScopeSel, tail: &[&str]) -> Result<reqwest::Url> {
+    let mut url =
+        reqwest::Url::parse(base).with_context(|| format!("invalid backend URL '{base}'"))?;
+    {
+        let mut seg = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("backend URL '{base}' cannot be a base"))?;
+        seg.pop_if_empty().push("api");
+        match (&sel.group, &sel.pc) {
+            (None, None) => seg.push("config"),
+            (Some(g), None) => seg.extend(["groups", g.as_str(), "config"]),
+            (None, Some(p)) => seg.extend(["pcs", p.as_str(), "config"]),
+            (Some(_), Some(_)) => bail!("--group and --pc are mutually exclusive"),
+        };
+        seg.extend(tail);
+    }
+    Ok(url)
+}
+
+/// An empty name would produce an empty path segment (`/api/groups//config`)
+/// that matches no route and answers a confusing 404.
+fn check_scope_name(sel: &ScopeSel) -> Result<()> {
+    match (&sel.group, &sel.pc) {
+        (Some(g), _) if g.is_empty() => bail!("--group must not be empty"),
+        (_, Some(p)) if p.is_empty() => bail!("--pc must not be empty"),
+        _ => Ok(()),
+    }
+}
+
+/// Send a prepared request. Connection failures get the request line as
+/// context; non-2xx responses (401 / 403 / 400 included) surface the status
+/// and body the same way the other HTTP subcommands do.
+async fn send(
+    req: reqwest::RequestBuilder,
+    op: &str,
+    method: &str,
+    url: &reqwest::Url,
+) -> Result<reqwest::Response> {
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("{method} {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("{op} failed: {status} — {body}");
+    }
+    Ok(resp)
+}
+
+async fn send_json<T: serde::de::DeserializeOwned>(
+    req: reqwest::RequestBuilder,
+    op: &str,
+    method: &str,
+    url: &reqwest::Url,
+) -> Result<T> {
+    send(req, op, method, url)
+        .await?
+        .json()
+        .await
+        .with_context(|| format!("parse JSON response from {method} {url}"))
+}
+
+async fn get(base: &str, sel: &ScopeSel) -> Result<()> {
+    check_scope_name(sel)?;
     let key = scope_key(sel)?;
-    let scope = read_scope(kv, &key).await?;
+    let url = scope_url(base, sel, &[])?;
+    let req = crate::http_client::authed_client()?.get(url.clone());
+    let scope: ConfigScope = send_json(req, "get", "GET", &url).await?;
     println!("# {} = {}", scope_label(sel), key);
     println!("{}", serde_json::to_string_pretty(&scope)?);
     Ok(())
 }
 
-async fn set(kv: &async_nats::jetstream::kv::Store, sel: &ScopeSel, spec: &str) -> Result<()> {
-    let (field, value) = spec
-        .split_once('=')
-        .ok_or_else(|| anyhow!("expected <field>=<value>, got '{spec}'"))?;
-    // Validate the field/value once up front so a typo fails before
-    // the CAS loop rather than on every retry.
+async fn set(base: &str, sel: &ScopeSel, spec: &str) -> Result<()> {
+    let (field, value) = parse_set_spec(spec)?;
+    // Validate up front so a typo fails before any request is made; the
+    // backend validates again with the same function.
     apply_field(&mut ConfigScope::default(), field, Some(value))?;
-    let key = scope_key(sel)?;
-    // #505: CAS read-modify-write — a blind get→put raced e.g. a
-    // rollout writing target_version on the same scope and
-    // clobbered it.
-    kanade_shared::kv_cas::read_modify_write(kv, &key, |scope: &mut ConfigScope| {
-        let before = scope.clone();
-        // Pre-validated above, so Err is unreachable here; comparing
-        // against the prior state lets an already-set value skip the
-        // write entirely (no revision bump, no watcher wake).
-        let _ = apply_field(scope, field, Some(value));
-        *scope != before
-    })
-    .await?;
+    check_scope_name(sel)?;
+    let url = scope_url(base, sel, &["fields", field])?;
+    let req = crate::http_client::authed_client()?
+        .put(url.clone())
+        .json(&FieldValue {
+            value: value.to_string(),
+        });
+    let _: FieldUpdate = send_json(req, "set", "PUT", &url).await?;
     println!("set {field} = {value} on {}", scope_label(sel));
     Ok(())
 }
 
-async fn unset(kv: &async_nats::jetstream::kv::Store, sel: &ScopeSel, field: &str) -> Result<()> {
+async fn unset(base: &str, sel: &ScopeSel, field: &str) -> Result<()> {
     apply_field(&mut ConfigScope::default(), field, None)?;
-    let key = scope_key(sel)?;
-    kanade_shared::kv_cas::read_modify_write(kv, &key, |scope: &mut ConfigScope| {
-        let before = scope.clone();
-        let _ = apply_field(scope, field, None);
-        *scope != before
-    })
-    .await?;
+    check_scope_name(sel)?;
+    let url = scope_url(base, sel, &["fields", field])?;
+    let req = crate::http_client::authed_client()?.delete(url.clone());
+    let _: FieldUpdate = send_json(req, "unset", "DELETE", &url).await?;
     println!("unset {field} on {}", scope_label(sel));
     Ok(())
 }
 
-async fn clear(kv: &async_nats::jetstream::kv::Store, sel: &ScopeSel) -> Result<()> {
+async fn clear(base: &str, sel: &ScopeSel) -> Result<()> {
+    check_scope_name(sel)?;
     let key = scope_key(sel)?;
-    kv.delete(&key).await.context("kv delete")?;
+    let url = scope_url(base, sel, &[])?;
+    let req = crate::http_client::authed_client()?.delete(url.clone());
+    send(req, "clear", "DELETE", &url).await?;
     println!("cleared {} ({})", scope_label(sel), key);
     Ok(())
 }
 
-async fn effective(js: &async_nats::jetstream::Context, pc_id: String) -> Result<()> {
-    let cfg_kv = js
-        .get_key_value(BUCKET_AGENT_CONFIG)
-        .await
-        .with_context(|| format!("KV '{BUCKET_AGENT_CONFIG}' missing"))?;
-    let groups_kv = js
-        .get_key_value(BUCKET_AGENT_GROUPS)
-        .await
-        .with_context(|| format!("KV '{BUCKET_AGENT_GROUPS}' missing"))?;
-
-    // Snapshot every scope row the resolver will need.
-    let global_scope = read_scope_optional(&cfg_kv, KEY_AGENT_CONFIG_GLOBAL).await?;
-    let pc_scope = read_scope_optional(&cfg_kv, &agent_config_pc_key(&pc_id)).await?;
-
-    let mut group_scopes: BTreeMap<String, ConfigScope> = BTreeMap::new();
-    let mut keys = cfg_kv.keys().await.context("kv keys")?;
-    while let Some(k) = keys.next().await {
-        let k = k.context("kv key entry")?;
-        if let Some(group) = parse_agent_config_group_key(&k)
-            && let Some(scope) = read_scope_optional(&cfg_kv, &k).await?
-        {
-            group_scopes.insert(group.to_string(), scope);
-        }
+async fn effective(base: &str, pc_id: &str) -> Result<()> {
+    let mut url =
+        reqwest::Url::parse(base).with_context(|| format!("invalid backend URL '{base}'"))?;
+    {
+        let mut seg = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("backend URL '{base}' cannot be a base"))?;
+        seg.pop_if_empty()
+            .extend(["api", "agents", pc_id, "effective_config"]);
     }
-
-    let my_groups = match groups_kv.get(&pc_id).await? {
-        Some(bytes) => serde_json::from_slice::<AgentGroups>(&bytes)
-            .map(|g| g.groups)
-            .unwrap_or_default(),
-        None => Vec::new(),
-    };
-
-    let (eff, warns) = resolve(
-        global_scope.as_ref(),
-        &group_scopes,
-        pc_scope.as_ref(),
-        &my_groups,
-    );
-
-    println!("# pc_id      = {pc_id}");
-    println!("# my_groups  = {my_groups:?}");
-    println!("{}", serde_json::to_string_pretty(&eff)?);
-    for w in &warns {
-        println!("# warning: {w:?}");
-    }
-    Ok(())
-}
-
-async fn read_scope(kv: &async_nats::jetstream::kv::Store, key: &str) -> Result<ConfigScope> {
-    Ok(read_scope_optional(kv, key).await?.unwrap_or_default())
-}
-
-async fn read_scope_optional(
-    kv: &async_nats::jetstream::kv::Store,
-    key: &str,
-) -> Result<Option<ConfigScope>> {
-    match kv.get(key).await.context("kv get")? {
-        Some(bytes) => Ok(Some(
-            serde_json::from_slice(&bytes).context("decode ConfigScope")?,
-        )),
-        None => Ok(None),
-    }
-}
-
-/// Apply `value` (or `None` for unset) to the named field on
-/// `scope`. Lives here rather than as a generic helper because the
-/// field names + types are stable enough that an open-coded match
-/// is the most readable form.
-fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Result<()> {
-    // #491: duration fields are humantime-validated BEFORE the KV
-    // put. The agent maps an unparseable value to a silent fallback
-    // (jitter especially used to fall back to ZERO — turning a
-    // `30minutes`-style typo into a fleet-wide simultaneous-download
-    // herd on the next rollout), so the only safe place to catch the
-    // typo is the write boundary, where the operator gets an error.
-    let parsed_duration = |field: &str, v: Option<&str>| -> Result<Option<String>> {
-        match v {
-            None => Ok(None),
-            Some(v) => {
-                humantime::parse_duration(v).with_context(|| {
-                    format!("{field}: expected a humantime duration (e.g. 30s, 10m, 1h), got {v:?}")
-                })?;
-                Ok(Some(v.to_string()))
-            }
-        }
-    };
-    match field {
-        "max_local_concurrent" => {
-            scope.max_local_concurrent = value
-                .map(str::parse::<std::num::NonZeroU32>)
-                .transpose()
-                .context("max_local_concurrent: expected an integer >= 1")?;
-        }
-        "target_version" => scope.target_version = value.map(String::from),
-        "target_version_jitter" => {
-            scope.target_version_jitter = parsed_duration(field, value)?;
-        }
-        "heartbeat_interval" => scope.heartbeat_interval = parsed_duration(field, value)?,
-        "host_perf_interval" => scope.host_perf_interval = parsed_duration(field, value)?,
-        "process_perf_enabled" => {
-            scope.process_perf_enabled = match value {
-                None => None,
-                Some(v) => Some(v.parse::<bool>().with_context(|| {
-                    format!("process_perf_enabled: expected true|false, got {v:?}")
-                })?),
-            };
-        }
-        "process_perf_expires_at" => {
-            scope.process_perf_expires_at = match value {
-                None => None,
-                Some(v) => Some(
-                    chrono::DateTime::parse_from_rfc3339(v)
-                        .with_context(|| {
-                            format!(
-                                "process_perf_expires_at: expected RFC3339 timestamp, got {v:?}"
-                            )
-                        })?
-                        .with_timezone(&chrono::Utc),
-                ),
-            };
-        }
-        "process_perf_top_n" => {
-            scope.process_perf_top_n = match value {
-                None => None,
-                Some(v) => Some(v.parse::<u32>().with_context(|| {
-                    format!("process_perf_top_n: expected positive integer, got {v:?}")
-                })?),
-            };
-        }
-        // Free-form product name (e.g. "端末管理支援ツール") — no
-        // format validation; any non-empty string is a valid brand.
-        // The agent/client trim + treat blank as "unset" downstream.
-        "client_display_name" => scope.client_display_name = value.map(String::from),
-        other => bail!(
-            "unknown field '{other}' — supported: max_local_concurrent, target_version, target_version_jitter, heartbeat_interval, host_perf_interval, process_perf_enabled, process_perf_expires_at, process_perf_top_n, client_display_name"
-        ),
+    let req = crate::http_client::authed_client()?.get(url.clone());
+    let resp: EffectiveResponse = send_json(req, "effective", "GET", &url).await?;
+    println!("# pc_id      = {}", resp.pc_id);
+    println!("# my_groups  = {:?}", resp.my_groups);
+    println!("{}", serde_json::to_string_pretty(&resp.effective)?);
+    for w in &resp.warnings {
+        println!("# warning: {w}");
     }
     Ok(())
 }
@@ -302,96 +263,313 @@ fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_http::{fake_backend, seen};
 
-    #[test]
-    fn local_limit_sets_clears_and_rejects_invalid_values() {
-        let mut s = ConfigScope::default();
-        apply_field(&mut s, "max_local_concurrent", Some("2")).unwrap();
-        assert_eq!(s.max_local_concurrent.unwrap().get(), 2);
-        for value in ["0", "-1", "1.5", "4294967296"] {
-            assert!(apply_field(&mut s, "max_local_concurrent", Some(value)).is_err());
+    const UPDATE: &str = r#"{"scope":{},"changed":true}"#;
+
+    fn sel(group: Option<&str>, pc: Option<&str>) -> ScopeSel {
+        ScopeSel {
+            group: group.map(String::from),
+            pc: pc.map(String::from),
         }
-        apply_field(&mut s, "max_local_concurrent", None).unwrap();
-        assert!(s.max_local_concurrent.is_none());
-    }
-    #[test]
-    fn apply_field_sets_string() {
-        let mut s = ConfigScope::default();
-        apply_field(&mut s, "heartbeat_interval", Some("15s")).unwrap();
-        assert_eq!(s.heartbeat_interval.as_deref(), Some("15s"));
     }
 
-    #[test]
-    fn apply_field_unset_clears_string() {
-        let mut s = ConfigScope {
-            heartbeat_interval: Some("15s".into()),
-            ..Default::default()
-        };
-        apply_field(&mut s, "heartbeat_interval", None).unwrap();
-        assert!(s.heartbeat_interval.is_none());
-    }
-
-    #[test]
-    fn apply_field_sets_and_clears_client_display_name() {
-        let mut s = ConfigScope::default();
-        apply_field(&mut s, "client_display_name", Some("端末管理支援ツール")).unwrap();
-        assert_eq!(s.client_display_name.as_deref(), Some("端末管理支援ツール"));
-        apply_field(&mut s, "client_display_name", None).unwrap();
-        assert!(s.client_display_name.is_none());
-    }
-
-    #[test]
-    fn apply_field_rejects_unknown() {
-        let mut s = ConfigScope::default();
-        let err = apply_field(&mut s, "nope", Some("x")).unwrap_err();
-        assert!(err.to_string().contains("unknown field"));
-    }
-
-    #[test]
-    fn apply_field_rejects_malformed_durations() {
-        // #491: a typo'd duration must be rejected at the write
-        // boundary, never stored (the agent's parse failure falls
-        // back silently — jitter especially used to fall back to
-        // ZERO, defeating the rollout stagger fleet-wide).
-        let mut s = ConfigScope::default();
-        for field in [
-            "target_version_jitter",
-            "heartbeat_interval",
-            "host_perf_interval",
-        ] {
-            let err = apply_field(&mut s, field, Some("not-a-duration")).unwrap_err();
-            assert!(err.to_string().contains("humantime"), "{field}: {err:#}",);
-        }
-        // Unset still works for validated fields.
-        apply_field(&mut s, "target_version_jitter", None).unwrap();
-        assert!(s.target_version_jitter.is_none());
+    fn args(sub: ConfigSub) -> ConfigArgs {
+        ConfigArgs { sub }
     }
 
     #[test]
     fn scope_key_routing() {
+        assert_eq!(scope_key(&sel(None, None)).unwrap(), "global");
         assert_eq!(
-            scope_key(&ScopeSel {
-                group: None,
-                pc: None
-            })
-            .unwrap(),
-            "global",
+            scope_key(&sel(Some("canary"), None)).unwrap(),
+            "groups.canary"
         );
+        assert_eq!(scope_key(&sel(None, Some("PC-01"))).unwrap(), "pcs.PC-01");
+    }
+
+    #[tokio::test]
+    async fn get_hits_each_scope_with_auth_source_and_prints_nothing_sent() {
+        for (s, path) in [
+            (sel(None, None), "/api/config"),
+            (sel(Some("canary"), None), "/api/groups/canary/config"),
+            (sel(None, Some("PC-01")), "/api/pcs/PC-01/config"),
+        ] {
+            let (base, log) = fake_backend(vec![(200, r#"{"target_version":"1.2.3"}"#)]).await;
+            execute(&format!("{base}/"), args(ConfigSub::Get { scope: s }))
+                .await
+                .unwrap();
+            let got = seen(&log);
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0].method, "GET");
+            assert_eq!(got[0].target, path);
+            assert!(got[0].headers.contains("x-kanade-source: cli"));
+        }
+    }
+
+    #[tokio::test]
+    async fn set_puts_the_field_value_on_each_scope() {
+        for (s, path) in [
+            (sel(None, None), "/api/config/fields/heartbeat_interval"),
+            (
+                sel(Some("canary"), None),
+                "/api/groups/canary/config/fields/heartbeat_interval",
+            ),
+            (
+                sel(None, Some("PC-01")),
+                "/api/pcs/PC-01/config/fields/heartbeat_interval",
+            ),
+        ] {
+            let (base, log) = fake_backend(vec![(200, UPDATE)]).await;
+            execute(
+                &base,
+                args(ConfigSub::Set {
+                    spec: "heartbeat_interval=15s".into(),
+                    scope: s,
+                }),
+            )
+            .await
+            .unwrap();
+            let got = seen(&log);
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0].method, "PUT");
+            assert_eq!(got[0].target, path);
+            assert_eq!(got[0].body, r#"{"value":"15s"}"#);
+        }
+    }
+
+    #[tokio::test]
+    async fn set_value_keeps_everything_after_the_first_equals() {
+        let (base, log) = fake_backend(vec![(200, UPDATE)]).await;
+        execute(
+            &base,
+            args(ConfigSub::Set {
+                spec: "client_display_name=a=b".into(),
+                scope: sel(None, None),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(seen(&log)[0].body, r#"{"value":"a=b"}"#);
+    }
+
+    #[tokio::test]
+    async fn unset_deletes_the_field_route_on_each_scope() {
+        for (s, path) in [
+            (sel(None, None), "/api/config/fields/target_version"),
+            (
+                sel(Some("canary"), None),
+                "/api/groups/canary/config/fields/target_version",
+            ),
+            (
+                sel(None, Some("PC-01")),
+                "/api/pcs/PC-01/config/fields/target_version",
+            ),
+        ] {
+            let (base, log) = fake_backend(vec![(200, UPDATE)]).await;
+            execute(
+                &base,
+                args(ConfigSub::Unset {
+                    field: "target_version".into(),
+                    scope: s,
+                }),
+            )
+            .await
+            .unwrap();
+            let got = seen(&log);
+            assert_eq!(got[0].method, "DELETE");
+            assert_eq!(got[0].target, path);
+            assert_eq!(got[0].body, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_deletes_the_whole_scope_including_global() {
+        for (s, path) in [
+            (sel(None, None), "/api/config"),
+            (sel(Some("canary"), None), "/api/groups/canary/config"),
+            (sel(None, Some("PC-01")), "/api/pcs/PC-01/config"),
+        ] {
+            let (base, log) = fake_backend(vec![(204, "")]).await;
+            execute(&base, args(ConfigSub::Clear { scope: s }))
+                .await
+                .unwrap();
+            let got = seen(&log);
+            assert_eq!(got[0].method, "DELETE");
+            assert_eq!(got[0].target, path);
+        }
+    }
+
+    #[tokio::test]
+    async fn names_are_encoded_as_single_path_segments() {
+        let (base, log) = fake_backend(vec![(200, UPDATE)]).await;
+        execute(
+            &base,
+            args(ConfigSub::Set {
+                spec: "target_version=1.0.0".into(),
+                scope: sel(Some("a/b c"), None),
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            scope_key(&ScopeSel {
-                group: Some("canary".into()),
-                pc: None
-            })
-            .unwrap(),
-            "groups.canary",
+            seen(&log)[0].target,
+            "/api/groups/a%2Fb%20c/config/fields/target_version"
         );
-        assert_eq!(
-            scope_key(&ScopeSel {
-                group: None,
-                pc: Some("PC-01".into())
-            })
-            .unwrap(),
-            "pcs.PC-01",
+        let (base, log) = fake_backend(vec![(204, "")]).await;
+        execute(
+            &base,
+            args(ConfigSub::Clear {
+                scope: sel(None, Some("pc?x#y")),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(seen(&log)[0].target, "/api/pcs/pc%3Fx%23y/config");
+    }
+
+    #[tokio::test]
+    async fn effective_uses_the_effective_config_route() {
+        // A real EffectiveConfig so the test tracks the wire shape.
+        let eff = serde_json::to_string(&EffectiveConfig::builtin_defaults()).unwrap();
+        let body: &'static str = Box::leak(
+            format!(r#"{{"pc_id":"PC-01","effective":{eff},"warnings":["w"],"my_groups":["g"]}}"#)
+                .into_boxed_str(),
+        );
+        let (base, log) = fake_backend(vec![(200, body)]).await;
+        execute(
+            &base,
+            args(ConfigSub::Effective {
+                pc_id: "PC 01".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let got = seen(&log);
+        assert_eq!(got[0].method, "GET");
+        assert_eq!(got[0].target, "/api/agents/PC%2001/effective_config");
+    }
+
+    #[tokio::test]
+    async fn invalid_input_never_reaches_the_backend() {
+        let (base, log) = fake_backend(vec![(200, UPDATE)]).await;
+        for spec in ["heartbeat_interval", "heartbeat_interval=soon", "nope=1"] {
+            let err = execute(
+                &base,
+                args(ConfigSub::Set {
+                    spec: spec.into(),
+                    scope: sel(None, None),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert!(!format!("{err:#}").is_empty());
+        }
+        let err = execute(
+            &base,
+            args(ConfigSub::Unset {
+                field: "nope".into(),
+                scope: sel(None, None),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err:#}");
+        let err = execute(
+            &base,
+            args(ConfigSub::Clear {
+                scope: sel(Some(""), None),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err:#}");
+        assert!(seen(&log).is_empty(), "nothing may be sent");
+    }
+
+    #[tokio::test]
+    async fn validation_message_matches_the_shared_grammar() {
+        let err = execute(
+            "http://127.0.0.1:1",
+            args(ConfigSub::Set {
+                spec: "heartbeat_interval=soon".into(),
+                scope: sel(None, None),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("heartbeat_interval: expected a humantime duration"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_errors_report_status_and_body() {
+        for (code, body) in [
+            (400, "unknown field 'x'"),
+            (401, "bad token"),
+            (403, "operator role required"),
+            (500, "boom"),
+        ] {
+            let (base, _log) = fake_backend(vec![(code, body)]).await;
+            let err = execute(
+                &base,
+                args(ConfigSub::Set {
+                    spec: "target_version=1.0.0".into(),
+                    scope: sel(None, None),
+                }),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("set failed"), "{err}");
+            assert!(err.contains(&code.to_string()), "{err}");
+            assert!(err.contains(body), "{err}");
+        }
+        let (base, _log) = fake_backend(vec![(403, "no")]).await;
+        let err = execute(
+            &base,
+            args(ConfigSub::Clear {
+                scope: sel(None, None),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("clear failed") && err.contains("403"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn malformed_json_is_a_parse_error() {
+        let (base, _log) = fake_backend(vec![(200, "not json")]).await;
+        let err = execute(
+            &base,
+            args(ConfigSub::Get {
+                scope: sel(None, None),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("parse JSON response"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn connection_failure_names_the_request() {
+        let err = execute(
+            "http://127.0.0.1:1",
+            args(ConfigSub::Get {
+                scope: sel(Some("canary"), None),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("GET http://127.0.0.1:1/api/groups/canary/config"),
+            "{err}"
         );
     }
 }

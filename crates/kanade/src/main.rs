@@ -22,7 +22,7 @@ const DEFAULT_BACKEND: &str = "http://127.0.0.1:8080";
 struct Cli {
     /// NATS broker URL (not the backend).
     ///
-    /// Used by the broker subcommands: `run`, `kill`, `agent`, `config`,
+    /// Used by the broker subcommands: `run`, `kill`, `agent`,
     /// `group` (except `group def`, which is HTTP — see --backend-url),
     /// `meta`, `script`, `app`, `jetstream` (except `jetstream status`,
     /// which is HTTP). Its credential is NOT a flag — the CLI reads
@@ -37,7 +37,7 @@ struct Cli {
     /// Backend HTTP base URL.
     ///
     /// Used by the HTTP subcommands: `job`, `schedule`, `exec`, `view`,
-    /// `query`, `freeze`, `account`, `group def`, `ping`, `revoke`,
+    /// `query`, `freeze`, `account`, `group def`, `config`, `ping`, `revoke`,
     /// `unrevoke`, `jetstream status`. They authenticate
     /// WITH `$KANADE_AUTH_TOKEN`, a JWT — a different credential from
     /// the broker token above, which is the usual source of confusion
@@ -85,7 +85,8 @@ enum SubCmd {
     /// CRUD the manifest-script Object Store (`OBJECT_SCRIPTS`, #211).
     /// Bodies referenced by `execute.script_object` (#213 / #214).
     Script(cmd::script::ScriptArgs),
-    /// Manage the layered agent_config KV bucket (global / per-group / per-pc).
+    /// Manage the layered agent config (global / per-group / per-pc). Goes
+    /// through the backend API (needs KANADE_AUTH_TOKEN), not NATS.
     Config(cmd::config::ConfigArgs),
     /// Break-glass command-signing key (#1165). The backend's own key is minted
     /// on the backend host (`kanade-backend command-key-generate`), never here.
@@ -153,6 +154,8 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::login::execute(&backend_url, args).await;
     } else if let SubCmd::Account(args) = command {
         return cmd::account::execute(&backend_url, args).await;
+    } else if let SubCmd::Config(args) = command {
+        return cmd::config::execute(&backend_url, args).await;
     } else if let SubCmd::Query(args) = command {
         return cmd::query::execute(&backend_url, args).await;
     } else if let SubCmd::Ping(args) = command {
@@ -194,13 +197,13 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
         SubCmd::App(args) => cmd::app::execute(client, args).await,
         SubCmd::Script(args) => cmd::script::execute(client, args).await,
-        SubCmd::Config(args) => cmd::config::execute(client, args).await,
         SubCmd::Meta(args) => cmd::meta::execute(client, args).await,
         SubCmd::Exec(_)
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
         | SubCmd::View(_)
         | SubCmd::Group(_)
+        | SubCmd::Config(_)
         | SubCmd::Freeze(_)
         | SubCmd::Ping(_)
         | SubCmd::Revoke(_)

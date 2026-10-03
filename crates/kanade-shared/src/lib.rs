@@ -3,6 +3,7 @@ pub mod boot_sentinel;
 pub mod bootstrap;
 pub mod check_eval;
 pub mod config;
+pub mod config_field;
 pub mod default_paths;
 pub mod exe_version;
 pub mod feature;

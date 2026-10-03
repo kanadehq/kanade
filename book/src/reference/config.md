@@ -56,6 +56,18 @@ kanade config set --pc EXACT-HOSTNAME max_local_concurrent=1
 kanade config unset --pc EXACT-HOSTNAME max_local_concurrent
 ```
 
+`kanade config` (`get`, `set`, `unset`, `clear`, `effective`) talks to the
+backend HTTP API, not to NATS: it needs `KANADE_AUTH_TOKEN` (an operator-role
+token to change anything, like the other HTTP subcommands) and no broker
+token. Automation that calls `kanade config` must therefore authenticate with
+an auth token. The backend does each `set` / `unset` as a compare-and-swap on
+that one field, so a concurrent rollout writing `target_version` on the same
+scope is not overwritten, and a request that would change nothing writes
+nothing. Each change is recorded in the audit log under the caller's account;
+the audit entry is published after the write and is best-effort, not atomic
+with it. `effective` prints the backend's resolved view; its warnings are the
+backend's rendered text.
+
 `unset` restores inheritance; when all applicable scopes omit the field,
 CPU-based sizing resumes. Updates apply without restarting the agent.
 Reducing the limit lets existing jobs finish and holds new jobs until enough

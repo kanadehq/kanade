@@ -492,8 +492,9 @@ agent_config:pcs.<pc_id>                     ← この PC 専用の override (�
 - `heartbeat_interval`
 
 操作:
-- `kanade config get/set/unset/clear [--group <n>|--pc <pc_id>]` — CLI 直接 KV
-- `GET/PUT/DELETE /api/config`, `/api/groups/{n}/config`, `/api/pcs/{p}/config` — backend HTTP
+- `kanade config get/set/unset/clear/effective [--group <n>|--pc <pc_id>]` — backend HTTP 経由 (`KANADE_AUTH_TOKEN`、変更は operator 以上。NATS 直結ではない)
+- `GET/PUT/DELETE /api/config`, `/api/groups/{n}/config`, `/api/pcs/{p}/config` — backend HTTP (スコープ全体の置換 / 削除)
+- `PUT/DELETE /api/config/fields/{field}`, `/api/groups/{n}/config/fields/{field}`, `/api/pcs/{p}/config/fields/{field}` — 1 フィールドの set / unset (サーバー側 CAS read-modify-write。変化が無ければ書き込まない)
 - `GET /api/agents/{pc_id}/effective_config` — 解決済み view (debug 用)
 
 ## 2.4 命令定義 (YAML スキーマ)

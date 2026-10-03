@@ -629,6 +629,7 @@ get(/^\/api\/agents\/([^/]+)\/effective_config$/, (_req, _url, m) => {
     pc_id: p.pc_id,
     effective: { ...EFFECTIVE_CONFIG, target_version: p.agent_version },
     warnings: [],
+    my_groups: [],
   });
 });
 
