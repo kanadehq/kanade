@@ -315,7 +315,7 @@ impl SupportCodesProjection {
 /// never chooses — and never sees — these values.
 // PartialEq/Eq beyond the minimal derive list: `ServerSettings` derives
 // them, so every section must too.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentInstallSection {
     /// NATS URL baked into the installer's agent.toml. None → the backend's
@@ -330,6 +330,22 @@ pub struct AgentInstallSection {
     /// "configured" without ever seeing the value. Never accepted from PUT.
     #[serde(skip_deserializing)]
     pub nats_token_set: bool,
+    /// Agent-role NATS user baked into the installer next to the token, so a
+    /// host installed today already holds the credential the broker will
+    /// later require. Shared by every agent by design. WRITE-ONLY exactly
+    /// like `nats_token`, and a pair with `nats_password`: the installer
+    /// embeds them only when both are present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_user: Option<String>,
+    /// Read-only indicator for `nats_user`, computed by redacted().
+    #[serde(skip_deserializing)]
+    pub nats_user_set: bool,
+    /// Password for `nats_user`. WRITE-ONLY, see `nats_user`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_password: Option<String>,
+    /// Read-only indicator for `nats_password`, computed by redacted().
+    #[serde(skip_deserializing)]
+    pub nats_password_set: bool,
     /// Ask the generated Windows installer to pass `-RequireSignedCommands`
     /// to `deploy-agent.ps1`, so a fresh agent starts enforcing signed
     /// commands from first boot instead of leaving that as a manual
@@ -344,6 +360,24 @@ pub struct AgentInstallSection {
     /// README.txt rather than silently dropped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub require_signed_commands: Option<bool>,
+}
+
+// Hand-written so a stray `{:?}` / `?settings` in a log line can never
+// print the write-only credentials.
+impl std::fmt::Debug for AgentInstallSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mask = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("AgentInstallSection")
+            .field("nats_url", &self.nats_url)
+            .field("nats_token", &mask(&self.nats_token))
+            .field("nats_token_set", &self.nats_token_set)
+            .field("nats_user", &mask(&self.nats_user))
+            .field("nats_user_set", &self.nats_user_set)
+            .field("nats_password", &mask(&self.nats_password))
+            .field("nats_password_set", &self.nats_password_set)
+            .field("require_signed_commands", &self.require_signed_commands)
+            .finish()
+    }
 }
 
 /// Value stored in the `server_settings` KV bucket under the single key
@@ -596,6 +630,7 @@ impl ServerSettings {
     /// credential baked into installer ZIPs, so it never leaves the backend
     /// either — the response carries only `nats_token_set` (computed HERE,
     /// never accepted from a client) so the SPA can render "configured".
+    /// `nats_user` / `nats_password` get the same `*_set` treatment.
     #[must_use]
     pub fn redacted(mut self) -> Self {
         for c in &mut self.support_codes {
@@ -604,6 +639,10 @@ impl ServerSettings {
         if let Some(ai) = self.agent_install.as_mut() {
             ai.nats_token_set = ai.nats_token.is_some();
             ai.nats_token = None;
+            ai.nats_user_set = ai.nats_user.is_some();
+            ai.nats_user = None;
+            ai.nats_password_set = ai.nats_password.is_some();
+            ai.nats_password = None;
         }
         self
     }
@@ -1234,13 +1273,14 @@ mod tests {
                 nats_token: Some("s3cret".into()),
                 nats_token_set: false,
                 require_signed_commands: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"agent_install":{"nats_url":"nats://broker.corp:4222","nats_token":"s3cret","nats_token_set":false}}"#
+            r#"{"agent_install":{"nats_url":"nats://broker.corp:4222","nats_token":"s3cret","nats_token_set":false,"nats_user_set":false,"nats_password_set":false}}"#
         );
         assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
     }
@@ -1257,7 +1297,7 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"agent_install":{"nats_token_set":false,"require_signed_commands":true}}"#
+            r#"{"agent_install":{"nats_token_set":false,"nats_user_set":false,"nats_password_set":false,"require_signed_commands":true}}"#
         );
         assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
     }
@@ -1287,6 +1327,7 @@ mod tests {
                 nats_token: Some("s3cret".into()),
                 nats_token_set: false,
                 require_signed_commands: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -1313,5 +1354,51 @@ mod tests {
         .redacted();
         let ai = sans_token.agent_install.as_ref().unwrap();
         assert!(!ai.nats_token_set);
+    }
+
+    #[test]
+    fn redacted_strips_the_user_pair_but_reports_presence() {
+        let redacted = ServerSettings {
+            agent_install: Some(AgentInstallSection {
+                nats_user: Some("agent-u".into()),
+                nats_password: Some("p@ss'w0rd".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .redacted();
+        let ai = redacted.agent_install.as_ref().unwrap();
+        assert_eq!(ai.nats_user, None);
+        assert_eq!(ai.nats_password, None);
+        assert!(ai.nats_user_set && ai.nats_password_set);
+        let json = serde_json::to_string(&redacted).unwrap();
+        assert!(!json.contains("agent-u"), "wire leaked the user: {json}");
+        assert!(!json.contains("w0rd"), "wire leaked the password: {json}");
+        assert!(json.contains(r#""nats_user_set":true"#), "wire: {json}");
+        assert!(json.contains(r#""nats_password_set":true"#), "wire: {json}");
+    }
+
+    #[test]
+    fn user_pair_flags_are_never_accepted_from_the_wire() {
+        let s: ServerSettings = serde_json::from_str(
+            r#"{"agent_install":{"nats_user_set":true,"nats_password_set":true}}"#,
+        )
+        .unwrap();
+        let ai = s.agent_install.unwrap();
+        assert!(!ai.nats_user_set && !ai.nats_password_set);
+    }
+
+    #[test]
+    fn debug_never_prints_the_credentials() {
+        let ai = AgentInstallSection {
+            nats_token: Some("tok-secret".into()),
+            nats_user: Some("user-secret".into()),
+            nats_password: Some("pw-secret".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{ai:?}");
+        for needle in ["tok-secret", "user-secret", "pw-secret"] {
+            assert!(!dbg.contains(needle), "Debug leaked {needle}: {dbg}");
+        }
     }
 }

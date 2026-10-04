@@ -461,6 +461,22 @@ it down for production with token auth:
    chooses between them. **None of this switches the broker from the shared
    token to users** — that is a separate, broker-side change.
 
+   **The backend-generated installer can carry the agent role's pair.**
+   The Settings page (`agent_install`) takes a write-only `nats_user` /
+   `nats_password` pair next to the token; the generated Windows ZIP and the
+   Linux / macOS tarballs pass it to the scripts above (`-NatsUser` /
+   `-NatsPassword`, `KANADE_NATS_USER` / `KANADE_NATS_PASSWORD`) **only when
+   both are set**, and still embed the token, so a newly kitted host already
+   holds the credential the broker may later require. This pair is the agent
+   role's credential, **shared by every agent by design**; the backend's own
+   credential and the break-glass credential never go in these settings. Like
+   the token it is never shown again (the API reports only `nats_user_set` /
+   `nats_password_set`), a save that leaves both fields blank keeps the stored
+   pair, and the two are always changed together, so rotating just the
+   password means typing the user again. An installer's `README.txt` says
+   whether it carries a user pair (never the values); a README without that
+   paragraph means no pair was embedded.
+
    ```powershell
    .\deploy-agent.ps1   -NatsToken '<your-fleet-token>' -NatsUser '<agent-user>'   -NatsPassword '<agent-password>'
    .\deploy-backend.ps1 -NatsToken '<your-fleet-token>' -NatsUser '<backend-user>' -NatsPassword '<backend-password>'

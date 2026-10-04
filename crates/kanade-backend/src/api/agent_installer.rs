@@ -32,7 +32,8 @@
 //!   * `deploy-agent.ps1` — the canonical `scripts/deploy/agent.ps1`,
 //!     verbatim. All install logic lives there; this module only wraps it.
 //!   * `install-agent.ps1` — a generated wrapper that invokes
-//!     `deploy-agent.ps1` with the configured `-NatsToken` and, when this
+//!     `deploy-agent.ps1` with the configured `-NatsToken`, the agent role's
+//!     `-NatsUser` / `-NatsPassword` when both are configured, and, when this
 //!     backend signs commands, a `-CommandKeys` ring holding the backend's
 //!     own PUBLIC key (never a break-glass key — those are distributed
 //!     separately, by hand).
@@ -53,6 +54,7 @@
 //!     `nats_url` only when `KANADE_NATS_URL` is set.
 //!   * `install.sh` (0755) — a generated wrapper: exports
 //!     `KANADE_NATS_TOKEN` when (and only when) the settings carry one,
+//!     `KANADE_NATS_USER` / `KANADE_NATS_PASSWORD` when both are configured,
 //!     `KANADE_COMMAND_KEYS` when this backend signs commands and
 //!     `KANADE_REQUIRE_SIGNED_COMMANDS=1` when the require-signed-commands
 //!     setting is on and there is a key to back it, then
@@ -281,7 +283,7 @@ pub async fn installer(
             format!("read server_settings: {e:#}"),
         )
     })?;
-    let (nats_url, nats_token) = resolve_nats(&settings, &state.nats_url)?;
+    let (nats_url, nats_token, user_pair) = resolve_nats(&settings, &state.nats_url)?;
     let agent_toml = render_agent_toml(&nats_url)?;
 
     // Read the release binary. ~20 MB in memory is acceptable — the
@@ -338,11 +340,15 @@ pub async fn installer(
             let install_ps1 = render_install_ps1(
                 &key,
                 nats_token.as_deref(),
+                user_pair.as_ref(),
                 command_keys.as_deref(),
                 enforcement == EnforcementPlan::Embedded,
             );
             let install_cmd = render_install_cmd(&key);
-            let readme = render_readme(&key, command_keys.is_some(), enforcement);
+            let mut readme = render_readme(&key, command_keys.is_some(), enforcement);
+            if user_pair.is_some() {
+                readme.push_str(&user_pair_note("\r\n"));
+            }
             let entries: Vec<(&str, Vec<u8>)> = vec![
                 ("kanade-agent.exe", exe),
                 ("agent.toml", agent_toml.into_bytes()),
@@ -378,6 +384,7 @@ pub async fn installer(
                 exe,
                 agent_toml,
                 nats_token.as_deref(),
+                user_pair.as_ref(),
                 command_keys.as_deref(),
                 enforcement,
             );
@@ -412,13 +419,15 @@ pub async fn installer(
         "agent_installer_download",
         Some(&key),
         Some(&caller),
-        // NEVER the token itself — only that one was embedded.
+        // NEVER the token or the user pair themselves — only that they
+        // were embedded.
         serde_json::json!({
             "version": key,
             "os": params.os.as_str(),
             "arch": arch.as_str(),
             "nats_url": nats_url,
             "token_embedded": nats_token.is_some(),
+            "user_pair_embedded": user_pair.is_some(),
             "command_keys_embedded": command_keys_embedded,
         }),
     )
@@ -674,12 +683,15 @@ fn key_matches_platform(key: &str, os: InstallerOs, arch: InstallerArch) -> bool
 /// at PUT, but a hand-written KV value can bypass that) is a 500 naming the
 /// Settings page — NOT a silent fallback, which would ship installers that
 /// dial a different broker than the operator configured.
+/// The URL, token and (complete) user pair an installer embeds.
+type ResolvedNats = (String, Option<String>, Option<NatsUserPair>);
+
 fn resolve_nats(
     settings: &ServerSettings,
     backend_url: &str,
-) -> Result<(String, Option<String>), (StatusCode, String)> {
+) -> Result<ResolvedNats, (StatusCode, String)> {
     let Some(ai) = settings.agent_install.as_ref() else {
-        return Ok((backend_url.to_string(), None));
+        return Ok((backend_url.to_string(), None, None));
     };
     let url = match ai.nats_url.as_deref() {
         Some(u) if u.is_empty() || u.contains('\'') || u.contains('\n') || u.contains('\r') => {
@@ -698,7 +710,56 @@ fn resolve_nats(
     // deploy-agent.ps1 an empty-string argument, and the audit record
     // would claim a token was embedded when none was.
     let token = ai.nats_token.clone().filter(|t| !t.is_empty());
-    Ok((url, token))
+    // The user pair is embedded only when BOTH halves are usable. PUT
+    // refuses a half pair, but a hand-written KV value can hold one; handing
+    // the client a lone `-NatsUser` would be a configuration error on the
+    // installed host, so it is dropped here (loudly, without the values).
+    let pair = match (
+        ai.nats_user.as_deref().filter(|v| !v.is_empty()),
+        ai.nats_password.as_deref().filter(|v| !v.is_empty()),
+    ) {
+        (Some(user), Some(password)) => Some(NatsUserPair {
+            user: user.to_string(),
+            password: password.to_string(),
+        }),
+        (None, None) => None,
+        _ => {
+            warn!(
+                "installer: server_settings agent_install holds only one of nats_user / \
+                 nats_password — the user pair is NOT embedded; set both on the Settings page"
+            );
+            None
+        }
+    };
+    Ok((url, token, pair))
+}
+
+/// The agent role's NATS user and password, embedded together or not at all.
+/// `Debug` hides the password (and the user) so a stray `{:?}` cannot log it.
+#[derive(Clone, PartialEq, Eq)]
+struct NatsUserPair {
+    user: String,
+    password: String,
+}
+
+impl std::fmt::Debug for NatsUserPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NatsUserPair(<redacted>)")
+    }
+}
+
+/// README paragraph telling the operator the archive carries a user pair,
+/// without revealing it. Appended only when a pair is embedded, so an
+/// archive without one keeps exactly the README it always had.
+fn user_pair_note(nl: &str) -> String {
+    [
+        "",
+        "This installer also embeds the agent role's NATS user and password (shared by",
+        "every agent by design) next to the token, so this host holds the credential",
+        "the broker may later require. Treat this archive as a secret.",
+        "",
+    ]
+    .join(nl)
 }
 
 /// The store key reaches several sinks that tolerate no hostile bytes: a
@@ -800,12 +861,20 @@ fn resolve_enforcement(requested: bool, key_present: bool) -> EnforcementPlan {
 fn render_install_ps1(
     version: &str,
     nats_token: Option<&str>,
+    user_pair: Option<&NatsUserPair>,
     command_keys: Option<&str>,
     require_signed_commands: bool,
 ) -> String {
     let mut args = String::new();
     if let Some(token) = nats_token {
         args.push_str(&format!(" -NatsToken {}", ps_quote(token)));
+    }
+    if let Some(pair) = user_pair {
+        args.push_str(&format!(
+            " -NatsUser {} -NatsPassword {}",
+            ps_quote(&pair.user),
+            ps_quote(&pair.password)
+        ));
     }
     if let Some(keys) = command_keys {
         args.push_str(&format!(" -CommandKeys {}", ps_quote(keys)));
@@ -950,16 +1019,18 @@ impl TarEntry {
 /// definition, the setup script's name, and the README differ. `os` is
 /// Linux or macOS; the handler never calls this for Windows (and a
 /// Windows value falls through to the Linux shape).
+#[allow(clippy::too_many_arguments)]
 fn unix_tar_entries(
     os: InstallerOs,
     key: &str,
     exe: Vec<u8>,
     agent_toml: String,
     nats_token: Option<&str>,
+    user_pair: Option<&NatsUserPair>,
     command_keys: Option<&str>,
     enforcement: EnforcementPlan,
 ) -> Vec<TarEntry> {
-    let (service_entry, setup_name, setup_script, service_kind, readme) =
+    let (service_entry, setup_name, setup_script, service_kind, mut readme) =
         if os == InstallerOs::Macos {
             (
                 TarEntry::new(
@@ -985,8 +1056,12 @@ fn unix_tar_entries(
                 render_readme_linux(key, command_keys.is_some(), enforcement),
             )
         };
+    if user_pair.is_some() {
+        readme.push_str(&user_pair_note("\n"));
+    }
     let install_sh = render_install_sh(
         nats_token,
+        user_pair,
         command_keys,
         enforcement == EnforcementPlan::Embedded,
         setup_name,
@@ -1047,6 +1122,7 @@ fn sh_quote(value: &str) -> String {
 /// broker on redeploy" logic intact.
 fn render_install_sh(
     nats_token: Option<&str>,
+    user_pair: Option<&NatsUserPair>,
     command_keys: Option<&str>,
     require_signed_commands: bool,
     setup_script: &str,
@@ -1062,6 +1138,16 @@ fn render_install_sh(
     s.push_str("cd \"$(dirname \"$0\")\"\n");
     if let Some(token) = nats_token {
         s.push_str(&format!("export KANADE_NATS_TOKEN={}\n", sh_quote(token)));
+    }
+    if let Some(pair) = user_pair {
+        s.push_str(&format!(
+            "export KANADE_NATS_USER={}\n",
+            sh_quote(&pair.user)
+        ));
+        s.push_str(&format!(
+            "export KANADE_NATS_PASSWORD={}\n",
+            sh_quote(&pair.password)
+        ));
     }
     if let Some(keys) = command_keys {
         s.push_str(&format!("export KANADE_COMMAND_KEYS={}\n", sh_quote(keys)));
@@ -1435,6 +1521,7 @@ mod tests {
         let out = render_install_ps1(
             "0.43.99",
             Some("s3cret"),
+            None,
             Some(r#"[{"kid":"backend-1","public_key":"AAAA","label":"backend"}]"#),
             false,
         );
@@ -1454,6 +1541,7 @@ mod tests {
         let out = render_install_ps1(
             "0.43.99",
             Some("s3cret"),
+            None,
             Some(r#"[{"kid":"backend-1","public_key":"AAAA"}]"#),
             true,
         );
@@ -1491,7 +1579,7 @@ mod tests {
         // Windows-facing like every other ps1 we generate — a bare LF
         // inside the try/finally block would still run under PowerShell,
         // but stay consistent with the rest of the ZIP.
-        let out = render_install_ps1("0.43.99", Some("tok"), None, false);
+        let out = render_install_ps1("0.43.99", Some("tok"), None, None, false);
         for (i, b) in out.bytes().enumerate() {
             if b == b'\n' {
                 assert!(
@@ -1523,7 +1611,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("install-agent.ps1"),
-            render_install_ps1("9.9.9", None, None, false),
+            render_install_ps1("9.9.9", None, None, None, false),
         )
         .unwrap();
         std::fs::write(
@@ -1554,7 +1642,7 @@ mod tests {
 
     #[test]
     fn install_ps1_omits_args_entirely_when_not_given() {
-        let out = render_install_ps1("0.43.99", None, None, false);
+        let out = render_install_ps1("0.43.99", None, None, None, false);
         assert!(!out.contains("-NatsToken"));
         assert!(!out.contains("-CommandKeys"));
         assert!(!out.contains("-RequireSignedCommands"));
@@ -1567,7 +1655,7 @@ mod tests {
         // PowerShell single-quoted literal escaping: `'` becomes `''`. An
         // unescaped quote would terminate the literal and let the rest of
         // the token run as script.
-        let out = render_install_ps1("0.43.99", Some("it's"), None, false);
+        let out = render_install_ps1("0.43.99", Some("it's"), None, None, false);
         assert!(out.contains("-NatsToken 'it''s'"));
     }
 
@@ -1597,8 +1685,13 @@ mod tests {
     #[test]
     fn zip_round_trips_all_entries() {
         let agent_toml = render_agent_toml("nats://broker.corp:4222").unwrap();
-        let install_ps1 =
-            render_install_ps1("0.43.99", Some("tok"), Some("[{\"kid\":\"k\"}]"), true);
+        let install_ps1 = render_install_ps1(
+            "0.43.99",
+            Some("tok"),
+            None,
+            Some("[{\"kid\":\"k\"}]"),
+            true,
+        );
         let entries: Vec<(&str, Vec<u8>)> = vec![
             ("kanade-agent.exe", b"MZ-fake-exe".to_vec()),
             ("agent.toml", agent_toml.clone().into_bytes()),
@@ -1693,10 +1786,11 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            let (url, _) = resolve_nats(&settings, "nats://backend:4222").unwrap();
+            let (url, _, _) = resolve_nats(&settings, "nats://backend:4222").unwrap();
             assert_eq!(url, "nats://backend:4222");
         }
-        let (_, token) = resolve_nats(&ServerSettings::default(), "nats://backend:4222").unwrap();
+        let (_, token, _) =
+            resolve_nats(&ServerSettings::default(), "nats://backend:4222").unwrap();
         assert_eq!(token, None);
     }
 
@@ -1706,12 +1800,11 @@ mod tests {
             agent_install: Some(kanade_shared::wire::AgentInstallSection {
                 nats_url: Some("nats://broker.corp:4222".into()),
                 nats_token: Some("s3cret".into()),
-                nats_token_set: false,
-                require_signed_commands: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
-        let (url, token) = resolve_nats(&settings, "nats://backend:4222").unwrap();
+        let (url, token, _) = resolve_nats(&settings, "nats://backend:4222").unwrap();
         assert_eq!(url, "nats://broker.corp:4222");
         assert_eq!(token.as_deref(), Some("s3cret"));
     }
@@ -1728,7 +1821,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (_, token) = resolve_nats(&settings, "nats://backend:4222").unwrap();
+        let (_, token, _) = resolve_nats(&settings, "nats://backend:4222").unwrap();
         assert_eq!(token, None);
     }
 
@@ -1942,6 +2035,7 @@ mod tests {
         let with = render_install_sh(
             Some("s3cret"),
             None,
+            None,
             false,
             "setup-agent.sh",
             "a systemd service",
@@ -1956,7 +2050,14 @@ mod tests {
         // LF only.
         assert!(!with.contains('\r'));
 
-        let without = render_install_sh(None, None, false, "setup-agent.sh", "a systemd service");
+        let without = render_install_sh(
+            None,
+            None,
+            None,
+            false,
+            "setup-agent.sh",
+            "a systemd service",
+        );
         assert!(!without.contains("KANADE_NATS_TOKEN"));
         assert!(without.ends_with("exec ./setup-agent.sh\n"));
     }
@@ -1968,6 +2069,7 @@ mod tests {
         // as shell.
         let out = render_install_sh(
             Some("it's"),
+            None,
             None,
             false,
             "setup-agent.sh",
@@ -2004,6 +2106,7 @@ mod tests {
             agent_toml.clone(),
             Some("tok"),
             None,
+            None,
             EnforcementPlan::Off,
         ));
         for expected in [
@@ -2037,6 +2140,7 @@ mod tests {
             render_install_sh(
                 Some("tok"),
                 None,
+                None,
                 false,
                 "setup-agent.sh",
                 "a systemd service"
@@ -2059,6 +2163,7 @@ mod tests {
             b"\xcf\xfa\xed\xfe-fake".to_vec(),
             agent_toml.clone(),
             Some("tok"),
+            None,
             None,
             EnforcementPlan::Off,
         ));
@@ -2140,6 +2245,7 @@ mod tests {
             b"bin".to_vec(),
             "toml".into(),
             Some("tok"),
+            None,
             keys,
             enforcement,
         ));
@@ -2178,5 +2284,185 @@ mod tests {
         assert!(warned.contains("*** WARNING"));
         assert!(warned.contains("does NOT enable enforcement"));
         assert!(!warned.contains('\r'));
+    }
+
+    fn awkward_pair() -> NatsUserPair {
+        NatsUserPair {
+            user: "svc agent".into(),
+            password: r#"it's a "$pw" \ `x`"#.into(),
+        }
+    }
+
+    fn pair_settings(user: Option<&str>, password: Option<&str>) -> ServerSettings {
+        ServerSettings {
+            agent_install: Some(kanade_shared::wire::AgentInstallSection {
+                nats_token: Some("tok".into()),
+                nats_user: user.map(Into::into),
+                nats_password: password.map(Into::into),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn install_ps1_embeds_the_user_pair_after_the_token_with_quoting() {
+        let pair = awkward_pair();
+        let out = render_install_ps1("0.43.99", Some("tok"), Some(&pair), None, false);
+        assert!(
+            out.contains(
+                " -NatsToken 'tok' -NatsUser 'svc agent' \
+                 -NatsPassword 'it''s a \"$pw\" \\ `x`'"
+            ),
+            "{out}"
+        );
+        // Without a token the pair still embeds; the token never depends on it.
+        let out = render_install_ps1("0.43.99", None, Some(&pair), None, false);
+        assert!(out.contains(" -NatsUser 'svc agent' -NatsPassword "));
+        assert!(!out.contains("-NatsToken"));
+    }
+
+    #[test]
+    fn install_ps1_without_a_pair_is_byte_for_byte_the_old_output() {
+        let out = render_install_ps1("0.43.99", Some("tok"), None, Some("[1]"), true);
+        assert_eq!(
+            out,
+            "# Generated by kanade-backend — do not edit.\r\n\
+             # Installs kanade-agent 0.43.99 as a Windows service. Run as Administrator.\r\n\
+             $ErrorActionPreference = 'Stop'\r\n\
+             Start-Transcript -Path (Join-Path $PSScriptRoot 'install.log') -Force | Out-Null\r\n\
+             try {\r\n\
+             \x20   & (Join-Path $PSScriptRoot 'deploy-agent.ps1') -NatsToken 'tok' -CommandKeys '[1]' -RequireSignedCommands\r\n\
+             \x20   exit $LASTEXITCODE\r\n\
+             } finally {\r\n\
+             \x20   Stop-Transcript | Out-Null\r\n\
+             }\r\n"
+        );
+    }
+
+    #[test]
+    fn install_sh_embeds_the_user_pair_with_sh_quoting() {
+        let pair = awkward_pair();
+        let out = render_install_sh(
+            Some("tok"),
+            Some(&pair),
+            None,
+            false,
+            "setup-agent.sh",
+            "a systemd service",
+        );
+        assert!(out.contains(
+            "export KANADE_NATS_TOKEN='tok'\n\
+             export KANADE_NATS_USER='svc agent'\n\
+             export KANADE_NATS_PASSWORD='it'\\''s a \"$pw\" \\ `x`'\n\
+             exec ./setup-agent.sh\n"
+        ));
+    }
+
+    #[test]
+    fn install_sh_without_a_pair_is_byte_for_byte_the_old_output() {
+        let out = render_install_sh(
+            Some("tok"),
+            None,
+            Some("[1]"),
+            true,
+            "setup-agent.sh",
+            "a systemd service",
+        );
+        assert_eq!(
+            out,
+            "#!/bin/sh\n\
+             # Generated by kanade-backend — do not edit.\n\
+             # Installs kanade-agent as a systemd service. Run as root (sudo).\n\
+             set -eu\n\
+             cd \"$(dirname \"$0\")\"\n\
+             export KANADE_NATS_TOKEN='tok'\n\
+             export KANADE_COMMAND_KEYS='[1]'\n\
+             export KANADE_REQUIRE_SIGNED_COMMANDS=1\n\
+             exec ./setup-agent.sh\n"
+        );
+    }
+
+    #[test]
+    fn tarballs_embed_the_pair_and_say_so_in_the_readme_without_revealing_it() {
+        let pair = awkward_pair();
+        for (os, setup) in [
+            (InstallerOs::Linux, "setup-agent.sh"),
+            (InstallerOs::Macos, "setup-agent-macos.sh"),
+        ] {
+            let build = |p: Option<&NatsUserPair>| {
+                tar_round_trip(unix_tar_entries(
+                    os,
+                    "0.45.4-x",
+                    b"bin".to_vec(),
+                    "toml".into(),
+                    Some("tok"),
+                    p,
+                    None,
+                    EnforcementPlan::Off,
+                ))
+            };
+            let with = build(Some(&pair));
+            let sh = String::from_utf8(with["install.sh"].1.clone()).unwrap();
+            assert!(sh.contains("export KANADE_NATS_TOKEN='tok'\n"));
+            assert!(sh.contains("export KANADE_NATS_USER='svc agent'\n"));
+            assert!(sh.contains(&format!("exec ./{setup}\n")));
+            let readme = String::from_utf8(with["README.txt"].1.clone()).unwrap();
+            assert!(readme.contains("NATS user and password"));
+            assert!(!readme.contains("svc agent") && !readme.contains("$pw"));
+            assert!(!readme.contains('\r'));
+
+            // No pair → README and install.sh carry no trace of one.
+            let without = build(None);
+            let sh = String::from_utf8(without["install.sh"].1.clone()).unwrap();
+            assert!(!sh.contains("KANADE_NATS_USER") && !sh.contains("KANADE_NATS_PASSWORD"));
+            let readme = String::from_utf8(without["README.txt"].1.clone()).unwrap();
+            assert!(!readme.contains("NATS user"));
+            assert!(
+                String::from_utf8(with["README.txt"].1.clone())
+                    .unwrap()
+                    .starts_with(&readme)
+            );
+        }
+    }
+
+    #[test]
+    fn windows_readme_note_is_crlf_and_value_free() {
+        let note = user_pair_note("\r\n");
+        assert!(note.contains("NATS user and password"));
+        assert!(note.lines().all(|l| !l.contains('$')));
+        assert_eq!(note.matches('\n').count(), note.matches("\r\n").count());
+    }
+
+    #[test]
+    fn resolve_nats_returns_the_pair_only_when_both_halves_are_usable() {
+        let url = "nats://backend:4222";
+        let (_, token, pair) = resolve_nats(&pair_settings(Some("u"), Some("p")), url).unwrap();
+        assert_eq!(token.as_deref(), Some("tok"));
+        assert_eq!(
+            pair,
+            Some(NatsUserPair {
+                user: "u".into(),
+                password: "p".into()
+            })
+        );
+        // Half pairs (only reachable via a hand-written KV value) and empty
+        // halves embed nothing — never a lone -NatsUser.
+        for (u, p) in [
+            (Some("u"), None),
+            (None, Some("p")),
+            (Some(""), Some("p")),
+            (Some("u"), Some("")),
+            (None, None),
+        ] {
+            let (_, _, pair) = resolve_nats(&pair_settings(u, p), url).unwrap();
+            assert_eq!(pair, None, "{u:?}/{p:?}");
+        }
+    }
+
+    #[test]
+    fn user_pair_debug_hides_the_values() {
+        let dbg = format!("{:?}", awkward_pair());
+        assert!(!dbg.contains("svc agent") && !dbg.contains("pw"), "{dbg}");
     }
 }

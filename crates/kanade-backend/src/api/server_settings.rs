@@ -123,7 +123,9 @@ pub async fn defaults() -> Json<ServerSettings> {
 ///   instead of silently disabling email at the next restart).
 /// - `agent_install`: `nats_url` non-empty, no `'` / newline (TOML literal-
 ///   string safety — the installer splices it into agent.toml); `nats_token`
-///   no newline (it lands in a PowerShell literal). Merged SPECIALLY (see
+///   no newline (it lands in a PowerShell literal); `nats_user` /
+///   `nats_password` non-empty, no newline, and updated only as a pair
+///   (see [`validate_user_pair_update`]). Merged SPECIALLY (see
 ///   [`merge_agent_install`]): an incoming section that omits `nats_token`
 ///   keeps the stored one — the support-code trap, where a form round-trip
 ///   of the redacted document would otherwise silently clear a live secret.
@@ -154,6 +156,7 @@ pub async fn put(
             )
         })?;
     validate(&typed)?;
+    validate_user_pair_update(&incoming)?;
     let typed = normalize(typed);
 
     // Precompute the normalised JSON values once (outside the CAS closure,
@@ -385,7 +388,8 @@ pub async fn put(
 }
 
 /// Blank every secret in a raw settings document, leaving the rest
-/// byte-identical: the support-code hashes and `agent_install.nats_token`.
+/// byte-identical: the support-code hashes and the `agent_install` NATS
+/// credentials (token, user, password).
 /// Used on the audit copy, which is raw JSON (so unknown keys survive)
 /// rather than the typed view [`ServerSettings::redacted`] operates on.
 fn redact_secrets(mut doc: Value) -> Value {
@@ -401,8 +405,14 @@ fn redact_secrets(mut doc: Value) -> Value {
     // be duplicated into. Keep the same presence indicator redacted()
     // computes for responses, so the audit still records "a token was set".
     if let Some(ai) = doc.get_mut("agent_install").and_then(Value::as_object_mut) {
-        let had_token = ai.remove("nats_token").is_some_and(|v| v.is_string());
-        ai.insert("nats_token_set".to_string(), Value::Bool(had_token));
+        for (secret, flag) in [
+            ("nats_token", "nats_token_set"),
+            ("nats_user", "nats_user_set"),
+            ("nats_password", "nats_password_set"),
+        ] {
+            let had = ai.remove(secret).is_some_and(|v| v.is_string());
+            ai.insert(flag.to_string(), Value::Bool(had));
+        }
     }
     doc
 }
@@ -453,6 +463,8 @@ fn merge_field(
 /// `nats_token: "..."` / `null` rotates / clears it. `nats_token_set` is
 /// computed by `redacted()` on the way out — it is never stored, and never
 /// accepted from the client (also enforced by `skip_deserializing`).
+const INSTALL_SECRET_FLAGS: [&str; 3] = ["nats_token_set", "nats_user_set", "nats_password_set"];
+
 fn merge_agent_install(obj: &mut Map<String, Value>, incoming: &Map<String, Value>) -> bool {
     let Some(inc) = incoming.get("agent_install") else {
         return false;
@@ -470,7 +482,7 @@ fn merge_agent_install(obj: &mut Map<String, Value>, incoming: &Map<String, Valu
         None => Map::new(),
     };
     for (k, v) in inc_obj {
-        if k == "nats_token_set" {
+        if INSTALL_SECRET_FLAGS.contains(&k.as_str()) {
             continue;
         }
         if v.is_null() {
@@ -481,7 +493,9 @@ fn merge_agent_install(obj: &mut Map<String, Value>, incoming: &Map<String, Valu
     }
     // A stored indicator (hand-written KV, or written before the key was
     // skip-stored) never survives a merge either.
-    merged.remove("nats_token_set");
+    for flag in INSTALL_SECRET_FLAGS {
+        merged.remove(flag);
+    }
     if merged.is_empty() {
         // All keys cleared → drop the section, so an emptied section reads
         // back as unset (None) rather than a present-but-empty object.
@@ -638,7 +652,43 @@ fn validate_agent_install(ai: &AgentInstallSection) -> Result<(), (StatusCode, S
             "agent_install.nats_token must not contain a newline".into(),
         ));
     }
+    for (name, v) in [
+        ("nats_user", ai.nats_user.as_deref()),
+        ("nats_password", ai.nats_password.as_deref()),
+    ] {
+        if let Some(v) = v
+            && (v.is_empty() || v.contains('\n') || v.contains('\r'))
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("agent_install.{name} must be non-empty and must not contain a newline"),
+            ));
+        }
+    }
     Ok(())
+}
+
+/// `nats_user` / `nats_password` are one credential: setting only one half
+/// would store something the installer must then ignore, and the operator
+/// would believe a user pair is being distributed when it is not. Judged on
+/// the RAW incoming section, because the typed decode cannot tell an omitted
+/// key (keep the stored value) from `null` (clear it). Per key the update is
+/// "omitted", "cleared" or "set"; both halves must agree. Messages never
+/// carry the submitted values.
+fn validate_user_pair_update(incoming: &Map<String, Value>) -> Result<(), (StatusCode, String)> {
+    let Some(ai) = incoming.get("agent_install").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let state = |k: &str| ai.get(k).map(|v| !v.is_null());
+    match (state("nats_user"), state("nats_password")) {
+        (None, None) | (Some(false), Some(false)) | (Some(true), Some(true)) => Ok(()),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "agent_install.nats_user and agent_install.nats_password are a pair: send both \
+             (to set or rotate) or both as null (to clear), or omit both to keep the stored pair"
+                .into(),
+        )),
+    }
 }
 
 /// #1247: each bucket cap must be `1..=MAX_OBJECT_STORE_CAP_MIB`.
@@ -1029,13 +1079,14 @@ async fn open_bucket(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
     use kanade_shared::config::{MailEncryption, MailSection};
     use serde_json::{Map, Value, json};
 
     use super::{
         MAX_OBJECT_STORE_CAP_MIB, MIN_SUPPORT_CODE_LEN, ObjectStoreCaps, ServerSettings,
         SupportCodeBody, hash_support_code, merge_agent_install, merge_field, normalize,
-        redact_secrets, validate, validate_support_code,
+        redact_secrets, validate, validate_support_code, validate_user_pair_update,
     };
 
     fn obj(v: Value) -> Map<String, Value> {
@@ -1499,6 +1550,78 @@ mod tests {
     }
 
     #[test]
+    fn agent_install_merge_preserves_the_user_pair_when_omitted() {
+        let mut stored = obj(json!({ "agent_install": {
+            "nats_url":"nats://old:4222","nats_user":"u","nats_password":"p"} }));
+        // The SPA round-trips the redacted document: flags, no secrets.
+        let incoming = obj(json!({ "agent_install": {
+            "nats_url":"nats://new:4222","nats_user_set":true,"nats_password_set":true} }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert_eq!(
+            stored["agent_install"],
+            json!({"nats_url":"nats://new:4222","nats_user":"u","nats_password":"p"}),
+        );
+        // Rotate both, then clear both.
+        let incoming = obj(json!({ "agent_install": {"nats_user":"u2","nats_password":"p2"} }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert_eq!(stored["agent_install"]["nats_user"], "u2");
+        assert_eq!(stored["agent_install"]["nats_password"], "p2");
+        let incoming = obj(json!({ "agent_install": {"nats_user":null,"nats_password":null} }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert!(stored["agent_install"].get("nats_user").is_none());
+        assert!(stored["agent_install"].get("nats_password").is_none());
+    }
+
+    #[test]
+    fn user_pair_update_must_be_all_or_nothing() {
+        let check = |v: Value| validate_user_pair_update(&obj(json!({ "agent_install": v })));
+        assert!(check(json!({"nats_url":"nats://b:4222"})).is_ok());
+        assert!(check(json!({"nats_user":"u","nats_password":"p"})).is_ok());
+        assert!(check(json!({"nats_user":null,"nats_password":null})).is_ok());
+        assert!(validate_user_pair_update(&obj(json!({}))).is_ok());
+        for bad in [
+            json!({"nats_user":"u-secret"}),
+            json!({"nats_password":"pw-secret"}),
+            json!({"nats_user":"u-secret","nats_password":null}),
+            json!({"nats_user":null,"nats_password":"pw-secret"}),
+        ] {
+            let (code, msg) = check(bad).unwrap_err();
+            assert_eq!(code, StatusCode::BAD_REQUEST);
+            assert!(msg.contains("pair"), "{msg}");
+            assert!(!msg.contains("secret"), "message leaked a value: {msg}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_user_pair_values_without_echoing_them() {
+        use kanade_shared::wire::AgentInstallSection;
+        let with = |u: &str, p: &str| ServerSettings {
+            agent_install: Some(AgentInstallSection {
+                nats_user: Some(u.into()),
+                nats_password: Some(p.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate(&with("agent", "it's a $pw \"x\"")).is_ok());
+        for (u, p) in [("", "p"), ("u", ""), ("u\nx", "p"), ("u", "pw-secret\r")] {
+            let (_, msg) = validate(&with(u, p)).unwrap_err();
+            assert!(!msg.contains("secret"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn redact_secrets_hides_the_user_pair_in_the_audit_copy() {
+        let redacted = redact_secrets(json!({"agent_install": {
+            "nats_url":"nats://b:4222","nats_user":"u-secret","nats_password":"pw-secret"}}));
+        let text = redacted.to_string();
+        assert!(!text.contains("secret"), "{text}");
+        assert_eq!(redacted["agent_install"]["nats_user_set"], true);
+        assert_eq!(redacted["agent_install"]["nats_password_set"], true);
+        assert_eq!(redacted["agent_install"]["nats_token_set"], false);
+    }
+
+    #[test]
     fn agent_install_merge_drops_a_fully_cleared_section() {
         // Clearing the last key removes the section entirely, so it reads
         // back as unset (None) rather than a present-but-empty object.
@@ -1515,8 +1638,7 @@ mod tests {
             agent_install: Some(AgentInstallSection {
                 nats_url: nats_url.map(str::to_string),
                 nats_token: nats_token.map(str::to_string),
-                nats_token_set: false,
-                require_signed_commands: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
