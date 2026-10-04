@@ -261,10 +261,19 @@ function Assert-KanadeCommandKeys {
     param([object[]]$Entries)
     foreach ($e in $Entries) {
         $bytes = $null
+        $raw = [string]$e.public_key
         try {
-            $bytes = [Convert]::FromBase64String(([string]$e.public_key).Trim())
+            $bytes = [Convert]::FromBase64String($raw)
         } catch {
             throw "CommandKeys entry '$($e.kid)' has a public_key that is not valid Base64. Nothing was changed."
+        }
+        # The value is stored verbatim and the agent's strict standard-Base64
+        # decoder reads it as-is. .NET also accepts surrounding or interior
+        # whitespace and non-canonical trailing bits, which the agent rejects,
+        # so require the string to be exactly the canonical encoding of what it
+        # decodes to.
+        if ([Convert]::ToBase64String($bytes) -cne $raw) {
+            throw "CommandKeys entry '$($e.kid)' has a public_key that is not canonical standard Base64 (no whitespace, correct padding). Nothing was changed."
         }
         if ($bytes.Length -ne 32) {
             throw "CommandKeys entry '$($e.kid)' has a public_key that decodes to $($bytes.Length) bytes; an Ed25519 public key is exactly 32. Nothing was changed."

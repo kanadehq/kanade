@@ -40,7 +40,10 @@ foreach ($p in @($agentPs1, $assetPs1)) {
 
     $cases = @(
         @{ n = 'valid 32-byte key'; k = $good; ok = $true },
-        @{ n = 'valid key with surrounding whitespace'; k = "  $good`n"; ok = $true },
+        @{ n = 'key with surrounding whitespace'; k = "  $good`n"; ok = $false },
+        @{ n = 'key with interior whitespace'; k = ($good.Substring(0, 8) + ' ' + $good.Substring(8)); ok = $false },
+        @{ n = 'key with missing padding'; k = $good.TrimEnd('='); ok = $false },
+        @{ n = 'key with non-canonical trailing bits'; k = ($good.Substring(0, 42) + 'B='); ok = $false },
         @{ n = 'not Base64'; k = 'this is not base64!!'; ok = $false },
         @{ n = 'truncated Base64'; k = $good.Substring(0, $good.Length - 1); ok = $false },
         @{ n = '31 bytes'; k = (B64 31); ok = $false },
