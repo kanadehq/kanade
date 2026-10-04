@@ -542,7 +542,7 @@ impl Ledger {
                     // directly (the ledger write failed, the outbox write did
                     // not). That file is the outcome, not "unknown": adopt it
                     // rather than overwrite it with a placeholder.
-                    match self.queued_outcome(&rec.request_id) {
+                    match self.queued_outcome(&rec) {
                         Ok(Some(result)) => {
                             let finished_at = result.finished_at;
                             rec.state = State::Finished {
@@ -747,15 +747,89 @@ impl Ledger {
         }
     }
 
-    /// The result already sitting in the outbox for `request_id`, if any.
-    fn queued_outcome(&self, request_id: &str) -> Result<Option<ExecResult>, LedgerError> {
-        let path = self.outbox_dir.join(format!("{request_id}.json"));
+    /// Whether `result` is the outcome of the admission `rec` describes. The
+    /// outbox keeps one slot per `request_id`, so a result left by an earlier
+    /// refusal of the same request shares the name but not the `result_id`.
+    fn is_outcome_of(&self, rec: &Record, result: &ExecResult) -> bool {
+        result.result_id == rec.result_id
+            && result.request_id == rec.request_id
+            && result.pc_id == self.pc_id
+    }
+
+    /// The result already queued for the admission `rec`, if any: first in the
+    /// outbox, then in its quarantine. A result that belongs to another
+    /// admission of the same `request_id` is not an outcome of this one.
+    fn queued_outcome(&self, rec: &Record) -> Result<Option<ExecResult>, LedgerError> {
+        let path = self.outbox_dir.join(format!("{}.json", rec.request_id));
         match std::fs::read(&path) {
-            Ok(b) => serde_json::from_slice::<ExecResult>(&b)
-                .map(Some)
-                .map_err(|e| LedgerError::Corrupt(format!("{}: {e}", path.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(io_err(&format!("read {}", path.display()), e)),
+            Ok(b) => {
+                let result = serde_json::from_slice::<ExecResult>(&b)
+                    .map_err(|e| LedgerError::Corrupt(format!("{}: {e}", path.display())))?;
+                if self.is_outcome_of(rec, &result) {
+                    return Ok(Some(result));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(&format!("read {}", path.display()), e)),
+        }
+        self.quarantined_outcome(rec)
+    }
+
+    /// The newest matching result among the quarantined files for
+    /// `rec.request_id` (`<id>.json`, `<id>.json.N`). The quarantine is
+    /// permanent, so an unreadable or foreign file is skipped rather than
+    /// blocking recovery for good; only a directory that cannot be listed
+    /// defers it. Nothing is moved: a quarantined result is not resent here.
+    fn quarantined_outcome(&self, rec: &Record) -> Result<Option<ExecResult>, LedgerError> {
+        let dir = self.outbox_dir.join(crate::outbox_retry::STUCK_DIR);
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&format!("read_dir {}", dir.display()), e)),
+        };
+        let base = format!("{}.json", rec.request_id);
+        let mut best: Option<ExecResult> = None;
+        let mut listing_failed = false;
+        for entry in rd {
+            let Ok(entry) = entry else {
+                listing_failed = true;
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_candidate = name == base
+                || name
+                    .strip_prefix(&format!("{base}."))
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if !is_candidate {
+                continue;
+            }
+            let result = match std::fs::read(entry.path())
+                .map_err(|e| e.to_string())
+                .and_then(|b| serde_json::from_slice::<ExecResult>(&b).map_err(|e| e.to_string()))
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(file = %entry.path().display(), error = %e, "admission ledger: skipping an unreadable quarantined result");
+                    continue;
+                }
+            };
+            if !self.is_outcome_of(rec, &result) {
+                continue;
+            }
+            if best
+                .as_ref()
+                .is_none_or(|b| result.finished_at > b.finished_at)
+            {
+                best = Some(result);
+            }
+        }
+        match best {
+            Some(r) => Ok(Some(r)),
+            None if listing_failed => Err(LedgerError::Corrupt(format!(
+                "{}: an entry could not be listed",
+                dir.display()
+            ))),
+            None => Ok(None),
         }
     }
 
@@ -1559,5 +1633,98 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn launching_only(fx: &Fixture) -> String {
+        let l = fx.open();
+        let t = admitted(&l, "req-1");
+        t.mark_launching().unwrap();
+        t.result_id().to_string()
+    }
+
+    fn put(path: &Path, rid: &str, pc: &str, code: i32) {
+        let mut r = result_for("req-1", code);
+        r.result_id = rid.into();
+        r.pc_id = pc.into();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec(&r).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn recovery_ignores_an_outbox_result_of_another_admission() {
+        let fx = Fixture::new();
+        let rid = launching_only(&fx);
+        put(&fx.outbox_dir().join("req-1.json"), "refusal-id", "PC1", 7);
+        let r = fx.open().recover();
+        assert_eq!(r.unknown_reported, 1);
+        let out = fx.outbox_files();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].result_id, rid);
+        assert_eq!(out[0].exit_code, EXIT_RESTARTED_OUTCOME_UNKNOWN);
+    }
+
+    #[test]
+    fn recovery_ignores_an_outbox_result_of_another_pc() {
+        let fx = Fixture::new();
+        let rid = launching_only(&fx);
+        put(&fx.outbox_dir().join("req-1.json"), &rid, "OTHER", 7);
+        assert_eq!(fx.open().recover().unknown_reported, 1);
+    }
+
+    #[test]
+    fn recovery_adopts_a_matching_outbox_result() {
+        let fx = Fixture::new();
+        let rid = launching_only(&fx);
+        put(&fx.outbox_dir().join("req-1.json"), &rid, "PC1", 7);
+        let l = fx.open();
+        assert_eq!(l.recover().unknown_reported, 0);
+        assert_eq!(fx.outbox_files()[0].exit_code, 7);
+        assert!(matches!(
+            l.state_of("req-1"),
+            Some(State::Finished {
+                outbox_enqueued: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn recovery_finds_a_matching_result_in_quarantine() {
+        for name in ["req-1.json", "req-1.json.2"] {
+            let fx = Fixture::new();
+            let rid = launching_only(&fx);
+            // A foreign result in the live slot must not stop the search.
+            put(&fx.outbox_dir().join("req-1.json"), "refusal-id", "PC1", 9);
+            let stuck = fx.outbox_dir().join(crate::outbox_retry::STUCK_DIR);
+            put(&stuck.join("req-1.json.1"), "other", "PC1", 8);
+            std::fs::write(stuck.join("req-1.json.3"), b"garbage").unwrap();
+            put(&stuck.join(name), &rid, "PC1", 6);
+            let l = fx.open();
+            assert_eq!(l.recover().unknown_reported, 0, "{name}");
+            assert!(
+                matches!(
+                    l.state_of("req-1"),
+                    Some(State::Finished {
+                        outbox_enqueued: true,
+                        ref result,
+                        ..
+                    }) if result.exit_code == 6
+                ),
+                "{name}"
+            );
+            assert_eq!(fx.outbox_files()[0].exit_code, 9, "outbox is untouched");
+            // A later recover changes nothing.
+            assert_eq!(fx.open().recover().unknown_reported, 0);
+        }
+    }
+
+    #[test]
+    fn recovery_reports_unknown_when_quarantine_holds_nothing_matching() {
+        let fx = Fixture::new();
+        launching_only(&fx);
+        let stuck = fx.outbox_dir().join(crate::outbox_retry::STUCK_DIR);
+        put(&stuck.join("req-1.json"), "other", "PC1", 8);
+        std::fs::write(stuck.join("req-1.json.1"), b"garbage").unwrap();
+        assert_eq!(fx.open().recover().unknown_reported, 1);
     }
 }
