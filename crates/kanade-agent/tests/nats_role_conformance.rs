@@ -62,7 +62,9 @@ use async_nats::{Client, Event};
 use bytes::Bytes;
 use futures::StreamExt;
 use kanade_shared::ExecResult;
-use kanade_shared::nats_client::{NatsCredentials, NatsRole, connect_with_credentials_and_event_callback};
+use kanade_shared::nats_client::{
+    NatsCredentials, NatsRole, connect_with_credentials_and_event_callback,
+};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
@@ -318,7 +320,11 @@ impl Broker {
     #[cfg(unix)]
     fn reload(&self, auth: Auth) {
         self.write_conf(auth);
-        let pid = self.child.as_ref().and_then(|c| c.id()).expect("broker pid");
+        let pid = self
+            .child
+            .as_ref()
+            .and_then(|c| c.id())
+            .expect("broker pid");
         let ok = std::process::Command::new("kill")
             .args(["-HUP", &pid.to_string()])
             .status()
@@ -351,7 +357,10 @@ impl Broker {
                     .map(|c| {
                         (
                             c["name"].as_str().unwrap_or_default().to_string(),
-                            c["authorized_user"].as_str().unwrap_or_default().to_string(),
+                            c["authorized_user"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
                         )
                     })
                     .collect()
@@ -401,7 +410,11 @@ fn parse_violations(log: &str) -> Vec<Violation> {
             .and_then(|r| r.split('"').next())
             .unwrap_or_default()
             .to_string();
-        out.push(Violation { user, kind, subject });
+        out.push(Violation {
+            user,
+            kind,
+            subject,
+        });
     }
     out
 }
@@ -432,7 +445,11 @@ async fn http_request(
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let body = raw.split_once("\r\n\r\n").map(|x| x.1).unwrap_or("").to_string();
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|x| x.1)
+        .unwrap_or("")
+        .to_string();
     (status, body)
 }
 
@@ -516,7 +533,9 @@ impl RoleClient {
 
     fn violated_since(&self, mark: usize, kind: &str, subject: &str) -> bool {
         let needle = format!("{kind} to \"{subject}\"");
-        self.violations_since(mark).iter().any(|e| e.contains(&needle))
+        self.violations_since(mark)
+            .iter()
+            .any(|e| e.contains(&needle))
     }
 
     fn any_violation(&self) -> Vec<String> {
@@ -553,8 +572,12 @@ struct Proc {
 
 impl Proc {
     fn spawn(mut cmd: Command, prefix: &'static str) -> Self {
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-        let mut child = cmd.spawn().unwrap_or_else(|e| panic!("spawn {prefix}: {e}"));
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {prefix}: {e}"));
         if let Some(o) = child.stdout.take() {
             common::forward_lines(o, prefix);
         }
@@ -763,14 +786,17 @@ fn fresh(tag: &str) -> String {
 async fn prove_the_violation_oracle(f: &Fleet) {
     let probe = f.role(Role::Breakglass).await;
     let subject = format!("heartbeat.oracle-{}", fresh(""));
-    probe.client.publish(subject.clone(), Bytes::new()).await.unwrap();
+    probe
+        .client
+        .publish(subject.clone(), Bytes::new())
+        .await
+        .unwrap();
     let _ = probe.client.subscribe("commands.oracle.>").await.unwrap();
     probe.settle().await;
     let seen = f.broker.violations();
     assert!(
-        seen.iter().any(|v| v.user == "breakglass"
-            && v.kind == "Publish"
-            && v.subject == subject),
+        seen.iter()
+            .any(|v| v.user == "breakglass" && v.kind == "Publish" && v.subject == subject),
         "the broker log parser missed a deliberate publish violation — the log format \
          has drifted from what this test expects.\n{}",
         f.broker.log()
@@ -805,16 +831,32 @@ async fn allowed_flows_complete_under_the_users_block() {
     // Every resource the bootstrap promises exists, read back through the
     // backend's own credential.
     for s in kanade_shared::kv::ALL_STREAMS {
-        backend.js.get_stream(*s).await.unwrap_or_else(|e| panic!("stream {s}: {e}"));
+        backend
+            .js
+            .get_stream(*s)
+            .await
+            .unwrap_or_else(|e| panic!("stream {s}: {e}"));
     }
     for b in kanade_shared::kv::ALL_KV_BUCKETS {
-        backend.js.get_key_value(*b).await.unwrap_or_else(|e| panic!("bucket {b}: {e}"));
+        backend
+            .js
+            .get_key_value(*b)
+            .await
+            .unwrap_or_else(|e| panic!("bucket {b}: {e}"));
     }
     for o in kanade_shared::kv::ALL_OBJECT_STORES {
-        backend.js.get_object_store(*o).await.unwrap_or_else(|e| panic!("store {o}: {e}"));
+        backend
+            .js
+            .get_object_store(*o)
+            .await
+            .unwrap_or_else(|e| panic!("store {o}: {e}"));
     }
     // Buckets bootstrap does not create: first use creates them.
-    backend.js.get_key_value("scheduler_dispatch").await.expect("scheduler_dispatch");
+    backend
+        .js
+        .get_key_value("scheduler_dispatch")
+        .await
+        .expect("scheduler_dispatch");
 
     // Lazily created buckets, fired through the real HTTP handlers.
     let yaml = Some("application/yaml");
@@ -847,7 +889,10 @@ async fn allowed_flows_complete_under_the_users_block() {
     // control path).
     let agent_config = backend.js.get_key_value("agent_config").await.unwrap();
     agent_config
-        .put("global", Bytes::from_static(br#"{"heartbeat_interval":"1s"}"#))
+        .put(
+            "global",
+            Bytes::from_static(br#"{"heartbeat_interval":"1s"}"#),
+        )
         .await
         .expect("backend writes agent_config");
     // The first heartbeat after the write may still be on the old cadence;
@@ -868,9 +913,16 @@ async fn allowed_flows_complete_under_the_users_block() {
     let marker = fresh("mk");
     let out = f.cli_run_echo(&marker, 30).await;
     assert_cli_ok(&out, &marker);
-    until("backend results projector ack", Duration::from_secs(120), || async {
-        f.broker.ack_floor("RESULTS", "backend_results_projector").await >= 1
-    })
+    until(
+        "backend results projector ack",
+        Duration::from_secs(120),
+        || async {
+            f.broker
+                .ack_floor("RESULTS", "backend_results_projector")
+                .await
+                >= 1
+        },
+    )
     .await;
     // …and the audit the CLI published for the run reaches the backend's
     // audit projector.
@@ -883,9 +935,11 @@ async fn allowed_flows_complete_under_the_users_block() {
     // through the agent's durable consumer: the consumer exists under the
     // agent's credential and its position advanced.
     let replay = format!("agent_replay_{}", f.pc_id);
-    until("agent replay consumer ack", Duration::from_secs(30), || async {
-        f.broker.ack_floor("EXEC", &replay).await >= 1
-    })
+    until(
+        "agent replay consumer ack",
+        Duration::from_secs(30),
+        || async { f.broker.ack_floor("EXEC", &replay).await >= 1 },
+    )
     .await;
 
     // Offline agent: a break-glass command sent while the agent is down lands
@@ -895,19 +949,33 @@ async fn allowed_flows_complete_under_the_users_block() {
     f.stop_agent().await;
     let offline_marker = fresh("off");
     let out = f.cli_run_echo(&offline_marker, 1).await;
-    assert!(!out.status.success(), "run against a stopped agent unexpectedly completed");
+    assert!(
+        !out.status.success(),
+        "run against a stopped agent unexpectedly completed"
+    );
     f.start_agent().await;
     wait_result_containing(&mut results, &offline_marker, Duration::from_secs(90)).await;
 
     // Request/reply: ping and log fetch through the real backend handlers,
     // tail directly (it needs a running job to be interesting; the permission
     // surface is the same).
-    let (st, body) =
-        http_request(f.http_port, "POST", &format!("/api/agents/{}/ping", f.pc_id), None, "").await;
+    let (st, body) = http_request(
+        f.http_port,
+        "POST",
+        &format!("/api/agents/{}/ping", f.pc_id),
+        None,
+        "",
+    )
+    .await;
     assert_eq!(st, 200, "ping: {body}");
-    let (st, body) =
-        http_request(f.http_port, "GET", &format!("/api/agents/{}/logs?tail=20", f.pc_id), None, "")
-            .await;
+    let (st, body) = http_request(
+        f.http_port,
+        "GET",
+        &format!("/api/agents/{}/logs?tail=20", f.pc_id),
+        None,
+        "",
+    )
+    .await;
     assert_eq!(st, 200, "logs.fetch: {}", &body[..body.len().min(200)]);
     let tail = backend
         .client
@@ -925,10 +993,14 @@ async fn allowed_flows_complete_under_the_users_block() {
     for (label, body) in [("first", &first), ("overwrite", &second)] {
         enqueue_outbox(&outbox, &request_id, &f.pc_id, body);
         let path = outbox.join(format!("{request_id}.json"));
-        until(&format!("outbox {label} drained"), Duration::from_secs(60), || {
-            let gone = !path.exists();
-            async move { gone }
-        })
+        until(
+            &format!("outbox {label} drained"),
+            Duration::from_secs(60),
+            || {
+                let gone = !path.exists();
+                async move { gone }
+            },
+        )
         .await;
         let store = backend.js.get_object_store("result_output").await.unwrap();
         let mut obj = store
@@ -962,11 +1034,46 @@ async fn allowed_flows_complete_under_the_users_block() {
             .get_key_value(b)
             .await
             .unwrap_or_else(|e| panic!("agent get_key_value({b}): {e}"));
-        let _ = kv.get("nope").await.unwrap_or_else(|e| panic!("agent kv get {b}: {e}"));
-        let mut keys = kv.keys().await.unwrap_or_else(|e| panic!("agent keys {b}: {e}"));
-        while keys.next().await.is_some() {}
-        let mut w = kv.watch_all().await.unwrap_or_else(|e| panic!("agent watch {b}: {e}"));
-        let _ = tokio::time::timeout(Duration::from_millis(500), w.next()).await;
+        let _ = kv
+            .get("nope")
+            .await
+            .unwrap_or_else(|e| panic!("agent kv get {b}: {e}"));
+        let walk = async {
+            let mut keys = kv
+                .keys()
+                .await
+                .unwrap_or_else(|e| panic!("agent keys {b}: {e}"));
+            while keys.next().await.is_some() {}
+        };
+        tokio::time::timeout(Duration::from_secs(15), walk)
+            .await
+            .unwrap_or_else(|_| panic!("agent keys() on {b} stalled"));
+        // A watch must deliver: a distinguishable update written through the
+        // backend's credential has to arrive within a deadline.
+        let mut w = kv
+            .watch_all()
+            .await
+            .unwrap_or_else(|e| panic!("agent watch {b}: {e}"));
+        let probe = fresh("w");
+        let writer = backend.js.get_key_value(b).await.unwrap();
+        writer
+            .put("conformance-watch", Bytes::from(probe.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("backend writes {b}: {e}"));
+        let seen = async {
+            while let Some(entry) = w.next().await {
+                let entry = entry.unwrap_or_else(|e| panic!("watch {b} delivery error: {e}"));
+                if entry.key == "conformance-watch" && entry.value == probe.as_bytes() {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(15), seen).await == Ok(true),
+            "the agent's watch on {b} never delivered the update (stalled or closed)"
+        );
+        let _ = writer.delete("conformance-watch").await;
     }
     // Notification read-state: the one bucket an agent writes.
     let read_state = agent.js.get_key_value("notifications_read").await.unwrap();
@@ -1024,7 +1131,12 @@ async fn allowed_flows_complete_under_the_users_block() {
                 ..Default::default()
             })
             .await
-            .unwrap_or_else(|e| panic!("agent ephemeral consumer on {}: {e}", stream.cached_info().config.name));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "agent ephemeral consumer on {}: {e}",
+                    stream.cached_info().config.name
+                )
+            });
         let mut batch = consumer
             .fetch()
             .max_messages(100)
@@ -1043,7 +1155,10 @@ async fn allowed_flows_complete_under_the_users_block() {
     let big = vec![7u8; 6 * 1024 * 1024];
     let scripts = backend.js.get_object_store("scripts").await.unwrap();
     let mut cursor = std::io::Cursor::new(big.clone());
-    scripts.put("conformance/big", &mut cursor).await.expect("backend writes scripts");
+    scripts
+        .put("conformance/big", &mut cursor)
+        .await
+        .expect("backend writes scripts");
     let agent_scripts = agent.js.get_object_store("scripts").await.unwrap();
     let mut obj = tokio::time::timeout(
         Duration::from_secs(60),
@@ -1058,15 +1173,104 @@ async fn allowed_flows_complete_under_the_users_block() {
         .expect("agent object read stalled (flow control?)")
         .unwrap();
     assert_eq!(got.len(), big.len());
-    agent
+    // agent_releases: a real read of an object the backend published.
+    let releases = backend.js.get_object_store("agent_releases").await.unwrap();
+    let mut cursor = std::io::Cursor::new(b"release-bytes".to_vec());
+    releases
+        .put("conformance/rel", &mut cursor)
+        .await
+        .expect("backend writes agent_releases");
+    let agent_releases = agent
         .js
         .get_object_store("agent_releases")
         .await
-        .expect("agent reads agent_releases");
+        .expect("agent_releases");
+    let mut obj = tokio::time::timeout(
+        Duration::from_secs(30),
+        agent_releases.get("conformance/rel"),
+    )
+    .await
+    .expect("agent_releases get stalled")
+    .expect("agent_releases get");
+    let mut got = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), obj.read_to_end(&mut got))
+        .await
+        .expect("agent_releases read stalled")
+        .unwrap();
+    assert_eq!(got, b"release-bytes");
+
+    // collections: the agent uploads a bundle (the collect flow's upload,
+    // done through the agent credential — the real one needs a manifest run)
+    // and the backend reads it back.
+    let collections = agent
+        .js
+        .get_object_store("collections")
+        .await
+        .expect("collections");
+    let mut cursor = std::io::Cursor::new(b"bundle-v1".to_vec());
+    collections
+        .put("conformance/bundle", &mut cursor)
+        .await
+        .expect("agent uploads a bundle");
+    let mut cursor = std::io::Cursor::new(b"bundle-v2-longer".to_vec());
+    collections
+        .put("conformance/bundle", &mut cursor)
+        .await
+        .expect("agent overwrites a bundle");
+    let mut obj = backend
+        .js
+        .get_object_store("collections")
+        .await
+        .unwrap()
+        .get("conformance/bundle")
+        .await
+        .expect("backend reads the bundle");
+    let mut got = Vec::new();
+    obj.read_to_end(&mut got).await.unwrap();
+    assert_eq!(got, b"bundle-v2-longer");
+
+    // Notifications: the backend publishes one, the NOTIFICATIONS stream
+    // retains it, the agent's role receives it, and the backend's own list
+    // handler (an ephemeral consumer on the stream) reads it back.
+    let mut note = agent
+        .client
+        .subscribe(format!("notifications.pc.{}", f.pc_id))
+        .await
+        .unwrap();
+    agent.settle().await;
+    let body = serde_json::json!({
+        "target": {"pcs": [f.pc_id]},
+        "priority": "info",
+        "title": "conformance",
+        "body": "probe",
+    })
+    .to_string();
+    let (st, resp) = http_request(
+        f.http_port,
+        "POST",
+        "/api/notifications",
+        Some("application/json"),
+        &body,
+    )
+    .await;
+    assert_eq!(st, 200, "notification publish: {resp}");
+    tokio::time::timeout(Duration::from_secs(10), note.next())
+        .await
+        .expect("notification never reached the agent role")
+        .unwrap();
+    let (st, list) = http_request(f.http_port, "GET", "/api/notifications", None, "").await;
+    assert!(
+        st == 200 && list.contains("conformance"),
+        "notification list: {st} {list}"
+    );
 
     // Break-glass `kill`, plus its audit subject.
     let out = f.cli(&["kill", "no-such-exec"]).await;
-    assert!(out.status.success(), "kanade kill: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "kanade kill: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Reconnect: restart the broker under the running processes. Everything
     // re-establishes (re-auth, resubscribe, ordered consumers, durables) and a
@@ -1078,6 +1282,37 @@ async fn allowed_flows_complete_under_the_users_block() {
     // re-subscribed `commands.pc.*` for this to complete.
     let out = f.cli_run_echo(&marker, 60).await;
     assert_cli_ok(&out, &marker);
+
+    // A plain `kanade run` emits no lifecycle event (only manifest runs do),
+    // so one is published through the agent credential for the EVENTS
+    // projector to consume; it may reject the payload but must acknowledge it.
+    agent
+        .js
+        .publish(
+            format!("events.started.conformance-exec.{}", f.pc_id),
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .expect("agent publishes a lifecycle event")
+        .await
+        .expect("lifecycle event acknowledged");
+
+    // Projectors: every durable the backend runs has consumed and
+    // acknowledged what the flows above produced.
+    for (stream, durable) in [
+        ("EVENTS", "backend_events_projector"),
+        ("EVENTS", "backend_notification_acks_projector_v2"),
+        ("OBS_EVENTS", "backend_obs_events_projector"),
+        ("RESULTS", "backend_results_projector"),
+        ("AUDIT", "backend_audit_projector"),
+    ] {
+        until(
+            &format!("{durable} acked"),
+            Duration::from_secs(60),
+            || async { f.broker.ack_floor(stream, durable).await >= 1 },
+        )
+        .await;
+    }
 
     // The second oracle: nothing above may have tripped a permission.
     let after: BTreeSet<Violation> = f.broker.violations().into_iter().collect();
@@ -1092,7 +1327,10 @@ async fn allowed_flows_complete_under_the_users_block() {
         f.backend.as_mut().unwrap().alive(),
         f.agent.as_mut().unwrap().alive(),
     );
-    assert!(backend_ok && agent_ok, "a process exited during the allowed flows");
+    assert!(
+        backend_ok && agent_ok,
+        "a process exited during the allowed flows"
+    );
 }
 
 async fn wait_result_containing(sub: &mut async_nats::Subscriber, needle: &str, within: Duration) {
@@ -1191,16 +1429,44 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Agent, Request("$JS.API.STREAM.UPDATE.KV_jobs"), Denied),
         (Agent, Request("$JS.API.STREAM.UPDATE.EXEC"), Denied),
         (Agent, Request("$JS.API.STREAM.DELETE.KV_jobs"), Denied),
-        (Agent, Request("$JS.API.STREAM.DELETE.OBJ_result_output"), Denied),
+        (
+            Agent,
+            Request("$JS.API.STREAM.DELETE.OBJ_result_output"),
+            Denied,
+        ),
         (Agent, Request("$JS.API.STREAM.PURGE.KV_jobs"), Denied),
         (Agent, Request("$JS.API.STREAM.PURGE.OBJ_scripts"), Denied),
         (Agent, Request("$JS.API.STREAM.PURGE.RESULTS"), Denied),
-        (Agent, Request("$JS.API.STREAM.MSG.DELETE.NOTIFICATIONS"), Denied),
-        (Agent, Request("$JS.API.STREAM.INFO.KV_server_settings"), Denied),
-        (Agent, Request("$JS.API.CONSUMER.CREATE.KV_server_settings"), Denied),
-        (Agent, Request("$JS.API.DIRECT.GET.KV_server_settings.$KV.server_settings.current"), Denied),
-        (Agent, Request("$JS.API.CONSUMER.DELETE.EXEC.someone"), Denied),
-        (Agent, Request("$JS.API.CONSUMER.CREATE.RESULTS.evil"), Denied),
+        (
+            Agent,
+            Request("$JS.API.STREAM.MSG.DELETE.NOTIFICATIONS"),
+            Denied,
+        ),
+        (
+            Agent,
+            Request("$JS.API.STREAM.INFO.KV_server_settings"),
+            Denied,
+        ),
+        (
+            Agent,
+            Request("$JS.API.CONSUMER.CREATE.KV_server_settings"),
+            Denied,
+        ),
+        (
+            Agent,
+            Request("$JS.API.DIRECT.GET.KV_server_settings.$KV.server_settings.current"),
+            Denied,
+        ),
+        (
+            Agent,
+            Request("$JS.API.CONSUMER.DELETE.EXEC.someone"),
+            Denied,
+        ),
+        (
+            Agent,
+            Request("$JS.API.CONSUMER.CREATE.RESULTS.evil"),
+            Denied,
+        ),
         // ── agent: allowed ──
         (Agent, Publish("heartbeat.x"), Allowed),
         (Agent, Publish("results.x"), Allowed),
@@ -1211,9 +1477,21 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Agent, Subscribe("kill.*"), Allowed),
         (Agent, Subscribe("agents.x.ping"), Allowed),
         // The one group the narrowing edit changes:
-        (Agent, Subscribe("commands.all"), COMMAND_BROADCAST_SUBSCRIBE),
-        (Agent, Subscribe("commands.group.x"), COMMAND_BROADCAST_SUBSCRIBE),
-        (Agent, Subscribe("commands.pc.x"), COMMAND_BROADCAST_SUBSCRIBE),
+        (
+            Agent,
+            Subscribe("commands.all"),
+            COMMAND_BROADCAST_SUBSCRIBE,
+        ),
+        (
+            Agent,
+            Subscribe("commands.group.x"),
+            COMMAND_BROADCAST_SUBSCRIBE,
+        ),
+        (
+            Agent,
+            Subscribe("commands.pc.x"),
+            COMMAND_BROADCAST_SUBSCRIBE,
+        ),
         // ── break-glass: nothing but its four flows ──
         (Breakglass, Publish("commands.all"), Denied),
         (Breakglass, Publish("commands.group.x"), Denied),
@@ -1226,7 +1504,11 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Breakglass, Request("$JS.API.INFO"), Denied),
         (Breakglass, Request("$JS.API.STREAM.INFO.EXEC"), Denied),
         (Breakglass, Request("$JS.API.STREAM.CREATE.EVIL"), Denied),
-        (Breakglass, Request("$JS.API.CONSUMER.CREATE.EXEC.x"), Denied),
+        (
+            Breakglass,
+            Request("$JS.API.CONSUMER.CREATE.EXEC.x"),
+            Denied,
+        ),
         (Breakglass, Subscribe("commands.>"), Denied),
         (Breakglass, Subscribe("heartbeat.>"), Denied),
         (Breakglass, Subscribe("_INBOX.>"), Denied),
@@ -1319,7 +1601,11 @@ async fn denied_operations_are_denied_per_role() {
             _ => {}
         }
     }
-    assert!(wrong.is_empty(), "expectation table mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "expectation table mismatches:\n{}",
+        wrong.join("\n")
+    );
 
     // Delivery denials, from absence of delivery on another connection after
     // a positive control proved the path.
@@ -1327,7 +1613,11 @@ async fn denied_operations_are_denied_per_role() {
     let agent = f.role_fast(Role::Agent).await;
     let observer = f.role_fast(Role::Agent).await; // agents may subscribe `commands.pc.*`
     let glass = f.role_fast(Role::Breakglass).await;
-    let mut seen = observer.client.subscribe("commands.pc.victim").await.unwrap();
+    let mut seen = observer
+        .client
+        .subscribe("commands.pc.victim")
+        .await
+        .unwrap();
     observer.settle().await;
     glass
         .client
@@ -1350,7 +1640,9 @@ async fn denied_operations_are_denied_per_role() {
         "agent publish to commands.* was not refused"
     );
     assert!(
-        tokio::time::timeout(Duration::from_secs(2), seen.next()).await.is_err(),
+        tokio::time::timeout(Duration::from_secs(2), seen.next())
+            .await
+            .is_err(),
         "an agent's forged command reached another subscriber"
     );
 
@@ -1366,8 +1658,14 @@ async fn denied_operations_are_denied_per_role() {
         let Ok(write) = backend.js.get_key_value(*b).await else {
             continue;
         };
-        write.put("control", Bytes::from_static(b"ok")).await.expect("backend control write");
-        assert_eq!(write.get("control").await.unwrap().as_deref(), Some(&b"ok"[..]));
+        write
+            .put("control", Bytes::from_static(b"ok"))
+            .await
+            .expect("backend control write");
+        assert_eq!(
+            write.get("control").await.unwrap().as_deref(),
+            Some(&b"ok"[..])
+        );
         writable.push((*b, write));
     }
     let attempts = writable.iter().map(|(b, _)| {
@@ -1405,7 +1703,10 @@ async fn denied_operations_are_denied_per_role() {
                 "no permission violation for an agent write to {b}"
             );
         }
-        assert!(write.get("evil").await.unwrap().is_none(), "forged key landed in {b}");
+        assert!(
+            write.get("evil").await.unwrap().is_none(),
+            "forged key landed in {b}"
+        );
     }
 
     // Real-API denials: create / update / delete / purge streams, buckets and
@@ -1446,7 +1747,7 @@ async fn denied_operations_are_denied_per_role() {
             a.delete_object_store("scripts"),
             a.delete_stream("EXEC"),
             async {
-                if let Ok(mut s) = a.get_stream("KV_jobs").await {
+                if let Ok(s) = a.get_stream("KV_jobs").await {
                     let _ = s.purge().await;
                 }
             },
@@ -1476,11 +1777,26 @@ async fn denied_operations_are_denied_per_role() {
         );
     }
     for s in ["KV_jobs", "KV_schedules", "OBJ_scripts", "EXEC"] {
-        let info = backend.js.get_stream(s).await.unwrap_or_else(|e| panic!("{s} vanished: {e}"));
-        assert_ne!(info.cached_info().config.max_messages, 1, "{s} was reconfigured");
+        let info = backend
+            .js
+            .get_stream(s)
+            .await
+            .unwrap_or_else(|e| panic!("{s} vanished: {e}"));
+        assert_ne!(
+            info.cached_info().config.max_messages,
+            1,
+            "{s} was reconfigured"
+        );
     }
     assert_eq!(
-        backend.js.get_stream("KV_jobs").await.unwrap().cached_info().config.max_messages_per_subject,
+        backend
+            .js
+            .get_stream("KV_jobs")
+            .await
+            .unwrap()
+            .cached_info()
+            .config
+            .max_messages_per_subject,
         jobs_history,
         "KV_jobs history was changed by the agent"
     );
@@ -1491,7 +1807,10 @@ async fn denied_operations_are_denied_per_role() {
     // Break-glass through the real CLI: its four flows work (A covers the
     // happy path); a CLI flow that is not one of them is refused.
     let g = f.role_fast(Role::Breakglass).await;
-    assert!(g.js.get_stream("EXEC").await.is_err(), "break-glass reached JetStream");
+    assert!(
+        g.js.get_stream("EXEC").await.is_err(),
+        "break-glass reached JetStream"
+    );
     g.settle().await;
     assert!(g.violated("Publish", "$JS.API.STREAM.INFO.EXEC"));
 
@@ -1500,7 +1819,9 @@ async fn denied_operations_are_denied_per_role() {
     // another's, because the three users are shared by every host of a role.
     let rs = agent.js.get_key_value("notifications_read").await.unwrap();
     assert!(
-        rs.put("someone-elses-host.u1", Bytes::from_static(b"{}")).await.is_ok(),
+        rs.put("someone-elses-host.u1", Bytes::from_static(b"{}"))
+            .await
+            .is_ok(),
         "residual changed: a per-host notifications_read write is now refused"
     );
 }
@@ -1518,22 +1839,31 @@ struct Proxy {
 
 impl Proxy {
     async fn start(target: u16) -> Self {
-        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.expect("proxy bind");
+        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("proxy bind");
         let port = l.local_addr().unwrap().port();
         let conns: Arc<Mutex<Vec<tokio::task::AbortHandle>>> = Arc::default();
         let reg = conns.clone();
         let accept = tokio::spawn(async move {
             loop {
-                let Ok((mut inbound, _)) = l.accept().await else { return };
+                let Ok((mut inbound, _)) = l.accept().await else {
+                    return;
+                };
                 let h = tokio::spawn(async move {
-                    if let Ok(mut out) = tokio::net::TcpStream::connect(("127.0.0.1", target)).await {
+                    if let Ok(mut out) = tokio::net::TcpStream::connect(("127.0.0.1", target)).await
+                    {
                         let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
                     }
                 });
                 reg.lock().unwrap().push(h.abort_handle());
             }
         });
-        Self { port, conns, accept }
+        Self {
+            port,
+            conns,
+            accept,
+        }
     }
 
     fn cut(&self) {
@@ -1561,13 +1891,17 @@ async fn principals(b: &Broker) -> Vec<(String, String)> {
 
 fn on_users(p: &[(String, String)], pc: &str) -> bool {
     let agent = p.iter().any(|(n, u)| n.contains(pc) && u == "agent");
-    let backend = p.iter().any(|(n, u)| n == "kanade-backend" && u == "backend");
+    let backend = p
+        .iter()
+        .any(|(n, u)| n == "kanade-backend" && u == "backend");
     agent && backend
 }
 
 fn on_token(p: &[(String, String)], pc: &str) -> bool {
     let agent = p.iter().any(|(n, u)| n.contains(pc) && u != "agent");
-    let backend = p.iter().any(|(n, u)| n == "kanade-backend" && u != "backend");
+    let backend = p
+        .iter()
+        .any(|(n, u)| n == "kanade-backend" && u != "backend");
     agent && backend
 }
 
@@ -1577,12 +1911,23 @@ fn on_token(p: &[(String, String)], pc: &str) -> bool {
 async fn every_role_works(f: &mut Fleet, stage: &str, observe_as: Auth) {
     let mut hb = observe_heartbeats(f, observe_as).await;
     f.heartbeat(&mut hb, Duration::from_secs(90)).await;
-    let (st, body) =
-        http_request(f.http_port, "POST", &format!("/api/agents/{}/ping", f.pc_id), None, "").await;
+    let (st, body) = http_request(
+        f.http_port,
+        "POST",
+        &format!("/api/agents/{}/ping", f.pc_id),
+        None,
+        "",
+    )
+    .await;
     assert_eq!(st, 200, "[{stage}] backend → agent ping: {body}");
-    let (st, _) =
-        http_request(f.http_port, "GET", &format!("/api/agents/{}/logs?tail=5", f.pc_id), None, "")
-            .await;
+    let (st, _) = http_request(
+        f.http_port,
+        "GET",
+        &format!("/api/agents/{}/logs?tail=5", f.pc_id),
+        None,
+        "",
+    )
+    .await;
     assert_eq!(st, 200, "[{stage}] backend → agent log fetch");
     let marker = fresh("sw");
     let out = f.cli_run_echo(&marker, 60).await;
@@ -1591,8 +1936,14 @@ async fn every_role_works(f: &mut Fleet, stage: &str, observe_as: Auth) {
         "[{stage}] break-glass run did not complete: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(f.agent.as_mut().unwrap().alive(), "[{stage}] the agent exited");
-    assert!(f.backend.as_mut().unwrap().alive(), "[{stage}] the backend exited");
+    assert!(
+        f.agent.as_mut().unwrap().alive(),
+        "[{stage}] the agent exited"
+    );
+    assert!(
+        f.backend.as_mut().unwrap().alive(),
+        "[{stage}] the backend exited"
+    );
 }
 
 /// A heartbeat subscription on whichever credential the broker accepts in
@@ -1605,7 +1956,10 @@ async fn observe_heartbeats(f: &Fleet, auth: Auth) -> async_nats::Subscriber {
             Role::Backend.password(),
         ),
     };
-    let c = opts.connect(&f.broker.url()).await.expect("observer connect");
+    let c = opts
+        .connect(&f.broker.url())
+        .await
+        .expect("observer connect");
     let s = c.subscribe(format!("heartbeat.{}", f.pc_id)).await.unwrap();
     std::mem::forget(c);
     s
@@ -1631,27 +1985,37 @@ async fn token_to_users_and_back_with_processes_running() {
             .connect(&f.broker.url())
             .await
             .expect("config writer connect");
-        let kv = jetstream::new(c).get_key_value("agent_config").await.expect("agent_config");
-        kv.put("global", Bytes::from_static(br#"{"heartbeat_interval":"1s"}"#))
+        let kv = jetstream::new(c)
+            .get_key_value("agent_config")
             .await
-            .expect("write agent_config");
+            .expect("agent_config");
+        kv.put(
+            "global",
+            Bytes::from_static(br#"{"heartbeat_interval":"1s"}"#),
+        )
+        .await
+        .expect("write agent_config");
     }
 
     // Stage 1 — token broker. The user the helper offers is refused by the
     // probe, so the token is what goes on the wire.
     every_role_works(&mut f, "token", Auth::Token).await;
-    until("both processes on the token", Duration::from_secs(30), || async {
-        on_token(&principals(&f.broker).await, &f.pc_id)
-    })
+    until(
+        "both processes on the token",
+        Duration::from_secs(30),
+        || async { on_token(&principals(&f.broker).await, &f.pc_id) },
+    )
     .await;
 
     // Stage 2 — reload as `users`, processes untouched. The broker stops
     // admitting the token; the clients pick the user at their next attempt.
     f.broker.reload(Auth::Users);
     proxy.cut();
-    until("both processes re-authenticated as their users", Duration::from_secs(90), || async {
-        on_users(&principals(&f.broker).await, &f.pc_id)
-    })
+    until(
+        "both processes re-authenticated as their users",
+        Duration::from_secs(90),
+        || async { on_users(&principals(&f.broker).await, &f.pc_id) },
+    )
     .await;
     every_role_works(&mut f, "users", Auth::Users).await;
 
@@ -1681,9 +2045,11 @@ async fn token_to_users_and_back_with_processes_running() {
         // running processes and bring every role back onto the token.
         f.broker.restart(Auth::Token).await;
         proxy.cut();
-        until("both processes back on the token after a restart", Duration::from_secs(90), || async {
-            on_token(&principals(&f.broker).await, &f.pc_id)
-        })
+        until(
+            "both processes back on the token after a restart",
+            Duration::from_secs(90),
+            || async { on_token(&principals(&f.broker).await, &f.pc_id) },
+        )
         .await;
     }
     every_role_works(&mut f, "token again", Auth::Token).await;
@@ -1716,8 +2082,14 @@ async fn consumer_delivery_target_residual_is_recorded() {
     let victim = f.role_fast(Role::Agent).await;
 
     // The attacker writes bytes of its choosing into a stream it may write.
-    let kvb = attacker.js.get_key_value("notifications_read").await.unwrap();
-    kvb.put("residual.probe", Bytes::from_static(b"ATTACKER-BYTES")).await.unwrap();
+    let kvb = attacker
+        .js
+        .get_key_value("notifications_read")
+        .await
+        .unwrap();
+    kvb.put("residual.probe", Bytes::from_static(b"ATTACKER-BYTES"))
+        .await
+        .unwrap();
 
     // Positive control: the victim's subject is observable, and a legitimate
     // publish reaches it.
@@ -1725,7 +2097,11 @@ async fn consumer_delivery_target_residual_is_recorded() {
     let mut seen = victim.client.subscribe(target).await.unwrap();
     victim.settle().await;
     let glass = f.role_fast(Role::Breakglass).await;
-    glass.client.publish(target, Bytes::from_static(b"control")).await.unwrap();
+    glass
+        .client
+        .publish(target, Bytes::from_static(b"control"))
+        .await
+        .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(10), seen.next())
         .await
         .expect("positive control did not arrive")

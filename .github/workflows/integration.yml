@@ -102,3 +102,9 @@ jobs:
 
       - name: NATS auth (user / token fallback) integration tests
         run: cargo test -p kanade-shared --test nats_auth_live -- --ignored
+
+      - name: Build backend, agent and CLI for the role conformance test
+        run: cargo build -p kanade-backend -p kanade-agent -p kanade
+
+      - name: NATS role-level authorization conformance
+        run: cargo test -p kanade-agent --test nats_role_conformance -- --ignored --nocapture

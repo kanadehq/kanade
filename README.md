@@ -463,6 +463,25 @@ it down for production with token auth:
 `nats_url` in `agent.toml` / `backend.toml` stays plain. The secret
 never lands in config files or process listings.
 
+#### Role-level permissions (validated, not yet shipped)
+
+`configs/nats-server.users.conf` is the `authorization { users: [...] }` block
+meant to replace the shared token: three users (`agent`, `backend`,
+`breakglass`) with explicit publish / subscribe permissions. The shipped
+broker does not run it yet. It is validated by a conformance test that starts
+a real `nats-server` with the block and drives every role's real flows (the
+backend, agent and `kanade run` / `kill` binaries), asserts each denial from
+the broker's permission-violation error, and exercises the token → users →
+token switch with processes left running. Run it with `nats-server` in `PATH`:
+
+```sh
+cargo build -p kanade-backend -p kanade-agent -p kanade
+cargo test -p kanade-agent --test nats_role_conformance -- --ignored
+```
+
+The switch scenario needs a signal-driven reload and runs on Unix only; the
+rest also runs on Windows in CI. Re-run the test after any edit to the block.
+
 #### Seeing which credential each host actually used
 
 Provisioning a credential and a host *presenting* it are different facts,
