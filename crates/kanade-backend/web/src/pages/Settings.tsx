@@ -97,6 +97,14 @@ interface AgentInstallSettings {
   /// Server-reported: whether a token is currently stored. Display hint
   /// for the form (the token itself can never be read back).
   nats_token_set?: boolean;
+  /// Agent-role NATS user + password: a write-only PAIR, handled exactly
+  /// like the token (GET reports only the `*_set` flags; the PUT changes
+  /// the stored pair ONLY when the keys are present, and the backend
+  /// refuses a body that carries just one of them).
+  nats_user?: string;
+  nats_user_set?: boolean;
+  nats_password?: string;
+  nats_password_set?: boolean;
   /// Ask the generated Windows installer to pass `-RequireSignedCommands`,
   /// so a fresh agent enforces signed commands from first boot. Only takes
   /// effect while this backend has a command-signing key configured — see
@@ -373,6 +381,8 @@ function ServerTab() {
   // the post-save refetch) so a saved token can't be re-sent by accident.
   const [agentInstallNatsUrl, setAgentInstallNatsUrl] = useState('');
   const [agentInstallNatsToken, setAgentInstallNatsToken] = useState('');
+  const [agentInstallNatsUser, setAgentInstallNatsUser] = useState('');
+  const [agentInstallNatsPassword, setAgentInstallNatsPassword] = useState('');
   const [agentInstallRequireSignedCommands, setAgentInstallRequireSignedCommands] =
     useState(false);
   useEffect(() => {
@@ -413,6 +423,8 @@ function ServerTab() {
       setCapCollections(c?.collections_mib == null ? '' : String(c.collections_mib));
       setAgentInstallNatsUrl((settings.data.agent_install?.nats_url ?? '').trim());
       setAgentInstallNatsToken('');
+      setAgentInstallNatsUser('');
+      setAgentInstallNatsPassword('');
       setAgentInstallRequireSignedCommands(
         settings.data.agent_install?.require_signed_commands ?? false,
       );
@@ -643,14 +655,25 @@ function ServerTab() {
   const aiUrlTrimmed = agentInstallNatsUrl.trim();
   const aiUrlValue: string | null = aiUrlTrimmed === '' ? null : aiUrlTrimmed;
   const aiTokenTyped = agentInstallNatsToken !== '';
+  // The user pair is sent only when BOTH halves are typed; one half alone
+  // blocks the save (the backend would reject it anyway), so a password
+  // rotation needs the user re-entered — neither half can be read back.
+  const aiUserTyped = agentInstallNatsUser !== '';
+  const aiPasswordTyped = agentInstallNatsPassword !== '';
+  const aiPairValid = aiUserTyped === aiPasswordTyped;
   const agentInstallValue: AgentInstallSettings = {
     nats_url: aiUrlValue,
     ...(aiTokenTyped ? { nats_token: agentInstallNatsToken } : {}),
+    ...(aiUserTyped && aiPasswordTyped
+      ? { nats_user: agentInstallNatsUser, nats_password: agentInstallNatsPassword }
+      : {}),
     require_signed_commands: agentInstallRequireSignedCommands,
   };
   const aiDirty =
     aiUrlValue !== (settings.data?.agent_install?.nats_url ?? null) ||
     aiTokenTyped ||
+    aiUserTyped ||
+    aiPasswordTyped ||
     agentInstallRequireSignedCommands !==
       (settings.data?.agent_install?.require_signed_commands ?? false);
 
@@ -665,7 +688,8 @@ function ServerTab() {
     staleValid &&
     mailValid &&
     capsValid &&
-    capsAggregateValid;
+    capsAggregateValid &&
+    aiPairValid;
   const dirty =
     settings.data != null &&
     (pruneValue !== settings.data.agent_prune_days ||
@@ -1002,6 +1026,48 @@ function ServerTab() {
           </div>
           <p className="text-muted text-xs">{t('server.agentInstall.natsUrlHint')}</p>
           <p className="text-muted text-xs">{t('server.agentInstall.tokenHint')}</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor="agent-install-nats-user">{t('server.agentInstall.natsUser')}</Label>
+              <Input
+                id="agent-install-nats-user"
+                type="password"
+                value={agentInstallNatsUser}
+                placeholder={t('server.agentInstall.natsUserPlaceholder')}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setAgentInstallNatsUser(e.target.value)}
+                autoComplete="new-password"
+              />
+              <p className="text-muted text-xs">
+                {settings.data?.agent_install?.nats_user_set
+                  ? t('server.agentInstall.userSet')
+                  : t('server.agentInstall.userNotSet')}
+              </p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="agent-install-nats-password">
+                {t('server.agentInstall.natsPassword')}
+              </Label>
+              <Input
+                id="agent-install-nats-password"
+                type="password"
+                value={agentInstallNatsPassword}
+                placeholder={t('server.agentInstall.natsPasswordPlaceholder')}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setAgentInstallNatsPassword(e.target.value)}
+                autoComplete="new-password"
+              />
+              <p className="text-muted text-xs">
+                {settings.data?.agent_install?.nats_password_set
+                  ? t('server.agentInstall.passwordSet')
+                  : t('server.agentInstall.passwordNotSet')}
+              </p>
+            </div>
+          </div>
+          <p className="text-muted text-xs">{t('server.agentInstall.userPairHint')}</p>
+          {!aiPairValid && (
+            <p className="text-danger text-xs">{t('server.agentInstall.userPairIncomplete')}</p>
+          )}
           <div className="space-y-1">
             <Label htmlFor="agent-install-require-signed-commands">
               {t('server.agentInstall.requireSignedCommands')}

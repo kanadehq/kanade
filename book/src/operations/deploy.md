@@ -72,4 +72,24 @@ The script:
 - Secures the configuration and NATS token in the Windows registry path (`HKLM:\SOFTWARE\Kanade\agent`).
 - Registers and starts the **KanadeAgent** service.
 
+#### Agent-role NATS user in generated installers
+
+`deploy-agent.ps1` also accepts `-NatsUser` / `-NatsPassword` (the shell
+scripts take `KANADE_NATS_USER` / `KANADE_NATS_PASSWORD`), both or neither.
+The installers the backend generates (Windows ZIP, Linux / macOS tarball)
+embed such a pair when the server settings' `agent_install` section holds
+both a user and a password, next to the token, so machines installed from now
+on already carry the credential the broker may later require.
+
+- The pair is the **agent role's** credential and is **shared by all agents by
+  design**. The backend's own credential and the break-glass credential must
+  never be entered in these settings.
+- It is write-only, like the token: the API returns only `nats_user_set` /
+  `nats_password_set`, and a settings update that omits both keeps the stored
+  pair. A settings update that sets only one of the two is rejected, so
+  replacing the password means sending the user again.
+- A generated `README.txt` states whether a user pair is included, without
+  revealing it; with no paragraph about it, none was embedded and the
+  installer is exactly what it was before this setting existed.
+
 Once the service is active, the agent establishes an outbound NATS connection, subscribes to command streams, and reports its online heartbeat back to the fleet backend.

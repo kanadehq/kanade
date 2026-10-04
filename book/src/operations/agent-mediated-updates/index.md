@@ -31,6 +31,12 @@ backend HTTP API, not to NATS: they need `KANADE_AUTH_TOKEN` (see
 token. Publishes and deletes are audited against that account by the
 backend. Operators who previously relied on the NATS token alone must now
 export `KANADE_AUTH_TOKEN`; without it the backend answers 401 / 403.
+The NATS user pair in the server settings' `agent_install` section is the
+agent role's credential, shared by all agents by design, and the backend-
+generated installers embed it (alongside the token) only when both halves are
+set. The backend's own credential and the break-glass credential never go in
+those settings.
+
 `kanade agent publish` is capped by the backend at 64 MB for the whole
 upload (a normal agent binary is well under that). `app publish` additionally downloads the package back from the backend
 and checks its digest before reporting success.
