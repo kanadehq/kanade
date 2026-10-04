@@ -26,7 +26,7 @@ use kanade_shared::subject;
 use kanade_shared::wire::RunAs;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::AppState;
 use super::yaml_body::{YamlOrJson, mirror_yaml, yaml_headers};
@@ -297,68 +297,49 @@ async fn fetch_live_counts(
     Ok(out)
 }
 
-/// #1492 review (R2-1-1): build the error response for a catalog
-/// write (KV bucket lookup / serialize / put) that failed AFTER
-/// `ensure_tables_atomic` already committed an explode-table schema
-/// migration for this manifest. There is no way to undo that SQLite
-/// commit from here — it's a different transactional system than the
-/// NATS KV write that just failed, so this handler can't offer
-/// all-or-nothing across both. What it CAN do is make the gap loud
-/// instead of silent: the `note` strings already computed (rebuilt?
-/// which columns? rows lost to the new primary key?) go into both the
-/// HTTP error body — so the CLI prints them instead of just "KV put:
-/// ..." — and an audit record, so the drift is still discoverable
-/// later even if the operator doesn't read this response closely.
-/// `schema_changes` is empty on the common path (no explode specs, or
-/// every explode table already matched), in which case this is just
-/// the plain error.
-async fn catalog_write_failed(
+/// Build the error response for a failed explode-table schema
+/// migration that ran AFTER the catalog write already landed. The
+/// catalog (NATS KV) and the derived table (SQLite) are separate
+/// transactional systems, so the two writes can't be atomic; the
+/// catalog is written FIRST so the only possible divergence is
+/// "catalog newer than table", which the startup reconcile
+/// (`ensure_tables_for_jobs`) closes by migrating the table forward.
+/// The opposite order (table migrated, catalog write failed) left a
+/// restart free to rebuild the table back to the OLD manifest's
+/// schema and drop rows collected under the new one.
+async fn migration_failed_after_catalog(
     s: &AppState,
     job: &Manifest,
     caller: &Caller,
-    schema_changes: &[String],
-    reason: String,
+    reason: &str,
 ) -> (StatusCode, String) {
-    if !schema_changes.is_empty() {
-        warn!(
-            job_id = %job.id,
-            ?schema_changes,
-            error = %reason,
-            "job_upsert: catalog write failed after explode schema migration already committed",
-        );
-        audit::record(
-            &s.nats,
-            "operator",
-            "job_upsert_failed_after_schema_migration",
-            Some(&job.id),
-            Some(caller),
-            serde_json::json!({
-                "error": reason,
-                "schema_changes": schema_changes,
-            }),
-        )
-        .await;
-    }
+    error!(
+        job_id = %job.id,
+        error = %reason,
+        "job_upsert: catalog saved but explode schema migration failed; derived table lags the manifest",
+    );
+    audit::record(
+        &s.nats,
+        "operator",
+        "job_upsert_migration_failed_after_catalog",
+        Some(&job.id),
+        Some(caller),
+        serde_json::json!({ "error": reason }),
+    )
+    .await;
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        catalog_write_failure_message(&reason, schema_changes),
+        migration_failure_message(reason),
     )
 }
 
-/// Pure message-building half of [`catalog_write_failed`], split out
-/// so it's testable without a live NATS client (audit::record needs
-/// one; this doesn't). `schema_changes` empty ⇒ the plain error,
-/// unchanged from before this fix.
-fn catalog_write_failure_message(reason: &str, schema_changes: &[String]) -> String {
-    if schema_changes.is_empty() {
-        return reason.to_string();
-    }
+/// Pure message-building half of [`migration_failed_after_catalog`],
+/// testable without a live NATS client.
+fn migration_failure_message(reason: &str) -> String {
     format!(
-        "{reason}; NOTE: this job's inventory.explode derived table schema was already \
-         migrated before this failure and was NOT rolled back ({}) — the manifest was NOT \
-         saved, so the catalog and the derived table now disagree on that table's shape \
-         until this job is created successfully or the table receives another exec result",
-        schema_changes.join("; ")
+        "inventory.explode schema migration failed: {reason}; NOTE: the job manifest WAS \
+         saved to the catalog, but its derived table still has the previous schema — it \
+         will be migrated on the next backend start, or re-run `job create` to retry now"
     )
 }
 
@@ -402,78 +383,16 @@ pub async fn create(
                 .to_string(),
         ));
     }
-    // #1492: reconcile every `inventory.explode` derived table's SQL
-    // schema against this manifest BEFORE the KV write below. Without
-    // this, a manifest edit that changed `primary_key` / `columns`
-    // stored cleanly (this handler never touched the derived table at
-    // all — only the startup pass and the per-result hot path did, and
-    // both used a plain `CREATE TABLE IF NOT EXISTS` that's a no-op
-    // once the table exists), so the derived table kept its original
-    // schema forever while `job create` / `job validate` / `exec` all
-    // kept reporting success. Running the reconcile here, and failing
-    // the request (not writing the manifest) if it errors, means a job
-    // catalog entry is never left pointing at a derived table we know
-    // is out of sync with it.
-    //
-    // `ensure_tables_atomic` runs every spec inside ONE transaction
-    // (review R1-2-1): a manifest with several explode specs where an
-    // earlier spec's migration succeeds but a later one fails must not
-    // leave the earlier table already mutated while this handler
-    // reports failure — that would both lose the earlier migration's
-    // own report (discarded along with the 500 response) and leave the
-    // DB and the (unwritten) catalog disagreeing about that table's
-    // shape. A single transaction means a failure anywhere rolls every
-    // spec in this call back together, so schema_changes below is only
-    // ever populated with changes that actually landed.
-    let mut schema_changes = Vec::new();
     if let Some(specs) = job.inventory.as_ref().and_then(|inv| inv.explode.as_ref()) {
-        let changes = crate::projector::explode::ensure_tables_atomic(&s.pool, specs)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("inventory.explode schema migration failed: {e:#}"),
-                )
-            })?;
-        for (spec, change) in specs.iter().zip(changes) {
-            if !change.is_notable() {
-                continue;
-            }
-            let mut note = if change.rebuilt {
-                format!(
-                    "{}: rebuilt (primary_key/columns changed); copied {} row(s)",
-                    spec.table, change.rows_copied
-                )
-            } else {
-                format!(
-                    "{}: added column(s) {}",
-                    spec.table,
-                    change.added_columns.join(", ")
-                )
-            };
-            if change.rows_lost > 0 {
-                note.push_str(&format!(
-                    ", lost {} row(s) to the new primary key (will reappear on next exec)",
-                    change.rows_lost
-                ));
-            }
-            warn!(job_id = %job.id, table = %spec.table, %note, "explode: derived table schema migrated");
-            schema_changes.push(note);
-        }
+        crate::projector::explode::validate_specs(specs).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("inventory.explode spec invalid: {e:#}"),
+            )
+        })?;
     }
 
-    // #1492 review (R2-1-1): everything from here on writes to the KV
-    // catalog, which is a different transactional system than the
-    // SQLite migration `ensure_tables_atomic` already committed above
-    // — there's no 2-phase commit spanning NATS KV and SQLite, so a
-    // failure in any of these steps can't be made to un-migrate the
-    // derived table. `catalog_write_failed` makes that unavoidable gap
-    // visible instead of silent: it folds the already-committed
-    // `schema_changes` into both the error response and an audit
-    // record, mirroring `delete`'s `job_delete_failed_post_revoke`
-    // event for the same "committed side effect, primary write still
-    // failed" shape.
-    let kv = match s
+    let kv = s
         .jetstream
         .create_key_value(KvConfig {
             bucket: BUCKET_JOBS.into(),
@@ -481,42 +400,12 @@ pub async fn create(
             ..Default::default()
         })
         .await
-    {
-        Ok(kv) => kv,
-        Err(e) => {
-            return Err(catalog_write_failed(
-                &s,
-                &job,
-                &caller,
-                &schema_changes,
-                format!("ensure KV: {e}"),
-            )
-            .await);
-        }
-    };
-    let body_bytes = match serde_json::to_vec(&job) {
-        Ok(b) => b,
-        Err(e) => {
-            return Err(catalog_write_failed(
-                &s,
-                &job,
-                &caller,
-                &schema_changes,
-                format!("serialize: {e}"),
-            )
-            .await);
-        }
-    };
-    if let Err(e) = kv.put(&job.id, body_bytes.into()).await {
-        return Err(catalog_write_failed(
-            &s,
-            &job,
-            &caller,
-            &schema_changes,
-            format!("KV put: {e}"),
-        )
-        .await);
-    }
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ensure KV: {e}")))?;
+    let body_bytes = serde_json::to_vec(&job)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
+    kv.put(&job.id, body_bytes.into())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV put: {e}")))?;
 
     // Keep `script_current` in lockstep with the catalog on every upsert,
     // NOT just on `kanade exec` (exec.rs #258). `script_current.<id>` is
@@ -561,6 +450,71 @@ pub async fn create(
     if let Err(e) = mirror_yaml(&s, BUCKET_JOBS_YAML, &job.id, &yaml_source).await {
         warn!(error = %e, job_id = %job.id, "jobs: YAML mirror put failed; JSON catalog is current");
     }
+
+    // #1492: reconcile every `inventory.explode` derived table's SQL
+    // schema against this manifest AFTER the catalog write above.
+    // Ordering matters: NATS KV and SQLite can't commit together, and
+    // the old order (migrate, then write the catalog) could leave the
+    // table on the NEW schema with the catalog on the OLD manifest —
+    // a restart's `ensure_tables_for_jobs` then rebuilt the table back
+    // to the old schema, dropping rows collected under the new one.
+    // With the catalog first, a failure here can only leave the table
+    // BEHIND the manifest, which startup reconcile migrates forward.
+    // The specs were validated before the catalog write, so what is
+    // left to fail here is I/O.
+    //
+    // `ensure_tables_atomic` runs every spec inside ONE transaction
+    // (review R1-2-1): a failure on any spec rolls every spec in this
+    // call back together, so schema_changes is only ever populated
+    // with changes that actually landed.
+    let mut schema_changes = Vec::new();
+    if let Some(specs) = job.inventory.as_ref().and_then(|inv| inv.explode.as_ref()) {
+        let changes = match crate::projector::explode::ensure_tables_atomic(&s.pool, specs).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(
+                    migration_failed_after_catalog(&s, &job, &caller, &format!("{e:#}")).await,
+                );
+            }
+        };
+        for (spec, change) in specs.iter().zip(changes) {
+            if !change.is_notable() {
+                continue;
+            }
+            let mut note = if change.rebuilt {
+                format!(
+                    "{}: rebuilt (primary_key/columns changed); copied {} row(s)",
+                    spec.table, change.rows_copied
+                )
+            } else {
+                format!(
+                    "{}: added column(s) {}",
+                    spec.table,
+                    change.added_columns.join(", ")
+                )
+            };
+            if change.rows_lost > 0 {
+                note.push_str(&format!(
+                    ", lost {} row(s) to the new primary key (will reappear on next exec)",
+                    change.rows_lost
+                ));
+            }
+            warn!(job_id = %job.id, table = %spec.table, %note, "explode: derived table schema migrated");
+            schema_changes.push(note);
+        }
+    }
+
+    // #1492 review (R2-1-1): everything from here on writes to the KV
+    // catalog, which is a different transactional system than the
+    // SQLite migration `ensure_tables_atomic` already committed above
+    // — there's no 2-phase commit spanning NATS KV and SQLite, so a
+    // failure in any of these steps can't be made to un-migrate the
+    // derived table. `catalog_write_failed` makes that unavoidable gap
+    // visible instead of silent: it folds the already-committed
+    // `schema_changes` into both the error response and an audit
+    // record, mirroring `delete`'s `job_delete_failed_post_revoke`
+    // event for the same "committed side effect, primary write still
+    // failed" shape.
 
     let summary = JobSummary {
         id: job.id.clone(),
@@ -1018,41 +972,17 @@ mod tests {
         assert!(v["execute"].get("script_object").is_none());
     }
 
-    /// Review R2-1-1: when the KV catalog write fails with no explode
-    /// migration in play (the common case), the response is exactly
-    /// the underlying error — no change from before this fix.
+    /// The migration-failure body must say the catalog WAS saved and
+    /// how the table catches up, so an operator doesn't assume the
+    /// write was lost (catalog is written before the migration).
     #[test]
-    fn catalog_write_failure_message_is_plain_reason_when_no_schema_changes() {
-        let msg = catalog_write_failure_message("KV put: connection refused", &[]);
-        assert_eq!(msg, "KV put: connection refused");
-    }
-
-    /// Review R2-1-1: when `ensure_tables_atomic` already committed a
-    /// migration before the KV write failed, that fact — including any
-    /// row loss from a rebuild — must be readable in the error body
-    /// the CLI prints, not just in a server-side log line. Before this
-    /// fix the handler returned bare `format!("KV put: {e}")`,
-    /// discarding the already-computed `schema_changes` entirely.
-    #[test]
-    fn catalog_write_failure_message_surfaces_committed_schema_changes() {
-        let changes = vec![
-            "example_items: rebuilt (primary_key/columns changed); copied 3 row(s), lost 1 \
-             row(s) to the new primary key (will reappear on next exec)"
-                .to_string(),
-        ];
-        let msg = catalog_write_failure_message("KV put: timeout", &changes);
-        assert!(msg.starts_with("KV put: timeout"), "{msg}");
+    fn migration_failure_message_says_catalog_was_saved() {
+        let msg = migration_failure_message("create table x: disk I/O error");
         assert!(
-            msg.contains("example_items: rebuilt"),
-            "migration note must appear in the response body: {msg}"
+            msg.starts_with("inventory.explode schema migration failed: create table x"),
+            "{msg}"
         );
-        assert!(
-            msg.contains("lost 1 row(s)"),
-            "row loss must be visible in the response body, not just logs: {msg}"
-        );
-        assert!(
-            msg.contains("was NOT saved"),
-            "must make clear the catalog write itself failed despite the migration landing: {msg}"
-        );
+        assert!(msg.contains("WAS saved"), "{msg}");
+        assert!(msg.contains("next backend start"), "{msg}");
     }
 }

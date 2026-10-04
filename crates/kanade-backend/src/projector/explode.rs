@@ -57,7 +57,7 @@ use anyhow::{Result, anyhow, bail};
 use kanade_shared::manifest::{ExplodeColumn, ExplodeSpec, Manifest};
 use serde_json::Value as JsonValue;
 use sqlx::{AssertSqlSafe, Row, Sqlite, SqliteConnection, SqlitePool, Transaction};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// #1492 fix: in-memory cache of derived tables we've already
 /// reconciled against their current spec. Hot path is the results
@@ -169,9 +169,24 @@ pub fn create_table_sql(spec: &ExplodeSpec) -> Result<String> {
     sql.push_str("    pc_id TEXT NOT NULL,\n");
     sql.push_str("    job_id TEXT NOT NULL,\n");
     sql.push_str("    collected_at TIMESTAMP,\n");
+    // SQLite column names are case-insensitive; a duplicate or a clash
+    // with a built-in column would only fail at CREATE/ALTER time, i.e.
+    // after `job create` already stored the manifest.
+    let mut seen: BTreeSet<String> = ["pc_id", "job_id", "collected_at"]
+        .into_iter()
+        .map(String::from)
+        .collect();
     for col in &spec.columns {
         validate_ident(&col.field)?;
         validate_kind(col.kind.as_deref())?;
+        if !seen.insert(col.field.to_ascii_lowercase()) {
+            bail!(
+                "column {:?} for table {:?} is declared twice or collides with a built-in \
+                 column (pc_id, job_id, collected_at)",
+                col.field,
+                spec.table,
+            );
+        }
         sql.push_str(&format!(
             "    \"{}\" {},\n",
             col.field,
@@ -522,6 +537,18 @@ async fn reconcile_table(conn: &mut SqliteConnection, spec: &ExplodeSpec) -> Res
     Ok(change)
 }
 
+/// Pure (no DB) validation of every spec's identifiers, primary key
+/// and column kinds. `job create` runs this BEFORE writing the
+/// catalog so the later SQL migration can only fail on I/O, not on a
+/// bad spec the catalog already accepted.
+pub fn validate_specs(specs: &[ExplodeSpec]) -> Result<()> {
+    for spec in specs {
+        create_table_sql(spec)?;
+        create_index_sqls(spec)?;
+    }
+    Ok(())
+}
+
 /// Create (or migrate) the derived table + indexes for one spec,
 /// inside its own transaction. Called from the projector's startup
 /// pass (scan all registered jobs) and from the inventory upsert
@@ -619,7 +646,7 @@ pub async fn ensure_tables_for_jobs(
                     table = %spec.table,
                     "explode: derived table ready",
                 ),
-                Err(e) => warn!(
+                Err(e) => error!(
                     error = %e,
                     job_id = %manifest.id,
                     table = %spec.table,
@@ -1460,5 +1487,101 @@ mod tests {
         .await
         .unwrap();
         assert!(b_exists.is_none(), "spec B's table must not exist");
+    }
+
+    /// The job-create handler validates specs before writing the
+    /// catalog, so a bad spec must be rejected without any DB.
+    #[test]
+    fn validate_specs_rejects_a_bad_spec_and_accepts_good_ones() {
+        let mut bad = items_spec_v2();
+        bad.primary_key = vec!["does_not_exist".into()];
+        let err = validate_specs(&[items_spec_v1(), bad]).unwrap_err();
+        assert!(err.to_string().contains("does_not_exist"), "{err}");
+        validate_specs(&[items_spec_v1(), items_spec_v2()]).unwrap();
+    }
+
+    /// Duplicate columns and built-in-column clashes must be rejected
+    /// by `validate_specs` so they never reach the catalog.
+    #[test]
+    fn validate_specs_rejects_duplicate_and_builtin_columns() {
+        let mut dup = items_spec_v2();
+        dup.columns.push(ExplodeColumn {
+            field: "Name".into(),
+            kind: None,
+            index: false,
+        });
+        assert!(validate_specs(&[dup]).is_err());
+        let mut builtin = items_spec_v2();
+        builtin.columns.push(ExplodeColumn {
+            field: "pc_id".into(),
+            kind: None,
+            index: false,
+        });
+        assert!(validate_specs(&[builtin]).is_err());
+    }
+
+    /// `job create` writes the catalog BEFORE the SQL migration, so a
+    /// failed/skipped migration leaves "catalog NEW, table OLD". A
+    /// backend restart (empty cache, new manifest from the catalog)
+    /// must migrate the table forward and keep every row, never leave
+    /// it on the old schema or drop data.
+    #[tokio::test]
+    async fn startup_reconcile_migrates_forward_when_catalog_is_ahead_of_table() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let rename = |mut spec: ExplodeSpec| {
+            spec.table = "example_items_ahead".into();
+            spec
+        };
+        let v1 = rename(items_spec_v1());
+
+        ensure_table(&pool, &v1).await.unwrap();
+        for (pc, id, name) in [("pc-01", "i-1", "Widget"), ("pc-02", "i-2", "Gadget")] {
+            replace_rows(
+                &pool,
+                &v1,
+                pc,
+                "job-items",
+                None,
+                &serde_json::json!({"items": [{"item_id": id, "name": name}]}),
+            )
+            .await
+            .unwrap();
+        }
+        // Restart: fresh cache, catalog already holds the v2 manifest.
+        ensured_tables().lock().unwrap().remove(&v1.table);
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "id": "job-items",
+            "version": "0.0.2",
+            "execute": { "shell": "powershell", "script": "echo '{}'", "timeout": "30s" },
+            "inventory": {
+                "display": [{ "field": "items", "label": "Items" }],
+                "explode": [{
+                    "field": "items",
+                    "table": "example_items_ahead",
+                    "primary_key": ["name"],
+                    "columns": [{ "field": "item_id" }, { "field": "name" }, { "field": "kind" }],
+                }],
+            },
+        }))
+        .unwrap();
+        ensure_tables_for_jobs(&pool, [manifest]).await.unwrap();
+
+        let ddl: (String,) = sqlx::query_as(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'example_items_ahead'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(ddl.0.contains("\"kind\""), "new column present: {}", ddl.0);
+        let rows: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM example_items_ahead")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.0, 2, "every row survives the forward migration");
     }
 }
