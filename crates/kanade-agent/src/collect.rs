@@ -327,12 +327,12 @@ async fn collect_and_upload(
         // `<pc_id>/<job_id>/<ts>.zip` (unlabeled, back-compat) — exactly
         // three slash segments, which the backend's `parse_bundle_key`
         // requires; the filename carries the optional `<label>__` prefix.
-        let key = bundle_key(pc_id, &cmd.id, label.as_deref(), &ts, 0);
+        let key = bundle_key(pc_id, &cmd.id, label.as_deref(), &ts, None);
         let bytes_len = zip_bytes.len();
         // Never overwrite: an identical bundle already stored is reused, a
         // different one under the same key pushes this upload to `-r<N>`
         // before `.zip` so the key keeps the shape `parse_bundle_key` reads.
-        let alt = |n: u32| bundle_key(pc_id, &cmd.id, label.as_deref(), &ts, n);
+        let alt = |tag: &str| bundle_key(pc_id, &cmd.id, label.as_deref(), &ts, Some(tag));
         let key = match crate::object_put::put_no_overwrite(&store, &key, &zip_bytes, alt).await {
             Ok(k) => k,
             Err(e) => {
@@ -388,14 +388,16 @@ async fn collect_and_upload(
     Ok(out)
 }
 
-/// Bundle object key; `attempt` > 0 adds `-r<attempt>` before `.zip` so a
+/// Bundle object key; a `tag` adds `-<tag>` before `.zip` so a
 /// forced alternative keeps the three-segment `.zip` shape.
-fn bundle_key(pc_id: &str, job_id: &str, label: Option<&str>, ts: &str, attempt: u32) -> String {
-    let r = if attempt == 0 {
-        String::new()
-    } else {
-        format!("-r{attempt}")
-    };
+fn bundle_key(
+    pc_id: &str,
+    job_id: &str,
+    label: Option<&str>,
+    ts: &str,
+    tag: Option<&str>,
+) -> String {
+    let r = tag.map(|t| format!("-{t}")).unwrap_or_default();
     match label {
         Some(l) => format!("{pc_id}/{job_id}/{l}__{ts}{r}.zip"),
         None => format!("{pc_id}/{job_id}/{ts}{r}.zip"),
@@ -410,11 +412,11 @@ mod tests {
     fn bundle_key_keeps_shape_with_and_without_attempt() {
         let ts = "20260101T000000.000Z";
         assert_eq!(
-            bundle_key("pc", "j", None, ts, 0),
+            bundle_key("pc", "j", None, ts, None),
             "pc/j/20260101T000000.000Z.zip"
         );
         assert_eq!(
-            bundle_key("pc", "j", Some("a"), ts, 2),
+            bundle_key("pc", "j", Some("a"), ts, Some("r2")),
             "pc/j/a__20260101T000000.000Z-r2.zip"
         );
     }
@@ -449,8 +451,8 @@ mod tests {
             }
         }
         let ts = "20260101T000000.000Z";
-        let base = bundle_key("pc", "j", Some("a"), ts, 0);
-        let alt = |n| bundle_key("pc", "j", Some("a"), ts, n);
+        let base = bundle_key("pc", "j", Some("a"), ts, None);
+        let alt = |t: &str| bundle_key("pc", "j", Some("a"), ts, Some(t));
         let m = Mem(RefCell::new(HashMap::new()));
         assert_eq!(put_no_overwrite(&m, &base, b"x", alt).await.unwrap(), base);
         assert_eq!(put_no_overwrite(&m, &base, b"x", alt).await.unwrap(), base);

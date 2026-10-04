@@ -282,14 +282,14 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
 
 /// Inspect `result.stdout` / `.stderr`; for each one over the inline
 /// threshold, upload the bytes to `OBJECT_RESULT_OUTPUT` under
-/// `<request_id>/{stdout,stderr}`, clear the inline field, and set
+/// `<request_id>/<pc_id>/{stdout,stderr}`, clear the inline field, and set
 /// the matching pointer. Returns whether any field was overflowed so
 /// the caller knows to re-serialize (small case stays a zero-copy
 /// publish of the on-disk bytes).
 ///
 /// Uploads never replace an object. A re-run after a lost publish finds
 /// the identical object under the same key and reuses it; if the key
-/// holds different bytes the upload goes to `<key>.r<N>` and that key is
+/// holds different bytes the upload goes to `<key>.r<N>` (or a digest-derived tag once those are used) and that key is
 /// the one recorded in the result.
 async fn offload_overflow(
     js: &async_nats::jetstream::Context,
@@ -316,7 +316,7 @@ async fn offload_overflow(
 
     let mut overflowed = false;
     if result.stdout.len() > STDOUT_INLINE_THRESHOLD {
-        let base = format!("{}/stdout", result.request_id);
+        let base = format!("{}/{}/stdout", result.request_id, result.pc_id);
         let stdout_bytes = std::mem::take(&mut result.stdout).into_bytes();
         let bytes_len = stdout_bytes.len();
         let key = crate::object_put::put_no_overwrite(
@@ -336,7 +336,7 @@ async fn offload_overflow(
         overflowed = true;
     }
     if result.stderr.len() > STDOUT_INLINE_THRESHOLD {
-        let base = format!("{}/stderr", result.request_id);
+        let base = format!("{}/{}/stderr", result.request_id, result.pc_id);
         let stderr_bytes = std::mem::take(&mut result.stderr).into_bytes();
         let bytes_len = stderr_bytes.len();
         let key = crate::object_put::put_no_overwrite(

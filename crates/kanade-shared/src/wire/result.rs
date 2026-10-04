@@ -78,7 +78,7 @@ pub struct ExecResult {
     pub finished_at: chrono::DateTime<chrono::Utc>,
     /// Object Store key under [`crate::kv::OBJECT_RESULT_OUTPUT`] when
     /// `stdout` overflowed the agent's inline threshold (#227). Set to
-    /// `Some("<request_id>/stdout")` by the agent's outbox drain; the
+    /// `Some("<request_id>/<pc_id>/stdout")` by the agent's outbox drain; the
     /// backend projector fetches the bytes from that key and uses them
     /// in place of the (empty) `stdout` field. `None` for the common
     /// small-stdout case + every pre-#227 payload (`serde(default)`

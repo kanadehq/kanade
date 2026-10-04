@@ -1032,8 +1032,8 @@ async fn allowed_flows_complete_under_the_users_block() {
     let first = vec![b'a'; kanade_shared::kv::STDOUT_INLINE_THRESHOLD + 4096];
     let second = vec![b'b'; kanade_shared::kv::STDOUT_INLINE_THRESHOLD + 8192];
     let store = backend.js.get_object_store("result_output").await.unwrap();
-    let base_key = format!("{request_id}/stdout");
-    let alt_key = format!("{request_id}/stdout.r1");
+    let base_key = format!("{request_id}/{}/stdout", f.pc_id);
+    let alt_key = format!("{request_id}/{}/stdout.r1", f.pc_id);
     let mut nuid_before = String::new();
     for (label, body, key) in [
         ("first", &first, &base_key),

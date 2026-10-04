@@ -19,7 +19,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 
-/// Candidate keys tried after the base key before giving up.
+/// Sequential `r<n>` candidates tried after the base key; past these the
+/// key is derived from the content digest, so there is no dead end.
 const MAX_ALT_ATTEMPTS: u32 = 8;
 
 /// What a key currently holds, as far as `put` is concerned.
@@ -75,23 +76,24 @@ fn digest_matches(recorded: &str, want: &[u8]) -> bool {
         .is_ok_and(|d| d.as_slice() == want)
 }
 
-/// Store `bytes` under `base_key`, or under `alt_key(n)` for n = 1.. when an
-/// earlier candidate holds different content. Candidates are tried in a fixed
-/// order, so a retry of the same payload converges on the key it used before.
-/// Returns the key that holds the bytes.
+/// Store `bytes` under `base_key`, or under `alt_key(tag)` when an earlier
+/// candidate holds different content. Tags are `r1`..`r8` in order, then
+/// `h<digest prefix>`: the last candidate is a function of the content, so
+/// any number of different payloads for one base key still find a home and a
+/// retry of the same payload converges on the key it used before. Returns the
+/// key that holds the bytes.
 pub async fn put_no_overwrite<S: PutStore>(
     store: &S,
     base_key: &str,
     bytes: &[u8],
-    alt_key: impl Fn(u32) -> String,
+    alt_key: impl Fn(&str) -> String,
 ) -> Result<String> {
     let want = Sha256::digest(bytes);
-    for n in 0..=MAX_ALT_ATTEMPTS {
-        let key = if n == 0 {
-            base_key.to_string()
-        } else {
-            alt_key(n)
-        };
+    let hex: String = want.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let mut candidates = vec![base_key.to_string()];
+    candidates.extend((1..=MAX_ALT_ATTEMPTS).map(|n| alt_key(&format!("r{n}"))));
+    candidates.push(alt_key(&format!("h{hex}")));
+    for key in candidates {
         match store.slot(&key).await? {
             Slot::Absent => {
                 store.put_bytes(&key, bytes).await?;
@@ -106,12 +108,12 @@ pub async fn put_no_overwrite<S: PutStore>(
             Slot::Live { .. } | Slot::Deleted => {}
         }
     }
-    bail!("object_store: no free key for {base_key} after {MAX_ALT_ATTEMPTS} alternatives")
+    bail!("object_store: no free key for {base_key}")
 }
 
-/// `<base>.r<n>` for keys without an extension that matters (outbox output).
-pub fn suffix_key(base: &str) -> impl Fn(u32) -> String + '_ {
-    move |n| format!("{base}.r{n}")
+/// `<base>.<tag>` for keys without an extension that matters (outbox output).
+pub fn suffix_key(base: &str) -> impl Fn(&str) -> String + '_ {
+    move |tag| format!("{base}.{tag}")
 }
 
 #[cfg(test)]
@@ -227,7 +229,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exhausted_candidates_error() {
+    async fn more_payloads_than_sequential_slots_still_get_a_key() {
+        let f = Fake::default();
+        let mut keys = Vec::new();
+        for i in 0..12u8 {
+            keys.push(run(&f, &[i]).await.unwrap());
+        }
+        let uniq: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(uniq.len(), 12);
+        // retries converge instead of creating new objects
+        for i in 0..12u8 {
+            assert_eq!(run(&f, &[i]).await.unwrap(), keys[i as usize]);
+        }
+        assert_eq!(f.puts.borrow().len(), 12);
+    }
+
+    #[tokio::test]
+    async fn every_candidate_taken_by_other_content_errors() {
         let f = Fake::default();
         f.objects
             .borrow_mut()
@@ -237,6 +255,14 @@ mod tests {
                 .borrow_mut()
                 .insert(format!("r/stdout.r{n}"), Slot::Deleted);
         }
+        let hex: String = Sha256::digest(b"a")
+            .iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        f.objects
+            .borrow_mut()
+            .insert(format!("r/stdout.h{hex}"), Slot::Deleted);
         assert!(run(&f, b"a").await.is_err());
         assert!(f.puts.borrow().is_empty());
     }
