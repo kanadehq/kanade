@@ -1022,13 +1022,24 @@ async fn allowed_flows_complete_under_the_users_block() {
     assert!(tail.is_ok(), "job.tail request got no reply: {tail:?}");
 
     // Outbox drain: a spilled result (JetStream publish with ack plus an
-    // object-store upload), then an overwrite of the same key, which makes
-    // the upload purge the previous chunks.
+    // object-store upload). The agent holds no purge right, so it must never
+    // put over an existing object: (a) first upload, (b) the same result
+    // again — the retry after a lost acknowledgement — reuses the stored
+    // object, (c) the same request id with a different body goes to a
+    // distinct key and leaves the original intact.
     let outbox = f.data_dir().join("outbox");
     let request_id = fresh("big");
     let first = vec![b'a'; kanade_shared::kv::STDOUT_INLINE_THRESHOLD + 4096];
     let second = vec![b'b'; kanade_shared::kv::STDOUT_INLINE_THRESHOLD + 8192];
-    for (label, body) in [("first", &first), ("overwrite", &second)] {
+    let store = backend.js.get_object_store("result_output").await.unwrap();
+    let base_key = format!("{request_id}/{}/stdout", f.pc_id);
+    let alt_key = format!("{request_id}/{}/stdout.r1", f.pc_id);
+    let mut nuid_before = String::new();
+    for (label, body, key) in [
+        ("first", &first, &base_key),
+        ("identical retry", &first, &base_key),
+        ("different body", &second, &alt_key),
+    ] {
         enqueue_outbox(&outbox, &request_id, &f.pc_id, body);
         let path = outbox.join(format!("{request_id}.json"));
         until(
@@ -1040,16 +1051,36 @@ async fn allowed_flows_complete_under_the_users_block() {
             },
         )
         .await;
-        let store = backend.js.get_object_store("result_output").await.unwrap();
         let mut obj = store
-            .get(format!("{request_id}/stdout"))
+            .get(key.as_str())
             .await
             .unwrap_or_else(|e| panic!("object after {label}: {e}"));
         let mut got = Vec::new();
         obj.read_to_end(&mut got).await.unwrap();
         assert_eq!(got.len(), body.len(), "object size after {label}");
         assert_eq!(got.first(), body.first(), "object content after {label}");
+        let info = store.info(&base_key).await.unwrap();
+        match label {
+            "first" => nuid_before = info.nuid,
+            _ => assert_eq!(info.nuid, nuid_before, "{label} replaced the original"),
+        }
+        let alt = store.info(&alt_key).await;
+        assert_eq!(
+            alt.is_ok(),
+            label == "different body",
+            "alternative key presence after {label}"
+        );
     }
+    let purges: Vec<_> = f
+        .broker
+        .violations()
+        .into_iter()
+        .filter(|v| v.subject.contains("STREAM.PURGE"))
+        .collect();
+    assert!(
+        purges.is_empty(),
+        "the outbox flows needed a purge: {purges:?}"
+    );
 
     // Agent reads and watches, under its own credential and through the real
     // helper: every bucket it reads, a watch on each, the keys() walk, and a
@@ -1527,6 +1558,16 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         ),
         (Agent, Request("$JS.API.STREAM.PURGE.KV_jobs"), Denied),
         (Agent, Request("$JS.API.STREAM.PURGE.OBJ_scripts"), Denied),
+        (
+            Agent,
+            Request("$JS.API.STREAM.PURGE.OBJ_result_output"),
+            Denied,
+        ),
+        (
+            Agent,
+            Request("$JS.API.STREAM.PURGE.OBJ_collections"),
+            Denied,
+        ),
         (Agent, Request("$JS.API.STREAM.PURGE.RESULTS"), Denied),
         (
             Agent,

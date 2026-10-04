@@ -327,16 +327,19 @@ async fn collect_and_upload(
         // `<pc_id>/<job_id>/<ts>.zip` (unlabeled, back-compat) — exactly
         // three slash segments, which the backend's `parse_bundle_key`
         // requires; the filename carries the optional `<label>__` prefix.
-        let key = match &label {
-            Some(l) => format!("{pc_id}/{}/{l}__{ts}.zip", cmd.id),
-            None => format!("{pc_id}/{}/{ts}.zip", cmd.id),
-        };
+        let key = bundle_key(pc_id, &cmd.id, label.as_deref(), &ts, None);
         let bytes_len = zip_bytes.len();
-        let mut cursor = std::io::Cursor::new(zip_bytes);
-        if let Err(e) = store.put(key.as_str(), &mut cursor).await {
-            warn!(error = %e, key, "collect: upload failed; skipping bundle");
-            continue;
-        }
+        // Never overwrite: an identical bundle already stored is reused, a
+        // different one under the same key pushes this upload to `-r<N>`
+        // before `.zip` so the key keeps the shape `parse_bundle_key` reads.
+        let alt = |tag: &str| bundle_key(pc_id, &cmd.id, label.as_deref(), &ts, Some(tag));
+        let key = match crate::object_put::put_no_overwrite(&store, &key, &zip_bytes, alt).await {
+            Ok(k) => k,
+            Err(e) => {
+                warn!(error = %e, key, "collect: upload failed; skipping bundle");
+                continue;
+            }
+        };
         info!(
             key,
             bytes = bytes_len,
@@ -385,9 +388,78 @@ async fn collect_and_upload(
     Ok(out)
 }
 
+/// Bundle object key; a `tag` adds `-<tag>` before `.zip` so a
+/// forced alternative keeps the three-segment `.zip` shape.
+fn bundle_key(
+    pc_id: &str,
+    job_id: &str,
+    label: Option<&str>,
+    ts: &str,
+    tag: Option<&str>,
+) -> String {
+    let r = tag.map(|t| format!("-{t}")).unwrap_or_default();
+    match label {
+        Some(l) => format!("{pc_id}/{job_id}/{l}__{ts}{r}.zip"),
+        None => format!("{pc_id}/{job_id}/{ts}{r}.zip"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundle_key_keeps_shape_with_and_without_attempt() {
+        let ts = "20260101T000000.000Z";
+        assert_eq!(
+            bundle_key("pc", "j", None, ts, None),
+            "pc/j/20260101T000000.000Z.zip"
+        );
+        assert_eq!(
+            bundle_key("pc", "j", Some("a"), ts, Some("r2")),
+            "pc/j/a__20260101T000000.000Z-r2.zip"
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_collision_uses_alt_key_and_identical_retry_reuses() {
+        use crate::object_put::{PutStore, Slot, put_no_overwrite};
+        use sha2::{Digest, Sha256};
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        struct Mem(RefCell<HashMap<String, Vec<u8>>>);
+        impl PutStore for Mem {
+            async fn slot(&self, key: &str) -> anyhow::Result<Slot> {
+                Ok(match self.0.borrow().get(key) {
+                    None => Slot::Absent,
+                    Some(b) => Slot::Live {
+                        size: b.len(),
+                        digest: Some(format!(
+                            "SHA-256={}",
+                            base64::Engine::encode(
+                                &base64::engine::general_purpose::URL_SAFE,
+                                Sha256::digest(b)
+                            )
+                        )),
+                    },
+                })
+            }
+            async fn put_bytes(&self, key: &str, bytes: &[u8]) -> anyhow::Result<()> {
+                assert!(!self.0.borrow().contains_key(key));
+                self.0.borrow_mut().insert(key.into(), bytes.to_vec());
+                Ok(())
+            }
+        }
+        let ts = "20260101T000000.000Z";
+        let base = bundle_key("pc", "j", Some("a"), ts, None);
+        let alt = |t: &str| bundle_key("pc", "j", Some("a"), ts, Some(t));
+        let m = Mem(RefCell::new(HashMap::new()));
+        assert_eq!(put_no_overwrite(&m, &base, b"x", alt).await.unwrap(), base);
+        assert_eq!(put_no_overwrite(&m, &base, b"x", alt).await.unwrap(), base);
+        let k = put_no_overwrite(&m, &base, b"y", alt).await.unwrap();
+        assert_eq!(k, "pc/j/a__20260101T000000.000Z-r1.zip");
+        assert_eq!(m.0.borrow()[&base], b"x");
+    }
 
     #[test]
     fn json_string_array_reads_and_skips_blanks() {

@@ -241,8 +241,8 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
     // breach the broker's default 1 MB max_payload and lock the
     // outbox into a reconnect loop. Upload + replace + serialize a
     // fresh smaller payload; the on-disk file keeps the full bytes
-    // so a retry after broker outage re-runs the upload (idempotent
-    // — same key + same bytes hash to the same object on re-put).
+    // so a retry after broker outage re-runs the upload (an identical
+    // object already stored is reused, never overwritten).
     let overflowed = offload_overflow(js, &mut result).await?;
     let publish_bytes = if overflowed {
         serde_json::to_vec(&result)
@@ -282,14 +282,15 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
 
 /// Inspect `result.stdout` / `.stderr`; for each one over the inline
 /// threshold, upload the bytes to `OBJECT_RESULT_OUTPUT` under
-/// `<request_id>/{stdout,stderr}`, clear the inline field, and set
+/// `<request_id>/<pc_id>/{stdout,stderr}`, clear the inline field, and set
 /// the matching pointer. Returns whether any field was overflowed so
 /// the caller knows to re-serialize (small case stays a zero-copy
 /// publish of the on-disk bytes).
 ///
-/// Upload is idempotent: same `<request_id>` key + same bytes hash
-/// to the same object on `put`. Re-runs after broker outage replay
-/// the upload without producing duplicate keys.
+/// Uploads never replace an object. A re-run after a lost publish finds
+/// the identical object under the same key and reuses it; if the key
+/// holds different bytes the upload goes to `<key>.r<N>` (or a digest-derived tag once those are used) and that key is
+/// the one recorded in the result.
 async fn offload_overflow(
     js: &async_nats::jetstream::Context,
     result: &mut ExecResult,
@@ -315,19 +316,16 @@ async fn offload_overflow(
 
     let mut overflowed = false;
     if result.stdout.len() > STDOUT_INLINE_THRESHOLD {
-        let key = format!("{}/stdout", result.request_id);
-        // `mem::take` moves the String out + leaves an empty one in
-        // its place; `into_bytes` is then a zero-copy reuse of the
-        // String's buffer. Avoids the extra `to_vec` clone that the
-        // first draft did on a (potentially) multi-MB payload
-        // (Gemini #282 MEDIUM).
+        let base = format!("{}/{}/stdout", result.request_id, result.pc_id);
         let stdout_bytes = std::mem::take(&mut result.stdout).into_bytes();
         let bytes_len = stdout_bytes.len();
-        let mut cursor = std::io::Cursor::new(stdout_bytes);
-        store
-            .put(key.as_str(), &mut cursor)
-            .await
-            .with_context(|| format!("object_store.put {key}"))?;
+        let key = crate::object_put::put_no_overwrite(
+            &store,
+            &base,
+            &stdout_bytes,
+            crate::object_put::suffix_key(&base),
+        )
+        .await?;
         info!(
             request_id = %result.request_id,
             key,
@@ -338,16 +336,16 @@ async fn offload_overflow(
         overflowed = true;
     }
     if result.stderr.len() > STDOUT_INLINE_THRESHOLD {
-        let key = format!("{}/stderr", result.request_id);
-        // Same zero-copy `mem::take` + `into_bytes` shape as stdout
-        // above (Gemini #282 MEDIUM).
+        let base = format!("{}/{}/stderr", result.request_id, result.pc_id);
         let stderr_bytes = std::mem::take(&mut result.stderr).into_bytes();
         let bytes_len = stderr_bytes.len();
-        let mut cursor = std::io::Cursor::new(stderr_bytes);
-        store
-            .put(key.as_str(), &mut cursor)
-            .await
-            .with_context(|| format!("object_store.put {key}"))?;
+        let key = crate::object_put::put_no_overwrite(
+            &store,
+            &base,
+            &stderr_bytes,
+            crate::object_put::suffix_key(&base),
+        )
+        .await?;
         info!(
             request_id = %result.request_id,
             key,
