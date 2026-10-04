@@ -289,23 +289,26 @@ pub async fn list_jobs(
             )
         })?;
     let mut out = Vec::new();
-    let mut keys = match kv.keys().await {
+    let keys = match kv.keys().await {
         Ok(k) => k,
         Err(_) => return Ok(Json(out)),
     };
-    while let Some(key) = keys.next().await {
-        let key = match key {
-            Ok(k) => k,
-            Err(_) => continue,
-        };
-        let entry = match kv.get(&key).await.unwrap_or(None) {
-            Some(b) => b,
-            None => continue,
-        };
-        let job: Manifest = match serde_json::from_slice(&entry) {
-            Ok(j) => j,
-            Err(_) => continue,
-        };
+    // Fetch the manifests concurrently (bounded): one serial NATS round trip
+    // per key made this endpoint scale with the number of jobs. A key that
+    // fails to fetch or parse is skipped, as before; the sort below makes the
+    // completion order irrelevant.
+    let kv = &kv;
+    let jobs: Vec<Manifest> = keys
+        .filter_map(|key| async move { key.ok() })
+        .map(|key| async move {
+            let entry = kv.get(&key).await.unwrap_or(None)?;
+            serde_json::from_slice::<Manifest>(&entry).ok()
+        })
+        .buffer_unordered(16)
+        .filter_map(|m| async move { m })
+        .collect()
+        .await;
+    for job in jobs {
         if let Some(hint) = job.inventory {
             out.push(InventoryJob {
                 manifest_id: job.id,
