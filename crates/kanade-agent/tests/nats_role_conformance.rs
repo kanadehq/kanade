@@ -113,6 +113,15 @@ fn exe(name: &str) -> PathBuf {
     here
 }
 
+/// The backend binary. A debug build of it overflows the 1 MiB main-thread
+/// stack on Windows (the production build is a release build), so CI points
+/// this at a release binary there.
+fn backend_exe() -> PathBuf {
+    std::env::var_os("KANADE_CONFORMANCE_BACKEND_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| exe("kanade-backend"))
+}
+
 fn agent_exe() -> PathBuf {
     env!("CARGO_BIN_EXE_kanade-agent").into()
 }
@@ -132,11 +141,11 @@ fn prerequisites() -> bool {
             missing.push(format!("nats-server {want} (found: {})", got.trim()));
         }
     }
-    for bin in ["kanade-backend", "kanade"] {
-        if !exe(bin).exists() {
+    for bin in [backend_exe(), exe("kanade")] {
+        if !bin.exists() {
             missing.push(format!(
                 "{} (run `cargo build -p kanade-backend -p kanade-agent -p kanade`)",
-                exe(bin).display()
+                bin.display()
             ));
         }
     }
@@ -208,6 +217,8 @@ impl Role {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Auth {
     Users,
+    /// Only the switch scenario (unix) runs a token broker.
+    #[cfg(unix)]
     Token,
 }
 
@@ -257,6 +268,7 @@ impl Broker {
         let store = self.dir.path().join("js");
         let auth_block = match auth {
             Auth::Users => "include \"nats-server.users.conf\"".to_string(),
+            #[cfg(unix)]
             Auth::Token => format!("authorization {{ token: \"{TOKEN}\" }}"),
         };
         let conf = format!(
@@ -348,6 +360,7 @@ impl Broker {
     }
 
     /// `(connection name, authorized_user)` for every live connection.
+    #[cfg(unix)]
     async fn connections(&self) -> Vec<(String, String)> {
         let v = self.monitor("/connz?auth=1").await;
         v["connections"]
@@ -658,7 +671,7 @@ impl Fleet {
         );
         let cfg = dir.join("backend.toml");
         std::fs::write(&cfg, toml).expect("backend.toml");
-        let mut cmd = Command::new(exe("kanade-backend"));
+        let mut cmd = Command::new(backend_exe());
         cmd.arg("--config")
             .arg(&cfg)
             // A throwaway data dir keeps the boot sentinel and key material
@@ -714,6 +727,7 @@ impl Fleet {
 
     /// Start `kanade run` and leave it running: it waits for its result over
     /// a subscription that has to survive whatever the broker does next.
+    #[cfg(unix)]
     fn cli_spawn_slow(&self, marker: &str, sleep_secs: u32) -> Child {
         let mut cmd = Command::new(exe("kanade"));
         cmd.arg("--server")
@@ -1908,12 +1922,14 @@ async fn denied_operations_are_denied_per_role() {
 /// A TCP pass-through whose live connections can all be cut at once, so a
 /// client is forced to authenticate again — which is the moment its
 /// credential selection runs.
+#[cfg(unix)]
 struct Proxy {
     port: u16,
     conns: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
     accept: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(unix)]
 impl Proxy {
     async fn start(target: u16) -> Self {
         let l = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -1950,6 +1966,7 @@ impl Proxy {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Proxy {
     fn drop(&mut self) {
         self.accept.abort();
@@ -1958,6 +1975,7 @@ impl Drop for Proxy {
 }
 
 /// What the broker says each kanade connection authenticated as.
+#[cfg(unix)]
 async fn principals(b: &Broker) -> Vec<(String, String)> {
     b.connections()
         .await
@@ -1966,6 +1984,7 @@ async fn principals(b: &Broker) -> Vec<(String, String)> {
         .collect()
 }
 
+#[cfg(unix)]
 fn on_users(p: &[(String, String)], pc: &str) -> bool {
     let agent = p.iter().any(|(n, u)| n.contains(pc) && u == "agent");
     let backend = p
@@ -1974,6 +1993,7 @@ fn on_users(p: &[(String, String)], pc: &str) -> bool {
     agent && backend
 }
 
+#[cfg(unix)]
 fn on_token(p: &[(String, String)], pc: &str) -> bool {
     let agent = p.iter().any(|(n, u)| n.contains(pc) && u != "agent");
     let backend = p
@@ -1985,6 +2005,7 @@ fn on_token(p: &[(String, String)], pc: &str) -> bool {
 /// Everything the three roles do, once, with fresh identifiers: the agent
 /// heartbeats, the backend pings it and fetches its log through the real
 /// handlers, and the break-glass CLI runs a command and gets the result.
+#[cfg(unix)]
 async fn every_role_works(f: &mut Fleet, stage: &str, observe_as: Auth) {
     let mut hb = observe_heartbeats(f, observe_as).await;
     f.heartbeat(&mut hb, Duration::from_secs(90)).await;
@@ -2024,6 +2045,7 @@ async fn every_role_works(f: &mut Fleet, stage: &str, observe_as: Auth) {
 }
 
 /// The CLI that was started before a switch must still receive its result.
+#[cfg(unix)]
 async fn assert_slow_cli_completes(child: Child, marker: &str, stage: &str) {
     let out = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output())
         .await
@@ -2039,6 +2061,7 @@ async fn assert_slow_cli_completes(child: Child, marker: &str, stage: &str) {
 
 /// A heartbeat subscription on whichever credential the broker accepts in
 /// that stage. Kept alive for the rest of the test.
+#[cfg(unix)]
 async fn observe_heartbeats(f: &Fleet, auth: Auth) -> async_nats::Subscriber {
     let opts = match auth {
         Auth::Token => async_nats::ConnectOptions::with_token(TOKEN.into()),
