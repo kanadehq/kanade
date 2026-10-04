@@ -332,7 +332,7 @@ async fn wait_for_tcp(port: u16, timeout: Duration) -> Result<()> {
 /// line to stderr with a prefix. cargo test captures stderr per-test
 /// (no `--nocapture` needed for it), so green runs stay quiet but
 /// failed tests dump the subprocess context inline.
-fn forward_lines<R>(stream: R, prefix: &'static str)
+pub fn forward_lines<R>(stream: R, prefix: &'static str)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
