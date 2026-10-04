@@ -935,15 +935,24 @@ where
 /// Whether the client's connection task has terminated.
 ///
 /// When that task ends (a panic inside it, a drain, exhausted reconnects) the
-/// `Client` stays alive and never talks again — a silent zombie. The observable difference from an ordinary disconnect is
-/// that a publish is *buffered* while disconnected but fails with a send
-/// error once the task is gone, so one empty publish to an unused inbox is
-/// the probe. A publish that merely blocks (the buffer is full behind a
-/// live task) is not death.
+/// `Client` stays alive and never talks again — a silent zombie. The
+/// observable difference from an ordinary disconnect is the command channel:
+/// a task that is alive but reconnecting simply does not answer a flush, so
+/// the flush waits and the timeout elapses; a task that is gone has dropped
+/// the receiving end, so queueing the flush fails with a send error. The
+/// check publishes to no subject, so no role needs any publish right for it.
+///
+/// This tells whether the task still accepts commands, not whether the broker
+/// is reachable. A flush that fails after it was queued (its observer was
+/// dropped) is not treated as death: a task that really is gone fails the
+/// next check at the send step, and mistaking a plain disconnect for death
+/// would make a process exit needlessly.
 pub async fn is_dead(client: &async_nats::Client) -> bool {
-    let publish = client.publish(client.new_inbox(), Default::default());
-    match tokio::time::timeout(Duration::from_secs(5), publish).await {
-        Ok(Err(e)) => e.kind() == async_nats::client::PublishErrorKind::Send,
+    match tokio::time::timeout(Duration::from_secs(5), client.flush()).await {
+        Ok(Err(e)) => match e.kind() {
+            async_nats::client::FlushErrorKind::SendError => true,
+            async_nats::client::FlushErrorKind::FlushError => false,
+        },
         Ok(Ok(())) | Err(_) => false,
     }
 }

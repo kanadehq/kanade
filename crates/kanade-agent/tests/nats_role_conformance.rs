@@ -1540,6 +1540,7 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Agent, Publish("notif-amend"), Denied),
         (Agent, Publish("audit.operator.run.x"), Denied),
         (Agent, Publish("notifications.all"), Denied),
+        (Agent, Publish("_INBOX.forged.reply"), Denied),
         (Agent, Subscribe("heartbeat.>"), Denied),
         (Agent, Subscribe("results.*"), Denied),
         (Agent, Subscribe("audit.>"), Denied),
@@ -1644,6 +1645,7 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Breakglass, Subscribe("commands.>"), Denied),
         (Breakglass, Subscribe("heartbeat.>"), Denied),
         (Breakglass, Subscribe("_INBOX.>"), Denied),
+        (Breakglass, Publish("_INBOX.forged.reply"), Denied),
         (Breakglass, Subscribe(">"), Denied),
         (Breakglass, Publish("commands.pc.x"), Allowed),
         (Breakglass, Publish("kill.x"), Allowed),
@@ -1659,6 +1661,7 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Backend, Subscribe("results.*"), Allowed),
         (Backend, Publish("heartbeat.x"), Denied),
         (Backend, Publish("results.x"), Denied),
+        (Backend, Publish("_INBOX.forged.reply"), Denied),
         (Backend, Subscribe("commands.>"), Denied),
         (Backend, Subscribe(">"), Denied),
     ];

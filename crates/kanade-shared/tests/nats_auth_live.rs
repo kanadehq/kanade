@@ -317,8 +317,9 @@ async fn dead_client_detection_fires_once_the_connection_task_has_terminated() {
 #[tokio::test]
 #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
 async fn a_live_client_is_not_reported_dead_while_the_broker_is_down() {
-    // An ordinary disconnect buffers publishes; it must not be mistaken for
-    // a terminated connection task.
+    // An ordinary disconnect leaves the connection task alive but busy
+    // reconnecting, so a flush waits; that must not be mistaken for a
+    // terminated connection task, however many checks pile up.
     let mut broker = broker_or_skip!(TOKEN_AUTH);
     let client = connect_with_credentials(NatsRole::Cli, &broker.url(), both())
         .await
@@ -326,5 +327,7 @@ async fn a_live_client_is_not_reported_dead_while_the_broker_is_down() {
     assert!(round_trip(&client, Duration::from_secs(15)).await);
     broker.child.kill().await.expect("stop broker");
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(!is_dead(&client).await);
+    for _ in 0..3 {
+        assert!(!is_dead(&client).await);
+    }
 }
