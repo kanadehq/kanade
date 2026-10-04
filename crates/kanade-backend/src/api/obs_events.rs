@@ -697,6 +697,22 @@ mod tests {
         );
     }
 
+    /// The Events source picker must read the covering index, not the table.
+    #[tokio::test]
+    async fn distinct_source_uses_its_covering_index() {
+        let pool = fresh_pool().await;
+        let detail = plan_details(
+            &pool,
+            "EXPLAIN QUERY PLAN SELECT DISTINCT source FROM obs_events ORDER BY source",
+        )
+        .await
+        .join(" | ");
+        assert!(
+            detail.contains("COVERING INDEX idx_obs_events_source"),
+            "expected the source index, got: {detail}"
+        );
+    }
+
     /// Same rows out, whichever statement ran. The split is a planner
     /// concern; it must not change what the API returns.
     #[tokio::test]
