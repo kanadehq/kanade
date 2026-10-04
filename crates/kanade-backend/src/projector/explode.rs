@@ -169,9 +169,24 @@ pub fn create_table_sql(spec: &ExplodeSpec) -> Result<String> {
     sql.push_str("    pc_id TEXT NOT NULL,\n");
     sql.push_str("    job_id TEXT NOT NULL,\n");
     sql.push_str("    collected_at TIMESTAMP,\n");
+    // SQLite column names are case-insensitive; a duplicate or a clash
+    // with a built-in column would only fail at CREATE/ALTER time, i.e.
+    // after `job create` already stored the manifest.
+    let mut seen: BTreeSet<String> = ["pc_id", "job_id", "collected_at"]
+        .into_iter()
+        .map(String::from)
+        .collect();
     for col in &spec.columns {
         validate_ident(&col.field)?;
         validate_kind(col.kind.as_deref())?;
+        if !seen.insert(col.field.to_ascii_lowercase()) {
+            bail!(
+                "column {:?} for table {:?} is declared twice or collides with a built-in \
+                 column (pc_id, job_id, collected_at)",
+                col.field,
+                spec.table,
+            );
+        }
         sql.push_str(&format!(
             "    \"{}\" {},\n",
             col.field,
@@ -1483,6 +1498,26 @@ mod tests {
         let err = validate_specs(&[items_spec_v1(), bad]).unwrap_err();
         assert!(err.to_string().contains("does_not_exist"), "{err}");
         validate_specs(&[items_spec_v1(), items_spec_v2()]).unwrap();
+    }
+
+    /// Duplicate columns and built-in-column clashes must be rejected
+    /// by `validate_specs` so they never reach the catalog.
+    #[test]
+    fn validate_specs_rejects_duplicate_and_builtin_columns() {
+        let mut dup = items_spec_v2();
+        dup.columns.push(ExplodeColumn {
+            field: "Name".into(),
+            kind: None,
+            index: false,
+        });
+        assert!(validate_specs(&[dup]).is_err());
+        let mut builtin = items_spec_v2();
+        builtin.columns.push(ExplodeColumn {
+            field: "pc_id".into(),
+            kind: None,
+            index: false,
+        });
+        assert!(validate_specs(&[builtin]).is_err());
     }
 
     /// `job create` writes the catalog BEFORE the SQL migration, so a
