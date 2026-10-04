@@ -93,11 +93,11 @@
 
   Requires a non-empty keyring: pass -CommandKeys alongside this on a
   brand-new machine, or make sure CommandKeys is already provisioned
-  on one being re-run. An enforcing agent with an empty ring declines
-  to enforce rather than refusing everything (see command_verify.rs),
-  so asking for enforcement with no keys on hand would just be
-  silently inert -- this script refuses instead of writing a value
-  that does nothing.
+  on one being re-run, and every public_key must be Base64 for a 32-byte
+  Ed25519 key. An enforcing agent with an empty ring REFUSES every command
+  (it fails closed, see command_verify.rs), so this script refuses to
+  install rather than write a value that would leave the host unable to run
+  anything.
 
 .EXAMPLE
   # Drop deploy-agent.ps1 + kanade-agent.exe + agent.toml in a folder,
@@ -252,7 +252,38 @@ function Assert-KanadeNatsUserPair {
     }
 }
 
+# Every CommandKeys entry's public_key must be standard Base64 for exactly 32
+# bytes -- what the agent's `parse_keyring` decodes. A mistyped key otherwise
+# installs fine and leaves the agent with a ring it cannot parse, so refuse
+# here, before anything on the machine is touched. Names the kid, never echoes
+# the key material beyond the length.
+function Assert-KanadeCommandKeys {
+    param([object[]]$Entries)
+    foreach ($e in $Entries) {
+        $bytes = $null
+        try {
+            $bytes = [Convert]::FromBase64String(([string]$e.public_key).Trim())
+        } catch {
+            throw "CommandKeys entry '$($e.kid)' has a public_key that is not valid Base64. Nothing was changed."
+        }
+        if ($bytes.Length -ne 32) {
+            throw "CommandKeys entry '$($e.kid)' has a public_key that decodes to $($bytes.Length) bytes; an Ed25519 public key is exactly 32. Nothing was changed."
+        }
+    }
+}
+
 Assert-KanadeNatsUserPair -User $NatsUser -Password $NatsPassword
+
+# Key material is checked this early too, so a mistyped public_key fails the run
+# with the old install still in place. The fuller shape checks further down stay
+# where they are; this only looks at entries that parse far enough to have a
+# string public_key.
+if ($CommandKeys -and $CommandKeys.Trim().StartsWith('[')) {
+    $earlyParsed = $null
+    try { $earlyParsed = ConvertFrom-Json -InputObject $CommandKeys.Trim() } catch { }
+    $earlyEntries = @($earlyParsed) | Where-Object { $_ -and ($_.public_key -is [string]) }
+    if ($earlyEntries) { Assert-KanadeCommandKeys -Entries @($earlyEntries) }
+}
 
 $binDir    = Join-Path $env:ProgramFiles 'Kanade'
 $dataRoot  = Join-Path $env:ProgramData  'Kanade'
@@ -402,6 +433,8 @@ if ($CommandKeys) {
             throw "CommandKeys entry '$($e.kid)' has max_age_secs = $($e.max_age_secs). A non-positive window rejects every signature made with the key. Pick a window a human can act inside."
         }
     }
+    Assert-KanadeCommandKeys -Entries $entries
+
     # The agent keys its ring by id, so a repeat would silently drop one key
     # and every command signed by it would stop verifying with nothing to
     # explain it. `parse_keyring` refuses such a ring outright; catching it
@@ -435,12 +468,10 @@ if ($CommandKeys) {
 # REFUSE unverified commands instead of just reporting them. This is the
 # value `command_verify.rs::enforce_requested()` reads once at startup.
 #
-# An empty ring makes enforcement inert (the agent declines to enforce
-# rather than refusing everything, so it never bricks a host) -- but
-# writing the value anyway would let an operator believe a machine is
-# protected when it silently is not, with nothing at the time of the
-# mistake to say otherwise. So this checks for a ring rather than trusting
-# the operator remembered one: either -CommandKeys was passed alongside
+# With an empty ring the agent refuses EVERY command (it fails closed), so
+# writing the value without a usable ring would leave the machine unable to
+# run anything until someone re-provisions it locally. So this checks for a
+# ring rather than trusting the operator remembered one: either -CommandKeys was passed alongside
 # this run, or one is already sitting in the registry from an earlier run.
 if ($RequireSignedCommands) {
     # -CommandKeys, if passed, was already validated non-empty above (the
@@ -479,11 +510,15 @@ if ($RequireSignedCommands) {
                     ($_.public_key -is [string]) -and (-not [string]::IsNullOrWhiteSpace($_.public_key))
                 }
                 $hasRing = @($validEntries).Count -gt 0
+                # A key that is present but not a real 32-byte Ed25519 key leaves
+                # the agent with an empty ring, which with enforcement on
+                # refuses every command. Refuse before writing the flag.
+                if ($hasRing) { Assert-KanadeCommandKeys -Entries @($validEntries) }
             }
         }
     }
     if (-not $hasRing) {
-        throw "-RequireSignedCommands was passed but this machine has no CommandKeys (neither -CommandKeys nor a non-empty existing registry value). Enforcing with an empty ring is inert on the agent side, so this refuses rather than writing a value that silently does nothing. Pass -CommandKeys too."
+        throw "-RequireSignedCommands was passed but this machine has no CommandKeys (neither -CommandKeys nor a non-empty existing registry value). Enforcing with an empty ring makes the agent refuse every command, so this refuses rather than writing that value. Pass -CommandKeys too."
     }
     Set-KanadeRegistrySecret -Subkey 'agent' -ValueName 'RequireSignedCommands' -Value '1'
     Write-Host 'RequireSignedCommands provisioned. This agent will refuse unverified commands.'
