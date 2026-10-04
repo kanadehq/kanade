@@ -110,7 +110,7 @@ jobs:
         run: |
           cargo build -p kanade-agent -p kanade
           cargo build --release -p kanade-backend
-          echo "KANADE_CONFORMANCE_BACKEND_BIN=$PWD/target/release/kanade-backend${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
+          echo "KANADE_CONFORMANCE_BACKEND_BIN=$GITHUB_WORKSPACE/target/release/kanade-backend${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
 
       - name: NATS role-level authorization conformance
         run: cargo test -p kanade-agent --test nats_role_conformance -- --ignored --nocapture
