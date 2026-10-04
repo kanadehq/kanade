@@ -821,9 +821,9 @@ fn ps_quote(value: &str) -> String {
 /// misconfiguration, not a "nothing to do" — silently generating an
 /// installer that behaves like `Off` would let an operator believe a fresh
 /// fleet is protected when not one machine actually is. The empty-keyring
-/// fallback in `command_verify.rs` (an enforcing agent with no keys
-/// declines to enforce, rather than refusing everything) protects hosts
-/// that already got such an installer; it is not a reason to keep handing
+/// handling in `command_verify.rs` (an enforcing agent with no keys
+/// refuses every command) is the fail-closed backstop for hosts that
+/// already got such an installer; it is not a reason to keep handing
 /// out more of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnforcementPlan {
@@ -951,7 +951,7 @@ fn render_readme(version: &str, signing: bool, enforcement: EnforcementPlan) -> 
             "\r\n*** WARNING: RequireSignedCommands was requested in server settings, but\r\n\
              *** this backend has no command-signing key configured, so this installer\r\n\
              *** does NOT enable enforcement — an agent enforcing against an empty\r\n\
-             *** keyring would just decline to enforce, which is not what was asked for.\r\n\
+             *** keyring would refuse every command, which is not what was asked for.\r\n\
              *** Run `kanade-backend command-key-generate` on the backend host, then\r\n\
              *** re-download this installer.\r\n"
         }
@@ -1187,7 +1187,7 @@ fn unix_signing_note(signing: bool, enforcement: EnforcementPlan) -> String {
             "\n*** WARNING: RequireSignedCommands was requested in server settings, but\n\
              *** this backend has no command-signing key configured, so this installer\n\
              *** does NOT enable enforcement — an agent enforcing against an empty\n\
-             *** keyring would just decline to enforce, which is not what was asked for.\n\
+             *** keyring would refuse every command, which is not what was asked for.\n\
              *** Run `kanade-backend command-key-generate` on the backend host, then\n\
              *** re-download this installer.\n",
         ),
