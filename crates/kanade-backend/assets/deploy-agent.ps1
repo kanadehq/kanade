@@ -45,6 +45,28 @@
   agent reads this at startup ahead of $env:KANADE_NATS_TOKEN.
   Required when the broker is started with `authorization { token: ... }`.
 
+.PARAMETER NatsUser
+  Optional per-role NATS user, written to HKLM\SOFTWARE\kanade\agent\NatsUser
+  (REG_SZ) with the same hardened ACL as the token. Must be given together
+  with -NatsPassword: a half pair is refused before anything is written,
+  because the client treats a half pair as a configuration error too.
+
+  This is the agent's own credential. There is deliberately no shared user,
+  so it is never written under another role's key, and this script never
+  provisions the backend's, a CLI's or the break-glass credential.
+
+  The token is unaffected: a host given both keeps both, and the client
+  chooses between them. Re-running without these leaves an existing pair
+  untouched; passing new values replaces both halves together. Nothing here
+  switches the broker from the shared token to users -- that is a separate
+  broker-side change, and the user is inert until it happens.
+
+.PARAMETER NatsPassword
+  The password for -NatsUser, written to
+  HKLM\SOFTWARE\kanade\agent\NatsPassword (REG_SZ, hardened ACL). Never
+  echoed or logged by this script. Pass both -NatsUser and -NatsPassword, or
+  neither.
+
 .PARAMETER CommandKeys
   If set, write the command-signing keyring (#1165) to
   HKLM\SOFTWARE\kanade\agent\CommandKeys (REG_SZ) with the same
@@ -91,6 +113,11 @@
   PS> .\deploy-agent.ps1 -NatsToken '<your-fleet-token>'
 
 .EXAMPLE
+  # Kit a host with its per-role NATS user next to the token (the broker is
+  # not switched to users by this; the client uses the user once it is):
+  PS> .\deploy-agent.ps1 -NatsToken '<your-fleet-token>' -NatsUser '<agent-user>' -NatsPassword '<agent-password>'
+
+.EXAMPLE
   # Kit a new machine with both the NATS token and the command-signing
   # keyring, so it starts out able to verify rather than needing someone
   # to remember a follow-up step:
@@ -119,6 +146,8 @@ param(
     [switch]$Recreate,
     [switch]$NoStart,
     [string]$NatsToken   = '',
+    [string]$NatsUser    = '',
+    [string]$NatsPassword = '',
     [string]$CommandKeys = '',
     [switch]$RequireSignedCommands
 )
@@ -139,20 +168,38 @@ $ErrorActionPreference = 'Stop'
 # loads fail on some elevated / constrained-language pwsh sessions
 # with a CouldNotAutoloadMatchingModule error. The .NET classes are
 # always reachable from any PowerShell context.
-function Set-KanadeRegistrySecret {
+function Set-KanadeRegistrySecrets {
     param(
         [Parameter(Mandatory)][string]$Subkey,
-        [Parameter(Mandatory)][string]$ValueName,
-        [Parameter(Mandatory)][string]$Value
+        # Value name -> value. Written through ONE open key so a pair lands
+        # together; two separate calls could leave a half pair behind if the
+        # second failed, and the client reads a half pair as an error.
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Values,
+        # Overridable only so tests can aim at a scratch tree instead of the
+        # real machine key.
+        [string]$BasePath = 'SOFTWARE\kanade',
+        [Microsoft.Win32.RegistryKey]$Root = [Microsoft.Win32.Registry]::LocalMachine
     )
 
-    $subkeyPath = "SOFTWARE\kanade\$Subkey"
-    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subkeyPath, $true)
+    $subkeyPath = "$BasePath\$Subkey"
+    $key = $Root.OpenSubKey($subkeyPath, $true)
     if (-not $key) {
-        $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($subkeyPath)
+        $key = $Root.CreateSubKey($subkeyPath)
+    }
+    # What each value held before, so a failure part-way can put it back. A
+    # registry key has no multi-value transaction, and a pair with one new half
+    # and one old (or one half missing) is a configuration error for the client.
+    $previous = @{}
+    foreach ($name in $Values.Keys) {
+        $kind = $null
+        $old = $key.GetValue($name, $null)
+        if ($null -ne $old) { $kind = $key.GetValueKind($name) }
+        $previous[$name] = @{ Value = $old; Kind = $kind }
     }
     try {
-        $key.SetValue($ValueName, $Value, [Microsoft.Win32.RegistryValueKind]::String)
+        foreach ($name in $Values.Keys) {
+            $key.SetValue($name, [string]$Values[$name], [Microsoft.Win32.RegistryValueKind]::String)
+        }
 
         $sec = $key.GetAccessControl()
         $sec.SetAccessRuleProtection($true, $false)
@@ -165,12 +212,47 @@ function Set-KanadeRegistrySecret {
             $sec.AddAccessRule($rule)
         }
         $key.SetAccessControl($sec)
+    } catch {
+        $failure = $_
+        foreach ($name in $previous.Keys) {
+            try {
+                if ($null -eq $previous[$name].Value) { $key.DeleteValue($name, $false) }
+                else { $key.SetValue($name, $previous[$name].Value, $previous[$name].Kind) }
+            } catch { }
+        }
+        throw $failure
     } finally {
         $key.Close()
     }
 
-    Write-Host "Wrote $ValueName to HKLM:\$subkeyPath (SYSTEM + Administrators only)."
+    # Names only, never values.
+    foreach ($name in $Values.Keys) {
+        Write-Host "Wrote $name to HKLM:\$subkeyPath (SYSTEM + Administrators only)."
+    }
 }
+
+function Set-KanadeRegistrySecret {
+    param(
+        [Parameter(Mandatory)][string]$Subkey,
+        [Parameter(Mandatory)][string]$ValueName,
+        [Parameter(Mandatory)][string]$Value
+    )
+    Set-KanadeRegistrySecrets -Subkey $Subkey -Values @{ $ValueName = $Value }
+}
+
+# Both halves of the per-role NATS user or neither. Called before anything on
+# the machine is touched, so a half pair fails the run with the old install
+# still in place. The message names the parameters, never the values.
+function Assert-KanadeNatsUserPair {
+    param([string]$User, [string]$Password)
+    $hasUser = -not [string]::IsNullOrEmpty($User)
+    $hasPass = -not [string]::IsNullOrEmpty($Password)
+    if ($hasUser -ne $hasPass) {
+        throw '-NatsUser and -NatsPassword must be given together (or neither). A half pair is a configuration error for the client, so nothing was changed.'
+    }
+}
+
+Assert-KanadeNatsUserPair -User $NatsUser -Password $NatsPassword
 
 $binDir    = Join-Path $env:ProgramFiles 'Kanade'
 $dataRoot  = Join-Path $env:ProgramData  'Kanade'
@@ -238,6 +320,11 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
 
 if ($NatsToken) {
     Set-KanadeRegistrySecret -Subkey 'agent' -ValueName 'NatsToken' -Value $NatsToken
+}
+# The agent's own user, under the agent key only. Absent parameters write
+# nothing, so a re-run without them never deletes a pair already there.
+if ($NatsUser) {
+    Set-KanadeRegistrySecrets -Subkey 'agent' -Values @{ NatsUser = $NatsUser; NatsPassword = $NatsPassword }
 }
 
 # #1165: the command-signing keyring, provisioned here for the same reason

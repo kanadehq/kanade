@@ -17,6 +17,12 @@
 #   sudo KANADE_NATS_URL=wss://nats.kanade.example.com \
 #        KANADE_NATS_TOKEN=<the deployment's token> bash ./setup-agent-macos.sh
 #
+#   # Per-role NATS user (optional), both or neither, kept beside the token.
+#   # Re-running without them leaves an installed pair alone. The broker is
+#   # not switched to users by this:
+#   sudo KANADE_NATS_USER=<agent-user> KANADE_NATS_PASSWORD=<agent-password> \
+#        bash ./setup-agent-macos.sh
+#
 #   # Command signing (optional): trust the backend's signing key, and refuse
 #   # commands that do not verify against it:
 #   sudo KANADE_COMMAND_KEYS='[{"kid":"backend-1","public_key":"<base64>"}]' \
@@ -46,6 +52,43 @@ echo "==> Verifying bundle contents"
 for f in bin/kanade-agent etc/agent.toml "launchd/${label}.plist"; do
 	[ -e "$bundle/$f" ] || { echo "bundle is missing $f — re-download the macOS installer" >&2; exit 1; }
 done
+
+# Per-role NATS user (optional): KANADE_NATS_USER + KANADE_NATS_PASSWORD, both
+# or neither. It sits beside the token, never instead of it -- the client
+# chooses between them -- and it is this agent's own credential: there is
+# deliberately no shared user, so nothing here reads or writes another role's.
+# Nothing in this script switches the broker from the token to users.
+#
+# Validated before anything on the box is changed, so a half pair fails the run
+# with the old install still in place. Messages name the variables, never the
+# values.
+# >>> nats-user
+agent_env=/etc/kanade/agent.env
+nats_user="${KANADE_NATS_USER:-}"
+nats_pass="${KANADE_NATS_PASSWORD:-}"
+nats_user_lines=""
+prepare_nats_user() {
+	if [ -z "$nats_user" ] && [ -z "$nats_pass" ]; then
+		# No new pair: carry an existing one over verbatim, because the env
+		# file is rewritten whole below and must not lose a credential just
+		# because this run did not repeat it.
+		[ ! -f "$agent_env" ] || nats_user_lines="$(grep -E '^KANADE_NATS_(USER|PASSWORD)=' "$agent_env" || true)"
+		return 0
+	fi
+	if [ -z "$nats_user" ] || [ -z "$nats_pass" ]; then
+		echo "KANADE_NATS_USER and KANADE_NATS_PASSWORD must be set together (or neither) — nothing was changed" >&2
+		exit 1
+	fi
+	# The file is line-based and the launcher reads it with sed as data, so a
+	# value is stored raw; only a line break could not survive that.
+	case "$nats_user$nats_pass" in
+		*$'\n'*|*$'\r'*) echo "KANADE_NATS_USER / KANADE_NATS_PASSWORD must not contain a line break — nothing was changed" >&2; exit 1 ;;
+	esac
+	nats_user_lines="KANADE_NATS_USER=${nats_user}
+KANADE_NATS_PASSWORD=${nats_pass}"
+}
+prepare_nats_user
+# <<< nats-user
 
 # Command-signing keyring + enforcement (optional). Validated here, before
 # anything on the box is stopped or changed, so a bad ring fails the run with
@@ -206,12 +249,17 @@ if [ -n "$url" ]; then
 	echo "    nats_url -> ${url}"
 fi
 
-echo "==> Token (/etc/kanade/agent.env — root-only)"
+echo "==> Token and NATS user (/etc/kanade/agent.env — root-only)"
 # launchd has no EnvironmentFile, and the plist is world-readable (0644 is
 # mandatory for a LaunchDaemon), so the token must NOT go into the plist.
 # It lives here, 0600 root:wheel; the plist's launcher reads it at start.
+# The per-role NATS user, when there is one, rides in the same file for the
+# same reason.
 umask 077
-printf 'KANADE_NATS_TOKEN=%s\n' "$token" > /etc/kanade/agent.env
+{
+	printf 'KANADE_NATS_TOKEN=%s\n' "$token"
+	[ -z "$nats_user_lines" ] || printf '%s\n' "$nats_user_lines"
+} > /etc/kanade/agent.env
 chown root:wheel /etc/kanade/agent.env
 chmod 0600 /etc/kanade/agent.env
 umask 022

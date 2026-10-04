@@ -11,6 +11,12 @@
 #   sudo KANADE_NATS_URL=wss://nats.kanade.example.com \
 #        KANADE_NATS_TOKEN=<the deployment's token> bash ./setup-agent.sh
 #
+#   # Per-role NATS user (optional), both or neither, kept beside the token.
+#   # Re-running without them leaves an installed pair alone. The broker is
+#   # not switched to users by this:
+#   sudo KANADE_NATS_USER=<agent-user> KANADE_NATS_PASSWORD=<agent-password> \
+#        bash ./setup-agent.sh
+#
 #   # Command signing (optional): trust the backend's signing key, and refuse
 #   # commands that do not verify against it:
 #   sudo KANADE_COMMAND_KEYS='[{"kid":"backend-1","public_key":"<base64>"}]' \
@@ -38,6 +44,48 @@ echo "==> Verifying bundle contents"
 for f in bin/kanade-agent etc/agent.toml systemd/kanade-agent.service; do
 	[ -e "$bundle/$f" ] || { echo "bundle is missing $f — rebuild it with bundle-agent.sh" >&2; exit 1; }
 done
+
+# Per-role NATS user (optional): KANADE_NATS_USER + KANADE_NATS_PASSWORD, both
+# or neither. It sits beside the token, never instead of it -- the client
+# chooses between them -- and it is this agent's own credential: there is
+# deliberately no shared user, so nothing here reads or writes another role's.
+# Nothing in this script switches the broker from the token to users.
+#
+# Validated before anything on the box is changed, so a half pair fails the run
+# with the old install still in place. Messages name the variables, never the
+# values.
+# >>> nats-user
+agent_env=/etc/kanade/agent.env
+nats_user="${KANADE_NATS_USER:-}"
+nats_pass="${KANADE_NATS_PASSWORD:-}"
+nats_user_lines=""
+# systemd parses EnvironmentFile values itself, so a raw `'`, `"` or `\` in a
+# password would be read as quoting. Written inside double quotes, only the
+# four characters `\ " $` and the backtick are special, so those are
+# backslash-escaped; everything else (spaces, single quotes) stays literal.
+env_quote() {
+	printf '%s' "$1" | sed -e 's/[\\"$`]/\\&/g'
+}
+prepare_nats_user() {
+	if [ -z "$nats_user" ] && [ -z "$nats_pass" ]; then
+		# No new pair: carry an existing one over verbatim, because the env
+		# file is rewritten whole below and must not lose a credential just
+		# because this run did not repeat it.
+		[ ! -f "$agent_env" ] || nats_user_lines="$(grep -E '^KANADE_NATS_(USER|PASSWORD)=' "$agent_env" || true)"
+		return 0
+	fi
+	if [ -z "$nats_user" ] || [ -z "$nats_pass" ]; then
+		echo "KANADE_NATS_USER and KANADE_NATS_PASSWORD must be set together (or neither) — nothing was changed" >&2
+		exit 1
+	fi
+	case "$nats_user$nats_pass" in
+		*$'\n'*|*$'\r'*) echo "KANADE_NATS_USER / KANADE_NATS_PASSWORD must not contain a line break — nothing was changed" >&2; exit 1 ;;
+	esac
+	nats_user_lines="KANADE_NATS_USER=\"$(env_quote "$nats_user")\"
+KANADE_NATS_PASSWORD=\"$(env_quote "$nats_pass")\""
+}
+prepare_nats_user
+# <<< nats-user
 
 # Command-signing keyring + enforcement (optional). Validated here, before
 # anything on the box is stopped or changed, so a bad ring fails the run with
@@ -161,7 +209,7 @@ if [ -n "$url" ]; then
 	echo "    nats_url -> ${url}"
 fi
 
-echo "==> Token (/etc/kanade/agent.env — root-only)"
+echo "==> Token and NATS user (/etc/kanade/agent.env — root-only)"
 # Resolve the NATS token, in priority order:
 #   1. an explicit KANADE_NATS_TOKEN (standalone / override)
 #   2. an existing /etc/kanade/nats.env from a co-located backend
@@ -182,7 +230,10 @@ else
 fi
 [ -n "$token" ] || { echo "resolved an empty NATS token — aborting" >&2; exit 1; }
 umask 077
-printf 'KANADE_NATS_TOKEN=%s\n' "$token" > /etc/kanade/agent.env
+{
+	printf 'KANADE_NATS_TOKEN=%s\n' "$token"
+	[ -z "$nats_user_lines" ] || printf '%s\n' "$nats_user_lines"
+} > /etc/kanade/agent.env
 # Root-owned, not the shared `kanade` account — a compromised backend
 # process must not be able to read the root agent's token file.
 chown root:root /etc/kanade/agent.env

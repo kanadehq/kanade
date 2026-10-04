@@ -6,6 +6,18 @@
 #
 #   sudo KANADE_DOMAIN=kanade.example.com ./setup.sh
 #
+# Optional: give the backend its own NATS user beside the generated token
+# (both or neither; the token stays and the client chooses between them):
+#
+#   sudo KANADE_DOMAIN=kanade.example.com \
+#        KANADE_NATS_USER=<backend-user> KANADE_NATS_PASSWORD=<backend-password> \
+#        ./setup.sh
+#
+# It is written to /etc/kanade/kanade.env only -- never nats.env, which the
+# broker process reads. Re-running without them leaves an installed pair
+# alone; new values replace both halves. Nothing here switches the broker
+# from the token to users.
+#
 # This mirrors the Windows model: CI/build produces the artifacts, the
 # target only installs them — it never builds or fetches.
 #
@@ -24,6 +36,29 @@ if ! printf '%s' "$KANADE_DOMAIN" \
 	echo "KANADE_DOMAIN='${KANADE_DOMAIN}' is not a valid DNS hostname." >&2
 	exit 1
 fi
+
+# >>> nats-user
+nats_user="${KANADE_NATS_USER:-}"
+nats_pass="${KANADE_NATS_PASSWORD:-}"
+# systemd parses EnvironmentFile values itself, so a raw `'`, `"` or `\` in a
+# password would be read as quoting. Written inside double quotes, only the
+# four characters `\ " $` and the backtick are special, so those are
+# backslash-escaped; everything else (spaces, single quotes) stays literal.
+env_quote() {
+	printf '%s' "$1" | sed -e 's/[\\"$`]/\\&/g'
+}
+# Both or neither, checked before anything is written: the client treats a
+# half pair as a configuration error.
+if [ -n "$nats_user" ] || [ -n "$nats_pass" ]; then
+	if [ -z "$nats_user" ] || [ -z "$nats_pass" ]; then
+		echo "KANADE_NATS_USER and KANADE_NATS_PASSWORD must be set together (or neither) — nothing was changed" >&2
+		exit 1
+	fi
+	case "$nats_user$nats_pass" in
+		*$'\n'*|*$'\r'*) echo "KANADE_NATS_USER / KANADE_NATS_PASSWORD must not contain a line break — nothing was changed" >&2; exit 1 ;;
+	esac
+fi
+# <<< nats-user
 
 # The bundle root is this script's directory. Everything is installed from
 # here; nothing is downloaded.
@@ -107,6 +142,27 @@ EOF
 else
 	echo "    Keeping existing /etc/kanade/kanade.env and nats.env"
 fi
+
+# The backend's own NATS user. Only kanade.env: nats.env is the broker's file
+# and must never carry a backend credential. Any earlier pair is dropped and
+# the new one appended in one rename, so both halves change together.
+# >>> backend-env
+env_stage=""
+trap '[ -z "$env_stage" ] || rm -f "$env_stage"' EXIT
+if [ -n "$nats_user" ]; then
+	env_stage="$(umask 077; mktemp /etc/kanade/.kanade-env.XXXXXX)"
+	{
+		grep -Ev '^KANADE_NATS_(USER|PASSWORD)=' /etc/kanade/kanade.env || true
+		printf 'KANADE_NATS_USER="%s"\n' "$(env_quote "$nats_user")"
+		printf 'KANADE_NATS_PASSWORD="%s"\n' "$(env_quote "$nats_pass")"
+	} > "$env_stage"
+	chown kanade:kanade "$env_stage"
+	chmod 0600 "$env_stage"
+	mv -f "$env_stage" /etc/kanade/kanade.env
+	env_stage=""
+	echo "    backend NATS user written to /etc/kanade/kanade.env"
+fi
+# <<< backend-env
 
 echo "==> NATS config + Caddyfile + systemd units (from bundle)"
 install -o kanade -g kanade -m 0644 "$bundle/etc/nats-server.conf" /etc/kanade/nats-server.conf

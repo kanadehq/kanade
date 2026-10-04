@@ -244,6 +244,25 @@ sudo KANADE_NATS_URL=wss://nats.kanade.example.com \
      KANADE_NATS_TOKEN=<the deployment's token> bash ./setup-agent.sh
 ```
 
+Optional per-role NATS user, beside the token — both or neither (a half
+pair is refused before anything is written):
+
+```bash
+sudo KANADE_NATS_USER=<agent-user> KANADE_NATS_PASSWORD=<agent-password> \
+     bash ./setup-agent.sh
+```
+
+It is written to the root-only `/etc/kanade/agent.env` (mode 0600) in a form
+systemd reads back literally, so spaces, quotes and `$` survive. Re-running
+without them leaves an installed pair untouched; new values replace both
+halves. The token is unchanged and a host given both keeps both; the client chooses between them. Nothing here switches the broker from the shared token to per-role users: that is a separate, broker-side change, and the user is inert until it happens.
+
+The same two variables work on the backend host: `sudo KANADE_DOMAIN=…
+KANADE_NATS_USER=<backend-user> KANADE_NATS_PASSWORD=<backend-password> bash
+./setup.sh` writes the backend's own pair into `/etc/kanade/kanade.env` —
+never `nats.env`, which the broker reads, and never into anything handed to
+agents. Operator machines get their CLI credential by hand.
+
 The agent runs as **root** (so `kanade run` / jobs can manage the box —
 the Linux analog of the Windows LocalSystem agent) with an isolated data
 dir at `/var/lib/kanade-agent`. It appears in the SPA fleet under the
