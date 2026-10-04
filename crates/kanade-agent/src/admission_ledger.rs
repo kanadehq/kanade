@@ -1727,4 +1727,54 @@ mod tests {
         std::fs::write(stuck.join("req-1.json.1"), b"garbage").unwrap();
         assert_eq!(fx.open().recover().unknown_reported, 1);
     }
+
+    #[test]
+    fn recovery_leaves_the_record_when_the_outbox_result_is_unparseable() {
+        let fx = Fixture::new();
+        launching_only(&fx);
+        std::fs::create_dir_all(fx.outbox_dir()).unwrap();
+        std::fs::write(fx.outbox_dir().join("req-1.json"), b"garbage").unwrap();
+        let l = fx.open();
+        assert_eq!(l.recover().unknown_reported, 0);
+        assert!(matches!(l.state_of("req-1"), Some(State::Launching { .. })));
+    }
+
+    #[test]
+    fn recovery_defers_when_the_quarantine_cannot_be_listed() {
+        let fx = Fixture::new();
+        launching_only(&fx);
+        std::fs::create_dir_all(fx.outbox_dir()).unwrap();
+        std::fs::write(
+            fx.outbox_dir().join(crate::outbox_retry::STUCK_DIR),
+            b"not a directory",
+        )
+        .unwrap();
+        let l = fx.open();
+        assert_eq!(l.recover().unknown_reported, 0);
+        assert!(matches!(l.state_of("req-1"), Some(State::Launching { .. })));
+    }
+
+    #[test]
+    fn recovery_prefers_the_newest_matching_quarantined_result() {
+        let fx = Fixture::new();
+        let rid = launching_only(&fx);
+        let stuck = fx.outbox_dir().join(crate::outbox_retry::STUCK_DIR);
+        for (name, code, day) in [
+            ("req-1.json", 1, 5),
+            ("req-1.json.1", 2, 9),
+            ("req-1.json.2", 3, 7),
+        ] {
+            let mut r = result_for("req-1", code);
+            r.result_id = rid.clone();
+            r.finished_at = Utc.with_ymd_and_hms(2026, 1, day, 0, 0, 0).unwrap();
+            std::fs::create_dir_all(&stuck).unwrap();
+            std::fs::write(stuck.join(name), serde_json::to_vec(&r).unwrap()).unwrap();
+        }
+        let l = fx.open();
+        assert_eq!(l.recover().unknown_reported, 0);
+        assert!(matches!(
+            l.state_of("req-1"),
+            Some(State::Finished { ref result, .. }) if result.exit_code == 2
+        ));
+    }
 }
