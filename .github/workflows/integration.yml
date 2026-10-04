@@ -102,3 +102,15 @@ jobs:
 
       - name: NATS auth (user / token fallback) integration tests
         run: cargo test -p kanade-shared --test nats_auth_live -- --ignored
+
+      - name: Build backend, agent and CLI for the role conformance test
+        # The backend is built in release: a debug build overflows the
+        # main-thread stack on Windows, and release is what ships there.
+        shell: bash
+        run: |
+          cargo build -p kanade-agent -p kanade
+          cargo build --release -p kanade-backend
+          echo "KANADE_CONFORMANCE_BACKEND_BIN=$GITHUB_WORKSPACE/target/release/kanade-backend${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
+
+      - name: NATS role-level authorization conformance
+        run: cargo test -p kanade-agent --test nats_role_conformance -- --ignored --nocapture
