@@ -125,6 +125,24 @@ if (-not ($isWin -and $elevated)) {
             Check "$leaf registry: new values replace both halves" (($k.GetValue('NatsUser') -eq 'u2') -and ($k.GetValue('NatsPassword') -eq 'p2'))
             $k.Close()
 
+            # A failing second write (a value name over the registry limit) must
+            # not leave a half-updated pair: both halves keep their old values.
+            $threw = $false
+            try {
+                $null = Set-KanadeRegistrySecrets -Subkey $sub -BasePath $base -Root $root -Values ([ordered]@{ NatsUser = 'u3'; ('x' * 20000) = 'p3' }) 6>&1
+            } catch { $threw = $true }
+            $k = $root.OpenSubKey("$base\$sub")
+            Check "$leaf registry: a failed write throws" $threw
+            Check "$leaf registry: a failed write leaves the previous pair intact" (($k.GetValue('NatsUser') -eq 'u2') -and ($k.GetValue('NatsPassword') -eq 'p2'))
+            $k.Close()
+            $threw = $false
+            try {
+                $null = Set-KanadeRegistrySecrets -Subkey 'fresh' -BasePath $base -Root $root -Values ([ordered]@{ NatsUser = 'u3'; ('x' * 20000) = 'p3' }) 6>&1
+            } catch { $threw = $true }
+            $k = $root.OpenSubKey("$base\fresh")
+            Check "$leaf registry: a failed first install leaves no half pair" ($threw -and ($null -eq $k.GetValue('NatsUser')))
+            $k.Close()
+
             $out = Set-KanadeRegistrySecrets -Subkey $sub -BasePath $base -Root $root -Values @{ NatsUser = 'u2'; NatsPassword = $secret } 6>&1 | ForEach-Object { "$_" }
             Check "$leaf registry: nothing printed contains the password" (-not (($out -join "`n").Contains($secret)))
         } finally {

@@ -174,7 +174,7 @@ function Set-KanadeRegistrySecrets {
         # Value name -> value. Written through ONE open key so a pair lands
         # together; two separate calls could leave a half pair behind if the
         # second failed, and the client reads a half pair as an error.
-        [Parameter(Mandatory)][hashtable]$Values,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Values,
         # Overridable only so tests can aim at a scratch tree instead of the
         # real machine key.
         [string]$BasePath = 'SOFTWARE\kanade',
@@ -185,6 +185,16 @@ function Set-KanadeRegistrySecrets {
     $key = $Root.OpenSubKey($subkeyPath, $true)
     if (-not $key) {
         $key = $Root.CreateSubKey($subkeyPath)
+    }
+    # What each value held before, so a failure part-way can put it back. A
+    # registry key has no multi-value transaction, and a pair with one new half
+    # and one old (or one half missing) is a configuration error for the client.
+    $previous = @{}
+    foreach ($name in $Values.Keys) {
+        $kind = $null
+        $old = $key.GetValue($name, $null)
+        if ($null -ne $old) { $kind = $key.GetValueKind($name) }
+        $previous[$name] = @{ Value = $old; Kind = $kind }
     }
     try {
         foreach ($name in $Values.Keys) {
@@ -202,6 +212,15 @@ function Set-KanadeRegistrySecrets {
             $sec.AddAccessRule($rule)
         }
         $key.SetAccessControl($sec)
+    } catch {
+        $failure = $_
+        foreach ($name in $previous.Keys) {
+            try {
+                if ($null -eq $previous[$name].Value) { $key.DeleteValue($name, $false) }
+                else { $key.SetValue($name, $previous[$name].Value, $previous[$name].Kind) }
+            } catch { }
+        }
+        throw $failure
     } finally {
         $key.Close()
     }
