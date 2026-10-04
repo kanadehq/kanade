@@ -284,8 +284,7 @@ fn platform_file(path: &str) -> Option<std::path::PathBuf> {
 /// opposite case: whoever can write it could flip `1` to `0`, and ignoring it
 /// would hand them exactly that. So an untrusted file is treated as a request
 /// to enforce whatever it says; the worst that costs is refusals on a host
-/// whose ring is non-empty (an empty ring still declines), and only root can
-/// put the host back.
+/// whose ring is missing or empty, and only root can put the host back.
 fn enforce_requested_from(registry: Option<String>, file: Option<(&std::path::Path, u32)>) -> bool {
     let value = registry.or_else(|| {
         let (path, owner) = file?;
@@ -612,10 +611,10 @@ impl Outcome {
             }
             Outcome::Unprovisioned => {
                 concat!(
-                    "this host holds no command-signing keys at all, so nothing can be verified. \
-                     Provision ",
+                    "this host requires signed commands but holds no command-signing keys, so \
+                     nothing can be verified. Re-provision ",
                     keyring_location!(),
-                    "."
+                    " locally; it reloads without a restart."
                 )
             }
             Outcome::UnknownKid => {
@@ -751,13 +750,12 @@ pub struct Verifier {
     loader: Loader,
     /// What local config asked for (#1165 stage 3) — **not** the answer.
     ///
-    /// Whether this host actually refuses is [`Verifier::enforcing_now`],
-    /// which also consults the live ring. Config is fixed for the process;
-    /// the ring is not, and conflating them once cost a bricking bug: an
-    /// enforcing host whose ring later reloaded to empty would have refused
-    /// every command, including the one that would restore its keys.
+    /// Whether this host actually refuses is [`Verifier::enforcing_now`].
+    /// Config is fixed for the process; the ring is not. With the flag set an
+    /// empty ring fails closed (every command is refused until a keyring is
+    /// provisioned locally) rather than dropping enforcement.
     enforce_requested: bool,
-    /// Set once we have warned about declining to enforce on an empty ring, so
+    /// Set once we have warned about refusing everything on an empty ring, so
     /// the warning marks the transition rather than repeating per command.
     empty_ring_warned: std::sync::atomic::AtomicBool,
     /// When the ring was last pulled from the store, for [`RELOAD_MIN_INTERVAL`].
@@ -846,25 +844,21 @@ impl Verifier {
         } else {
             info!(kids = ?ring.kids().collect::<Vec<_>>(), "command keyring loaded");
         }
-        // An empty ring cannot enforce. Nothing verifies against no keys, so
-        // "enforce" there means "refuse every command", which is not a
-        // security posture — it is a machine that has stopped working, and one
-        // that cannot be fixed remotely because the command carrying the keys
-        // is refused along with the rest.
-        //
-        // Declining costs nothing an attacker can use: emptying the ring needs
-        // local administrator on this host, and someone with that can already
-        // run anything here — they gain no reach they did not have. What it
-        // buys is turning a bricked endpoint into a visible misconfiguration,
-        // and a safety net under the class of bug that nearly shipped in
-        // #1186, where a failed reload wiped a working ring.
-        let enforcing = enforce_requested && !ring.is_empty();
-        if enforce_requested && !enforcing {
+        // An empty ring still enforces: nothing verifies against no keys, so
+        // every command is refused. That is deliberate. The alternative --
+        // declining to enforce -- fails open: a keyring that was mistyped,
+        // corrupted or revoked would leave a host that was told to require
+        // signatures running unsigned commands, with only a log line to say so.
+        // The cost is that a host in this state cannot be repaired remotely
+        // (the command carrying the keys is refused too); recovery is a local
+        // re-provision of the keyring, which the running agent picks up without
+        // a restart. The process keeps running so the host stays visible.
+        let enforcing = enforce_requested;
+        if enforcing && ring.is_empty() {
             error!(
                 "RequireSignedCommands is set but this host holds NO command-signing keys — \
-                 refusing to enforce, because that would reject every command including the one \
-                 that would provision the keys. Provision the keyring; the ring reloads on \
-                 demand, so no restart is needed."
+                 refusing EVERY command until a keyring is provisioned locally. The ring \
+                 reloads on demand, so no restart is needed."
             );
         } else if enforcing {
             warn!(
@@ -887,16 +881,13 @@ impl Verifier {
 
     /// Whether this host refuses right now.
     ///
-    /// Evaluated per decision, **not** cached from construction, because the
-    /// ring can change under a running agent. `read_keyring` maps an absent
-    /// registry value to `Ok(empty)` — a state an operator can legitimately
-    /// intend, by revoking every key — and a provisioning script that deletes
-    /// before writing passes through it. If enforcement were a boot-time
-    /// snapshot, a host that reloaded into an empty ring would keep refusing
-    /// with nothing to verify against: every command `Unprovisioned`, every
-    /// command refused, including the one that would restore its keys. That is
-    /// precisely the bricking the constructor check exists to prevent, reached
-    /// through the reload path instead.
+    /// Fails closed: once local config requires signatures, an empty ring does
+    /// not switch enforcement off. It leaves nothing that can verify, so every
+    /// command is refused until a keyring is provisioned on the host. Dropping
+    /// enforcement there would let a mistyped, corrupted or revoked ring turn
+    /// "require signed commands" into "run anything". The ring is still
+    /// reloaded on demand and on every heartbeat, so a re-provisioned keyring
+    /// takes effect without a restart.
     fn enforcing_now(&self) -> bool {
         if !self.enforce_requested {
             return false;
@@ -912,31 +903,31 @@ impl Verifier {
             {
                 error!(concat!(
                     "this host is configured to require signed commands but its keyring is \
-                         now EMPTY — declining to enforce rather than refusing everything, \
-                         including the command that would restore the keys. Re-provision ",
+                     now EMPTY — refusing every command until it is re-provisioned. Re-provision ",
                     keyring_location!(),
                     "."
                 ));
             }
-            return false;
+            return true;
         }
         self.empty_ring_warned
             .store(false, std::sync::atomic::Ordering::Relaxed);
         true
     }
 
-    /// The same predicate as [`Verifier::enforcing_now`], against a ring the
-    /// caller already holds — the reporting path (#1250).
+    /// The same predicate as [`Verifier::enforcing_now`], for the reporting
+    /// path (#1250), which already holds the ring lock.
     ///
     /// Split from the decision path for two reasons. It takes the lock as an
     /// argument, so the ring and the enforcement state reported on one
     /// heartbeat describe **one instant** rather than two reads a reload could
     /// slip between. And it does not warn: the empty-ring log is about
-    /// declining to act, and firing it from an observation would make its
-    /// volume a function of the heartbeat interval. Reporting `false` is the
-    /// signal here, and unlike the log it is fleet-enumerable.
-    fn enforcing_with(&self, ring: &KeyRing) -> bool {
-        self.enforce_requested && !ring.is_empty()
+    /// refusing, and firing it from an observation would make its volume a
+    /// function of the heartbeat interval. `enforcing` is `true` with an empty
+    /// ring too -- the host is refusing everything -- so consumers must not
+    /// read it as "holds keys"; `command_keys` says that.
+    fn enforcing_with(&self, _ring: &KeyRing) -> bool {
+        self.enforce_requested
     }
 
     /// The stderr for a refusal, or `None` when this outcome is allowed to
@@ -1058,8 +1049,8 @@ impl Verifier {
                 // amplification worth a rejection.
                 //
                 // Keyed on the *config* rather than `enforcing_now`, and the
-                // difference matters: a host whose ring has gone empty is not
-                // enforcing, but it is exactly the host that most needs to
+                // difference matters: a host whose ring has gone empty refuses
+                // everything, and is exactly the host that most needs to
                 // look at the store again — the reload is how it recovers.
                 let reload = self.reload_if_due(now, self.enforce_requested);
                 if reload != Reload::Done {
@@ -2112,15 +2103,11 @@ mod tests {
     }
 
     #[test]
-    fn a_ring_that_goes_empty_at_runtime_stops_enforcing_too() {
-        // The constructor's empty-ring guard is not enough on its own: the
-        // ring changes under a running agent. `read_keyring` maps an absent
-        // registry value to `Ok(empty)` — a revoke an operator can intend, and
-        // a window a provisioning script that deletes-then-writes passes
-        // through — so a host that booted enforcing can reload into holding
-        // nothing. Cached enforcement would then refuse every command,
-        // including the one restoring its keys: the same bricking, reached by
-        // the other door.
+    fn a_ring_that_goes_empty_at_runtime_keeps_refusing() {
+        // The ring changes under a running agent: `read_keyring` maps an absent
+        // registry value to `Ok(empty)`, so a host that booted enforcing can
+        // reload into holding nothing. It must fail closed there too, not
+        // quietly start accepting unsigned commands.
         let sk = SigningKey::from_bytes(&[51u8; 32]);
         let store = Store::default();
         store.provision(backend_ring("backend-1", &sk));
@@ -2139,12 +2126,13 @@ mod tests {
         );
 
         assert!(
-            v.refusal(Outcome::Unsigned).is_none(),
-            "a host holding no keys must stop enforcing, not brick"
+            v.refusal(Outcome::Unsigned).is_some(),
+            "a host holding no keys must refuse, not fail open"
         );
+        assert!(v.refusal(Outcome::Unprovisioned).is_some());
 
-        // And it resumes once keys come back — declining is a live response to
-        // the ring, not a latch that needs a restart to clear.
+        // And it recovers once keys come back -- the refusal is a live
+        // response to the ring, not a latch that needs a restart to clear.
         store.provision(backend_ring("backend-1", &sk));
         assert_eq!(
             v.classify(
@@ -2163,18 +2151,56 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_ring_declines_to_enforce_rather_than_bricking_the_host() {
-        // Asking a host with no keys to enforce is asking it to refuse every
-        // command — including the one that would provision the keys, which is
-        // the only remote way out. Declining loses nothing to an attacker
-        // (emptying the ring needs local admin, and that already grants
-        // arbitrary local execution) and turns a dead endpoint into a visible
-        // misconfiguration.
+    fn an_empty_ring_with_the_flag_set_refuses_every_command() {
+        // Fail closed: a mistyped or lost keyring must not turn "require signed
+        // commands" into "run anything". Recovery is a local re-provision.
         let v =
             Verifier::with_loader_and_policy("PC1".into(), test_dir(), Box::new(|| Ok(None)), true);
-        assert!(
-            v.refusal(Outcome::Unsigned).is_none(),
-            "an empty ring must not enforce"
+        assert!(v.refusal(Outcome::Unsigned).is_some());
+        assert!(v.refusal(Outcome::Unprovisioned).is_some());
+    }
+
+    #[test]
+    fn an_unparseable_keyring_with_the_flag_set_refuses_every_command() {
+        let v = Verifier::with_loader_and_policy(
+            "PC1".into(),
+            test_dir(),
+            Box::new(|| Ok(Some("not json".into()))),
+            true,
+        );
+        assert!(v.refusal(Outcome::Unsigned).is_some());
+        assert!(v.refusal(Outcome::Unprovisioned).is_some());
+    }
+
+    #[test]
+    fn an_empty_ring_without_the_flag_still_runs_commands() {
+        let v = Verifier::with_loader_and_policy(
+            "PC1".into(),
+            test_dir(),
+            Box::new(|| Ok(None)),
+            false,
+        );
+        assert!(v.refusal(Outcome::Unsigned).is_none());
+        assert!(v.refusal(Outcome::Unprovisioned).is_none());
+    }
+
+    #[test]
+    fn a_keyring_provisioned_after_an_empty_start_is_accepted_without_restart() {
+        let sk = SigningKey::from_bytes(&[90u8; 32]);
+        let store = Store::default();
+        let v = Verifier::with_loader_and_policy("PC1".into(), test_dir(), store.loader(), true);
+        let headers = sign(&sk, "backend-1", b"job", 0);
+        let t = Instant::now() + RELOAD_MIN_INTERVAL * 2;
+        assert_eq!(
+            v.classify(b"job", &headers, "r1", 0, t),
+            Outcome::Unprovisioned
+        );
+        assert!(v.refusal(Outcome::Unprovisioned).is_some());
+
+        store.provision(backend_ring("backend-1", &sk));
+        assert_eq!(
+            v.classify(b"job", &headers, "r2", 0, t + RELOAD_MIN_INTERVAL * 2),
+            Outcome::Verified
         );
     }
 
@@ -2306,16 +2332,10 @@ mod tests {
     }
 
     #[test]
-    fn an_enforcing_host_that_loses_its_ring_reports_false() {
-        // The effective state, not the configured one. `RequireSignedCommands`
-        // is still set here, but the agent declines to enforce on an empty ring
-        // — refusing everything would include the command that restores the
-        // keys — so a host in this state is NOT enforcing, and reporting the
-        // registry value would describe a machine that does not exist.
-        //
-        // Fleet-wide this is the difference between "someone wiped a ring and
-        // that host silently stopped enforcing" and a healthy host, which the
-        // registry value cannot tell apart.
+    fn an_enforcing_host_that_loses_its_ring_still_reports_enforcing() {
+        // With the flag set the host refuses even with no keys, so it reports
+        // `enforcing: true`; the empty `command_keys` is what marks it as
+        // refusing everything.
         let sk = SigningKey::from_bytes(&[74u8; 32]);
         let store = Store::default();
         store.provision(backend_ring("backend-1", &sk));
@@ -2328,25 +2348,23 @@ mod tests {
         let (keys, enforcing) = v.refresh_and_report();
         assert!(keys.is_empty());
         assert!(
-            !enforcing,
-            "an empty ring cannot enforce, whatever the registry says"
+            enforcing,
+            "an empty ring fails closed, so it still enforces"
         );
     }
 
     #[test]
     fn reporting_does_not_fire_the_empty_ring_warning() {
         // The reporting path must stay side-effect free: the empty-ring log is
-        // about declining to ACT, and firing it from an observation would make
-        // its volume a function of the heartbeat interval. The fleet-visible
-        // `enforcing: false` is the signal here — and unlike a log line, it can
-        // be counted.
+        // about refusing, and firing it from an observation would make its
+        // volume a function of the heartbeat interval.
         let sk = SigningKey::from_bytes(&[75u8; 32]);
         let store = Store::default();
         store.provision(KeyRing::new());
         let v = Verifier::with_loader_and_policy("PC1".into(), test_dir(), store.loader(), true);
 
         for _ in 0..3 {
-            assert!(!v.refresh_and_report().1);
+            assert!(v.refresh_and_report().1);
         }
         assert!(
             !v.empty_ring_warned
@@ -2946,10 +2964,10 @@ mod tests {
     }
 
     #[test]
-    fn a_requested_flag_with_an_empty_ring_still_declines_to_enforce() {
+    fn a_requested_flag_with_an_empty_ring_still_enforces() {
         let v =
             Verifier::with_loader_and_policy("PC1".into(), test_dir(), Box::new(|| Ok(None)), true);
-        assert!(!v.enforcing_now());
+        assert!(v.enforcing_now());
         let sk = SigningKey::from_bytes(&[80u8; 32]);
         let v = enforcing_with(backend_ring("backend-1", &sk));
         assert!(v.enforcing_now());
