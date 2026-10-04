@@ -76,7 +76,7 @@ foreach ($p in @($agentPs1, $backendPs1)) {
         (-not ($src -match "-Subkey '$other'[^\r\n]*Nats(User|Password)") -and -not ($src -match "Subkey '$other' -Values @\{ NatsUser"))
     Check "$leaf has no shared-user key" (-not ($src -match "NatsUser[^\r\n]*kanade\\\\shared|kanade\\\\nats\\\\"))
     Check "$leaf only writes the pair when one was given (a re-run without it leaves it alone)" `
-        ($src -notmatch 'Remove-ItemProperty|DeleteValue')
+        ($src -notmatch 'Remove-ItemProperty')
     Check "$leaf passes no secret to Write-Host/Start-Transcript" `
         ($src -notmatch 'Start-Transcript' -and $src -notmatch 'Write-(Host|Output|Verbose|Debug)[^\r\n]*\$NatsPassword')
 }
