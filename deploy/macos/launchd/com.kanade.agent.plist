@@ -10,7 +10,8 @@
   manage the box — the macOS analog of the Windows agent's LocalSystem.
 
   Token: launchd has no EnvironmentFile, and this plist must be
-  world-readable, so the NATS token is NOT here. The launcher below reads
+  world-readable, so the NATS token (and the optional per-role NATS user
+  and password beside it) is NOT here. The launcher below reads
   it from /etc/kanade/agent.env (root-only, 0600) as data — sed, never
   `.`/source, so no byte of the token is ever evaluated as shell — then
   execs the agent, so launchd supervises the agent process itself.
@@ -24,7 +25,7 @@
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>KANADE_NATS_TOKEN="$(sed -n 's/^KANADE_NATS_TOKEN=//p' /etc/kanade/agent.env | head -n 1)"; [ -n "$KANADE_NATS_TOKEN" ] || exit 78; export KANADE_NATS_TOKEN; exec /usr/local/bin/kanade-agent</string>
+		<string>KANADE_NATS_TOKEN="$(sed -n 's/^KANADE_NATS_TOKEN=//p' /etc/kanade/agent.env | head -n 1)"; [ -n "$KANADE_NATS_TOKEN" ] || exit 78; export KANADE_NATS_TOKEN; KANADE_NATS_USER="$(sed -n 's/^KANADE_NATS_USER=//p' /etc/kanade/agent.env | head -n 1)"; KANADE_NATS_PASSWORD="$(sed -n 's/^KANADE_NATS_PASSWORD=//p' /etc/kanade/agent.env | head -n 1)"; if [ -n "$KANADE_NATS_USER" ] || [ -n "$KANADE_NATS_PASSWORD" ]; then export KANADE_NATS_USER KANADE_NATS_PASSWORD; fi; exec /usr/local/bin/kanade-agent</string>
 	</array>
 
 	<key>EnvironmentVariables</key>

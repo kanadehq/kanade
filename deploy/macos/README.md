@@ -61,13 +61,26 @@ sudo KANADE_NATS_URL=wss://nats.kanade.example.com \
      KANADE_NATS_TOKEN=<the deployment's token> bash ./setup-agent.sh
 ```
 
+Optional per-role NATS user, beside the token — both or neither (a half pair
+is refused before anything is written):
+
+```bash
+sudo KANADE_NATS_USER=<agent-user> KANADE_NATS_PASSWORD=<agent-password> \
+     bash ./setup-agent.sh
+```
+
+They go into `/etc/kanade/agent.env` (root:wheel 0600) and the launchd launcher
+passes them to the agent as `KANADE_NATS_USER` / `KANADE_NATS_PASSWORD`;
+without them nothing extra is exported. Re-running without them leaves an
+installed pair untouched; new values replace both halves. The token is unchanged and a host given both keeps both; the client chooses between them. Nothing here switches the broker from the shared token to per-role users: that is a separate, broker-side change, and the user is inert until it happens.
+
 ## What it installs
 
 | Path | Notes |
 | --- | --- |
 | `/usr/local/bin/kanade-agent` | root:wheel 0755, quarantine xattr cleared |
 | `/etc/kanade/agent.toml` | root:wheel 0644; an existing `nats_url` is preserved on redeploy unless `KANADE_NATS_URL` is set |
-| `/etc/kanade/agent.env` | root:wheel **0600**, `KANADE_NATS_TOKEN=…` — `KANADE_NATS_TOKEN` → existing file → hard fail |
+| `/etc/kanade/agent.env` | root:wheel **0600**, `KANADE_NATS_TOKEN=…` — `KANADE_NATS_TOKEN` → existing file → hard fail; plus `KANADE_NATS_USER=…` / `KANADE_NATS_PASSWORD=…` when a pair is provisioned |
 | `/Library/LaunchDaemons/com.kanade.agent.plist` | root:wheel 0644 (world-readable, so it never holds the token — its `/bin/sh` launcher reads `agent.env` and `exec`s the agent) |
 | `/var/lib/kanade-agent` | root 0700 data dir (`KANADE_AGENT_DATA_DIR`) |
 | `/var/log/kanade/agent.<date>.log` | the agent's own rotated log; `kanade-agent.launchd.log` catches pre-logging startup failures and panics |

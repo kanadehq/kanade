@@ -447,6 +447,25 @@ it down for production with token auth:
    .\deploy-backend.ps1 -NatsToken '<your-fleet-token>'
    ```
 
+   **Optional per-role NATS user, beside the token.** `deploy-agent.ps1`
+   and `deploy-backend.ps1` also accept `-NatsUser` / `-NatsPassword`,
+   and the Linux / macOS setup scripts take `KANADE_NATS_USER` /
+   `KANADE_NATS_PASSWORD`. Both or neither: a half pair is refused before
+   anything is written. Each role's pair goes to its **own** key
+   (`HKLM\SOFTWARE\kanade\agent` or `…\backend`, same hardened ACL as the
+   token) or env file (0600) — there is deliberately no shared user, no
+   installer provisions a CLI credential (operator machines get it by hand),
+   and nothing puts the backend's or the break-glass credential into what is
+   distributed to agents. Re-running without them leaves an installed pair untouched; new
+   values replace both halves. A host given both keeps both and the client
+   chooses between them. **None of this switches the broker from the shared
+   token to users** — that is a separate, broker-side change.
+
+   ```powershell
+   .\deploy-agent.ps1   -NatsToken '<your-fleet-token>' -NatsUser '<agent-user>'   -NatsPassword '<agent-password>'
+   .\deploy-backend.ps1 -NatsToken '<your-fleet-token>' -NatsUser '<backend-user>' -NatsPassword '<backend-password>'
+   ```
+
    **(3) `$KANADE_NATS_TOKEN` environment variable — dev / fallback.**
    Used only when neither registry value is present. Service binaries run
    as LocalSystem and never see user-session env vars, so this branch
