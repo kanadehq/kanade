@@ -39,6 +39,7 @@ mod command_verify;
 mod events_outbox;
 mod local_scheduler;
 mod nats_retry;
+mod object_put;
 mod obs_outbox;
 mod outbox;
 mod outbox_retry;
