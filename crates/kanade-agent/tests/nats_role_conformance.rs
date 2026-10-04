@@ -712,6 +712,30 @@ impl Fleet {
             .expect("run kanade CLI")
     }
 
+    /// Start `kanade run` and leave it running: it waits for its result over
+    /// a subscription that has to survive whatever the broker does next.
+    fn cli_spawn_slow(&self, marker: &str, sleep_secs: u32) -> Child {
+        let mut cmd = Command::new(exe("kanade"));
+        cmd.arg("--server")
+            .arg(&self.dial_url)
+            .args([
+                "run",
+                &self.pc_id,
+                "--shell",
+                "sh",
+                "--timeout",
+                "120",
+                "--",
+            ])
+            .arg(format!("sleep {sleep_secs}; echo {marker}"));
+        creds_env(&mut cmd, Role::Breakglass, self.with_token);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        cmd.spawn().expect("spawn kanade run")
+    }
+
     /// `kanade run <pc> -- echo <marker>`; returns stdout.
     async fn cli_run_echo(&self, marker: &str, timeout_secs: u64) -> std::process::Output {
         let t = timeout_secs.to_string();
@@ -1082,6 +1106,48 @@ async fn allowed_flows_complete_under_the_users_block() {
         .await
         .expect("agent writes its notification read-state");
 
+    // Notifications: the backend publishes one, the NOTIFICATIONS stream
+    // retains it, the agent's role receives it, and the backend's own list
+    // handler (an ephemeral consumer on the stream) reads it back.
+    let mut note = agent
+        .client
+        .subscribe(format!("notifications.pc.{}", f.pc_id))
+        .await
+        .unwrap();
+    agent.settle().await;
+    let body = serde_json::json!({
+        "target": {"pcs": [f.pc_id]},
+        "priority": "info",
+        "title": "conformance",
+        "body": "probe",
+    })
+    .to_string();
+    let (st, resp) = http_request(
+        f.http_port,
+        "POST",
+        "/api/notifications",
+        Some("application/json"),
+        &body,
+    )
+    .await;
+    assert_eq!(st, 200, "notification publish: {resp}");
+    tokio::time::timeout(Duration::from_secs(10), note.next())
+        .await
+        .expect("notification never reached the agent role")
+        .unwrap();
+    let (st, list) = http_request(f.http_port, "GET", "/api/notifications", None, "").await;
+    assert!(
+        st == 200 && list.contains("conformance"),
+        "notification list: {st} {list}"
+    );
+
+    // A read-state entry that stays, so the replay below has something of
+    // the agent's own to find.
+    read_state
+        .put(format!("{}.u2", f.pc_id), Bytes::from_static(b"{}"))
+        .await
+        .expect("agent writes a second read-state entry");
+
     // The Client App pipe (KLP) is Windows-only and is not driven here, but
     // its NATS traffic is plain JetStream: an unack (a KV delete plus an
     // acknowledged event publish), then throwaway pull consumers over the
@@ -1109,11 +1175,16 @@ async fn allowed_flows_complete_under_the_users_block() {
         .expect("agent publishes a notification ack event")
         .await
         .expect("notification ack event is acknowledged");
-    for (stream, filter) in [
-        ("NOTIFICATIONS", "notifications.pc.>".to_string()),
+    for (stream, filter, needle) in [
+        (
+            "NOTIFICATIONS",
+            "notifications.pc.>".to_string(),
+            "conformance",
+        ),
         (
             "KV_notifications_read",
             format!("$KV.notifications_read.{}.>", f.pc_id),
+            ".u2",
         ),
     ] {
         use jetstream::consumer::{AckPolicy, DeliverPolicy, pull::Config as PullConfig};
@@ -1122,6 +1193,7 @@ async fn allowed_flows_complete_under_the_users_block() {
             .get_stream(stream)
             .await
             .unwrap_or_else(|e| panic!("agent get_stream({stream}): {e}"));
+        let name = stream.cached_info().config.name.clone();
         let consumer = stream
             .create_consumer(PullConfig {
                 deliver_policy: DeliverPolicy::All,
@@ -1131,25 +1203,39 @@ async fn allowed_flows_complete_under_the_users_block() {
                 ..Default::default()
             })
             .await
-            .unwrap_or_else(|e| {
-                panic!(
-                    "agent ephemeral consumer on {}: {e}",
-                    stream.cached_info().config.name
-                )
-            });
+            .unwrap_or_else(|e| panic!("agent ephemeral consumer on {name}: {e}"));
         let mut batch = consumer
             .fetch()
             .max_messages(100)
-            .expires(Duration::from_secs(2))
+            .expires(Duration::from_secs(5))
             .messages()
             .await
             .expect("agent fetch");
-        while tokio::time::timeout(Duration::from_secs(3), batch.next())
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-        {}
+        // The replay must hand back the identifiable entry prepared above,
+        // within a deadline; a stall, a delivery error or an empty replay all
+        // fail.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut found = false;
+        while let Ok(next) = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            batch.next(),
+        )
+        .await
+        {
+            match next {
+                Some(Ok(m)) => {
+                    if m.subject.as_str().contains(needle)
+                        || String::from_utf8_lossy(&m.payload).contains(needle)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                Some(Err(e)) => panic!("replay on {name} delivery error: {e}"),
+                None => break,
+            }
+        }
+        assert!(found, "replay on {name} never delivered the prepared entry");
     }
 
     let big = vec![7u8; 6 * 1024 * 1024];
@@ -1199,69 +1285,52 @@ async fn allowed_flows_complete_under_the_users_block() {
         .unwrap();
     assert_eq!(got, b"release-bytes");
 
-    // collections: the agent uploads a bundle (the collect flow's upload,
-    // done through the agent credential — the real one needs a manifest run)
-    // and the backend reads it back.
-    let collections = agent
-        .js
-        .get_object_store("collections")
-        .await
-        .expect("collections");
-    let mut cursor = std::io::Cursor::new(b"bundle-v1".to_vec());
-    collections
-        .put("conformance/bundle", &mut cursor)
-        .await
-        .expect("agent uploads a bundle");
-    let mut cursor = std::io::Cursor::new(b"bundle-v2-longer".to_vec());
-    collections
-        .put("conformance/bundle", &mut cursor)
-        .await
-        .expect("agent overwrites a bundle");
-    let mut obj = backend
+    // collections: a real manifest run with a `collect:` hint, through the
+    // backend's job and exec handlers, the agent's collect-and-upload path and
+    // the outbox. The result must name the stored bundle, which must be there.
+    let fixture = f.agent_dir.path().join("collect-fixture.txt");
+    std::fs::write(&fixture, b"collected").unwrap();
+    let listing = toml_path(&fixture);
+    let (shell, script) = if cfg!(windows) {
+        (
+            "powershell",
+            format!("Write-Output '{{\"files\":[\"{listing}\"]}}'"),
+        )
+    } else {
+        ("sh", format!("printf '{{\"files\":[\"%s\"]}}' '{listing}'"))
+    };
+    let manifest = format!(
+        "id: conformance-collect\nversion: 0.1.0\nexecute:\n  shell: {shell}\n  timeout: 30s\n  \
+         script: |\n    {script}\ncollect:\n  name: conformance\n"
+    );
+    let (st, body) = http_request(f.http_port, "POST", "/api/jobs", yaml, &manifest).await;
+    assert!(st == 200 || st == 201, "job create: {st} {body}");
+    let mut collected = backend.client.subscribe("results.*").await.unwrap();
+    backend.settle().await;
+    let plan = serde_json::json!({"target": {"pcs": [f.pc_id]}}).to_string();
+    let (st, body) = http_request(
+        f.http_port,
+        "POST",
+        "/api/exec/conformance-collect",
+        Some("application/json"),
+        &plan,
+    )
+    .await;
+    assert!(st == 200 || st == 201, "exec: {st} {body}");
+    let key = wait_collect_object(&mut collected, &f.pc_id, Duration::from_secs(60)).await;
+    let mut bundle = backend
         .js
         .get_object_store("collections")
         .await
         .unwrap()
-        .get("conformance/bundle")
+        .get(key.clone())
         .await
-        .expect("backend reads the bundle");
-    let mut got = Vec::new();
-    obj.read_to_end(&mut got).await.unwrap();
-    assert_eq!(got, b"bundle-v2-longer");
-
-    // Notifications: the backend publishes one, the NOTIFICATIONS stream
-    // retains it, the agent's role receives it, and the backend's own list
-    // handler (an ephemeral consumer on the stream) reads it back.
-    let mut note = agent
-        .client
-        .subscribe(format!("notifications.pc.{}", f.pc_id))
-        .await
-        .unwrap();
-    agent.settle().await;
-    let body = serde_json::json!({
-        "target": {"pcs": [f.pc_id]},
-        "priority": "info",
-        "title": "conformance",
-        "body": "probe",
-    })
-    .to_string();
-    let (st, resp) = http_request(
-        f.http_port,
-        "POST",
-        "/api/notifications",
-        Some("application/json"),
-        &body,
-    )
-    .await;
-    assert_eq!(st, 200, "notification publish: {resp}");
-    tokio::time::timeout(Duration::from_secs(10), note.next())
-        .await
-        .expect("notification never reached the agent role")
-        .unwrap();
-    let (st, list) = http_request(f.http_port, "GET", "/api/notifications", None, "").await;
+        .unwrap_or_else(|e| panic!("collected bundle {key}: {e}"));
+    let mut zip = Vec::new();
+    bundle.read_to_end(&mut zip).await.unwrap();
     assert!(
-        st == 200 && list.contains("conformance"),
-        "notification list: {st} {list}"
+        zip.starts_with(b"PK"),
+        "collected bundle {key} is not a zip"
     );
 
     // Break-glass `kill`, plus its audit subject.
@@ -1282,20 +1351,6 @@ async fn allowed_flows_complete_under_the_users_block() {
     // re-subscribed `commands.pc.*` for this to complete.
     let out = f.cli_run_echo(&marker, 60).await;
     assert_cli_ok(&out, &marker);
-
-    // A plain `kanade run` emits no lifecycle event (only manifest runs do),
-    // so one is published through the agent credential for the EVENTS
-    // projector to consume; it may reject the payload but must acknowledge it.
-    agent
-        .js
-        .publish(
-            format!("events.started.conformance-exec.{}", f.pc_id),
-            Bytes::from_static(b"{}"),
-        )
-        .await
-        .expect("agent publishes a lifecycle event")
-        .await
-        .expect("lifecycle event acknowledged");
 
     // Projectors: every durable the backend runs has consumed and
     // acknowledged what the flows above produced.
@@ -1331,6 +1386,28 @@ async fn allowed_flows_complete_under_the_users_block() {
         backend_ok && agent_ok,
         "a process exited during the allowed flows"
     );
+}
+
+/// The `collect_object` key of the first result from `pc_id` that has one.
+async fn wait_collect_object(
+    sub: &mut async_nats::Subscriber,
+    pc_id: &str,
+    within: Duration,
+) -> String {
+    let deadline = Instant::now() + within;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let msg = tokio::time::timeout(left, sub.next())
+            .await
+            .unwrap_or_else(|_| panic!("no collect result within {within:?}"))
+            .expect("results subscription closed");
+        let v: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap_or_default();
+        if v["pc_id"] == pc_id
+            && let Some(k) = v["collect_object"].as_str()
+        {
+            return k.to_string();
+        }
+    }
 }
 
 async fn wait_result_containing(sub: &mut async_nats::Subscriber, needle: &str, within: Duration) {
@@ -1946,6 +2023,20 @@ async fn every_role_works(f: &mut Fleet, stage: &str, observe_as: Auth) {
     );
 }
 
+/// The CLI that was started before a switch must still receive its result.
+async fn assert_slow_cli_completes(child: Child, marker: &str, stage: &str) {
+    let out = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output())
+        .await
+        .unwrap_or_else(|_| panic!("[{stage}] the waiting kanade run hung"))
+        .expect("kanade run output");
+    assert!(
+        out.status.success() && stdout_of(&out).contains(marker),
+        "[{stage}] a kanade run kept across the switch lost its result: {}\n{}",
+        stdout_of(&out),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A heartbeat subscription on whichever credential the broker accepts in
 /// that stage. Kept alive for the rest of the test.
 async fn observe_heartbeats(f: &Fleet, auth: Auth) -> async_nats::Subscriber {
@@ -2024,6 +2115,9 @@ async fn token_to_users_and_back_with_processes_running() {
     // (whose probe still succeeds) stay on their users. That is recorded, not
     // assumed away: the evidence is the principal the broker reports after a
     // forced reconnect, and the processes keep working either way.
+    let slow_marker = fresh("slow");
+    let slow = f.cli_spawn_slow(&slow_marker, 20);
+    tokio::time::sleep(Duration::from_secs(3)).await;
     f.broker.reload(Auth::Token);
     proxy.cut();
     let reverted_by_reload = {
@@ -2039,6 +2133,7 @@ async fn token_to_users_and_back_with_processes_running() {
         }
     };
     eprintln!("revert by reload alone returned the clients to the token: {reverted_by_reload}");
+    assert_slow_cli_completes(slow, &slow_marker, "users → token (reload)").await;
     if !reverted_by_reload {
         every_role_works(&mut f, "reload-back (users still accepted)", Auth::Users).await;
         // Rollback therefore needs a broker restart; it has to work under the
