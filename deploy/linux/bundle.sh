@@ -97,6 +97,7 @@ rm -rf "$tmp"
 
 echo "==> configs, units, installer"
 install -m 0644 "$here/nats-server.conf"          "$root/etc/nats-server.conf"
+install -m 0644 "$repo_root/configs/nats-server.users.conf" "$root/etc/nats-server.users.conf"
 install -m 0644 "$here/Caddyfile"                 "$root/etc/Caddyfile"
 install -m 0644 "$repo_root/configs/backend.toml" "$root/etc/backend.toml"
 install -m 0644 "$here/systemd/nats-server.service"    "$root/systemd/nats-server.service"

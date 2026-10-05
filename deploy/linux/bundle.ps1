@@ -93,6 +93,7 @@ try {
 
 	Write-Host "==> configs, units, installer (byte-copied, LF preserved)"
 	Copy-Item -LiteralPath (Join-Path $here 'nats-server.conf')           -Destination (Join-Path $root 'etc\nats-server.conf')
+	Copy-Item -LiteralPath (Join-Path $repoRoot 'configs\nats-server.users.conf') -Destination (Join-Path $root 'etc\nats-server.users.conf')
 	Copy-Item -LiteralPath (Join-Path $here 'Caddyfile')                  -Destination (Join-Path $root 'etc\Caddyfile')
 	Copy-Item -LiteralPath (Join-Path $repoRoot 'configs\backend.toml')   -Destination (Join-Path $root 'etc\backend.toml')
 	Copy-Item -LiteralPath (Join-Path $here 'systemd\nats-server.service')    -Destination (Join-Path $root 'systemd\nats-server.service')
