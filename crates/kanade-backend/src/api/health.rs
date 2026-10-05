@@ -13,6 +13,11 @@
 //!     OR every registered agent is offline (`active == 0` while
 //!     `known > 0`)
 //!
+//! The `nats_auth` block reports connections that authenticated in a way the
+//! configured expectation does not allow. It is deliberately outside the
+//! status verdict (an external monitor must not start failing because a
+//! setting was added), so a monitor that cares reads `nats_auth.findings`.
+//!
 //! A *single* offline (stale) agent does NOT mark the fleet degraded:
 //! powering a PC off is normal operation, so a shut-down host is an
 //! expected state, not an infra fault. But a *total* blackout — every
@@ -40,6 +45,7 @@ use tracing::warn;
 
 use super::AppState;
 use super::time_bounds::bounds_in_range;
+use crate::projector::nats_auth_audit::{self, NatsAuthHealth};
 
 /// Stale threshold for `last_heartbeat`. Heartbeats cadence at 30 s
 /// by default; 2 min of slack catches a few missed ticks without
@@ -56,6 +62,10 @@ pub struct FleetHealth {
     pub agents: AgentsHealth,
     pub jetstream: JetstreamHealth,
     pub recent_results: RecentResults,
+    /// Broker-authentication audit. Informational: it never changes `status`
+    /// or the HTTP code, so a monitor that wants to alert on it must read this
+    /// block (see the book's NATS authentication section).
+    pub nats_auth: NatsAuthHealth,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -102,6 +112,10 @@ pub async fn fleet(State(state): State<AppState>) -> (StatusCode, Json<FleetHeal
     let agents = agents_health(&state.pool, stale_cutoff).await;
     let jetstream = jetstream_health(&state.jetstream).await;
     let recent_results = recent_results(&state.pool, recent_cutoff).await;
+    // An unreadable settings document leaves the mode unknown rather than
+    // guessed; the block says so (`expected_mode: null`).
+    let settings = nats_auth_audit::read_settings(&state.jetstream).await.ok();
+    let nats_auth = nats_auth_audit::health_block(&state.pool, settings.as_ref(), now).await;
 
     let status = classify(jetstream.all_ok, agents.known, agents.active);
 
@@ -117,6 +131,7 @@ pub async fn fleet(State(state): State<AppState>) -> (StatusCode, Json<FleetHeal
             agents,
             jetstream,
             recent_results,
+            nats_auth,
             observed_at: now,
         }),
     )

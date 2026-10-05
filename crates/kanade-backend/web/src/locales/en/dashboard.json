@@ -160,5 +160,47 @@
       "topMem": "Top memory consumers",
       "activeInvestigations": "Active investigations"
     }
+  },
+  "natsAuth": {
+    "grace": "Broker authentication mode was changed recently: new findings are held back until {{until}} while connections re-establish.",
+    "summary_one": "{{count}} connection claiming the {{subject}} role",
+    "summary_other": "{{count}} connections claiming the {{subject}} role",
+    "blind": "The authentication audit is not reading the broker right now ({{status}}); an empty list is not a clean result.",
+    "severity": {
+      "critical": "critical",
+      "warning": "warning",
+      "info": "info"
+    },
+    "subjects": {
+      "agent": "agent",
+      "backend": "backend",
+      "cli": "CLI",
+      "unnamed": "no-name",
+      "other": "unrecognised"
+    },
+    "status": {
+      "incomplete": "connection list incomplete",
+      "endpoint_unreadable": "monitoring endpoint unreadable",
+      "settings_unreadable": "settings unreadable",
+      "stale": "no recent poll"
+    },
+    "kinds": {
+      "broker_open": {
+        "title": "The NATS broker is not authenticating connections",
+        "description": "At least one connection got in without any credential. Anyone who can reach the broker can connect."
+      },
+      "token_reverted": {
+        "title": "Connections are using the shared token although users mode is expected",
+        "description": "The switch to per-role users did not take effect or was reverted on the broker."
+      },
+      "role_user_mismatch": {
+        "title": "Connections authenticated as another role's user",
+        "description": "The user the broker authenticated does not belong to the role the connection announces. Check for a misconfigured host or credential misuse."
+      },
+      "credential_unnameable": {
+        "title": "Some connection credentials could not be identified",
+        "description": "The broker did not report a nameable credential for these connections, so they could not be judged."
+      }
+    }
   }
 }

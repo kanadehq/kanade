@@ -74,6 +74,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
+use chrono::Utc;
 use http_body_util::BodyExt;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -81,6 +82,9 @@ use kanade_shared::nats_client::{CredentialKind, CredentialProbe, NatsRole, pars
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 use tracing::{debug, info, warn};
+
+use super::nats_auth_audit::{self, PollStatus};
+use super::nats_auth_findings::{Claimed, Observed};
 
 /// How often the broker is polled. Slower than the 30 s heartbeat on
 /// purpose: a host's credential changes when it is re-kitted or
@@ -296,6 +300,34 @@ fn correlate(
     (labels, anomalies)
 }
 
+/// Every kanade-named (or unnamed) connection with the label the broker's
+/// report reduced to, for the authentication audit.
+///
+/// Unlike [`correlate`] this is not limited to agents and does not collapse
+/// two connections claiming one pc_id: an open broker or a wrong role user is
+/// visible on a backend, a CLI or a nameless client just as much, and each
+/// live connection is its own piece of evidence. The label comes from
+/// [`classify`], so the raw `authorized_user` never travels further.
+fn observe(conns: &[ConnInfo], probe: &CredentialProbe, ev: Evidence) -> Vec<Observed> {
+    conns
+        .iter()
+        .filter_map(|c| {
+            let claimed = Claimed::from_name(c.name.as_deref())?;
+            let pc_id = c
+                .name
+                .as_deref()
+                .and_then(parse_client_name)
+                .and_then(|p| p.identity)
+                .map(str::to_string);
+            Some(Observed {
+                claimed,
+                pc_id,
+                label: classify(c.authorized_user.as_deref(), probe, ev),
+            })
+        })
+        .collect()
+}
+
 /// Write the correlated labels, touching only rows whose label actually
 /// changed. Returns how many rows moved.
 ///
@@ -404,8 +436,11 @@ async fn fetch_page(client: &MonitorClient, base: &str, offset: usize) -> Result
     serde_json::from_slice(&body).with_context(|| format!("decode /connz from {url}"))
 }
 
-/// Walk every page of `/connz` and return the connections.
-async fn fetch_all(client: &MonitorClient, base: &str) -> Result<Vec<ConnInfo>> {
+/// Walk every page of `/connz`. The flag says whether the walk covered the
+/// broker's own `total`: a walk cut short by the page cap, or by a broker
+/// that stopped serving, is not the full picture, and a caller reasoning from
+/// absence ("no such connection any more") must know that.
+async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>, bool)> {
     let mut out: Vec<ConnInfo> = Vec::new();
     for page in 0..MAX_PAGES {
         let z = fetch_page(client, base, out.len()).await?;
@@ -416,7 +451,8 @@ async fn fetch_all(client: &MonitorClient, base: &str) -> Result<Vec<ConnInfo>> 
         // otherwise a broker whose `total` outruns what it will serve would
         // loop until MAX_PAGES every poll.
         if got == 0 || out.len() >= z.total {
-            return Ok(out);
+            let complete = out.len() >= z.total;
+            return Ok((out, complete));
         }
         if page + 1 == MAX_PAGES {
             warn!(
@@ -427,7 +463,44 @@ async fn fetch_all(client: &MonitorClient, base: &str) -> Result<Vec<ConnInfo>> 
             );
         }
     }
-    Ok(out)
+    Ok((out, false))
+}
+
+/// Walk every page of `/connz` and return the connections.
+#[cfg(test)]
+async fn fetch_all(client: &MonitorClient, base: &str) -> Result<Vec<ConnInfo>> {
+    Ok(fetch_walk(client, base).await?.0)
+}
+
+/// Hand one poll to the authentication audit. Failures are logged, never
+/// fatal: the audit is a second reader of this poll, and must not stop the
+/// credential projection that shares it.
+async fn audit_authentication(
+    pool: &SqlitePool,
+    js: &async_nats::jetstream::Context,
+    observed: &[Observed],
+    complete: bool,
+    backend_proven: bool,
+) {
+    let registered = match nats_auth_audit::registered_pcs(pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %format!("{e:#}"), "nats auth audit skipped: agents unreadable");
+            return;
+        }
+    };
+    let settings = nats_auth_audit::read_settings(js).await;
+    let poll = nats_auth_audit::Poll {
+        observed,
+        registered: &registered,
+        complete,
+        backend_proven,
+    };
+    match nats_auth_audit::run_poll(pool, settings, &poll, Utc::now()).await {
+        Ok(0) => {}
+        Ok(written) => info!(written, "nats auth audit notices updated"),
+        Err(e) => warn!(error = %format!("{e:#}"), "nats auth audit failed"),
+    }
 }
 
 /// Poll the broker forever. Never returns in normal operation.
@@ -442,7 +515,12 @@ async fn fetch_all(client: &MonitorClient, base: &str) -> Result<Vec<ConnInfo>> 
 /// `nats` is the backend's own broker connection, and is read for one thing:
 /// whether it is currently up. That is what turns a locally-resolved
 /// credential into evidence about the broker — see [`Evidence`].
-pub async fn run(pool: SqlitePool, monitor_url: String, nats: async_nats::Client) -> Result<()> {
+pub async fn run(
+    pool: SqlitePool,
+    monitor_url: String,
+    nats: async_nats::Client,
+    js: async_nats::jetstream::Context,
+) -> Result<()> {
     let probe = CredentialProbe::for_role(NatsRole::Backend);
     let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
     info!(
@@ -462,7 +540,7 @@ pub async fn run(pool: SqlitePool, monitor_url: String, nats: async_nats::Client
         // Dropping the `fetch_all` future on timeout cancels the in-flight
         // request and closes the connection, so a wedged endpoint costs one
         // poll rather than the projector.
-        let polled = match tokio::time::timeout(POLL_TIMEOUT, fetch_all(&client, &monitor_url))
+        let polled = match tokio::time::timeout(POLL_TIMEOUT, fetch_walk(&client, &monitor_url))
             .await
         {
             Ok(result) => result,
@@ -472,7 +550,7 @@ pub async fn run(pool: SqlitePool, monitor_url: String, nats: async_nats::Client
             )),
         };
         match polled {
-            Ok(conns) => {
+            Ok((conns, complete)) => {
                 let seen = conns.len();
                 // Re-read per poll: the backend's link can drop and come
                 // back, and the proof is only as current as the connection.
@@ -481,6 +559,14 @@ pub async fn run(pool: SqlitePool, monitor_url: String, nats: async_nats::Client
                     nats.connection_state() == async_nats::connection::State::Connected,
                 );
                 let (labels, anomalies) = correlate(&conns, &probe, ev);
+                audit_authentication(
+                    &pool,
+                    &js,
+                    &observe(&conns, &probe, ev),
+                    complete,
+                    ev != Evidence::Unproven,
+                )
+                .await;
                 let correlated = labels.len();
                 if anomalies != reported {
                     if !anomalies.non_agent.is_empty() {
@@ -521,6 +607,14 @@ pub async fn run(pool: SqlitePool, monitor_url: String, nats: async_nats::Client
                 }
             }
             Err(e) => {
+                // The audit's own answer is now unknown, not "clean": say so
+                // in its recorded state and leave the ledger as it was.
+                if let Err(se) =
+                    nats_auth_audit::record_state(&pool, PollStatus::EndpointUnreadable, Utc::now())
+                        .await
+                {
+                    warn!(error = %format!("{se:#}"), "record nats auth audit state failed");
+                }
                 if healthy != Some(false) {
                     warn!(
                         error = %format!("{e:#}"),
@@ -618,6 +712,35 @@ mod tests {
             classify(Some("fleet-secret"), &probe, Evidence::Unproven),
             LABEL_UNKNOWN,
         );
+    }
+
+    #[test]
+    fn observe_keeps_every_kanade_or_nameless_connection_and_only_safe_labels() {
+        let secret = "tok-9f8e7d6c5b4a-SECRET";
+        let z = parse(&format!(
+            r#"{{"total":5,"connections":[
+                {{"cid":1,"name":"kanade-agent/PC1","authorized_user":"{secret}"}},
+                {{"cid":2,"name":"kanade-backend","authorized_user":"[REDACTED]"}},
+                {{"cid":3,"authorized_user":""}},
+                {{"cid":4,"name":"kanade-cli","authorized_user":"fleet-secret"}},
+                {{"cid":5,"name":"auth-probe","authorized_user":"x"}}
+            ]}}"#
+        ));
+        let probe = probe_holding(Some("fleet-secret"));
+        let out = observe(&z.connections, &probe, Evidence::TokenMode);
+        let labels: Vec<_> = out.iter().map(|o| (o.claimed, o.label.as_str())).collect();
+        assert_eq!(
+            labels,
+            [
+                (Claimed::Role(NatsRole::Agent), LABEL_UNKNOWN),
+                (Claimed::Role(NatsRole::Backend), LABEL_SHARED_TOKEN),
+                (Claimed::Unnamed, LABEL_NO_AUTH),
+                (Claimed::Role(NatsRole::Cli), LABEL_SHARED_TOKEN),
+            ],
+            "the probe connection is not ours to judge",
+        );
+        assert_eq!(out[0].pc_id.as_deref(), Some("PC1"));
+        assert!(!format!("{out:?}").contains(secret));
     }
 
     #[test]

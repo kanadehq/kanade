@@ -192,6 +192,14 @@
       "blankHint": "How long overflowed stdout/stderr blobs stay in the object store. Not how long the output survives — it is written into the database before the row lands — but how long a database rebuild can still recover it. Blank uses the built-in default.",
       "title": "Result output recovery",
       "description": "Overflowed stdout/stderr is uploaded to the object store, then written into the database when the result is recorded — so the output itself is never at risk here. This window is only how long a database rebuild can still recover it."
+    },
+    "natsAuthMode": {
+      "title": "Expected NATS authentication",
+      "description": "The authentication mode you expect the broker to apply. This only defines what the backend reports as unexpected; it does not change how anything connects. Under token, only an unauthenticated broker is reported. Under users, shared-token or unauthenticated connections, and connections authenticated as another role's user, are reported on the dashboard and in the fleet health response.",
+      "label": "Expected mode",
+      "token": "token (single shared token)",
+      "users": "users (per-role NATS users)",
+      "graceHint": "Changing this mode holds back new reports for 5 minutes so connections re-establishing under the new mode are not flagged while they converge."
     }
   }
 }

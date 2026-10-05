@@ -160,5 +160,46 @@
       "topMem": "メモリ上位",
       "activeInvestigations": "アクティブ調査"
     }
+  },
+  "natsAuth": {
+    "grace": "ブローカーの認証モードを最近変更したため、{{until}} まで新しい報告を保留しています (接続の再確立待ち)。",
+    "summary_other": "{{subject}} ロールを名乗る接続 {{count}} 件",
+    "blind": "認証監査がブローカーを読めていません ({{status}})。リストが空でも問題なしとは限りません。",
+    "severity": {
+      "critical": "重大",
+      "warning": "警告",
+      "info": "情報"
+    },
+    "subjects": {
+      "agent": "エージェント",
+      "backend": "バックエンド",
+      "cli": "CLI",
+      "unnamed": "名前なし",
+      "other": "未知のロール"
+    },
+    "status": {
+      "incomplete": "接続一覧が不完全",
+      "endpoint_unreadable": "監視エンドポイントを読めない",
+      "settings_unreadable": "設定を読めない",
+      "stale": "最近のポーリングなし"
+    },
+    "kinds": {
+      "broker_open": {
+        "title": "NATS ブローカーが接続を認証していません",
+        "description": "認証情報なしで接続できた接続があります。ブローカーに到達できれば誰でも接続できる状態です。"
+      },
+      "token_reverted": {
+        "title": "users モードを期待しているのに共有トークンで接続されています",
+        "description": "ロール別ユーザーへの切り替えがブローカー側で反映されていないか、元に戻っています。"
+      },
+      "role_user_mismatch": {
+        "title": "別ロールのユーザーで認証された接続があります",
+        "description": "ブローカーが認証したユーザーが、接続の名乗るロールのものではありません。設定ミスの端末や資格情報の不正利用を確認してください。"
+      },
+      "credential_unnameable": {
+        "title": "資格情報を特定できない接続があります",
+        "description": "ブローカーが名前を特定できる資格情報を報告しなかったため、判定できませんでした。"
+      }
+    }
   }
 }

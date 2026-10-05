@@ -113,6 +113,8 @@ interface AgentInstallSettings {
   require_signed_commands?: boolean | null;
 }
 
+type NatsAuthMode = 'token' | 'users';
+
 /// Backend-side server settings document (`server_settings` KV). Mirrors
 /// `kanade_shared::wire::ServerSettings`: every field is nullable, where
 /// `null` (or absent) means "unset — fall back to the built-in default".
@@ -128,6 +130,13 @@ interface ServerSettings {
   mail: MailSettings | null;
   object_store_caps: ObjectStoreCaps | null;
   agent_install: AgentInstallSettings | null;
+  /// The broker authentication the operator EXPECTS. Unset means `token`.
+  /// An expectation only: it changes no connection, just what the backend
+  /// reports as unexpected.
+  nats_auth_mode?: NatsAuthMode | null;
+  /// Stamped by the backend when the effective mode changes; read-only here
+  /// and never sent back (see [`ServerSettingsPatch`]).
+  nats_auth_mode_changed_at?: string | null;
   /// Read-only here. Managed through its own endpoints (see
   /// [`ServerSettingsPatch`]) and absent from the document PUT entirely.
   /// `serde` omits the key when empty, so an older / never-configured
@@ -141,7 +150,7 @@ interface ServerSettings {
 /// field. The backend ignores it either way, but keeping it out of the type
 /// means the SPA can't even build such a body. Codes go through
 /// `PUT`/`DELETE /api/server-settings/support-codes/{scope}` instead.
-type ServerSettingsPatch = Omit<ServerSettings, 'support_codes'>;
+type ServerSettingsPatch = Omit<ServerSettings, 'support_codes' | 'nats_auth_mode_changed_at'>;
 
 /// Settings page. Two distinct kinds of settings, split into tabs so it's
 /// unmistakable which is which:
@@ -354,6 +363,8 @@ function ServerTab() {
   // #1032②: days a check_status row may go stale before the Compliance page
   // hides it. Blank = unset (built-in 30d default); 0 disables staleness.
   const [staleDays, setStaleDays] = useState('');
+  // Expected broker authentication. Blank = unset = `token`.
+  const [natsAuthMode, setNatsAuthMode] = useState<NatsAuthMode>('token');
   // Trusted runner group for `tier: controller` jobs. Blank = unset
   // (controller-tier jobs run nowhere — fail-safe).
   const [controllerGroup, setControllerGroup] = useState('');
@@ -406,6 +417,7 @@ function ServerTab() {
           ? ''
           : String(settings.data.check_status_stale_days),
       );
+      setNatsAuthMode(settings.data.nats_auth_mode ?? 'token');
       // Trim on seed so an unedited reload of a stored value with stray
       // whitespace doesn't read as dirty (the draft is compared trimmed).
       setControllerGroup((settings.data.controller_group ?? '').trim());
@@ -697,6 +709,7 @@ function ServerTab() {
       resultOutputValue !== settings.data.result_output_retention_days ||
       sessionTtlValue !== settings.data.session_ttl_hours ||
       staleValue !== settings.data.check_status_stale_days ||
+      natsAuthMode !== (settings.data.nats_auth_mode ?? 'token') ||
       controllerValue !== (settings.data.controller_group ?? null) ||
       mailDirty ||
       capsDirty ||
@@ -707,6 +720,9 @@ function ServerTab() {
     result_output_retention_days: resultOutputValue,
     session_ttl_hours: sessionTtlValue,
     check_status_stale_days: staleValue,
+    // Always the explicit value: saving `token` over an unset field is not a
+    // switch (the backend compares effective modes), so no grace is started.
+    nats_auth_mode: natsAuthMode,
     controller_group: controllerValue,
     mail: mailValue,
     object_store_caps: capsValue,
@@ -960,6 +976,29 @@ function ServerTab() {
                 <span className="text-muted text-sm">{t('server.checkStale.unit')}</span>
               </div>
               <p className="text-muted text-xs">{t('server.checkStale.blankHint')}</p>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="max-w-xl">
+          <CardHeader>
+            <CardTitle>{t('server.natsAuthMode.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-muted text-sm">{t('server.natsAuthMode.description')}</p>
+            <div className="space-y-1">
+              <Label htmlFor="nats-auth-mode">{t('server.natsAuthMode.label')}</Label>
+              <Select
+                id="nats-auth-mode"
+                value={natsAuthMode}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setNatsAuthMode(e.target.value as NatsAuthMode)}
+                className="w-48"
+              >
+                <option value="token">{t('server.natsAuthMode.token')}</option>
+                <option value="users">{t('server.natsAuthMode.users')}</option>
+              </Select>
+              <p className="text-muted text-xs">{t('server.natsAuthMode.graceHint')}</p>
             </div>
           </CardContent>
         </Card>
