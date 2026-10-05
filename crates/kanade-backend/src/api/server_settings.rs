@@ -40,7 +40,7 @@ use kanade_shared::wire::{
     AgentInstallSection, MAX_AGENT_PRUNE_DAYS, MAX_CHECK_STATUS_STALE_DAYS,
     MAX_COLLECT_RETENTION_DAYS, MAX_OBJECT_STORE_CAP_MIB, MAX_OBJECT_STORE_TOTAL_MIB,
     MAX_RESULT_OUTPUT_RETENTION_DAYS, MAX_SESSION_TTL_HOURS, MAX_SUPPORT_UNLOCK_TTL_MINUTES,
-    ObjectStoreCaps, ServerSettings, SupportCode,
+    NatsAuthMode, ObjectStoreCaps, ServerSettings, SupportCode,
 };
 use lettre::message::Mailbox;
 use serde_json::{Map, Value};
@@ -167,6 +167,8 @@ pub async fn put(
     let session_ttl_value = typed.session_ttl_hours.map(Value::from);
     let check_stale_value = typed.check_status_stale_days.map(Value::from);
     let controller_value = typed.controller_group.clone().map(Value::String);
+    let nats_mode_value = typed.nats_auth_mode.map(|m| Value::from(m.as_str()));
+    let now = chrono::Utc::now();
     let mail_value = match typed.mail.as_ref() {
         Some(m) => Some(serde_json::to_value(m).map_err(|e| {
             (
@@ -261,6 +263,7 @@ pub async fn put(
             );
             changed |= merge_field(obj, &incoming, "controller_group", controller_value.clone());
             changed |= merge_field(obj, &incoming, "mail", mail_value.clone());
+            changed |= merge_nats_auth_mode(obj, &incoming, nats_mode_value.clone(), now);
             caps_changed = merge_field(obj, &incoming, "object_store_caps", caps_value.clone());
             changed |= caps_changed;
             // agent_install is NOT a generic merge_field: the section holds
@@ -385,6 +388,38 @@ pub async fn put(
     )
     .await;
     Ok(Json(merged.redacted()))
+}
+
+/// Merge `nats_auth_mode`, and stamp `nats_auth_mode_changed_at` when the
+/// **effective** mode moves.
+///
+/// The stamp is the backend's alone: `nats_auth_mode_changed_at` is never
+/// merged from the request, so a client cannot set, clear or extend the grace
+/// window the audit holds after a switch. Comparing effective modes (unset is
+/// `token`) means saving `token` over an unset field, re-saving the same mode,
+/// or round-tripping the whole document through the SPA leaves the stamp
+/// alone, so the window cannot be re-opened by saving.
+fn merge_nats_auth_mode(
+    obj: &mut Map<String, Value>,
+    incoming: &Map<String, Value>,
+    value: Option<Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let effective = |obj: &Map<String, Value>| {
+        obj.get("nats_auth_mode")
+            .and_then(|v| serde_json::from_value::<NatsAuthMode>(v.clone()).ok())
+            .unwrap_or_default()
+    };
+    let before = effective(obj);
+    let mut changed = merge_field(obj, incoming, "nats_auth_mode", value);
+    if effective(obj) != before {
+        obj.insert(
+            "nats_auth_mode_changed_at".to_string(),
+            Value::String(now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
+        changed = true;
+    }
+    changed
 }
 
 /// Blank every secret in a raw settings document, leaving the rest
@@ -1085,8 +1120,8 @@ mod tests {
 
     use super::{
         MAX_OBJECT_STORE_CAP_MIB, MIN_SUPPORT_CODE_LEN, ObjectStoreCaps, ServerSettings,
-        SupportCodeBody, hash_support_code, merge_agent_install, merge_field, normalize,
-        redact_secrets, validate, validate_support_code, validate_user_pair_update,
+        SupportCodeBody, hash_support_code, merge_agent_install, merge_field, merge_nats_auth_mode,
+        normalize, redact_secrets, validate, validate_support_code, validate_user_pair_update,
     };
 
     fn obj(v: Value) -> Map<String, Value> {
@@ -1213,6 +1248,85 @@ mod tests {
             from: "kanade-noreply@example.com".into(),
             username: None,
         }
+    }
+
+    fn nats_mode_doc(mode: Option<&str>, at: Option<&str>) -> Map<String, Value> {
+        let mut m = Map::new();
+        if let Some(mode) = mode {
+            m.insert("nats_auth_mode".into(), json!(mode));
+        }
+        if let Some(at) = at {
+            m.insert("nats_auth_mode_changed_at".into(), json!(at));
+        }
+        m
+    }
+
+    #[test]
+    fn a_mode_change_stamps_the_switch_time_and_a_resave_does_not() {
+        let now = chrono::Utc::now();
+        // token (unset) -> users: stamped.
+        let mut doc = nats_mode_doc(None, None);
+        let inc = obj(json!({"nats_auth_mode": "users"}));
+        assert!(merge_nats_auth_mode(
+            &mut doc,
+            &inc,
+            Some(json!("users")),
+            now
+        ));
+        assert_eq!(doc["nats_auth_mode"], "users");
+        assert!(doc.contains_key("nats_auth_mode_changed_at"));
+
+        // The same mode again, even with a client-sent stamp: untouched.
+        let stamp = doc["nats_auth_mode_changed_at"].clone();
+        let later = now + chrono::Duration::minutes(30);
+        let inc = obj(json!({
+            "nats_auth_mode": "users",
+            "nats_auth_mode_changed_at": "2099-01-01T00:00:00Z"
+        }));
+        assert!(!merge_nats_auth_mode(
+            &mut doc,
+            &inc,
+            Some(json!("users")),
+            later
+        ));
+        assert_eq!(doc["nats_auth_mode_changed_at"], stamp);
+
+        // Back to token: a change again, stamped with the new time.
+        let inc = obj(json!({"nats_auth_mode": "token"}));
+        assert!(merge_nats_auth_mode(
+            &mut doc,
+            &inc,
+            Some(json!("token")),
+            later
+        ));
+        assert_ne!(doc["nats_auth_mode_changed_at"], stamp);
+    }
+
+    #[test]
+    fn saving_token_over_unset_is_not_a_switch() {
+        let mut doc = nats_mode_doc(None, None);
+        let inc = obj(json!({"nats_auth_mode": "token"}));
+        merge_nats_auth_mode(&mut doc, &inc, Some(json!("token")), chrono::Utc::now());
+        assert!(!doc.contains_key("nats_auth_mode_changed_at"));
+        // Unsetting a stored `token` is not one either.
+        let mut doc = nats_mode_doc(Some("token"), None);
+        let inc = obj(json!({"nats_auth_mode": null}));
+        merge_nats_auth_mode(&mut doc, &inc, None, chrono::Utc::now());
+        assert!(!doc.contains_key("nats_auth_mode_changed_at"));
+    }
+
+    #[test]
+    fn a_request_that_omits_the_mode_never_touches_it_or_the_stamp() {
+        let mut doc = nats_mode_doc(Some("users"), Some("2026-01-01T00:00:00.000Z"));
+        let before = doc.clone();
+        let inc = obj(json!({"nats_auth_mode_changed_at": "2099-01-01T00:00:00Z"}));
+        assert!(!merge_nats_auth_mode(
+            &mut doc,
+            &inc,
+            None,
+            chrono::Utc::now()
+        ));
+        assert_eq!(doc, before);
     }
 
     #[test]

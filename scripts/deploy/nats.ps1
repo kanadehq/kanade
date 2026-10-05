@@ -98,61 +98,6 @@
   deploy-agent.ps1 / deploy-backend.ps1 so the operator can run
   the same value on every host.
 
-.PARAMETER UseNatsUsers
-  Opt-in. Install the role-level users configuration instead of the single
-  shared token: the installed nats-server.conf has its `authorization { ... }`
-  block replaced by `include "nats-server.users.conf"`, and that file is the
-  template shipped beside this script with the three bcrypt hashes
-  substituted. Both files get the SYSTEM + Administrators-only ACL. The
-  broker never holds a plaintext password -- only hashes (mint them with
-  scripts/ops/nats-password-hash.sh); the plaintext stays on the roles' own
-  hosts, where deploy-agent.ps1 / deploy-backend.ps1 write it.
-
-  The hashes come from -AgentPasswordHash / -BackendPasswordHash /
-  -BreakglassPasswordHash, or from the environment variables
-  KANADE_NATS_AGENT_PASSWORD_HASH / KANADE_NATS_BACKEND_PASSWORD_HASH /
-  KANADE_NATS_BREAKGLASS_PASSWORD_HASH. All three are required, there is no
-  default, and they are never printed. Anything that is not a `$2a$` bcrypt
-  hash is refused before the service is stopped or a file is touched.
-
-  WARNING: the switch is atomic. A config cannot carry both a token and
-  users, and once users exist a client presenting a token is rejected, so
-  every agent, backend and CLI host must ALREADY hold a user pair
-  (NatsUser / NatsPassword) before this runs. Follow the readiness procedure
-  in the NATS operations chapter of the book first.
-
-  Without -UseNatsUsers or -UseNatsToken this script behaves exactly as it
-  always did.
-
-.PARAMETER UseNatsToken
-  Opt-in, and the documented revert of -UseNatsUsers. Puts the shipped token
-  `authorization` block back in place of the include line, substitutes the
-  mandatory -NatsToken into it, and removes the installed users file.
-  Hand edits an operator made inside the `authorization` block of a users
-  install are not restored -- the shipped block is. Mutually exclusive with
-  -UseNatsUsers.
-
-.PARAMETER AgentPasswordHash
-.PARAMETER BackendPasswordHash
-.PARAMETER BreakglassPasswordHash
-  bcrypt hash of the agent / backend / breakglass password, for
-  -UseNatsUsers. Fall back to the matching KANADE_NATS_<ROLE>_PASSWORD_HASH
-  environment variable. Never defaulted.
-
-.NOTES
-  Reload behaviour is the one this script always had: the service is stopped
-  before the files change and started again at the end (suppress with
-  -NoStart, then Start-Service yourself). Choosing a mode adds no restart of
-  its own, and a failure while installing the users files restores the
-  previous files in memory before rethrowing, leaving the service stopped.
-
-.EXAMPLE
-  PS> $env:KANADE_NATS_AGENT_PASSWORD_HASH = '<hash>'   # likewise BACKEND, BREAKGLASS
-  PS> .\deploy-nats.ps1 -UseNatsUsers
-  # Switch the broker to the three role users (atomic; see WARNING above).
-.EXAMPLE
-  PS> .\deploy-nats.ps1 -UseNatsToken -NatsToken '<your-fleet-token>'
-  # Revert to the shared token.
 .EXAMPLE
   PS> .\deploy-nats.ps1
   # Binary + service only, keeping whatever config is already installed.
@@ -181,12 +126,7 @@ param(
     [switch]$NoFirewall,
     [switch]$Recreate,
     [switch]$NoStart,
-    [string]$NatsToken   = '',
-    [switch]$UseNatsUsers,
-    [switch]$UseNatsToken,
-    [string]$AgentPasswordHash,
-    [string]$BackendPasswordHash,
-    [string]$BreakglassPasswordHash
+    [string]$NatsToken   = ''
 )
 
 # Rewrite the `token: "..."` line in the installed nats-server.conf to the
@@ -272,96 +212,6 @@ and re-run without -NatsToken.
         throw "token substitution did not take effect in $ConfigPath"
     }
 }
-
-# >>> nats-users
-# Opt-in role-level users configuration. Everything here is only reached with
-# -UseNatsUsers / -UseNatsToken; the default install never calls it.
-$UsersConfName = 'nats-server.users.conf'
-$UsersInclude  = 'include "nats-server.users.conf"'
-$UsersRoles    = @('AGENT', 'BACKEND', 'BREAKGLASS')
-
-# `nats server passwd` mints `$2a$`. nats-server only recognises that prefix as
-# a hash: a `$2b$` / `$2y$` string would silently be taken as a plaintext
-# password equal to the hash text. The character set also excludes the quote,
-# backslash and line break that would corrupt the quoted string it is written
-# into, so a malformed or plaintext value is refused rather than escaped.
-function Test-NatsPasswordHash {
-    param([string]$Hash)
-    return [bool]($Hash -cmatch '\A\$2a\$\d\d\$[./A-Za-z0-9]{53}\z')
-}
-
-# One `authorization { ... }` block: from a line starting with the keyword to
-# the first line that is a bare `}`. Anchored to the line start so the words in
-# a header comment cannot be mistaken for it.
-$AuthBlockPattern = '(?ms)^authorization[^\S\r\n]*\{.*?^\}[^\S\r\n]*(?=\r?\n|\z)'
-
-function Set-NatsServerUsersInclude {
-    param([Parameter(Mandatory)][string]$ConfigPath)
-    $content = [System.IO.File]::ReadAllText($ConfigPath)
-    $hits = [regex]::Matches($content, $AuthBlockPattern)
-    if ($hits.Count -eq 0) {
-        if ($content -match ('(?m)^' + [regex]::Escape($UsersInclude) + '[^\S\r\n]*$')) { return }
-        throw "No ``authorization { ... }`` block found in $ConfigPath to replace with the users include."
-    }
-    if ($hits.Count -gt 1) {
-        throw "Found $($hits.Count) ``authorization { ... }`` blocks in $ConfigPath; cannot tell which one to replace."
-    }
-    $new = $content.Substring(0, $hits[0].Index) + $UsersInclude + $content.Substring($hits[0].Index + $hits[0].Length)
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($ConfigPath, $new, $utf8NoBom)
-}
-
-# The inverse: put the shipped token block back where the include line is.
-function Restore-NatsServerTokenBlock {
-    param(
-        [Parameter(Mandatory)][string]$ConfigPath,
-        [Parameter(Mandatory)][string]$SourceConfigPath
-    )
-    $content = [System.IO.File]::ReadAllText($ConfigPath)
-    if ([regex]::Matches($content, $AuthBlockPattern).Count -gt 0) { return }
-    $src = [regex]::Matches([System.IO.File]::ReadAllText($SourceConfigPath), $AuthBlockPattern)
-    if ($src.Count -ne 1) {
-        throw "Expected exactly one ``authorization { ... }`` block in $SourceConfigPath, found $($src.Count)."
-    }
-    $incPattern = '(?m)^' + [regex]::Escape($UsersInclude) + '[^\S\r\n]*(?=\r?$)'
-    $inc = [regex]::Matches($content, $incPattern)
-    if ($inc.Count -ne 1) {
-        throw "Expected exactly one ``$UsersInclude`` line in $ConfigPath, found $($inc.Count); cannot restore the token block."
-    }
-    $block = $src[0].Value
-    $new = $content.Substring(0, $inc[0].Index) + $block + $content.Substring($inc[0].Index + $inc[0].Length)
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($ConfigPath, $new, $utf8NoBom)
-}
-
-# The template with each `password: $KANADE_NATS_<ROLE>_PASSWORD_HASH` line's
-# reference replaced by the quoted hash. A MatchEvaluator, not a replacement
-# string: a hash is full of `$`, which a regex replacement would read as a
-# group reference. Each reference must occur exactly once.
-function Format-NatsUsersConf {
-    param(
-        [Parameter(Mandatory)][string]$Template,
-        [Parameter(Mandatory)][hashtable]$Hashes
-    )
-    $out = $Template
-    foreach ($role in $UsersRoles) {
-        $hash = $Hashes[$role]
-        if (-not (Test-NatsPasswordHash $hash)) {
-            throw "The $role password hash is not a bcrypt `$2a`$ hash (mint one with scripts/ops/nats-password-hash.sh)."
-        }
-        $pattern = '(?m)^([^\S\r\n]*password:[^\S\r\n]*)\$KANADE_NATS_' + $role + '_PASSWORD_HASH[^\S\r\n]*$'
-        $n = [regex]::Matches($out, $pattern).Count
-        if ($n -ne 1) {
-            throw "Expected exactly one password reference for $role in the users template, found $n."
-        }
-        $quoted = '"' + $hash + '"'
-        $out = [regex]::Replace($out, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{
-            param($m) $m.Groups[1].Value + $quoted
-        })
-    }
-    return $out
-}
-# <<< nats-users
 
 $ErrorActionPreference = 'Stop'
 
@@ -508,46 +358,6 @@ if (-not (Test-Path $configSrc)) {
     throw "Missing '$configName' in '$SourceDir'. Run `build-release.ps1 -Roles nats` first to populate it."
 }
 
-# >>> nats-users-input
-# Resolve and validate the opt-in inputs BEFORE the service is stopped or any
-# file is touched: a refusal here costs nothing.
-$usersTemplateSrc = Join-Path $SourceDir $UsersConfName
-$usersConfDst     = Join-Path $configDir $UsersConfName
-$usersHashes      = @{}
-if ($UseNatsUsers -and $UseNatsToken) {
-    throw '-UseNatsUsers and -UseNatsToken are mutually exclusive.'
-}
-if ($UseNatsUsers) {
-    if ($NatsToken) {
-        throw '-NatsToken has no meaning with -UseNatsUsers (the users configuration carries no token). Use -UseNatsToken -NatsToken to go back.'
-    }
-    $given = @{
-        AGENT      = $AgentPasswordHash
-        BACKEND    = $BackendPasswordHash
-        BREAKGLASS = $BreakglassPasswordHash
-    }
-    foreach ($role in $UsersRoles) {
-        $v = $given[$role]
-        if (-not $v) { $v = [Environment]::GetEnvironmentVariable("KANADE_NATS_${role}_PASSWORD_HASH") }
-        if (-not $v) {
-            throw "-UseNatsUsers needs the $role password hash: pass -$((Get-Culture).TextInfo.ToTitleCase($role.ToLower()))PasswordHash or set KANADE_NATS_${role}_PASSWORD_HASH. Nothing was changed."
-        }
-        if (-not (Test-NatsPasswordHash $v)) {
-            throw "The $role password hash is not a bcrypt `$2a`$ hash. Mint one with scripts/ops/nats-password-hash.sh; never pass the plaintext. Nothing was changed."
-        }
-        $usersHashes[$role] = $v
-    }
-    if (-not (Test-Path $usersTemplateSrc)) {
-        throw "Missing '$UsersConfName' in '$SourceDir'. Re-stage with build-release.ps1 -Roles nats. Nothing was changed."
-    }
-}
-if ($UseNatsToken) {
-    if (-not $NatsToken) {
-        throw '-UseNatsToken needs -NatsToken <the fleet token> to write into the restored token configuration. Nothing was changed.'
-    }
-}
-# <<< nats-users-input
-
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -ne 'Stopped') {
     Write-Host "Stopping $ServiceName..."
@@ -598,55 +408,6 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
     Write-Host "Keeping existing $configDst (pass -ForceConfig to overwrite)."
 }
 
-# >>> nats-users-install
-# Opt-in only; the default install skips this whole block. The users file and
-# the include line land before the ACL step below, which locks the main file;
-# the users file gets the same ACL here, created empty first so the hashes are
-# never readable by anyone else. A failure puts back what was there (in
-# memory, like $configBefore) and rethrows with the service still stopped.
-$usersBefore = if (Test-Path $usersConfDst) { [System.IO.File]::ReadAllText($usersConfDst) } else { $null }
-if ($UseNatsUsers) {
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    try {
-        Write-Host "Installing users configuration -> $usersConfDst"
-        $usersText = Format-NatsUsersConf -Template ([System.IO.File]::ReadAllText($usersTemplateSrc)) -Hashes $usersHashes
-        if (-not (Test-Path $usersConfDst)) { New-Item -ItemType File -Path $usersConfDst | Out-Null }
-        $aclOut = & icacls $usersConfDst /inheritance:r /grant:r '*S-1-5-18:F' /grant:r '*S-1-5-32-544:F' 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "icacls failed on ${usersConfDst} (exit $LASTEXITCODE)" }
-        [System.IO.File]::WriteAllText($usersConfDst, $usersText, $utf8NoBom)
-        $readBack = [System.IO.File]::ReadAllText($usersConfDst)
-        foreach ($role in $UsersRoles) {
-            if ($readBack.IndexOf('"' + $usersHashes[$role] + '"') -lt 0) { throw "the $role hash did not land in $UsersConfName" }
-        }
-        if ($readBack -match '(?m)^[^\S\r\n]*password:[^\S\r\n]*\$KANADE_NATS_') { throw "an unsubstituted password reference remains in $UsersConfName" }
-        Write-Host "Replacing authorization block in $configDst with the users include"
-        Set-NatsServerUsersInclude -ConfigPath $configDst
-        # Let the real broker parse what was just written before it is trusted.
-        # Its output is not shown: a parse error can quote the offending line.
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'   # stderr from a native exe must not throw under 'Stop' on 5.1
-        try { $null = & $exeDst -t -c $configDst 2>&1 } finally { $ErrorActionPreference = $prevEap }
-        if ($LASTEXITCODE -ne 0) { throw "nats-server rejected the users configuration (exit $LASTEXITCODE)" }
-    } catch {
-        if ($null -ne $configBefore) { [System.IO.File]::WriteAllText($configDst, $configBefore, $utf8NoBom) }
-        if ($null -ne $usersBefore) { [System.IO.File]::WriteAllText($usersConfDst, $usersBefore, $utf8NoBom) }
-        elseif (Test-Path $usersConfDst) { Remove-Item -Force $usersConfDst }
-        Write-Warning "Users configuration failed; restored the previous files. The service is still stopped -- start it with: Start-Service $ServiceName"
-        throw
-    }
-} elseif ($UseNatsToken) {
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    try {
-        Write-Host "Restoring the token authorization block in $configDst"
-        Restore-NatsServerTokenBlock -ConfigPath $configDst -SourceConfigPath $configSrc
-    } catch {
-        if ($null -ne $configBefore) { [System.IO.File]::WriteAllText($configDst, $configBefore, $utf8NoBom) }
-        Write-Warning "Token restore failed; restored the previous $configName. The service is still stopped -- start it with: Start-Service $ServiceName"
-        throw
-    }
-}
-# <<< nats-users-install
-
 # Apply -NatsToken before the ACL gets locked down. The script runs
 # as Admin so we still have write access either way, but doing the
 # substitution first keeps the on-disk content right by the time
@@ -692,15 +453,6 @@ $icaclsOut = & icacls $configDst /inheritance:r /grant:r '*S-1-5-18:F' /grant:r 
 if ($LASTEXITCODE -ne 0) {
     throw "icacls failed on ${configDst} (exit $LASTEXITCODE):`n$icaclsOut"
 }
-
-# >>> nats-users-remove
-# The revert leaves no users file behind; it holds only hashes, but a stale
-# file next to a token config is a trap for the next switch.
-if ($UseNatsToken -and (Test-Path $usersConfDst)) {
-    Write-Host "Removing $usersConfDst"
-    Remove-Item -Force $usersConfDst
-}
-# <<< nats-users-remove
 
 # nats-server.exe detects when it's running under SCM via its own
 # StartServiceCtrlDispatcher path; we don't need NSSM or sc.exe wrappers.

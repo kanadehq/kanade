@@ -114,11 +114,3 @@ jobs:
 
       - name: NATS role-level authorization conformance
         run: cargo test -p kanade-agent --test nats_role_conformance -- --ignored --nocapture
-
-      - name: Broker auth-mode deploy scripts (Linux setup.sh, hash helper)
-        if: runner.os != 'Windows'
-        run: bash deploy/test-nats-auth-mode.sh
-
-      - name: Broker auth-mode deploy script (deploy-nats.ps1 users config)
-        shell: pwsh
-        run: ./scripts/deploy/nats-users.Tests.ps1

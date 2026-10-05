@@ -380,6 +380,29 @@ impl std::fmt::Debug for AgentInstallSection {
     }
 }
 
+/// Which authentication the operator expects the broker to apply to every
+/// connection. An **expectation**, not a switch: it changes nothing about how
+/// any process connects, it only defines which connection reports the
+/// backend raises a warning for (see the backend's `nats_auth_findings`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NatsAuthMode {
+    /// One fleet-wide token. Today's shape, and what an unset field means.
+    #[default]
+    Token,
+    /// Per-role NATS users (`authorization { users: [...] }`).
+    Users,
+}
+
+impl NatsAuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NatsAuthMode::Token => "token",
+            NatsAuthMode::Users => "users",
+        }
+    }
+}
+
 /// Value stored in the `server_settings` KV bucket under the single key
 /// [`crate::kv::KEY_SERVER_SETTINGS`]. Operator-editable, backend-side
 /// server configuration that isn't per-agent (so it doesn't belong in
@@ -533,6 +556,22 @@ pub struct ServerSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_store_caps: Option<ObjectStoreCaps>,
 
+    /// The broker authentication mode the operator expects — see
+    /// [`NatsAuthMode`]. `None` (unset) is `token`, the behaviour before this
+    /// field existed. Read by the backend's connection audit only; no
+    /// connection is made differently because of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_auth_mode: Option<NatsAuthMode>,
+
+    /// When the **effective** expected mode last changed. Written by the
+    /// backend alone, at the moment a save moves the mode, and never taken
+    /// from a client: the audit holds its findings back for a short window
+    /// after this instant so connections re-establishing under the new mode
+    /// are not reported while they converge. A re-save of the same mode (or a
+    /// restart) leaves it alone, so the window cannot be extended by saving.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_auth_mode_changed_at: Option<chrono::DateTime<chrono::Utc>>,
+
     /// Operator-issued support codes — the helpdesk "裏コマンド" that reveals
     /// `client.unlock`-scoped jobs in the Client App. See [`SupportCode`].
     ///
@@ -580,6 +619,8 @@ impl ServerSettings {
             result_output_retention_days: Some(DEFAULT_RESULT_OUTPUT_RETENTION_DAYS),
             session_ttl_hours: Some(DEFAULT_SESSION_TTL_HOURS),
             check_status_stale_days: Some(DEFAULT_CHECK_STATUS_STALE_DAYS),
+            nats_auth_mode: None,
+            nats_auth_mode_changed_at: None,
             // Real per-bucket defaults, so the SPA renders them as faint
             // placeholders and unset deployments are capped out of the box.
             object_store_caps: Some(ObjectStoreCaps {
@@ -712,6 +753,12 @@ impl ServerSettings {
             .or(Self::defaults().session_ttl_hours)
             .unwrap_or(DEFAULT_SESSION_TTL_HOURS)
             .clamp(1, MAX_SESSION_TTL_HOURS)
+    }
+
+    /// The expected broker authentication mode, with unset resolved to
+    /// [`NatsAuthMode::Token`].
+    pub fn effective_nats_auth_mode(&self) -> NatsAuthMode {
+        self.nats_auth_mode.unwrap_or_default()
     }
 
     /// The effective check-staleness window in days: the stored value if set,

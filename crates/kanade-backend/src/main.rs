@@ -1644,8 +1644,9 @@ async fn run_backend_inner(
         // credential it merely *resolved* from one the broker actually
         // *accepted* — only the latter proves which auth mode is in force.
         let nats_client = nats.clone();
+        let js = jetstream.clone();
         resources.spawn(async move {
-            if let Err(e) = projector::nats_conns::run(pool, monitor_url, nats_client).await {
+            if let Err(e) = projector::nats_conns::run(pool, monitor_url, nats_client, js).await {
                 error!(error = %format!("{e:#}"), "nats connections projector exited");
             }
         });

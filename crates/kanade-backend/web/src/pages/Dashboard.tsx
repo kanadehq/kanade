@@ -66,6 +66,70 @@ type ScanDurationStats = {
   max_result_id: string | null;
 };
 
+const NATS_AUTH_TONE: Record<NatsAuthFinding['severity'], string> = {
+  critical: 'border-danger text-danger',
+  warning: 'border-amber-500 text-amber-600',
+  info: 'border-border text-muted',
+};
+
+const NATS_AUTH_BADGE = {
+  critical: 'danger',
+  warning: 'amber',
+  info: 'default',
+} as const satisfies Record<NatsAuthFinding['severity'], string>;
+
+/**
+ * Standing banner for the broker-authentication audit. Rendered from the
+ * fleet-health response rather than pushed to endpoints, so it is visible to
+ * anyone who opens the console and does not depend on a delivery channel.
+ * Shows nothing when there is nothing to say; a poll that is not `ok` is said
+ * out loud, because then "no findings" is not a clean answer.
+ */
+function NatsAuthBanner({ audit }: { audit: NatsAuthHealth }) {
+  const { t } = useTranslation('dashboard');
+  const blind = audit.poll_status !== 'ok' && audit.poll_status !== 'pending';
+  if (audit.findings.length === 0 && !blind) return null;
+  return (
+    <div className="space-y-2" data-testid="nats-auth-banner">
+      {audit.grace_until && (
+        <p className="text-muted text-xs">
+          {t('natsAuth.grace', { until: new Date(audit.grace_until).toLocaleTimeString() })}
+        </p>
+      )}
+      {audit.findings.map((f) => (
+        <Card key={`${f.kind}/${f.subject}`} className={cn(NATS_AUTH_TONE[f.severity])}>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <AlertTriangle className="size-5" />
+              {t(`natsAuth.kinds.${f.kind}.title`)}
+              <Badge variant={NATS_AUTH_BADGE[f.severity]}>{t(`natsAuth.severity.${f.severity}`)}</Badge>
+            </CardTitle>
+            <CardDescription>{t(`natsAuth.kinds.${f.kind}.description`)}</CardDescription>
+          </CardHeader>
+          <CardContent className="text-sm">
+            <span>
+              {t('natsAuth.summary', {
+                count: f.count,
+                subject: t(`natsAuth.subjects.${f.subject}`, { defaultValue: f.subject }),
+              })}
+            </span>
+            {f.sample_hosts.length > 0 && (
+              <span className="text-muted"> — {f.sample_hosts.join(', ')}</span>
+            )}
+          </CardContent>
+        </Card>
+      ))}
+      {blind && (
+        <p className="text-muted text-xs">
+          {t('natsAuth.blind', {
+            status: t(`natsAuth.status.${audit.poll_status}`, { defaultValue: audit.poll_status }),
+          })}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function fmtMs(ms: number): string {
   if (ms < 1) return '<1 ms';
   if (ms < 1000) return `${ms} ms`;
@@ -79,7 +143,29 @@ type FleetHealth = {
   /** `failed` excludes the agent's synthetic skips, counted in
    *  `skipped` instead (absent from pre-skip backends). */
   recent_results: { window_hours: number; total: number; failed: number; skipped?: number };
+  /** Broker-authentication audit. Absent from backends that predate it. */
+  nats_auth?: NatsAuthHealth;
   observed_at: string;
+};
+
+type NatsAuthFinding = {
+  kind: 'broker_open' | 'token_reverted' | 'role_user_mismatch' | 'credential_unnameable';
+  /** Claimed-role bucket: agent | backend | cli | unnamed | other. */
+  subject: string;
+  severity: 'critical' | 'warning' | 'info';
+  count: number;
+  sample_hosts: string[];
+  first_seen_at: string;
+};
+
+type NatsAuthHealth = {
+  expected_mode: 'token' | 'users' | null;
+  grace_until: string | null;
+  /** Anything but `ok` means an empty findings list is not a clean answer. */
+  poll_status: string;
+  polled_at: string | null;
+  open_total: number;
+  findings: NatsAuthFinding[];
 };
 
 type ResultRow = {
@@ -510,6 +596,10 @@ export function Dashboard() {
             ))}
           </CardContent>
         </Card>
+      )}
+
+      {health?.nats_auth && (
+        <NatsAuthBanner audit={health.nats_auth} />
       )}
 
       {health && healthMeta && (
