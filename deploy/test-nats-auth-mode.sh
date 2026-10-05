@@ -59,6 +59,12 @@ cmp -s "$conf" "$tmp/bundle/etc/nats-server.conf"; check "default: the token con
 [ ! -e "$modef" ] && [ ! -e "$usersf" ]; check "default: no mode file, no users file" $?
 ! grep -q 'restart' "$tmp/out"; check "default: nothing about a restart" $?
 
+# 1b. A users file nobody asked this run about is left alone by a default run.
+reset
+printf 'operator-owned\n' > "$usersf"
+run; rc=$?
+[ "$rc" -eq 0 ] && [ "$(cat "$usersf")" = operator-owned ]; check "default: an existing users file is not deleted" $?
+
 # 2. users without the three hashes, or with a malformed one: nothing changes.
 reset
 before="$(snapshot)"

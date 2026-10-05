@@ -289,7 +289,11 @@ if [ "$auth_mode" = users ]; then
 	echo "    users mode: /etc/kanade/nats-server.conf includes nats-server.users.conf; hashes in nats.env"
 else
 	install -o kanade -g kanade -m 0644 "$bundle/etc/nats-server.conf" /etc/kanade/nats-server.conf
-	rm -f /etc/kanade/nats-server.users.conf
+	# Only an explicit `token` or a recorded `users` earns the removal: an
+	# unrecorded file next to a default run was never this script's to delete.
+	if [ "$auth_mode_set" = token ] || [ "$recorded_mode" = users ]; then
+		rm -f /etc/kanade/nats-server.users.conf
+	fi
 	# Back to the token: the broker's env file loses the hashes and keeps the
 	# rest. Nothing is rewritten when there were none.
 	if grep -Eq '^KANADE_NATS_(AGENT|BACKEND|BREAKGLASS)_PASSWORD_HASH=' /etc/kanade/nats.env 2>/dev/null; then
