@@ -47,7 +47,8 @@ run() { # env assignments...: validate then install; exit status is the script's
 	' _ "$tmp/bundle" <(region nats-auth-input) <(region nats-auth-install) ) >"$tmp/out" 2>"$tmp/err"
 }
 snapshot() { ( cd "$tmp/etc" && find . -type f | sort | while read -r f; do printf '%s %s\n' "$f" "$(cksum < "$f")"; done ); }
-mode_of() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+# GNU first: on Linux `stat -f` is filesystem status and succeeds with other text.
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 conf="$tmp/etc/nats-server.conf"; envf="$tmp/etc/nats.env"; modef="$tmp/etc/nats-auth-mode"; usersf="$tmp/etc/nats-server.users.conf"
 
 # 1. Default: byte for byte what the unconditional install used to produce.
