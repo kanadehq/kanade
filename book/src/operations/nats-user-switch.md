@@ -67,6 +67,14 @@ never prints a credential.
 7. An **API token** for the backend, in `KANADE_API_TOKEN` (or `-Token`), and
    the backend URL in `KANADE_BACKEND_URL` (or `-BackendUrl`). Prefer an
    `https://` URL: the token travels in the request header.
+8. **The deployment switch is available in the release you deploy from.** The
+   switch and the revert are made by an opt-in mode of the broker deployment
+   scripts (Windows and Linux paths), which is separate work from this page.
+   Before relying on this procedure, confirm in that release's deployment
+   documentation and scripts that a users mode **and** a way back to the
+   token both exist, record the release or artifact you will run them from,
+   and read their exact usage. If either is missing, stop: there is no
+   supported switch or emergency revert to follow.
 
 ### Manual checklist: backend and break-glass
 
@@ -134,15 +142,11 @@ overwrite an existing file without `-Force`.
 
 ### 3. Switch
 
-On the broker host, using the deployment script's users mode. The exact
-options, the hash variables and the Windows / Linux differences are in
-[Installation and Deployment](./deploy.md#optional-per-role-users-instead-of-the-shared-token);
-do not improvise them here. In short:
-
-* Windows: `deploy-nats.ps1 -UseNatsUsers` (the service is restarted by the
-  script).
-* Linux: `KANADE_NATS_AUTH_MODE=users` with `setup.sh`, then apply it with a
-  restart or reload of `nats-server`.
+On the broker host, with the broker deployment's opt-in users mode (prerequisite
+8). Use exactly the options its own documentation gives for your release; this
+page does not repeat them, because they belong to the deployment scripts and
+can differ between releases. Applying the mode must reload or restart the
+broker; note whether your path does that itself or leaves it to you.
 
 Write down the **UTC time** at which the broker applied the new configuration;
 `Compare` needs it as `-SwitchedAt`. Then set *Settings → Server → Expected
@@ -197,12 +201,11 @@ fails it exits 2 saying plainly that this is **not** an empty result.
 
 ## Revert
 
-On the broker host (through the way you tested in the prerequisites):
-restore the token configuration and reload.
-
-* Windows: `deploy-nats.ps1 -UseNatsToken -NatsToken '<token>'`.
-* Linux: `KANADE_NATS_AUTH_MODE=token` with `setup.sh`, then restart or reload
-  `nats-server`.
+On the broker host (through the way you tested in the prerequisites): use the
+same deployment path's token mode to restore the token configuration, then
+reload or restart the broker. Know the exact revert command **before** the
+switch (prerequisite 8) and keep it where you can reach it without the fleet.
+Hand edits made inside the shipped token block are not restored by it.
 
 Set the expected authentication mode back to `token`. Nothing on any agent is
 touched. Agents retry on their own and rejoin; confirm with:
