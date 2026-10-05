@@ -12,6 +12,7 @@
 
 - [Overview](./operations/overview.md)
 - [Installation and Deployment](./operations/deploy.md)
+- [Switching the broker to role-level users](./operations/nats-user-switch.md)
 - [Agent-Mediated Updates](./operations/agent-mediated-updates/index.md)
     - [Updating kanade-backend](./operations/agent-mediated-updates/backend.md)
     - [Updating kanade-client](./operations/agent-mediated-updates/client.md)

@@ -517,6 +517,13 @@ cargo test -p kanade-agent --test nats_role_conformance -- --ignored
 The switch scenario needs a signal-driven reload and runs on Unix only; the
 rest also runs on Windows in CI. Re-run the test after any edit to the block.
 
+**Switching a live fleet is a manual procedure, never automated.** The broker
+cannot accept the token and the users at once, so a host without a working
+user pair is locked out the moment it flips, and looks just like a powered-off
+one. Follow [Switching the broker to role-level users](book/src/operations/nats-user-switch.md)
+— readiness check, snapshot, switch, compare, revert — which uses
+`scripts/ops/nats-switch-check.ps1` (backend API only, never the broker).
+
 #### Seeing which credential each host actually used
 
 Provisioning a credential and a host *presenting* it are different facts,
