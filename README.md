@@ -498,19 +498,16 @@ it down for production with token auth:
 `nats_url` in `agent.toml` / `backend.toml` stays plain. The secret
 never lands in config files or process listings.
 
-#### Role-level permissions (opt-in)
+#### Role-level permissions (validated, not yet shipped)
 
 `configs/nats-server.users.conf` is the `authorization { users: [...] }` block
-that replaces the shared token: three users (`agent`, `backend`,
-`breakglass`) with explicit publish / subscribe permissions. **Nothing selects
-it by default**; both broker deployment paths install the token configuration
-until an operator asks for this one. It is validated by a conformance test that
-starts a real `nats-server` from that same file, with bcrypt hashes of
-throwaway passwords supplied the way `setup.sh` supplies them, and drives every
-role's real flows (the backend, agent and `kanade run` / `kill` binaries),
-asserts each denial from the broker's permission-violation error, and
-exercises the token → users → token switch with processes left running. Run it
-with `nats-server` in `PATH`:
+meant to replace the shared token: three users (`agent`, `backend`,
+`breakglass`) with explicit publish / subscribe permissions. The shipped
+broker does not run it yet. It is validated by a conformance test that starts
+a real `nats-server` with the block and drives every role's real flows (the
+backend, agent and `kanade run` / `kill` binaries), asserts each denial from
+the broker's permission-violation error, and exercises the token → users →
+token switch with processes left running. Run it with `nats-server` in `PATH`:
 
 ```sh
 cargo build -p kanade-backend -p kanade-agent -p kanade
@@ -519,37 +516,6 @@ cargo test -p kanade-agent --test nats_role_conformance -- --ignored
 
 The switch scenario needs a signal-driven reload and runs on Unix only; the
 rest also runs on Windows in CI. Re-run the test after any edit to the block.
-
-**The broker holds hashes only.** The template's passwords are
-`$KANADE_NATS_<ROLE>_PASSWORD_HASH` references to bcrypt (`$2a$`) hashes; the
-plaintext stays on each role's own hosts, where `deploy-agent.ps1` /
-`deploy-backend.ps1` (or the shell setup scripts) already write it. Mint a hash
-without echoing the password or leaving it in history or a file:
-
-```sh
-scripts/ops/nats-password-hash.sh        # or nats-password-hash.ps1; wraps `nats server passwd`
-```
-
-**The two switches**
-
-| | Windows (`deploy-nats.ps1`) | Linux (`setup.sh`) |
-|---|---|---|
-| to users | `-UseNatsUsers` with `-AgentPasswordHash`, `-BackendPasswordHash`, `-BreakglassPasswordHash` (or the `KANADE_NATS_<ROLE>_PASSWORD_HASH` variables) | `KANADE_NATS_AUTH_MODE=users` with the same three variables |
-| installs | the installed `nats-server.conf` with its `authorization` block replaced by `include "nats-server.users.conf"`, plus that file (the template with the hashes substituted as quoted strings); both SYSTEM + Administrators only | the same two files in `/etc/kanade`, the hashes in the broker's own `nats.env` (0600, next to the token, never plaintext or another role's credential) |
-| to token (revert) | `-UseNatsToken -NatsToken '<token>'`: restores the shipped token block, substitutes the token, removes the users file | `KANADE_NATS_AUTH_MODE=token`: reinstalls the token config, drops the hashes from `nats.env` |
-| remembered | no: without a switch the script behaves as before | yes: recorded in `/etc/kanade/nats-auth-mode` (root only); a plain re-run keeps installing the recorded mode |
-| takes effect | the script's existing stop / start of the service (`-NoStart` to defer) | not until you run `systemctl restart nats-server`; `setup.sh` only `enable --now`s |
-
-Hashes that are not `$2a$` bcrypt (plaintext, `$2y$`, anything with a quote or
-backslash) are refused before any file changes. A revert puts the *shipped*
-`authorization` block back, so hand edits made inside that block are not
-restored.
-
-> **The switch is atomic.** A config cannot carry both a token and users, and
-> once users exist a client presenting a token is rejected. Every agent,
-> backend and CLI host must already hold a user pair (`NatsUser` /
-> `NatsPassword`) before the broker flips, or it is locked out. The readiness
-> procedure is documented separately; follow it first.
 
 #### Seeing which credential each host actually used
 
