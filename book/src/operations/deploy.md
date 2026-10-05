@@ -99,9 +99,9 @@ Findings are grouped by kind and announced role, so a whole fleet reverting at
 once is a handful of entries, each with a connection count and at most five
 registered host names. A finding is raised when it first appears, shows as a
 banner on the Dashboard, and is marked resolved when it is gone (a later
-recurrence is raised again). `credential_unnameable` is held still while the
-backend's own broker connection cannot prove which mode the broker runs,
-because user names cannot then be told from secrets.
+recurrence is raised again). While the backend's own broker connection
+cannot prove the mode, user names read as `unknown`, so expect
+`credential_unnameable` entries until it reconnects.
 
 **Grace after a switch.** When you change the expected mode, new findings are
 held back for **5 minutes**. Switching re-authenticates every client, and each

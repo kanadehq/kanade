@@ -16,9 +16,7 @@ use kanade_shared::wire::ServerSettings;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 
-use super::nats_auth_findings::{
-    FindingKind, NOTICE_PREFIX, Observed, Severity, grace_until, group, in_grace,
-};
+use super::nats_auth_findings::{NOTICE_PREFIX, Observed, Severity, grace_until, group, in_grace};
 use super::notice_ledger::{self, Desired, Op, Policy, Stored};
 
 /// A recorded poll older than this is reported as `stale`: the projector
@@ -56,12 +54,6 @@ pub struct Poll<'a> {
     pub registered: &'a HashSet<String>,
     /// Every page of the connection list was read.
     pub complete: bool,
-    /// The backend's own connection proves the broker's mode (see the
-    /// projector's `Evidence`). Without it a user name is indistinguishable
-    /// from a secret and is reported as `unknown`, so `credential_unnameable`
-    /// would fire for connections that are fine; that one kind is held
-    /// still, neither raised nor resolved, until the proof is back.
-    pub backend_proven: bool,
 }
 
 /// The ledger writes this poll calls for.
@@ -82,18 +74,13 @@ pub fn plan(
             sample: g.sample_hosts,
         })
         .collect();
-    let frozen = if poll.backend_proven {
-        Vec::new()
-    } else {
-        vec![FindingKind::CredentialUnnameable.notice_kind()]
-    };
     notice_ledger::reconcile(
         stored,
         &desired,
         Policy {
             in_grace: in_grace(now, settings.nats_auth_mode_changed_at),
             complete: poll.complete,
-            frozen_kinds: &frozen,
+            frozen_kinds: &[],
         },
     )
 }
@@ -301,7 +288,6 @@ mod tests {
             observed: o,
             registered: r,
             complete: true,
-            backend_proven: true,
         }
     }
 
@@ -338,29 +324,15 @@ mod tests {
     }
 
     #[test]
-    fn unproven_backend_freezes_only_the_unnameable_kind() {
-        let o = [agent("PC1", LABEL_UNKNOWN), agent("PC2", LABEL_NO_AUTH)];
+    fn unnameable_credentials_are_reported_even_without_backend_proof() {
+        // Without proof a user name reads as `unknown`; it is still a
+        // low-severity finding, and nothing about it is withheld.
+        let o = [agent("PC1", LABEL_UNKNOWN)];
         let r = reg();
-        let mut p = poll(&o, &r);
-        p.backend_proven = false;
-        let ops = plan(&users(), &p, &[], t0());
+        let ops = plan(&users(), &poll(&o, &r), &[], t0());
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], Op::Raise(d) if d.kind == "nats_auth.broker_open"));
-        // An open notice of the frozen kind is not resolved by its absence.
-        let open = Stored {
-            kind: "nats_auth.credential_unnameable".into(),
-            subject: "agent".into(),
-            severity: "info".into(),
-            count: 1,
-            sample: vec![],
-            first_seen_at: t0(),
-            resolved_at: None,
-        };
-        assert!(
-            plan(&users(), &p, &[open], t0())
-                .iter()
-                .all(|o| !matches!(o, Op::Resolve { .. }))
-        );
+        assert!(matches!(&ops[0], Op::Raise(d)
+            if d.kind == "nats_auth.credential_unnameable" && d.severity == "info"));
     }
 
     async fn pool() -> SqlitePool {

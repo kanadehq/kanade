@@ -480,7 +480,6 @@ async fn audit_authentication(
     js: &async_nats::jetstream::Context,
     observed: &[Observed],
     complete: bool,
-    backend_proven: bool,
 ) {
     let registered = match nats_auth_audit::registered_pcs(pool).await {
         Ok(r) => r,
@@ -494,7 +493,6 @@ async fn audit_authentication(
         observed,
         registered: &registered,
         complete,
-        backend_proven,
     };
     match nats_auth_audit::run_poll(pool, settings, &poll, Utc::now()).await {
         Ok(0) => {}
@@ -559,14 +557,7 @@ pub async fn run(
                     nats.connection_state() == async_nats::connection::State::Connected,
                 );
                 let (labels, anomalies) = correlate(&conns, &probe, ev);
-                audit_authentication(
-                    &pool,
-                    &js,
-                    &observe(&conns, &probe, ev),
-                    complete,
-                    ev != Evidence::Unproven,
-                )
-                .await;
+                audit_authentication(&pool, &js, &observe(&conns, &probe, ev), complete).await;
                 let correlated = labels.len();
                 if anomalies != reported {
                     if !anomalies.non_agent.is_empty() {
