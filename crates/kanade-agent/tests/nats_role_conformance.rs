@@ -237,11 +237,13 @@ struct WaitKind {
     default_secs: u64,
 }
 
-// The defaults below are several times the worst case seen in the repeated CI
-// runs (the per-OS distribution is in the pull request that introduced them
-// and in the workflow's step summary). A bound is never what makes a healthy
-// run pass: it only has to be far enough away that a slow runner is not
-// mistaken for a defect, and finite so that a hang still fails.
+// The defaults below are PROVISIONAL: generous guesses (the old fixed
+// deadlines were 15 to 120 s) set before any repeated CI run existed. They are
+// to be replaced by four to five times the worst value per kind in the
+// per-OS distribution that the workflow's step summary reports for a repeated
+// run (`conformance_repeat`). A bound is never what makes a healthy run pass:
+// it only has to be far enough away that a slow runner is not mistaken for a
+// defect, and finite so that a hang still fails.
 
 /// Spawning `nats-server` until its monitoring port answers.
 const BROKER_READY: WaitKind = WaitKind {
@@ -571,11 +573,19 @@ impl Waiter {
     /// the bound. `None` means the attempt did not finish.
     async fn call<T>(&mut self, fut: impl Future<Output = T>) -> Option<T> {
         let cap = ATTEMPT_CAP.min(self.left());
-        match tokio::time::timeout(cap, fut).await {
-            Ok(v) => Some(v),
-            Err(_) => {
+        let attempt_started = Instant::now();
+        tokio::pin!(fut);
+        // Polled in slices so a child that dies while the attempt is pending
+        // is reported at once, not when the attempt returns or is abandoned.
+        loop {
+            let slice = POLL.min(cap.saturating_sub(attempt_started.elapsed()));
+            if let Ok(v) = tokio::time::timeout(slice, &mut fut).await {
+                return Some(v);
+            }
+            self.check();
+            if attempt_started.elapsed() >= cap {
                 self.observed(format!("an attempt was still pending after {cap:?}"));
-                None
+                return None;
             }
         }
     }
@@ -623,6 +633,7 @@ async fn guarded_until_bound<T>(
     tokio::pin!(fut);
     loop {
         if let Ok(v) = tokio::time::timeout(POLL.min(w.left()), &mut fut).await {
+            w.done();
             return Ok(v);
         }
         if w.left().is_zero() {

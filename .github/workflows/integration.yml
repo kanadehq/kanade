@@ -131,6 +131,9 @@ jobs:
         env:
           CONFORMANCE_REPEAT: ${{ inputs.conformance_repeat || '1' }}
         run: |
+          # No -e: a failed run must not end the step before the rest of the
+          # repeats and the summary.
+          set +e
           set -uo pipefail
           case "$CONFORMANCE_REPEAT" in
             ''|*[!0-9]*|0) echo "conformance_repeat must be a positive integer" >&2; exit 2 ;;
