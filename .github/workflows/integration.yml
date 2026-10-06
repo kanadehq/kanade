@@ -13,6 +13,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      conformance_repeat:
+        description: >-
+          How many times to run the NATS role conformance suite on each
+          operating system (the timing distribution is in the step summary).
+        type: string
+        default: "1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -112,5 +119,42 @@ jobs:
           cargo build --release -p kanade-backend
           echo "KANADE_CONFORMANCE_BACKEND_BIN=$GITHUB_WORKSPACE/target/release/kanade-backend${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
 
+      - name: Build the role conformance test once
+        run: cargo test -p kanade-agent --test nats_role_conformance --no-run
+
       - name: NATS role-level authorization conformance
-        run: cargo test -p kanade-agent --test nats_role_conformance -- --ignored --nocapture
+        # Runs the suite `conformance_repeat` times (1 unless dispatched by
+        # hand) without rebuilding, keeps going after a failed run so the
+        # distribution includes it, then writes the per-OS timing table to the
+        # step summary and fails if any run failed.
+        shell: bash
+        env:
+          CONFORMANCE_REPEAT: ${{ inputs.conformance_repeat || '1' }}
+        run: |
+          set -uo pipefail
+          case "$CONFORMANCE_REPEAT" in
+            ''|*[!0-9]*|0) echo "conformance_repeat must be a positive integer" >&2; exit 2 ;;
+          esac
+          timings="$RUNNER_TEMP/conformance-timings.jsonl"
+          : > "$timings"
+          export KANADE_CONFORMANCE_TIMINGS="$timings"
+          failures=0
+          for i in $(seq 1 "$CONFORMANCE_REPEAT"); do
+            echo "::group::conformance run $i of $CONFORMANCE_REPEAT"
+            start=$SECONDS
+            cargo test -p kanade-agent --test nats_role_conformance -- --ignored --nocapture
+            rc=$?
+            secs=$((SECONDS - start))
+            echo "::endgroup::"
+            outcome=ok
+            if [ "$rc" -ne 0 ]; then outcome=failed; failures=$((failures + 1)); fi
+            printf '{"kind":"suite","os":"%s","test":"all","switch":"","step":"suite","secs":%s,"outcome":"%s","concurrent":0}\n' \
+              "$(echo "$RUNNER_OS" | tr 'A-Z' 'a-z')" "$secs" "$outcome" >> "$timings"
+            echo "run $i: $outcome in ${secs}s"
+          done
+          py=$(command -v python3 || command -v python)
+          "$py" scripts/ci/conformance_timings.py "$timings"
+          if [ "$failures" -ne 0 ]; then
+            echo "$failures of $CONFORMANCE_REPEAT conformance runs failed" >&2
+            exit 1
+          fi
