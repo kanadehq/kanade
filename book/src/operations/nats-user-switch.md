@@ -154,11 +154,11 @@ NATS authentication* to `users` so the backend reports anything unexpected.
 Its findings are held back for five minutes after that change, which does not
 affect the script.
 
-### 4. Compare, about two heartbeat intervals later
+### 4. Compare, after the fleet has had time to reconnect
 
 ```powershell
 ./scripts/ops/nats-switch-check.ps1 -Mode Compare -SnapshotPath before.json `
-    -SwitchedAt 2026-01-01T09:00:00Z -WaitSeconds 150 -MaxDisappeared 0
+    -SwitchedAt 2026-01-01T09:00:00Z -WaitSeconds <see below> -MaxDisappeared 0
 ```
 
 A locked-out host still looks alive for up to two minutes after its last
@@ -166,6 +166,56 @@ heartbeat, so the script refuses to judge sooner than that plus one heartbeat
 interval (`-HeartbeatSeconds`, default 60; set it to your fleet's configured
 interval) and exits 3 "too early". `-WaitSeconds` makes it wait before
 reading. Run it again after waiting rather than reading a partial answer.
+
+**How long to wait is the larger of two numbers, both counted from the switch
+time you wrote down:**
+
+* the script's own floor: 120 s plus the fleet's heartbeat interval; and
+* four times the worst reconnect time measured for your clients (below), plus
+  the fleet's heartbeat interval.
+
+The second term used to be a guess. An agent that has lost its connection does
+not heartbeat again until it has reconnected, and on a reconnect the client's
+credential selection first probes the broker with each credential it holds and
+then connects for real, so a reconnect is several round trips with their own
+timeouts and the client's reconnect backoff in between, not one. On a slow or
+busy machine that can add up to tens of seconds. Comparing sooner than that
+reads agents that are still reconnecting as disappeared.
+
+#### How the reconnect time was measured
+
+The conformance suite (`nats_role_conformance`, run by the Integration
+workflow on Ubuntu, Windows and macOS) times it on every run. It restarts the
+broker, or on Linux and macOS reloads it from the token to the users block with
+every live connection cut through a proxy, under a running real backend and
+agent, and counts from the instant before the restart or reload until each of
+these has worked again, all measured side by side from that same instant:
+
+* the agent's next heartbeat, seen by an observer connected straight to the
+  broker;
+* the backend's ping of the agent returning 200;
+* a break-glass `kanade run` completing;
+* a fresh call made with the agent role and with the backend role through the
+  real `connect` helper (so the helper's probe is inside the number).
+
+Conditions of that measurement, which are not your fleet's: a loopback broker
+on a hosted CI runner, three test processes running in parallel on the
+machine, the agent heartbeating every second (so the heartbeat adds about one
+second, not your interval), and the broker version the workflow pins
+(`NATS_SERVER_VERSION`). A real fleet has network latency, a busy broker,
+many clients reconnecting at once and a longer heartbeat interval; those make
+it slower, not faster. The CI figure is therefore a lower bound on what to
+expect and not a recovery guarantee. The right number for your fleet comes
+from rehearsing on a few hosts: note when each host's first heartbeat arrives
+after a switch of a test broker or one site, and take the worst.
+
+The distribution per operating system (count, minimum, median, 95th
+percentile, maximum, and how many waits hit their bound) is written to the
+Integration workflow's step summary, and a manual run of the workflow can
+repeat the suite (`conformance_repeat`) to collect more samples. Read the
+`reconnect` rows and use the worst one on your clients' operating system as
+the figure above. If it is tens of seconds even on a loopback runner, plan the
+wait in minutes, not in the two or three the old example implied.
 
 It prints:
 
@@ -212,7 +262,7 @@ touched. Agents retry on their own and rejoin; confirm with:
 
 ```powershell
 ./scripts/ops/nats-switch-check.ps1 -Mode Compare -SnapshotPath before.json `
-    -SwitchedAt <time of the revert, UTC> -WaitSeconds 150 -MaxDisappeared 0
+    -SwitchedAt <time of the revert, UTC> -WaitSeconds <as in step 4> -MaxDisappeared 0
 ```
 
 Caveat on "agents retry forever": this is not exactly what the code does. A
