@@ -1288,6 +1288,25 @@ impl Fleet {
         .await
     }
 
+    /// One call to the backend's HTTP API, under the operation bound, with the
+    /// children watched while it is pending and its duration recorded.
+    async fn api(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: &str,
+    ) -> (u16, String) {
+        let step = format!("{method} {}", path.replace(&self.pc_id, "<agent>"));
+        guarded(
+            &OPERATION,
+            &step,
+            self.watch(),
+            http_request(self.http_port, method, path, content_type, body),
+        )
+        .await
+    }
+
     async fn role(&self, role: Role) -> RoleClient {
         RoleClient::open_with(&self.dial_url, role, None, self.with_token).await
     }
@@ -1603,9 +1622,9 @@ async fn allowed_flows_complete_under_the_users_block() {
     let yaml = Some("application/yaml");
     let group = include_str!("../../../configs/groups/hostname-prefix.yaml");
     let view = include_str!("../../../configs/views/dashboards-fleet.yaml");
-    let (st, body) = http_request(f.http_port, "POST", "/api/group-defs", yaml, group).await;
+    let (st, body) = f.api("POST", "/api/group-defs", yaml, group).await;
     assert!(st == 200 || st == 201, "group-defs create: {st} {body}");
-    let (st, body) = http_request(f.http_port, "POST", "/api/views", yaml, view).await;
+    let (st, body) = f.api("POST", "/api/views", yaml, view).await;
     assert!(st == 200 || st == 201, "views create: {st} {body}");
     for bucket in ["group_defs", "views"] {
         backend
@@ -1707,23 +1726,18 @@ async fn allowed_flows_complete_under_the_users_block() {
     // Request/reply: ping and log fetch through the real backend handlers,
     // tail directly (it needs a running job to be interesting; the permission
     // surface is the same).
-    let (st, body) = http_request(
-        f.http_port,
-        "POST",
-        &format!("/api/agents/{}/ping", f.pc_id),
-        None,
-        "",
-    )
-    .await;
+    let (st, body) = f
+        .api("POST", &format!("/api/agents/{}/ping", f.pc_id), None, "")
+        .await;
     assert_eq!(st, 200, "ping: {body}");
-    let (st, body) = http_request(
-        f.http_port,
-        "GET",
-        &format!("/api/agents/{}/logs?tail=20", f.pc_id),
-        None,
-        "",
-    )
-    .await;
+    let (st, body) = f
+        .api(
+            "GET",
+            &format!("/api/agents/{}/logs?tail=20", f.pc_id),
+            None,
+            "",
+        )
+        .await;
     assert_eq!(st, 200, "logs.fetch: {}", &body[..body.len().min(200)]);
     let tail = backend
         .client
@@ -1886,14 +1900,14 @@ async fn allowed_flows_complete_under_the_users_block() {
         "body": "probe",
     })
     .to_string();
-    let (st, resp) = http_request(
-        f.http_port,
-        "POST",
-        "/api/notifications",
-        Some("application/json"),
-        &body,
-    )
-    .await;
+    let (st, resp) = f
+        .api(
+            "POST",
+            "/api/notifications",
+            Some("application/json"),
+            &body,
+        )
+        .await;
     assert_eq!(st, 200, "notification publish: {resp}");
     guarded(
         &OPERATION,
@@ -1903,7 +1917,7 @@ async fn allowed_flows_complete_under_the_users_block() {
     )
     .await
     .expect("notification subscription closed");
-    let (st, list) = http_request(f.http_port, "GET", "/api/notifications", None, "").await;
+    let (st, list) = f.api("GET", "/api/notifications", None, "").await;
     assert!(
         st == 200 && list.contains("conformance"),
         "notification list: {st} {list}"
@@ -2082,19 +2096,19 @@ async fn allowed_flows_complete_under_the_users_block() {
         "id: conformance-collect\nversion: 0.1.0\nexecute:\n  shell: {shell}\n  timeout: 30s\n  \
          script: |\n    {script}\ncollect:\n  name: conformance\n"
     );
-    let (st, body) = http_request(f.http_port, "POST", "/api/jobs", yaml, &manifest).await;
+    let (st, body) = f.api("POST", "/api/jobs", yaml, &manifest).await;
     assert!(st == 200 || st == 201, "job create: {st} {body}");
     let mut collected = backend.client.subscribe("results.*").await.unwrap();
     backend.settle().await;
     let plan = serde_json::json!({"target": {"pcs": [f.pc_id]}}).to_string();
-    let (st, body) = http_request(
-        f.http_port,
-        "POST",
-        "/api/exec/conformance-collect",
-        Some("application/json"),
-        &plan,
-    )
-    .await;
+    let (st, body) = f
+        .api(
+            "POST",
+            "/api/exec/conformance-collect",
+            Some("application/json"),
+            &plan,
+        )
+        .await;
     assert!(st == 200 || st == 201, "exec: {st} {body}");
     let key = wait_collect_object(&f, &mut collected).await;
     let mut bundle = backend
@@ -2835,23 +2849,18 @@ async fn every_role_works(f: &mut Fleet, stage: &str, observe_as: Auth) {
         Instant::now(),
     )
     .await;
-    let (st, body) = http_request(
-        f.http_port,
-        "POST",
-        &format!("/api/agents/{}/ping", f.pc_id),
-        None,
-        "",
-    )
-    .await;
+    let (st, body) = f
+        .api("POST", &format!("/api/agents/{}/ping", f.pc_id), None, "")
+        .await;
     assert_eq!(st, 200, "[{stage}] backend → agent ping: {body}");
-    let (st, _) = http_request(
-        f.http_port,
-        "GET",
-        &format!("/api/agents/{}/logs?tail=5", f.pc_id),
-        None,
-        "",
-    )
-    .await;
+    let (st, _) = f
+        .api(
+            "GET",
+            &format!("/api/agents/{}/logs?tail=5", f.pc_id),
+            None,
+            "",
+        )
+        .await;
     assert_eq!(st, 200, "[{stage}] backend → agent log fetch");
     let marker = fresh("sw");
     let out = f.cli_run_echo(&marker, 60).await;
