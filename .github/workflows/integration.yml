@@ -110,6 +110,16 @@ jobs:
       - name: NATS auth (user / token fallback) integration tests
         run: cargo test -p kanade-shared --test nats_auth_live -- --ignored
 
+      - name: NATS authentication-mode switch under injected probe faults
+        # Restarts a real broker between `token` and `users` under running
+        # supervised role child processes while a proxy drops, holds or
+        # slows probes and stalls role handshakes. Assert actual non-zero
+        # exits and receive progress against a shared recovery deadline.
+        run: cargo test -p kanade-shared --test nats_auth_switch -- --ignored
+
+      - name: Agent config watch does not lose a write made before the watch opens
+        run: cargo test -p kanade-agent --bin kanade-agent config_supervisor::live -- --ignored
+
       - name: Build backend, agent and CLI for the role conformance test
         # The backend is built in release: a debug build overflows the
         # main-thread stack on Windows, and release is what ships there.

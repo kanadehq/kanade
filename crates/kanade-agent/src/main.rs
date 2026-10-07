@@ -647,6 +647,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     )
     .await?;
     info!("connected to NATS");
+    kanade_shared::nats_client::exit_on_dead(kanade_shared::nats_client::NatsRole::Agent, &client);
 
     let cmd_all = client.subscribe(subject::COMMANDS_ALL).await?;
     let cmd_self = client
@@ -1019,9 +1020,6 @@ pub(crate) async fn run_agent() -> Result<()> {
         check_sink.clone(),
     );
 
-    // `wait_until_dead` covers the case the subscriptions do not: a connection
-    // task that has ended can leave the subscription streams open, so without
-    // it the agent would sit idle forever.
     let loops = async {
         tokio::join!(
             commands::command_loop(
@@ -1046,14 +1044,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             ),
         );
     };
-    tokio::select! {
-        () = loops => {}
-        () = kanade_shared::nats_client::wait_until_dead(kanade_shared::nats_client::NatsRole::Agent, &client) => {
-            anyhow::bail!(
-                "NATS connection task terminated; exiting for a supervised restart"
-            );
-        }
-    }
+    loops.await;
 
     // The command subscriptions only end when the NATS client itself is gone
     // — e.g. a panic in async-nats' connection task (#1187's missing rustls

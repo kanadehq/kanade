@@ -3151,6 +3151,7 @@ dependencies = [
  "chrono",
  "croner",
  "ed25519-dalek",
+ "futures",
  "getrandom 0.4.3",
  "humantime",
  "pelite",

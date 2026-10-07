@@ -287,8 +287,16 @@ async fn run(
         // `watch(pc_id)` on agent_groups surfaces our membership flips;
         // when those change the key set, we break out and reopen the
         // agent_config watch against the new set (see the groups arm).
+        //
+        // Both watches replay the current value of each key rather than
+        // only changes made after they exist: the direct reads above and the
+        // watches are separate round trips, and a write landing between them
+        // would otherwise be lost until the next write to the same key,
+        // leaving the agent on stale settings. The replay is harmless
+        // because the per-key revision marks below drop anything already
+        // applied.
         let watch_keys = build_watch_keys(&pc_id, &state.my_groups);
-        let mut cfg_watch = match cfg_kv.watch_many(&watch_keys).await {
+        let mut cfg_watch = match cfg_kv.watch_many_with_history(&watch_keys).await {
             Ok(w) => w,
             Err(e) => {
                 warn!(error = %e, "watch_many agent_config failed; reopening");
@@ -296,7 +304,7 @@ async fn run(
                 continue;
             }
         };
-        let mut groups_watch = match groups_kv.watch(&pc_id).await {
+        let mut groups_watch = match groups_kv.watch_with_history(&pc_id).await {
             Ok(w) => w,
             Err(e) => {
                 warn!(error = %e, "watch agent_groups for pc failed; reopening");
@@ -376,9 +384,10 @@ async fn run(
                         // the sorted/deduped sets, so a reorder that
                         // resolves to the same keys doesn't churn the
                         // watch. The outer loop's `initial_sync` re-runs a
-                        // direct get *before* the new watch opens, so a
-                        // value put on a group key before we joined is
-                        // picked up — no gap.
+                        // direct get *before* the new watch opens and the
+                        // watch replays current values, so a value put on a
+                        // group key before we joined is picked up — no gap
+                        // on either side of the reopen.
                         if build_watch_keys(&pc_id, &state.my_groups) != watch_keys {
                             info!(
                                 groups = ?state.my_groups,
@@ -747,5 +756,167 @@ mod tests {
         let (eff, warns) = s.resolved();
         assert_eq!(eff.heartbeat_interval, "5s");
         assert!(warns.is_empty());
+    }
+}
+
+/// Live-broker test of the gap between the initial read and the watch.
+///
+/// Ignored by default: it spawns a throwaway `nats-server -js` (must be in
+/// PATH) on random ports.
+///
+/// ```text
+/// cargo test -p kanade-agent --bin kanade-agent config_supervisor::live -- --ignored
+/// ```
+#[cfg(test)]
+mod live {
+    use std::process::Stdio;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use kanade_shared::kv::{BUCKET_AGENT_CONFIG, KEY_AGENT_CONFIG_GLOBAL};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    /// A TCP relay that stalls the first consumer-create request it sees until
+    /// told to go on. Creating the consumer is what opens a watch, so the
+    /// stall is a window of any length between "the supervisor has read the
+    /// current value" and "the watch exists", in which the test can write.
+    struct StallingRelay {
+        port: u16,
+        stalled: Arc<Notify>,
+        go: Arc<Notify>,
+    }
+
+    impl StallingRelay {
+        async fn start(upstream: u16) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let (stalled, go) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+            let (s, g) = (stalled.clone(), go.clone());
+            let used = Arc::new(AtomicBool::new(false));
+            tokio::spawn(async move {
+                loop {
+                    let Ok((client, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let (s, g, used) = (s.clone(), g.clone(), used.clone());
+                    tokio::spawn(async move {
+                        let Ok(server) = TcpStream::connect(("127.0.0.1", upstream)).await else {
+                            return;
+                        };
+                        let (mut cr, mut cw) = client.into_split();
+                        let (mut sr, mut sw) = server.into_split();
+                        let down = tokio::spawn(async move {
+                            let _ = tokio::io::copy(&mut sr, &mut cw).await;
+                        });
+                        let mut buf = vec![0u8; 16 * 1024];
+                        while let Ok(n) = cr.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                            let chunk = &buf[..n];
+                            if chunk.windows(15).any(|w| w == b"CONSUMER.CREATE")
+                                && !used.swap(true, Ordering::SeqCst)
+                            {
+                                s.notify_one();
+                                g.notified().await;
+                            }
+                            if sw.write_all(chunk).await.is_err() {
+                                break;
+                            }
+                        }
+                        down.abort();
+                    });
+                }
+            });
+            Self { port, stalled, go }
+        }
+    }
+
+    async fn broker() -> Option<(tokio::process::Child, tempfile::TempDir, u16)> {
+        let dir = tempfile::TempDir::new().ok()?;
+        let port = portpicker::pick_unused_port()?;
+        let child = tokio::process::Command::new("nats-server")
+            .args(["-js", "-a", "127.0.0.1", "-p", &port.to_string(), "-sd"])
+            .arg(dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            assert!(Instant::now() < deadline, "nats-server did not come up");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Some((child, dir, port))
+    }
+
+    /// A value written after the supervisor has read the bucket but before its
+    /// watch exists must still reach the effective config. A watch that only
+    /// delivers changes made after it was created loses that write for good,
+    /// leaving the agent on the built-in cadence until something else touches
+    /// the key.
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn a_write_between_the_initial_read_and_the_watch_is_not_lost() {
+        let Some((_child, _dir, port)) = broker().await else {
+            eprintln!("skipping: nats-server not found in PATH");
+            return;
+        };
+        let direct = async_nats::connect(format!("nats://127.0.0.1:{port}"))
+            .await
+            .expect("connect direct");
+        let js = jetstream::new(direct);
+        // Only the two buckets the supervisor reads: the rest of the catalogue
+        // plays no part and costs storage a small CI runner may not have.
+        let mut buckets = Vec::new();
+        for name in [BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS] {
+            buckets.push(
+                js.create_key_value(jetstream::kv::Config {
+                    bucket: name.to_string(),
+                    max_bytes: 1024 * 1024,
+                    ..Default::default()
+                })
+                .await
+                .expect("create bucket"),
+            );
+        }
+        let kv = buckets.swap_remove(0);
+
+        let relay = StallingRelay::start(port).await;
+        let agent = async_nats::connect(format!("nats://127.0.0.1:{}", relay.port))
+            .await
+            .expect("connect via relay");
+        let rx = spawn(agent, "pc-race".into(), Tracker::new());
+
+        tokio::time::timeout(Duration::from_secs(20), relay.stalled.notified())
+            .await
+            .expect("the supervisor never tried to open a watch");
+        // The initial read is done by now and found nothing.
+        assert_eq!(
+            rx.borrow().heartbeat_duration(),
+            EffectiveConfig::builtin_defaults().heartbeat_duration()
+        );
+        kv.put(
+            KEY_AGENT_CONFIG_GLOBAL,
+            br#"{"heartbeat_interval":"1s"}"#.to_vec().into(),
+        )
+        .await
+        .expect("put");
+        relay.go.notify_one();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rx.borrow().heartbeat_duration() != Duration::from_secs(1) {
+            assert!(
+                Instant::now() < deadline,
+                "the write made between the initial read and the watch never reached the config"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }

@@ -1375,7 +1375,9 @@ fn spawn_freeze_watch_task(
             // projection), so watch the one key the scheduler cares about
             // instead of the whole bucket: other keys' updates must never
             // be decoded as a freeze.
-            let mut watch = match kv.watch(KEY_FREEZE).await {
+            // History, not only new changes: a freeze set between the
+            // re-seed above and the watch opening must not be missed.
+            let mut watch = match kv.watch_with_history(KEY_FREEZE).await {
                 Ok(w) => w,
                 Err(e) => {
                     warn!(error = %e, "freeze watch: watch failed; reopening");

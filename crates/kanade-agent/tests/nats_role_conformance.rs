@@ -262,10 +262,13 @@ struct WaitKind {
 //
 // Excluded: `heartbeat_cadence` hit its old 120 s bound without ever seeing
 // the faster heartbeats in 3 of 60 runs (1 linux, 2 windows). A stalled wait
-// is not a completion time, so these are not in the table above, and nothing
-// here explains them: the bounds are derived from successful waits only and
-// the cause of the stall is still open. With the 30 s bound a stall now fails
-// in 30 s instead of 120 s.
+// is not a completion time, so these are not in the table above. The cause was
+// not the connection: in each failed run the agent stayed connected and logged
+// no disconnect, but never applied the `heartbeat_interval` the test wrote
+// right after its first heartbeat. The agent's config watch only saw changes
+// made after it was created, so a write landing between its initial read and
+// the watch opening was lost. The watch now replays current values (see the
+// `config_supervisor` live test).
 //
 // To re-measure, dispatch the integration workflow with `conformance_repeat`
 // and read the per-OS table in the step summary; to run slower for a while,
