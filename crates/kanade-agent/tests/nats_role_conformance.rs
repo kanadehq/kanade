@@ -1045,8 +1045,10 @@ impl RoleClient {
 
     /// A round trip to the broker: every error caused by an earlier operation
     /// has been delivered once this returns (the server answers in order).
-    async fn settle(&self) {
-        let _ = tokio::time::timeout(OPERATION.bound(), self.client.flush()).await;
+    async fn settle(&self, watch: Vec<Sentinel>) {
+        guarded(&OPERATION, "settle round trip", watch, self.client.flush())
+            .await
+            .expect("flush while settling");
         tokio::time::sleep(QUIET_AFTER_ROUND_TRIP).await;
     }
 
@@ -1921,7 +1923,7 @@ async fn allowed_flows_complete_under_the_users_block() {
         .subscribe(format!("notifications.pc.{}", f.pc_id))
         .await
         .unwrap();
-    agent.settle().await;
+    agent.settle(f.watch()).await;
     let body = serde_json::json!({
         "target": {"pcs": [f.pc_id]},
         "priority": "info",
@@ -2128,7 +2130,7 @@ async fn allowed_flows_complete_under_the_users_block() {
     let (st, body) = f.api("POST", "/api/jobs", yaml, &manifest).await;
     assert!(st == 200 || st == 201, "job create: {st} {body}");
     let mut collected = backend.client.subscribe("results.*").await.unwrap();
-    backend.settle().await;
+    backend.settle(f.watch()).await;
     let plan = serde_json::json!({"target": {"pcs": [f.pc_id]}}).to_string();
     let (st, body) = f
         .api(
@@ -2506,7 +2508,7 @@ async fn denied_operations_are_denied_per_role() {
         let c = &clients[&role];
         let mark = c.errors.lock().unwrap().len();
         run_op(c, op).await;
-        c.settle().await;
+        c.settle(f.watch()).await;
         if expect == Expect::Denied {
             // The error is on its way: wait for it, stop at the first, and
             // if the bound runs out the verdict below reports what the broker
@@ -2553,7 +2555,7 @@ async fn denied_operations_are_denied_per_role() {
         .subscribe("commands.pc.victim")
         .await
         .unwrap();
-    observer.settle().await;
+    observer.settle(f.watch()).await;
     glass
         .client
         .publish("commands.pc.victim", Bytes::from_static(b"control"))
@@ -2573,7 +2575,7 @@ async fn denied_operations_are_denied_per_role() {
         .publish("commands.pc.victim", Bytes::from_static(b"forged"))
         .await
         .unwrap();
-    agent.settle().await;
+    agent.settle(f.watch()).await;
     assert!(
         agent.violated("Publish", "commands.pc.victim"),
         "agent publish to commands.* was not refused"
@@ -2629,7 +2631,7 @@ async fn denied_operations_are_denied_per_role() {
     for (b, wrote) in futures::future::join_all(attempts).await {
         assert!(!wrote, "agent wrote {b}");
     }
-    agent.settle().await;
+    agent.settle(f.watch()).await;
     for (b, write) in &writable {
         if AGENT_UNREADABLE_BUCKETS.contains(b) {
             assert!(
@@ -2697,7 +2699,7 @@ async fn denied_operations_are_denied_per_role() {
         )
     })
     .await;
-    agent.settle().await;
+    agent.settle(f.watch()).await;
     for (kind, subject) in [
         ("Publish", "$JS.API.STREAM.INFO.KV_server_settings"),
         // create_key_value asks for account info before it creates anything.
@@ -2750,7 +2752,7 @@ async fn denied_operations_are_denied_per_role() {
         g.js.get_stream("EXEC").await.is_err(),
         "break-glass reached JetStream"
     );
-    g.settle().await;
+    g.settle(f.watch()).await;
     assert!(g.violated("Publish", "$JS.API.STREAM.INFO.EXEC"));
 
     // Documented residual, asserted so a change in either direction is seen:
@@ -3164,7 +3166,7 @@ async fn consumer_delivery_target_residual_is_recorded() {
     // publish reaches it.
     let target = "commands.pc.residual-victim";
     let mut seen = victim.client.subscribe(target).await.unwrap();
-    victim.settle().await;
+    victim.settle(f.watch()).await;
     let glass = f.role_fast(Role::Breakglass).await;
     glass
         .client
