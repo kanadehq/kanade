@@ -1128,6 +1128,11 @@ pub async fn wait_until_dead_every(
     let stats = client.statistics();
     let mut received = stats.in_bytes.load(Ordering::Relaxed);
     let mut progressed = tokio::time::Instant::now();
+    // The last witness found the broker unreachable. The progress clock then
+    // describes the outage, not the client, so the first reachable witness
+    // only starts the client's chance to reconnect (it may still be in its
+    // backoff) and a stall is judged on the next check.
+    let mut broker_was_down = false;
     loop {
         tick.tick().await;
         let now_received = stats.in_bytes.load(Ordering::Relaxed);
@@ -1154,7 +1159,11 @@ pub async fn wait_until_dead_every(
         if progressed.elapsed() >= RESUME_BOUND {
             if let Some(health) = &health {
                 let outcome = witness(health).await;
-                if outcome != ProbeOutcome::Unreachable {
+                if outcome == ProbeOutcome::Unreachable {
+                    broker_was_down = true;
+                } else if std::mem::take(&mut broker_was_down) {
+                    continue;
+                } else {
                     // Recheck after the witness: a reconnect racing it is healthy.
                     if client.connection_state() == async_nats::connection::State::Connected
                         && stats.in_bytes.load(Ordering::Relaxed) != received

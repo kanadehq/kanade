@@ -612,6 +612,54 @@ async fn a_refused_client_is_not_dead_and_talks_once_accepted() {
     }).await.expect("the same refused client must receive after the broker accepts it");
 }
 
+/// The refusal above never reaches the broker: with no token the credential
+/// choice itself fails before the role's CONNECT is sent. This one makes the
+/// broker refuse the role's real CONNECT (a wrong token is the only choice
+/// left once the probe is rejected), at a reconnect, and requires that the
+/// same `Client` survives the refusal and talks once the broker runs `users`.
+#[tokio::test]
+#[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+async fn a_client_refused_at_its_role_handshake_recovers_on_reconnect() {
+    if !nats_server_available() {
+        eprintln!("skipping: nats-server not found in PATH");
+        return;
+    }
+    let _one_at_a_time = SERIAL.lock().await;
+    let mut broker = Broker::start(Mode::Users).await;
+    let creds = NatsCredentials::new(Some("wrong-token".into()), Some(user_of(NatsRole::Agent)));
+    let client = connect_with_credentials(
+        NatsRole::Agent,
+        &format!("nats://127.0.0.1:{}", broker.port),
+        creds,
+    )
+    .await
+    .expect("connect");
+    broker.down().await;
+    broker.up(Mode::Token).await;
+    // The probe is rejected, the wrong token is sent and refused, repeatedly.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert!(
+        !kanade_shared::nats_client::is_dead(&client).await,
+        "a refused role handshake ended the connection task"
+    );
+    broker.down().await;
+    broker.up(Mode::Users).await;
+    let subject = "handshake.retry";
+    let mut subscription = client.subscribe(subject).await.expect("subscribe");
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    tokio::time::timeout(RESUME_BOUND, async {
+        loop {
+            tokio::select! {
+                _ = tick.tick() => { client.publish(subject, "accepted".into()).await.expect("publish"); }
+                message = subscription.next() => {
+                    assert_eq!(message.expect("message").payload.as_ref(), b"accepted");
+                    break;
+                }
+            }
+        }
+    }).await.expect("the same client must talk after the broker accepts its user");
+}
+
 /// Refusals are not needed to strand a client: a handshake can stop making
 /// progress while the broker accepts fresh connections. The old flush-only
 /// watchdog waits forever in this state. Synchronize on observed role CONNECT

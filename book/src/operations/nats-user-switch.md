@@ -285,6 +285,11 @@ reconnect attempt allows the 4 s backoff, 3 s probe plus 1 s guard, and 5 s
 handshake; 30 s allows two attempts plus slack. An inconclusive probe now
 skips the attempt instead of guessing from the previous broker mode.
 
+After a broker outage the watchdog first lets a client that is still in its
+reconnect backoff try again: the first check that finds the broker reachable
+again only restarts the client's chance, and a stall is judged on the next
+check 15 s later, which stays inside the 45 s exit bound.
+
 The watchdog observes each connection's own receive progress. Idle clients
 send protocol PINGs every 5 s, so they need no subject permission or
 application message to show progress. A flush alone proves only a local write.
