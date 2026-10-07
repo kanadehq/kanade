@@ -9,6 +9,7 @@ import {
   useEffect,
   useLayoutEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -29,6 +30,19 @@ import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '@/lib/api';
 import { useMediaQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
+
+import {
+  parseFilters,
+  parseSort,
+  processSortFilter,
+  SortFilterBar,
+  SortFilterHeader,
+  type ColumnFilter,
+  type ColumnFlags,
+  type Filters,
+  type SortFilterApi,
+  type SortState,
+} from './table-sortfilter';
 
 /* ------------------------------------------------------------------ *
  * Column resizing (#1344)
@@ -72,6 +86,8 @@ const WIDTHS_PREFIX = 'kanade.table.widths.';
 const HIDDEN_PREFIX = 'kanade.table.hidden.';
 const ORDER_PREFIX = 'kanade.table.order.';
 const META_PREFIX = 'kanade.table.meta.';
+const SORT_PREFIX = 'kanade.table.sort.';
+const FILTERS_PREFIX = 'kanade.table.filters.';
 /** Persisted widths, keyed by column id (see `columnIdOf`). */
 type ColumnWidths = Record<string, number>;
 
@@ -129,6 +145,9 @@ interface ResizeContextValue {
    * ordinary table pays nothing for the plumbing.
    */
   registerPc: (pcId: string) => () => void;
+  /** Sorting / filtering (`<Table sortFilter>`). `null` when the table
+   *  didn't opt in, which is also what keeps its header cells untouched. */
+  sf: SortFilterApi | null;
 }
 
 const ResizeContext = createContext<ResizeContextValue | null>(null);
@@ -455,10 +474,15 @@ function makeTablePref<T>(opts: {
    *  hand-edited or corrupt must degrade to `empty`, never reach the DOM. */
   parse: (raw: unknown) => T;
   isEmpty: (value: T) => boolean;
+  /** `false` keeps the value in memory only: it survives navigation inside
+   *  the SPA (the store outlives the table) but not a reload. */
+  persist?: boolean;
 }): TablePref<T> {
+  const persist = opts.persist !== false;
   const stores = new Map<string, { value: T; listeners: Set<() => void> }>();
 
   const read = (key: string): T => {
+    if (!persist) return opts.empty;
     try {
       const raw = localStorage.getItem(opts.prefix + key);
       if (raw) return opts.parse(JSON.parse(raw));
@@ -485,6 +509,7 @@ function makeTablePref<T>(opts: {
   };
 
   const write = (key: string, value: T) => {
+    if (!persist) return;
     try {
       if (opts.isEmpty(value)) {
         // Remove the key rather than leaving an empty value behind, so
@@ -530,7 +555,7 @@ function makeTablePref<T>(opts: {
   const resetAll = (): number => {
     let count = 0;
     try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
+      for (let i = persist ? localStorage.length - 1 : -1; i >= 0; i--) {
         const k = localStorage.key(i);
         if (k?.startsWith(opts.prefix)) {
           localStorage.removeItem(k);
@@ -552,7 +577,7 @@ function makeTablePref<T>(opts: {
   const keysWithValue = (): string[] => {
     const out = new Set<string>();
     try {
-      for (let i = 0; i < localStorage.length; i++) {
+      for (let i = 0; persist && i < localStorage.length; i++) {
         const k = localStorage.key(i);
         if (k?.startsWith(opts.prefix)) {
           out.add(k.slice(opts.prefix.length));
@@ -606,6 +631,28 @@ const hiddenPref = makeTablePref<readonly string[]>({
   empty: Object.freeze([]) as readonly string[],
   parse: (raw) => (Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []),
   isEmpty: (ids) => ids.length === 0,
+});
+
+/** Column sort, persisted per table: a sort is a deliberate view choice and
+ *  survives a reload. Validated on read; an id that no longer names a
+ *  sortable column is ignored by the table, not trusted. */
+const sortPref = makeTablePref<SortState | null>({
+  prefix: SORT_PREFIX,
+  empty: null,
+  parse: parseSort,
+  isEmpty: (s) => s === null,
+});
+
+/** Column filters. Same store, but memory only: a filter that survived a
+ *  reload would quietly hide rows on the next visit, long after the
+ *  operator forgot setting it. It does outlive navigation inside the SPA. */
+const NO_FILTERS: Filters = Object.freeze({});
+const filtersPref = makeTablePref<Filters>({
+  prefix: FILTERS_PREFIX,
+  empty: NO_FILTERS,
+  parse: parseFilters,
+  isEmpty: (f) => Object.keys(f).length === 0,
+  persist: false,
 });
 
 /**
@@ -814,11 +861,55 @@ export function resetAllTableColumnPrefs(): number {
     ...widthPref.keysWithValue(),
     ...hiddenPref.keysWithValue(),
     ...orderPref.keysWithValue(),
+    ...sortPref.keysWithValue(),
   ]);
   widthPref.resetAll();
   hiddenPref.resetAll();
   orderPref.resetAll();
+  sortPref.resetAll();
+  filtersPref.resetAll();
   return affected.size;
+}
+
+/** Per-column `sortable` / `filterable` flags, read from the page's header
+ *  cells like `sourceColumnIds` does. Metadata columns get both. */
+function sourceColumnFlags(children: ReactNode, ids: string[]): Record<string, ColumnFlags> {
+  const flags: Record<string, ColumnFlags> = {};
+  ids.forEach((id) => (flags[id] = { sortable: true, filterable: true }));
+  for (const child of Children.toArray(children)) {
+    if (!isValidElement(child) || child.type !== TableHeader) continue;
+    const row = Children.toArray((child.props as { children?: ReactNode }).children).find(
+      (r) => isValidElement(r) && r.type === TableRow,
+    );
+    if (!row || !isValidElement(row)) break;
+    Children.toArray((row.props as { children?: ReactNode }).children).forEach((cell, i) => {
+      if (!isValidElement(cell) || i >= ids.length) return;
+      const p = cell.props as { sortable?: boolean; filterable?: boolean };
+      flags[ids[i]] = { sortable: p.sortable !== false, filterable: p.filterable !== false };
+    });
+    break;
+  }
+  return flags;
+}
+
+/** pc_ids of the body's rows, before any filtering (see `useAgentMeta`). */
+function bodyPcIds(children: ReactNode): string[] {
+  const out: string[] = [];
+  for (const child of Children.toArray(children)) {
+    if (!isValidElement(child) || child.type !== TableBody) continue;
+    for (const row of Children.toArray((child.props as { children?: ReactNode }).children)) {
+      const pc = isValidElement(row) && row.type === TableRow ? (row.props as { pcId?: string }).pcId : undefined;
+      if (pc) out.push(pc);
+    }
+  }
+  return out;
+}
+
+/** The chip strip + card-mode menu. Its own component so it can read the
+ *  column labels the table publishes, without `Table` subscribing to them. */
+function SortFilterChrome({ resizeKey, api, cardMode }: { resizeKey: string; api: SortFilterApi; cardMode: boolean }) {
+  const columns = useRegisteredColumns(resizeKey);
+  return <SortFilterBar api={api} columns={columns} cardMode={cardMode} />;
 }
 
 interface TableProps extends HTMLAttributes<HTMLTableElement> {
@@ -874,6 +965,22 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    * keys are defined per deployment, so there is no default worth having.
    */
   metaColumns?: boolean;
+  /**
+   * Excel-style sorting and filtering on the column headers. Needs
+   * `resizeKey`. Works on the rows the table is given — pass `'page'` when
+   * those are one server-side page, so the filter strip says so.
+   *
+   * Header click cycles sort asc / desc / off; the funnel next to it opens
+   * a "contains" box and a checklist of the column's values. Sort
+   * persists (`kanade.table.sort.<resizeKey>`); filters do not.
+   *
+   * Reads each cell's text, so a cell whose text isn't in its children
+   * (a badge component fed by props) should pass `sortValue`. Only direct
+   * `<TableRow>` children of `<TableBody>` with one cell per column are
+   * sorted and filtered; a page that wraps rows in Fragments (group
+   * headers, detail rows) should not opt in.
+   */
+  sortFilter?: boolean | 'page';
 }
 
 export const Table = forwardRef<HTMLTableElement, TableProps>(
@@ -885,6 +992,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       resizeKey,
       picker = false,
       metaColumns = false,
+      sortFilter = false,
       style,
       children,
       ...props
@@ -915,7 +1023,15 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     const selectedMeta = metaPref.use(resizeKey);
     const metaKeys = metaColumns ? [...selectedMeta] : [];
     const { pcIds, registerPc } = useRegisteredPcIds(metaColumns);
-    const metaByPc = useAgentMeta(metaKeys.length ? pcIds : undefined);
+    // With a filter active, rows drop out of the tree and unregister; asking
+    // for every row's PC up front keeps the request stable and lets a
+    // metadata column be filtered on.
+    const metaByPc = useAgentMeta(
+      metaKeys.length ? [...pcIds, ...(sortFilter ? bodyPcIds(children) : [])] : undefined,
+    );
+    const sortState = sortPref.use(resizeKey);
+    const filterState = filtersPref.use(resizeKey);
+    const { t, i18n } = useTranslation('common');
     const [layout, setLayout] = useState<{ order: string[]; total: number } | null>(null);
     const [hiddenPositions, setHiddenPositions] = useState<number[]>([]);
     // Scopes the generated stylesheet to THIS table. `useId` produces
@@ -1096,6 +1212,64 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         })()
       : [];
     const perm = permutationFor(sourceIds, order);
+    const sfOn = !!sortFilter && !!resizeKey && sourceIds.length > 0;
+    const sfOut = useMemo(() => {
+      if (!sfOn) return null;
+      const flags = sourceColumnFlags(children, sourceIds);
+      const filters: Filters = Object.fromEntries(
+        Object.entries(filterState).filter(([id]) => sourceIds.includes(id)),
+      );
+      const sort = sortState && flags[sortState.id]?.sortable ? sortState : null;
+      const result = processSortFilter({
+        children,
+        bodyType: TableBody,
+        rowType: TableRow,
+        ids: sourceIds,
+        ownCount: sourceIds.length - metaKeys.length,
+        metaKeys,
+        metaByPc,
+        filters,
+        sort,
+        flags,
+        language: i18n.language,
+        empty: () => (
+          <TableRow key="kn-sf-empty">
+            <TableCell spanAll className="py-8 text-center text-sm text-muted">
+              {t('table.filter.noMatch')}
+            </TableCell>
+          </TableRow>
+        ),
+      });
+      return { result, flags, filters, sort };
+      // `sourceIds` / `metaKeys` are rebuilt every render; their contents are the dependency.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sfOn, children, sourceIds.join('\u0000'), metaKeys.join('\u0000'), metaByPc, filterState, sortState, i18n.language, t]);
+    const sf: SortFilterApi | null =
+      sfOn && sfOut && resizeKey
+        ? {
+            sort: sfOut.sort,
+            filters: sfOut.filters,
+            flags: sfOut.flags,
+            setSort: (id, dir) => sortPref.update(resizeKey, dir ? { id, dir } : null),
+            cycleSort: (id) =>
+              sortPref.update(resizeKey, (prev) =>
+                prev?.id !== id ? { id, dir: 'asc' } : prev.dir === 'asc' ? { id, dir: 'desc' } : null,
+              ),
+            setFilter: (id, filter: ColumnFilter | undefined) =>
+              filtersPref.update(resizeKey, (prev) => {
+                const next = { ...prev };
+                const contains = filter?.contains?.trim() ? filter.contains : undefined;
+                if (!filter || (contains === undefined && filter.values === undefined)) delete next[id];
+                else next[id] = { contains, values: filter.values };
+                return next;
+              }),
+            clearFilters: () => filtersPref.update(resizeKey, NO_FILTERS),
+            candidates: sfOut.result.candidates,
+            total: sfOut.result.total,
+            shown: sfOut.result.shown,
+            pageOnly: sortFilter === 'page',
+          }
+        : null;
     const ctx: ResizeContextValue = {
       widths,
       layout,
@@ -1108,6 +1282,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       metaKeys,
       metaByPc,
       registerPc,
+      sf,
     };
     const sized = active && layout !== null;
 
@@ -1115,7 +1290,19 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     // wrapper — a table that didn't ask for one renders exactly the DOM it
     // always did.
     const withPicker = (table: ReactNode) =>
-      picker && resizeKey ? (
+      sf && resizeKey ? (
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <SortFilterChrome resizeKey={resizeKey} api={sf} cardMode={cards && !inTableMode} />
+            {picker && (
+              <div className="ml-auto">
+                <TableColumnPicker resizeKey={resizeKey} metaColumns={metaColumns} />
+              </div>
+            )}
+          </div>
+          {table}
+        </div>
+      ) : picker && resizeKey ? (
         <div className="space-y-1.5">
           <div className="flex justify-end">
             <TableColumnPicker resizeKey={resizeKey} metaColumns={metaColumns} />
@@ -1219,7 +1406,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
               ))}
             </colgroup>
           )}
-          <ResizeContext.Provider value={ctx}>{children}</ResizeContext.Provider>
+          <ResizeContext.Provider value={ctx}>{sfOut ? sfOut.result.children : children}</ResizeContext.Provider>
         </table>
       </div>,
     );
@@ -1330,15 +1517,24 @@ interface TableHeadProps extends ThHTMLAttributes<HTMLTableCellElement> {
    * header comment. Only meaningful on a table with `resizeKey`.
    */
   resizable?: boolean;
+  /** `false` takes this column out of header-click sorting on a
+   *  `sortFilter` table (an actions column; a column the server sorts). */
+  sortable?: boolean;
+  /** `false` gives this column no filter button on a `sortFilter` table. */
+  filterable?: boolean;
 }
 
 export const TableHead = forwardRef<HTMLTableCellElement, TableHeadProps>(
-  ({ className, colId, resizable = true, children, ...props }, ref) => {
+  ({ className, colId, resizable = true, sortable: _sortable, filterable: _filterable, children, ...props }, ref) => {
     const { t } = useTranslation('common');
     const resize = useContext(ResizeContext);
     const thRef = useRef<HTMLTableCellElement | null>(null);
     const setRefs = useMergedRef(thRef, ref);
     const showHandle = !!resize?.active && resizable;
+    // Header controls only in table mode: below the breakpoint the thead is
+    // hidden and the chip strip's menu stands in (see SortFilterBar).
+    const sf = resize?.active && colId !== undefined ? resize.sf : null;
+    const sortDir = sf?.flags[colId!]?.sortable && sf.sort?.id === colId ? (sf.sort?.dir ?? null) : null;
 
     const onPointerDown = (e: ReactPointerEvent<HTMLSpanElement>) => {
       if (e.button !== 0 || !thRef.current) return;
@@ -1353,10 +1549,25 @@ export const TableHead = forwardRef<HTMLTableCellElement, TableHeadProps>(
       <th
         ref={setRefs}
         data-col-id={colId}
+        aria-sort={
+          sf?.flags[colId!]?.sortable
+            ? sortDir === 'asc'
+              ? 'ascending'
+              : sortDir === 'desc'
+                ? 'descending'
+                : 'none'
+            : undefined
+        }
         className={cn('group relative h-9 px-3 text-left align-middle font-semibold', className)}
         {...props}
       >
-        {children}
+        {sf ? (
+          <SortFilterHeader api={sf} colId={colId!}>
+            {children}
+          </SortFilterHeader>
+        ) : (
+          children
+        )}
         {showHandle && (
           <span
             role="separator"
@@ -1421,6 +1632,13 @@ interface TableCellProps extends TdHTMLAttributes<HTMLTableCellElement> {
    * actions-button column) — those cells span the full card width.
    */
   label?: string;
+  /**
+   * What sorting should compare, when it isn't the cell's rendered text: a
+   * number behind a formatted size, an ISO timestamp behind a localised
+   * date, or the value of a cell that renders from props (a badge) and so
+   * has no text children. Only read on a `sortFilter` table.
+   */
+  sortValue?: string | number;
 }
 
 /**
@@ -1587,7 +1805,7 @@ export function TableColumnPicker({
 }
 
 export const TableCell = forwardRef<HTMLTableCellElement, TableCellProps>(
-  ({ className, label, spanAll, colSpan, ...props }, ref) => {
+  ({ className, label, spanAll, colSpan, sortValue: _sortValue, ...props }, ref) => {
     const table = useContext(ResizeContext);
     // `sourceIds` is the live column count, metadata columns included. Falls
     // back to the caller's `colSpan` when the table isn't tracking columns

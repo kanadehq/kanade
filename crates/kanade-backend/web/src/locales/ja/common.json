@@ -107,6 +107,30 @@
       "moveDown": "{{name}} を右へ移動",
       "resetOrder": "列の順序をリセット",
       "metaSection": "付加情報"
+    },
+    "sort": {
+      "group": "並べ替え",
+      "asc": "昇順",
+      "desc": "降順",
+      "hint": "{{name}} で並べ替え(クリックで昇順・降順・解除)"
+    },
+    "filter": {
+      "button": "{{name}} を絞り込み",
+      "contains": "含む…",
+      "containsAria": "{{name}} に含む文字列",
+      "search": "値を検索",
+      "values": "値",
+      "selectAll": "(すべて選択)",
+      "blanks": "(空白)",
+      "truncated": "先頭 {{n}} 件のみ表示中。検索で絞り込めます",
+      "clear": "絞り込みを解除",
+      "clearAll": "すべての絞り込みを解除",
+      "remove": "{{name}} の絞り込みを解除",
+      "count": "{{shown}} / {{total}} 件",
+      "noMatch": "条件に一致する行がありません。",
+      "pageOnly": "このページに表示中の行にのみ適用されます。",
+      "menu": "並べ替え / 絞り込み",
+      "column": "列"
     }
   },
   "comingSoon": {

@@ -183,20 +183,20 @@ export function Audit() {
           </CardContent>
         </Card>
       ) : (
-        <Table resizeKey="audit" picker>
+        <Table resizeKey="audit" picker sortFilter>
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.when')}</TableHead>
               <TableHead>{t('columns.actor')}</TableHead>
               <TableHead>{t('columns.action')}</TableHead>
               <TableHead>{t('columns.target')}</TableHead>
-              <TableHead>{t('columns.payload')}</TableHead>
+              <TableHead sortable={false} filterable={false}>{t('columns.payload')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.map((e) => (
               <TableRow key={e.id}>
-                <TableCell label={t('columns.when')} className="text-muted text-xs">{fmtIsoLocal(e.occurred_at)}</TableCell>
+                <TableCell label={t('columns.when')} sortValue={e.occurred_at} className="text-muted text-xs">{fmtIsoLocal(e.occurred_at)}</TableCell>
                 <TableCell label={t('columns.actor')}>
                   <Badge variant={actorVariant(e.actor)}>{e.actor}</Badge>
                 </TableCell>

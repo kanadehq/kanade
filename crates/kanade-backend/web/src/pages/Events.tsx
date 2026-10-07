@@ -1269,7 +1269,7 @@ export function Events() {
           {tab === 'chart' && <EventsTimeline events={visible} />}
           {tab === 'heatmap' && <EventsHeatmap events={visible} />}
           {tab === 'table' && (
-          <Table resizeKey="events" picker metaColumns>
+          <Table resizeKey="events" picker metaColumns sortFilter>
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.when')}</TableHead>
@@ -1277,13 +1277,13 @@ export function Events() {
               <TableHead>{t('columns.kind')}</TableHead>
               <TableHead>{t('columns.source')}</TableHead>
               <TableHead>{t('columns.recordId')}</TableHead>
-              <TableHead>{t('columns.payload')}</TableHead>
+              <TableHead sortable={false} filterable={false}>{t('columns.payload')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {visible.map((e) => (
               <TableRow key={e.id} pcId={e.pc_id}>
-                <TableCell label={t('columns.when')} className="text-muted text-xs">{fmtIsoLocal(e.at)}</TableCell>
+                <TableCell label={t('columns.when')} sortValue={e.at} className="text-muted text-xs">{fmtIsoLocal(e.at)}</TableCell>
                 <TableCell label={t('columns.pcId')}><code className="text-xs">{e.pc_id}</code></TableCell>
                 <TableCell label={t('columns.kind')}>
                   {/* Click a row's kind badge to cycle the same include →

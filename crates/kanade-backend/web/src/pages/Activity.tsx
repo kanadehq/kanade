@@ -356,7 +356,7 @@ export function Activity() {
           </CardContent>
         </Card>
       ) : (
-        <Table resizeKey="activity" picker metaColumns>
+        <Table resizeKey="activity" picker metaColumns sortFilter>
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.resultId')}</TableHead>
@@ -366,8 +366,8 @@ export function Activity() {
               <TableHead>{t('columns.exit')}</TableHead>
               <TableHead>{t('columns.started')}</TableHead>
               <TableHead>{t('columns.finished')}</TableHead>
-              <TableHead>{t('columns.stdio')}</TableHead>
-              <TableHead>{t('columns.actions')}</TableHead>
+              <TableHead sortable={false} filterable={false}>{t('columns.stdio')}</TableHead>
+              <TableHead sortable={false} filterable={false}>{t('columns.actions')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -399,7 +399,7 @@ export function Activity() {
                     ? <code className="text-xs">{r.exec_id.slice(0, ID_PREVIEW_LENGTH)}</code>
                     : <span className="text-muted text-xs">—</span>}
                 </TableCell>
-                <TableCell label={t('columns.exit')}>
+                <TableCell label={t('columns.exit')} sortValue={r.exit_code ?? undefined}>
                   {/* v0.30 / PR α' unified: exit_code is null while
                       the row is in flight (events.started landed
                       but no ExecResult yet). Show a 'running' badge
@@ -411,8 +411,8 @@ export function Activity() {
                     <ExitCodeBadge code={r.exit_code} skipped={r.skipped} />
                   )}
                 </TableCell>
-                <TableCell label={t('columns.started')} className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
-                <TableCell label={t('columns.finished')} className="text-muted text-xs">
+                <TableCell label={t('columns.started')} sortValue={r.started_at ?? undefined} className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
+                <TableCell label={t('columns.finished')} sortValue={r.finished_at ?? undefined} className="text-muted text-xs">
                   {/* v0.30 / PR α' unified: finished_at null = still
                       running. fmtIsoLocal returns "—" for null
                       which is OK but ambiguous with "no data"; show
