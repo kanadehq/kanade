@@ -160,8 +160,21 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// probe must not show up there as an unknown role.
 const PROBE_NAME: &str = "auth-probe";
 
-/// How often [`wait_until_dead`] checks the connection task is still there.
-const DEAD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the client sends a protocol PING when idle. Set explicitly (it
+/// equals async-nats' default) because every liveness bound below is derived
+/// from it: a healthy idle connection receives a PONG at least this often.
+const PING_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often [`wait_until_dead`] runs its local check. The check only reads
+/// counters and queues a flush on the local command channel, so a short
+/// interval costs no network traffic.
+const CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long without any received byte before the client is suspected stalled:
+/// three ping periods, so a healthy idle connection (one PONG per
+/// [`PING_INTERVAL`]) is two full periods away from being suspected.
+const STALL_BOUND: Duration = Duration::from_secs(3 * PING_INTERVAL.as_secs());
+
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The longest async-nats waits between reconnect attempts (its backoff cap).
@@ -186,12 +199,112 @@ pub const RESUME_BOUND: Duration = Duration::from_secs(2 * ATTEMPT_MAX_SECS + 4)
 
 /// How long after the broker starts answering in its new mode a client that
 /// has *not* resumed may stay alive before its process exits non-zero for the
-/// service manager to restart: the resume bound, then the next
-/// health check, a bounded flush, and a bounded credential witness. The
-/// service manager's own restart delay comes on top.
-pub const EXIT_BOUND: Duration = Duration::from_secs(
-    RESUME_BOUND.as_secs() + DEAD_CHECK_INTERVAL.as_secs() + 2 * HEALTH_TIMEOUT.as_secs(),
-);
+/// service manager to restart: the stall threshold, then the next local
+/// check, a bounded flush, and a bounded credential witness. The service
+/// manager's own restart delay comes on top. A broker outage seen by the
+/// witness only moves the threshold to [`RESUME_BOUND`] after it ends, which
+/// is never later than this.
+pub const EXIT_BOUND: Duration = Liveness::PRODUCTION.exit_bound();
+
+const _: () = {
+    assert!(STALL_BOUND.as_secs() >= PING_INTERVAL.as_secs() + 60);
+    assert!(RESUME_BOUND.as_secs() <= STALL_BOUND.as_secs());
+    assert!(EXIT_BOUND.as_secs() < 300);
+};
+
+/// The timing of [`wait_until_dead_with`]. Only [`Liveness::PRODUCTION`] is
+/// meant for shipped code; other values exist so tests can shorten the
+/// bounds, and a `stall_bound` at or below the ping interval would judge a
+/// healthy idle connection stalled.
+#[derive(Debug, Clone, Copy)]
+pub struct Liveness {
+    /// How often the local check runs.
+    pub check_interval: Duration,
+    /// How long without received bytes before a credential witness is tried.
+    pub stall_bound: Duration,
+}
+
+impl Liveness {
+    pub const PRODUCTION: Liveness = Liveness {
+        check_interval: CHECK_INTERVAL,
+        stall_bound: STALL_BOUND,
+    };
+
+    /// The longest a stalled client stays alive after the broker answers.
+    pub const fn exit_bound(&self) -> Duration {
+        Duration::from_secs(
+            self.stall_bound.as_secs()
+                + self.check_interval.as_secs()
+                + 2 * HEALTH_TIMEOUT.as_secs(),
+        )
+    }
+
+    /// The grace given after a witness finds the broker reachable again.
+    fn resume_grace(&self) -> Duration {
+        RESUME_BOUND.min(self.stall_bound)
+    }
+}
+
+/// What the supervisor should do after a credential witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Keep watching.
+    Wait,
+    /// The broker answered and the client is still silent: exit, unless a
+    /// recheck shows progress.
+    Stalled,
+}
+
+/// The stall decision as a pure state machine over caller-supplied times, so
+/// the long-window behaviour is testable without waiting.
+struct StallJudge {
+    liveness: Liveness,
+    deadline: tokio::time::Instant,
+    /// The last witness found the broker unreachable. The silence then
+    /// describes the outage, not the client.
+    outage: bool,
+    next_witness: Option<tokio::time::Instant>,
+}
+
+impl StallJudge {
+    fn new(liveness: Liveness, now: tokio::time::Instant) -> Self {
+        Self {
+            liveness,
+            deadline: now + liveness.stall_bound,
+            outage: false,
+            next_witness: None,
+        }
+    }
+
+    /// Receive progress was observed: the clock restarts and any outage
+    /// verdict no longer applies.
+    fn progressed(&mut self, now: tokio::time::Instant) {
+        self.deadline = now + self.liveness.stall_bound;
+        self.outage = false;
+        self.next_witness = None;
+    }
+
+    /// Whether a witness connection is due. Never true before the deadline.
+    fn witness_due(&self, now: tokio::time::Instant) -> bool {
+        now >= self.deadline && self.next_witness.is_none_or(|at| now >= at)
+    }
+
+    fn witnessed(&mut self, now: tokio::time::Instant, outcome: ProbeOutcome) -> Verdict {
+        if outcome == ProbeOutcome::Unreachable {
+            self.outage = true;
+            self.next_witness = Some(now + self.liveness.resume_grace());
+            return Verdict::Wait;
+        }
+        if std::mem::take(&mut self.outage) {
+            // First sight of the broker after an outage: the client may still
+            // be in its reconnect backoff, so give it the resume grace.
+            self.deadline = self.deadline.max(now + self.liveness.resume_grace());
+            self.next_witness = None;
+            return Verdict::Wait;
+        }
+        Verdict::Stalled
+    }
+}
 
 /// A connection that has been refused this many times in a row, over at
 /// least [`AUTH_REJECTION_WINDOW`], with no successful connect in between, is
@@ -1054,7 +1167,7 @@ where
     let opts = opts
         .retry_on_initial_connect()
         .connection_timeout(HEALTH_TIMEOUT)
-        .ping_interval(DEAD_CHECK_INTERVAL)
+        .ping_interval(PING_INTERVAL)
         // Names the connection in `nats server report connections`, in the
         // broker's own logs, and in `/connz`. Free observability while the
         // fleet is mid-migration: it shows which roles are connecting even
@@ -1112,34 +1225,28 @@ pub async fn is_dead(client: &async_nats::Client) -> bool {
 /// refused, or receive progress stalls while a fresh handshake reaches the
 /// broker (accepted or explicitly refused).
 /// Protocol PING/PONG traffic provides progress even for idle roles. A flush
-/// alone only proves a local write, not that the broker answered. Checked every
-/// `interval`. A process that depends on the client should treat this as
-/// fatal and exit non-zero so its service manager restarts it.
+/// alone only proves a local write, not that the broker answered. The local
+/// check runs every `liveness.check_interval`; a witness connection is made
+/// only after `liveness.stall_bound` without received bytes, never on a
+/// healthy connection, and an unreachable broker never ends the wait. A
+/// process that depends on the client should treat this as fatal and exit
+/// non-zero so its service manager restarts it.
 ///
 /// `role` names the connection the client was opened with.
-pub async fn wait_until_dead_every(
-    role: NatsRole,
-    client: &async_nats::Client,
-    interval: Duration,
-) {
+pub async fn wait_until_dead_with(role: NatsRole, client: &async_nats::Client, liveness: Liveness) {
     let health = connection_health(client);
-    let mut tick = tokio::time::interval(interval);
+    let mut tick = tokio::time::interval(liveness.check_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let stats = client.statistics();
     let mut received = stats.in_bytes.load(Ordering::Relaxed);
-    let mut progressed = tokio::time::Instant::now();
-    // The last witness found the broker unreachable. The progress clock then
-    // describes the outage, not the client, so the first reachable witness
-    // only starts the client's chance to reconnect (it may still be in its
-    // backoff) and a stall is judged on the next check.
-    let mut broker_was_down = false;
+    let mut judge = StallJudge::new(liveness, tokio::time::Instant::now());
     loop {
         tick.tick().await;
         let now_received = stats.in_bytes.load(Ordering::Relaxed);
         if client.connection_state() == async_nats::connection::State::Connected
             && now_received != received
         {
-            progressed = tokio::time::Instant::now();
+            judge.progressed(tokio::time::Instant::now());
         }
         received = now_received;
         if health.as_ref().is_some_and(|h| h.live.auth_failed()) {
@@ -1156,52 +1263,216 @@ pub async fn wait_until_dead_every(
             );
             return;
         }
-        if progressed.elapsed() >= RESUME_BOUND {
-            if let Some(health) = &health {
-                let outcome = witness(health).await;
-                if outcome == ProbeOutcome::Unreachable {
-                    broker_was_down = true;
-                } else if std::mem::take(&mut broker_was_down) {
-                    continue;
-                } else {
-                    // Recheck after the witness: a reconnect racing it is healthy.
-                    if client.connection_state() == async_nats::connection::State::Connected
-                        && stats.in_bytes.load(Ordering::Relaxed) != received
-                    {
-                        progressed = tokio::time::Instant::now();
-                        continue;
-                    }
-                    warn!(
-                        role = role.as_str(),
-                        witness = outcome.label(),
-                        "NATS client made no receive progress while a fresh credential witness reached the broker; exiting for a supervised restart"
-                    );
-                    return;
-                }
-            }
+        let Some(health) = &health else { continue };
+        if !judge.witness_due(tokio::time::Instant::now()) {
+            continue;
         }
+        let outcome = witness(health).await;
+        if judge.witnessed(tokio::time::Instant::now(), outcome) != Verdict::Stalled {
+            continue;
+        }
+        // Recheck after the witness: a reconnect racing it is healthy.
+        if client.connection_state() == async_nats::connection::State::Connected
+            && stats.in_bytes.load(Ordering::Relaxed) != received
+        {
+            judge.progressed(tokio::time::Instant::now());
+            continue;
+        }
+        warn!(
+            role = role.as_str(),
+            witness = outcome.label(),
+            "NATS client made no receive progress while a fresh credential witness reached the broker; exiting for a supervised restart"
+        );
+        return;
     }
 }
 
-/// [`wait_until_dead_every`] at the production cadence.
+/// [`wait_until_dead_with`] at the production stall bound, checking every
+/// `interval`.
+pub async fn wait_until_dead_every(
+    role: NatsRole,
+    client: &async_nats::Client,
+    interval: Duration,
+) {
+    wait_until_dead_with(
+        role,
+        client,
+        Liveness {
+            check_interval: interval,
+            ..Liveness::PRODUCTION
+        },
+    )
+    .await
+}
+
+/// [`wait_until_dead_with`] at the production timing.
 pub async fn wait_until_dead(role: NatsRole, client: &async_nats::Client) {
-    wait_until_dead_every(role, client, DEAD_CHECK_INTERVAL).await
+    wait_until_dead_with(role, client, Liveness::PRODUCTION).await
+}
+
+/// Start supervision at `liveness` and exit the process when it resolves.
+pub fn exit_on_dead_with(role: NatsRole, client: &async_nats::Client, liveness: Liveness) {
+    let client = client.clone();
+    tokio::spawn(async move {
+        wait_until_dead_with(role, &client, liveness).await;
+        std::process::exit(1);
+    });
 }
 
 /// Start supervision before subscriptions or bootstrap can block. Fatal
 /// liveness failure bypasses application shutdown so a blocked subsystem
 /// cannot keep a silent service alive beyond the exit deadline.
 pub fn exit_on_dead(role: NatsRole, client: &async_nats::Client) {
-    let client = client.clone();
-    tokio::spawn(async move {
-        wait_until_dead(role, &client).await;
-        std::process::exit(1);
-    });
+    exit_on_dead_with(role, client, Liveness::PRODUCTION);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// Drive `judge` on the local check cadence until `until`, with receive
+    /// progress every `progress_every` (none: silent). Returns the first time
+    /// a witness was due and, if it ends in a stall verdict, when.
+    fn simulate(
+        judge: &mut StallJudge,
+        start: tokio::time::Instant,
+        until: Duration,
+        progress_every: Option<Duration>,
+        outcome: ProbeOutcome,
+        witnesses: &mut Vec<Duration>,
+    ) -> Option<Duration> {
+        let step = judge.liveness.check_interval;
+        let mut elapsed = Duration::ZERO;
+        let mut last_progress = Duration::ZERO;
+        while elapsed < until {
+            elapsed += step;
+            let now = start + elapsed;
+            if progress_every.is_some_and(|p| elapsed - last_progress >= p) {
+                last_progress = elapsed;
+                judge.progressed(now);
+            }
+            if judge.witness_due(now) {
+                witnesses.push(elapsed);
+                if judge.witnessed(now, outcome) == Verdict::Stalled {
+                    return Some(elapsed);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn the_production_bounds_leave_a_healthy_idle_connection_a_wide_margin() {
+        assert!(STALL_BOUND >= PING_INTERVAL + secs(60));
+        assert!(EXIT_BOUND < secs(300));
+        assert_eq!(PING_INTERVAL, secs(60));
+        assert_eq!(STALL_BOUND, secs(180));
+        assert_eq!(EXIT_BOUND, secs(195));
+    }
+
+    #[test]
+    fn an_idle_healthy_client_is_never_judged_stalled() {
+        let start = tokio::time::Instant::now();
+        let mut judge = StallJudge::new(Liveness::PRODUCTION, start);
+        let mut witnesses = Vec::new();
+        // One PONG per ping interval, for a day.
+        let verdict = simulate(
+            &mut judge,
+            start,
+            secs(24 * 3600),
+            Some(PING_INTERVAL),
+            ProbeOutcome::Accepted,
+            &mut witnesses,
+        );
+        assert_eq!(verdict, None);
+        assert!(
+            witnesses.is_empty(),
+            "a witness connected to a healthy broker"
+        );
+    }
+
+    #[test]
+    fn an_offline_broker_never_exits_and_is_polled_at_the_resume_interval() {
+        let start = tokio::time::Instant::now();
+        let mut judge = StallJudge::new(Liveness::PRODUCTION, start);
+        let mut witnesses = Vec::new();
+        let verdict = simulate(
+            &mut judge,
+            start,
+            secs(3 * 3600),
+            None,
+            ProbeOutcome::Unreachable,
+            &mut witnesses,
+        );
+        assert_eq!(verdict, None);
+        assert_eq!(witnesses[0], STALL_BOUND);
+        assert!(witnesses.windows(2).all(|w| w[1] - w[0] >= RESUME_BOUND));
+    }
+
+    #[test]
+    fn a_stall_after_an_outage_is_judged_against_the_normal_bound() {
+        let start = tokio::time::Instant::now();
+        let mut judge = StallJudge::new(Liveness::PRODUCTION, start);
+        let mut witnesses = Vec::new();
+        assert_eq!(
+            simulate(
+                &mut judge,
+                start,
+                secs(3600),
+                None,
+                ProbeOutcome::Unreachable,
+                &mut witnesses
+            ),
+            None
+        );
+        assert!(judge.outage);
+        // The broker answers but the client has not resumed: only a grace.
+        let back = start + secs(3600);
+        witnesses.clear();
+        let exit = simulate(
+            &mut judge,
+            back,
+            EXIT_BOUND,
+            None,
+            ProbeOutcome::Accepted,
+            &mut witnesses,
+        );
+        assert!(!judge.outage);
+        let exit = exit.expect("a silent client with a reachable broker must exit");
+        assert!(exit <= EXIT_BOUND, "{exit:?}");
+
+        // Progress after the outage clears it; a later genuine stall is then
+        // judged against the full stall bound from the last progress.
+        let mut judge = StallJudge::new(Liveness::PRODUCTION, start);
+        let mut witnesses = Vec::new();
+        simulate(
+            &mut judge,
+            start,
+            secs(3600),
+            None,
+            ProbeOutcome::Unreachable,
+            &mut witnesses,
+        );
+        assert!(judge.outage);
+        let resumed = start + secs(3600);
+        judge.progressed(resumed);
+        assert!(!judge.outage);
+        assert!(!judge.witness_due(resumed + STALL_BOUND - secs(1)));
+        witnesses.clear();
+        let exit = simulate(
+            &mut judge,
+            resumed,
+            STALL_BOUND + secs(60),
+            None,
+            ProbeOutcome::Rejected,
+            &mut witnesses,
+        );
+        assert_eq!(exit, Some(STALL_BOUND));
+    }
     use std::collections::HashMap;
 
     /// A stand-in registry. Keys are `subkey\value`.
