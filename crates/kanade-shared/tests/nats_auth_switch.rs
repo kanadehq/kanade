@@ -634,6 +634,22 @@ async fn a_client_refused_at_its_role_handshake_recovers_on_reconnect() {
     )
     .await
     .expect("connect");
+    // The client is returned before its first handshake completes. Wait for a
+    // round trip so the refusal below happens at a reconnect, not in the
+    // initial-connect retry path.
+    let warmup = "handshake.warmup";
+    let mut warm = client.subscribe(warmup).await.expect("subscribe");
+    let mut warm_tick = tokio::time::interval(Duration::from_millis(250));
+    tokio::time::timeout(RESUME_BOUND, async {
+        loop {
+            tokio::select! {
+                _ = warm_tick.tick() => { let _ = client.publish(warmup, "x".into()).await; }
+                _ = warm.next() => break,
+            }
+        }
+    })
+    .await
+    .expect("the first connection must carry traffic");
     broker.down().await;
     broker.up(Mode::Token).await;
     // The probe is rejected, the wrong token is sent and refused, repeatedly.
