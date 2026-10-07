@@ -177,12 +177,21 @@ test.describe('Table sort and filter', () => {
     await expect(c.locator('th[data-col-id="name"]')).toBeVisible();
   });
 
-  test('filters are not persisted', async ({ mount, page }) => {
+  test('filters are written to localStorage', async ({ mount, page }) => {
     const c = await mount(<SortFilterTable />);
     await openFilter(c, 'name');
     await page.getByRole('searchbox', { name: 'name contains' }).fill('an');
-    const keys = await page.evaluate(() => Object.keys(localStorage));
-    expect(keys.filter((k) => k.startsWith('kanade.table.filters'))).toEqual([]);
+    const stored = await page.evaluate(() => localStorage.getItem('kanade.table.filters.ct-sf'));
+    expect(JSON.parse(stored!)).toEqual({ name: { contains: 'an' } });
+  });
+
+  test('stored filters are applied on first render, and corrupt ones ignored', async ({ mount, page }) => {
+    await page.evaluate(() =>
+      localStorage.setItem('kanade.table.filters.ct-sf', JSON.stringify({ kind: { values: ['veg'] }, gone: 5 })),
+    );
+    const c = await mount(<SortFilterTable />);
+    expect(await names(c)).toEqual(['carrot']);
+    await expect(c.getByTestId('filter-chip')).toHaveCount(1);
   });
 
   test('rows that are not data rows stay where they were', async ({ mount, page }) => {

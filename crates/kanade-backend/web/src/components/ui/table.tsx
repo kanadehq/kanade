@@ -474,15 +474,10 @@ function makeTablePref<T>(opts: {
    *  hand-edited or corrupt must degrade to `empty`, never reach the DOM. */
   parse: (raw: unknown) => T;
   isEmpty: (value: T) => boolean;
-  /** `false` keeps the value in memory only: it survives navigation inside
-   *  the SPA (the store outlives the table) but not a reload. */
-  persist?: boolean;
 }): TablePref<T> {
-  const persist = opts.persist !== false;
   const stores = new Map<string, { value: T; listeners: Set<() => void> }>();
 
   const read = (key: string): T => {
-    if (!persist) return opts.empty;
     try {
       const raw = localStorage.getItem(opts.prefix + key);
       if (raw) return opts.parse(JSON.parse(raw));
@@ -509,7 +504,6 @@ function makeTablePref<T>(opts: {
   };
 
   const write = (key: string, value: T) => {
-    if (!persist) return;
     try {
       if (opts.isEmpty(value)) {
         // Remove the key rather than leaving an empty value behind, so
@@ -555,7 +549,7 @@ function makeTablePref<T>(opts: {
   const resetAll = (): number => {
     let count = 0;
     try {
-      for (let i = persist ? localStorage.length - 1 : -1; i >= 0; i--) {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
         const k = localStorage.key(i);
         if (k?.startsWith(opts.prefix)) {
           localStorage.removeItem(k);
@@ -577,7 +571,7 @@ function makeTablePref<T>(opts: {
   const keysWithValue = (): string[] => {
     const out = new Set<string>();
     try {
-      for (let i = 0; persist && i < localStorage.length; i++) {
+      for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
         if (k?.startsWith(opts.prefix)) {
           out.add(k.slice(opts.prefix.length));
@@ -643,16 +637,15 @@ const sortPref = makeTablePref<SortState | null>({
   isEmpty: (s) => s === null,
 });
 
-/** Column filters. Same store, but memory only: a filter that survived a
- *  reload would quietly hide rows on the next visit, long after the
- *  operator forgot setting it. It does outlive navigation inside the SPA. */
+/** Column filters, persisted like the sort. Validated on read. The chip
+ *  strip above the table lists every active filter (hidden columns
+ *  included), so a restored filter is never an invisible one. */
 const NO_FILTERS: Filters = Object.freeze({});
 const filtersPref = makeTablePref<Filters>({
   prefix: FILTERS_PREFIX,
   empty: NO_FILTERS,
   parse: parseFilters,
   isEmpty: (f) => Object.keys(f).length === 0,
-  persist: false,
 });
 
 /**
@@ -862,6 +855,7 @@ export function resetAllTableColumnPrefs(): number {
     ...hiddenPref.keysWithValue(),
     ...orderPref.keysWithValue(),
     ...sortPref.keysWithValue(),
+    ...filtersPref.keysWithValue(),
   ]);
   widthPref.resetAll();
   hiddenPref.resetAll();
@@ -972,7 +966,8 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    *
    * Header click cycles sort asc / desc / off; the funnel next to it opens
    * a "contains" box and a checklist of the column's values. Sort
-   * persists (`kanade.table.sort.<resizeKey>`); filters do not.
+   * and filters persist (`kanade.table.sort.<resizeKey>`,
+   * `kanade.table.filters.<resizeKey>`).
    *
    * Reads each cell's text, so a cell whose text isn't in its children
    * (a badge component fed by props) should pass `sortValue`. Only direct
