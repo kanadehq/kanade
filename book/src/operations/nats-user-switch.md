@@ -257,8 +257,8 @@ reload or restart the broker. Know the exact revert command **before** the
 switch (prerequisite 8) and keep it where you can reach it without the fleet.
 Hand edits made inside the shipped token block are not restored by it.
 
-Set the expected authentication mode back to `token`. Nothing on any agent
-needs to be touched: what each process does on its own is the next section.
+Set the expected authentication mode back to `token`. Confirm client recovery
+and service-manager restart settings as described in the next section.
 Confirm with:
 
 ```powershell
@@ -266,59 +266,68 @@ Confirm with:
     -SwitchedAt <time of the revert, UTC> -WaitSeconds <as in step 4> -MaxDisappeared 0
 ```
 
-## What is guaranteed during a switch or a restart
+## Recovery deadlines and the production switch gate
 
-After the broker starts answering in its new authentication mode (a restart,
-or a reload between `token` and `users`, in either direction), every role's
-client does one of two things, and a process that stays alive without doing
-either is a defect:
+Do not switch production until the release containing the recovery watchdog
+has passed a manual Integration dispatch with `conformance_repeat=20` and
+zero failures on Ubuntu, Windows and macOS. The previous release's promises
+were not sufficient: a process could stay alive without heartbeats. The
+injected-fault tests and the repeated conformance results must both pass.
 
-* **it talks again within 30 s** (`RESUME_BOUND`), on the same connection and
-  without being touched; or
-* **its process exits non-zero within 45 s** (`EXIT_BOUND`), so the service
-  manager starts it again.
+The client recovery targets, counted from when the broker becomes reachable
+and accepts the newly provisioned credential, are:
 
-Both are counted from the moment the broker answers in the new mode, not from
-the moment it went away: a broker that is down is waited for without limit, and
-the clients do not exit for it. They are derived from the client's own timers
-in `crates/kanade-shared/src/nats_client.rs`. One reconnect attempt takes at
-most 13 s (the library's 4 s reconnect backoff, the 3 s credential probe plus
-its 1 s guard, the 5 s handshake); a probe that cannot decide, because the
-broker is mid-restart, can make the first attempt present the wrong credential
-and be refused, so the resume bound allows two attempts and slack (30 s). A
-client that is still refused after that is exited by the liveness check that
-runs every 15 s (45 s). The `nats_auth_switch` integration test asserts both
-bounds on Ubuntu, Windows and macOS against a real broker switched in both
-directions, with the probe dropped, held or slowed on purpose while the broker
-comes back. The reload path needs a signal and is only part of the
-conformance suite on Linux and macOS; Windows is covered for restarts.
+* resume communication within **30 s** (`RESUME_BOUND`); or
+* exit non-zero within **45 s** (`EXIT_BOUND`) so supervision can restart it.
 
-On top of the exit bound comes the service manager's own delay, which the
-deployment does not let you shorten: up to 60 s for the Windows service
-recovery actions (restart after 5 s, then 15 s, then 60 s), 5 s for systemd
-(`RestartSec`), and 10 s for launchd (`ThrottleInterval`). A start-rate limit
-of the service manager can also hold a process that exits repeatedly. The
-`kanade` CLI is not a service: it exits non-zero and whoever ran it runs it
-again.
+These timers are defined in `crates/kanade-shared/src/nats_client.rs`. A
+reconnect attempt allows the 4 s backoff, 3 s probe plus 1 s guard, and 5 s
+handshake; 30 s allows two attempts plus slack. An inconclusive probe now
+skips the attempt instead of guessing from the previous broker mode.
 
-### What you will see
+The watchdog observes each connection's own receive progress. Idle clients
+send protocol PINGs every 5 s, so they need no subject permission or
+application message to show progress. A flush alone proves only a local write.
+After 30 s without receive progress, the watchdog opens a fresh credential
+witness. If the witness connects or is explicitly refused while the original
+connection still has no progress, the process logs the failure and exits. The exit budget adds a
+5 s monitoring interval, 5 s flush timeout and 5 s witness timeout to the
+30 s recovery target. Supervision starts immediately after client creation,
+before subscriptions or resource bootstrap can block; fatal failure bypasses
+application shutdown so it cannot extend this deadline.
 
-During a switch, in an agent's or the backend's log:
+A broker that is unavailable, or whose mode cannot be determined by the
+probe, is waited for indefinitely. The deadlines assume the client can reach
+and authenticate to the broker; they are not a network outage deadline.
+Repeated actual credential refusals still fail visibly. A single refusal is
+retried by the pinned connection library and does not trigger an immediate
+exit. Restart coverage applies on all three operating systems; signal-based
+reload coverage is provided by conformance on Linux and macOS only.
 
-* `event: disconnected`, then a few `client error: nats: IO error` lines and
-  `expected INFO, got nothing` while the broker restarts;
-* one or two `authorization violation` errors from the library, which are
-  attempts refused while the credential choice was still settling. They are
-  expected and are retried;
-* `NATS credential selected ... credential="user"` (or `"token"`) once the
-  broker's mode is known, and `event: connected`.
+Service-manager delay is additional: Windows recovery actions wait 5 s, then
+15 s, then up to 60 s; systemd uses `RestartSec=5`; launchd uses
+`ThrottleInterval=10`. Thus the slowest configured restart after a watchdog
+exit is 105 s from broker availability on Windows, 50 s on systemd, and 55 s
+on launchd, before application startup and the next heartbeat. Start-rate
+limits or disabled recovery can prevent a restart; check them before the
+switch. The CLI is not a service: its caller must rerun it after non-zero exit.
 
-If the client cannot resume, it logs `the NATS broker keeps refusing this
-role's credential` (or `NATS connection task has terminated`) and the process
-exits non-zero; the service manager then restarts it and the same lines
-appear on the next start. A host whose process is alive, is not logging any of
-this and is not heartbeating is not covered by this guarantee and is worth
-reporting.
+### Expected logs
+
+During a restart, expect `event: disconnected`, IO errors and possibly
+`expected INFO, got nothing`. A refused user probe during token mode is
+expected. `NATS credential selected` names the selected shape (`user` or
+`token`) without exposing credentials. An inconclusive probe logs
+`NATS credential probe inconclusive; deferring this attempt` at debug level.
+
+On recovery, expect `event: connected` and resumed heartbeats. If the
+original client stalls while a witness reaches the broker, expect
+`NATS client made no receive progress while a fresh credential witness
+reached the broker; exiting for a supervised restart`, followed by a non-zero process
+exit and the service manager's restart. Persistent wrong credentials log
+`the NATS broker keeps refusing this role's credential`; a terminated task
+logs `NATS connection task has terminated`. A live, silent process after the
+deadline is a defect requiring investigation, not an expected switch state.
 
 ## Telling a locked-out host from an offline one
 

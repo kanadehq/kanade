@@ -112,9 +112,9 @@ jobs:
 
       - name: NATS authentication-mode switch under injected probe faults
         # Restarts a real broker between `token` and `users` under running
-        # clients while a proxy drops, holds or slows the credential probe,
-        # and asserts every client resumes or exits within the documented
-        # bounds.
+        # supervised role child processes while a proxy drops, holds or
+        # slows probes and stalls role handshakes. Assert actual non-zero
+        # exits and receive progress against a shared recovery deadline.
         run: cargo test -p kanade-shared --test nats_auth_switch -- --ignored
 
       - name: Agent config watch does not lose a write made before the watch opens

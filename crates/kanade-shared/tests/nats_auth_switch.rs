@@ -17,7 +17,9 @@
 //! the credential probe fail only by luck of timing; here the probe (and only
 //! the probe, recognised by the connection name in its CONNECT frame) can be
 //! dropped or held for a chosen interval while the real attempt reaches a
-//! broker that already runs the other mode.
+//! broker that already runs the other mode. The supervised children exercise
+//! the shared client used by each role; the separate role conformance suite
+//! exercises the actual agent, backend and CLI binaries.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -27,9 +29,9 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use kanade_shared::nats_client::{
-    EXIT_BOUND, NatsCredentials, NatsRole, RESUME_BOUND, connect_with_credentials, wait_until_dead,
+    EXIT_BOUND, NatsCredentials, NatsRole, RESUME_BOUND, connect_with_credentials,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
@@ -161,6 +163,8 @@ enum Fault {
     DropProbes,
     /// Hold only credential probes silent until they time out.
     HoldProbes,
+    /// Stall role handshakes while probes and witnesses reach the broker.
+    HoldClients,
     /// Let every connection through, but only after the broker's greeting has
     /// been delayed this many milliseconds (a broker busy recovering).
     SlowInfo(u64),
@@ -169,6 +173,7 @@ enum Fault {
 struct ProxyState {
     fault: Mutex<Fault>,
     upstream: Mutex<u16>,
+    held_clients: AtomicUsize,
 }
 
 struct Proxy {
@@ -185,6 +190,7 @@ impl Proxy {
             state: Arc::new(ProxyState {
                 fault: Mutex::new(Fault::None),
                 upstream: Mutex::new(upstream),
+                held_clients: AtomicUsize::new(0),
             }),
             accept: None,
         };
@@ -275,7 +281,19 @@ async fn pipe(mut client: TcpStream, state: Arc<ProxyState>) {
 
     // Server → client is forwarded untouched. Client → server is read up to
     // the first line (CONNECT) so the connection can be recognised.
-    let down = async { tokio::io::copy(&mut sr, &mut cw).await.map(|_| ()) };
+    let hold_downstream = tokio::sync::Notify::new();
+    let down = async {
+        tokio::select! {
+            copied = tokio::io::copy(&mut sr, &mut cw) => copied.map(|_| ()),
+            _ = hold_downstream.notified() => {
+                // Keep the socket open but hide the broker's auth timeout.
+                // Otherwise repeated Authorization Violations would exercise
+                // the existing refusal counter instead of the missing guard.
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                Ok(())
+            }
+        }
+    };
     let up = async {
         let mut first = Vec::new();
         let mut buf = [0u8; 4096];
@@ -301,6 +319,15 @@ async fn pipe(mut client: TcpStream, state: Arc<ProxyState>) {
                 _ => {}
             }
         }
+        if line.starts_with("CONNECT")
+            && line.contains("\"name\":\"kanade-")
+            && *state.fault.lock().unwrap() == Fault::HoldClients
+        {
+            hold_downstream.notify_one();
+            state.held_clients.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            return Ok(());
+        }
         sw.write_all(&first).await?;
         tokio::io::copy(&mut cr, &mut sw).await.map(|_| ())
     };
@@ -317,63 +344,64 @@ struct Process {
     role: NatsRole,
     /// Times the process exited (non-zero) and was started again.
     exits: Arc<AtomicUsize>,
+    exit_times: Arc<Mutex<Vec<Instant>>>,
     /// When the process last got a message of its own through the broker.
-    last_talk: Arc<Mutex<Option<Instant>>>,
+    last_talk: Arc<Mutex<Vec<Instant>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
-/// Run the way the shipped binaries do: connect, talk, and treat
-/// [`wait_until_dead`] returning as fatal. A supervisor loop restarts it.
+/// Run the way the shipped binaries do: connect, talk, and start
+/// a fatal watchdog. A supervisor loop records actual non-zero exit status
+/// and restarts the child executable.
 fn spawn_process(role: NatsRole, url: String) -> Process {
     let exits = Arc::new(AtomicUsize::new(0));
-    let last_talk = Arc::new(Mutex::new(None));
+    let last_talk = Arc::new(Mutex::new(Vec::new()));
+    let exit_times = Arc::new(Mutex::new(Vec::new()));
+    let times = exit_times.clone();
     let (e, l) = (exits.clone(), last_talk.clone());
     let task = tokio::spawn(async move {
         loop {
-            let creds = NatsCredentials::new(Some(TOKEN.into()), Some(user_of(role)));
-            let client = connect_with_credentials(role, &url, creds)
-                .await
-                .expect("connect");
-            let subject = format!("echo.{}", role.as_str());
-            let mut sub = client.subscribe(subject.clone()).await.expect("subscribe");
-            let l2 = l.clone();
-            let talk = async {
-                let mut tick = tokio::time::interval(Duration::from_millis(250));
-                loop {
-                    tokio::select! {
-                        _ = tick.tick() => {
-                            // Publish to ourselves: a message coming back
-                            // proves the whole path, both directions.
-                            let _ = client.publish(subject.clone(), "x".into()).await;
-                        }
-                        m = sub.next() => {
-                            if m.is_none() { return; }
-                            *l2.lock().unwrap() = Some(Instant::now());
-                        }
-                    }
-                }
-            };
-            tokio::select! {
-                () = talk => {}
-                () = wait_until_dead(role, &client) => {
-                    e.fetch_add(1, Ordering::SeqCst);
-                    eprintln!("[{}] process exits non-zero", role.as_str());
+            let mut child =
+                tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "supervised_role_client",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("AUTH_SWITCH_CHILD_ROLE", role.as_str())
+                    .env("AUTH_SWITCH_CHILD_URL", &url)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .expect("spawn role process");
+            let mut lines = BufReader::new(child.stdout.take().expect("child stdout")).lines();
+            while let Some(line) = lines.next_line().await.expect("child output") {
+                if line == "role round trip" {
+                    l.lock().unwrap().push(Instant::now());
                 }
             }
+            let status = child.wait().await.expect("wait role process");
+            assert!(!status.success(), "silent role process exited successfully");
+            times.lock().unwrap().push(Instant::now());
+            e.fetch_add(1, Ordering::SeqCst);
+            eprintln!("[{}] process exited {status}", role.as_str());
             tokio::time::sleep(SUPERVISOR_DELAY).await;
         }
     });
     Process {
         role,
         exits,
+        exit_times,
         last_talk,
         task,
     }
 }
 
-impl Process {
-    fn talked_since(&self, t: Instant) -> bool {
-        matches!(*self.last_talk.lock().unwrap(), Some(x) if x > t)
+impl Drop for Process {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -427,6 +455,12 @@ async fn run_scenarios(start: Mode, scenarios: &[Scenario]) {
             let resumed = wait_talking(p, t0, EXIT_BOUND + Duration::from_secs(5)).await;
             let at = t0.elapsed();
             let exited = p.exits.load(Ordering::SeqCst) > was;
+            let timely_exit = p
+                .exit_times
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|at| *at >= t0 && at.duration_since(t0) <= EXIT_BOUND);
             report.entry(s.name).or_default().push(format!(
                 "{:?}: resumed={:?} exited={exited} at {at:?}",
                 p.role, resumed
@@ -434,7 +468,7 @@ async fn run_scenarios(start: Mode, scenarios: &[Scenario]) {
             // Resumed in time, or exited in time and its replacement then
             // resumed in time.
             match resumed {
-                Some(took) if took <= RESUME_BOUND || exited => {}
+                Some(took) if took <= RESUME_BOUND || timely_exit => {}
                 Some(took) => panic!(
                     "{}: {:?} took {took:?} to resume without exiting (bound {RESUME_BOUND:?})",
                     s.name, p.role
@@ -459,14 +493,22 @@ async fn run_scenarios(start: Mode, scenarios: &[Scenario]) {
 
 /// Wait for `p` to receive a message of its own published after `since`.
 async fn wait_talking(p: &Process, since: Instant, within: Duration) -> Option<Duration> {
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if p.talked_since(since) {
-            return Some(since.elapsed());
+    let deadline = since + within;
+    loop {
+        if let Some(at) = p
+            .last_talk
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|at| **at > since && **at <= deadline)
+        {
+            return Some(at.duration_since(since));
+        }
+        if Instant::now() >= deadline {
+            return None;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    None
 }
 
 fn s(name: &'static str, fault: Fault, down_ms: u64, fault_after_up_ms: u64) -> Scenario {
@@ -554,14 +596,109 @@ async fn a_refused_client_is_not_dead_and_talks_once_accepted() {
     );
     broker.down().await;
     broker.up(Mode::Users).await;
-    let deadline = Instant::now() + RESUME_BOUND;
-    loop {
-        if let Ok(Ok(())) = tokio::time::timeout(Duration::from_secs(2), client.flush()).await {
-            break;
+    let subject = "refusal.retry";
+    let mut subscription = client.subscribe(subject).await.expect("subscribe");
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    tokio::time::timeout(RESUME_BOUND, async {
+        loop {
+            tokio::select! {
+                _ = tick.tick() => { client.publish(subject, "accepted".into()).await.expect("publish"); }
+                message = subscription.next() => {
+                    assert_eq!(message.expect("message").payload.as_ref(), b"accepted");
+                    break;
+                }
+            }
         }
-        assert!(
-            Instant::now() < deadline,
-            "the refused client never talked after the broker accepted it"
-        );
+    }).await.expect("the same refused client must receive after the broker accepts it");
+}
+
+/// Refusals are not needed to strand a client: a handshake can stop making
+/// progress while the broker accepts fresh connections. The old flush-only
+/// watchdog waits forever in this state. Synchronize on observed role CONNECT
+/// frames before starting the deadline rather than hoping to hit a reconnect.
+#[tokio::test]
+#[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+async fn stalled_role_handshakes_exit_within_the_bound() {
+    assert!(nats_server_available(), "nats-server is required");
+    let _serial = SERIAL.lock().await;
+    let mut broker = Broker::start(Mode::Token).await;
+    let mut proxy = Proxy::start(broker.port).await;
+    let processes: Vec<_> = ROLES
+        .iter()
+        .map(|role| spawn_process(*role, proxy.url()))
+        .collect();
+    let started = Instant::now();
+    for process in &processes {
+        assert!(wait_talking(process, started, RESUME_BOUND).await.is_some());
+    }
+    for mode in [Mode::Users, Mode::Token] {
+        proxy.set(Fault::HoldClients).await;
+        broker.down().await;
+        broker.up(mode).await;
+        let available = Instant::now();
+        let observed = proxy.state.held_clients.load(Ordering::SeqCst);
+        while proxy.state.held_clients.load(Ordering::SeqCst) == observed {
+            assert!(
+                available.elapsed() < RESUME_BOUND,
+                "no role CONNECT reached the barrier"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        while processes.iter().any(|p| {
+            !p.exit_times
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|at| *at >= available && at.duration_since(available) <= EXIT_BOUND)
+        }) {
+            assert!(
+                available.elapsed() < EXIT_BOUND,
+                "a live, stalled role did not exit within {EXIT_BOUND:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        proxy.set(Fault::None).await;
+        let restored = Instant::now();
+        for process in &processes {
+            assert!(
+                wait_talking(process, restored, RESUME_BOUND + SUPERVISOR_DELAY)
+                    .await
+                    .is_some()
+            );
+        }
+    }
+}
+
+/// Child entry point for the real process supervisor above. Without the
+/// private child environment this is a no-op when the whole suite runs.
+#[tokio::test]
+#[ignore = "child process entry point"]
+async fn supervised_role_client() {
+    let Ok(role) = std::env::var("AUTH_SWITCH_CHILD_ROLE") else {
+        return;
+    };
+    let role = match role.as_str() {
+        "agent" => NatsRole::Agent,
+        "backend" => NatsRole::Backend,
+        "cli" => NatsRole::Cli,
+        _ => panic!("invalid child role"),
+    };
+    let url = std::env::var("AUTH_SWITCH_CHILD_URL").expect("child URL");
+    let creds = NatsCredentials::new(Some(TOKEN.into()), Some(user_of(role)));
+    let client = connect_with_credentials(role, &url, creds)
+        .await
+        .expect("connect");
+    kanade_shared::nats_client::exit_on_dead(role, &client);
+    let subject = format!("echo.{}", role.as_str());
+    let mut sub = client.subscribe(subject.clone()).await.expect("subscribe");
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => { let _ = client.publish(subject.clone(), "x".into()).await; }
+            message = sub.next() => {
+                if message.is_none() { std::process::exit(2); }
+                println!("role round trip");
+            }
+        }
     }
 }

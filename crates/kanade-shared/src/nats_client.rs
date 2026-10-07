@@ -42,11 +42,11 @@
 //!   * accepted → present the user;
 //!   * rejected (authorization violation) → present the token, or fail
 //!     naming the missing token if there is none;
-//!   * anything else (unreachable, timeout) → reuse whichever credential
-//!     last worked, defaulting to the user.
+//!   * anything else (unreachable, timeout) → defer the attempt with an
+//!     authentication callback error. A cached answer describes an old broker
+//!     mode and must not become a refused handshake after a restart.
 //!
-//! A wrong guess is thus survivable and the process keeps one `Client`: the
-//! refused attempt is retried, re-probed, and presents the right credential.
+//! The process keeps one `Client`: a deferred attempt is retried and re-probed.
 //! That a refusal is retried and never ends the connection task is pinned
 //! against a real broker for the pinned async-nats, so a version change that
 //! breaks it fails a test instead of leaving a silent client.
@@ -135,7 +135,8 @@
 //! free. Same for mTLS.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -160,7 +161,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE_NAME: &str = "auth-probe";
 
 /// How often [`wait_until_dead`] checks the connection task is still there.
-const DEAD_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+const DEAD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The longest async-nats waits between reconnect attempts (its backoff cap).
 const RECONNECT_DELAY_MAX_SECS: u64 = 4;
@@ -176,8 +178,8 @@ const ATTEMPT_MAX_SECS: u64 =
 
 /// How long after the broker starts answering in its new authentication mode
 /// (a restart, or a switch between `token` and `users`) a client may take to
-/// talk again: two attempts, because a probe that could not decide may make
-/// the first one present the wrong credential, plus slack. Both bounds are
+/// talk again: two attempts, allowing a probe interrupted by the switch,
+/// plus slack. Both bounds are
 /// counted from the moment the broker answers, not from the moment it went
 /// away; a broker that is down is waited for indefinitely.
 pub const RESUME_BOUND: Duration = Duration::from_secs(2 * ATTEMPT_MAX_SECS + 4);
@@ -185,10 +187,11 @@ pub const RESUME_BOUND: Duration = Duration::from_secs(2 * ATTEMPT_MAX_SECS + 4)
 /// How long after the broker starts answering in its new mode a client that
 /// has *not* resumed may stay alive before its process exits non-zero for the
 /// service manager to restart: the resume bound, then the next
-/// [`wait_until_dead`] check that notices a sustained refusal. The service
-/// manager's own restart delay comes on top.
-pub const EXIT_BOUND: Duration =
-    Duration::from_secs(RESUME_BOUND.as_secs() + DEAD_CHECK_INTERVAL.as_secs());
+/// health check, a bounded flush, and a bounded credential witness. The
+/// service manager's own restart delay comes on top.
+pub const EXIT_BOUND: Duration = Duration::from_secs(
+    RESUME_BOUND.as_secs() + DEAD_CHECK_INTERVAL.as_secs() + 2 * HEALTH_TIMEOUT.as_secs(),
+);
 
 /// A connection that has been refused this many times in a row, over at
 /// least [`AUTH_REJECTION_WINDOW`], with no successful connect in between, is
@@ -432,12 +435,14 @@ impl Live {
             // and an offline broker is something to wait out.
             async_nats::Event::Connected | async_nats::Event::Disconnected => *refusals = None,
             async_nats::Event::ClientError(async_nats::ClientError::Other(kind))
-                if *kind == async_nats::ConnectErrorKind::AuthorizationViolation.to_string()
-                    || *kind == async_nats::ConnectErrorKind::Authentication.to_string() =>
+                if *kind == async_nats::ConnectErrorKind::AuthorizationViolation.to_string() =>
             {
                 let (first, n) = refusals.unwrap_or((std::time::Instant::now(), 0));
                 *refusals = Some((first, n + 1));
             }
+            // Callback errors include inconclusive probes, not broker refusals.
+            async_nats::Event::ClientError(async_nats::ClientError::Other(kind))
+                if *kind == async_nats::ConnectErrorKind::Authentication.to_string() => {}
             async_nats::Event::ClientError(_) => *refusals = None,
             _ => {}
         }
@@ -466,22 +471,106 @@ impl Live {
 /// Process-wide per-role state, so [`CredentialProbe::for_role`] sees the
 /// decision the already-open connection made without the callers having to
 /// thread anything through.
-fn live_for(role: NatsRole) -> Arc<Live> {
+fn role_lives() -> &'static Mutex<HashMap<&'static str, Arc<Live>>> {
     static LIVE: OnceLock<Mutex<HashMap<&'static str, Arc<Live>>>> = OnceLock::new();
-    let mut map = LIVE
-        .get_or_init(Default::default)
+    LIVE.get_or_init(Default::default)
+}
+
+fn publish_role_live(role: NatsRole, live: &Live) {
+    // Preserve the reporting handle held by CredentialProbe::for_role.
+    let reported = live_for(role);
+    *reported.decision.lock().unwrap_or_else(|e| e.into_inner()) = live.get();
+}
+
+fn live_for(role: NatsRole) -> Arc<Live> {
+    role_lives()
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    map.entry(role.as_str()).or_default().clone()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(role.as_str())
+        .or_default()
+        .clone()
+}
+
+struct ConnectionHealth {
+    live: Arc<Live>,
+    url: String,
+    creds: NatsCredentials,
+}
+
+struct HealthEntry {
+    stats: Weak<async_nats::client::Statistics>,
+    health: Arc<ConnectionHealth>,
+}
+
+fn health_entries() -> &'static Mutex<Vec<HealthEntry>> {
+    static HEALTH: OnceLock<Mutex<Vec<HealthEntry>>> = OnceLock::new();
+    HEALTH.get_or_init(Default::default)
+}
+
+fn register_health(client: &async_nats::Client, health: Arc<ConnectionHealth>) {
+    let mut entries = health_entries().lock().unwrap_or_else(|e| e.into_inner());
+    entries.retain(|entry| entry.stats.strong_count() > 0);
+    entries.push(HealthEntry {
+        stats: Arc::downgrade(&client.statistics()),
+        health,
+    });
+}
+
+fn connection_health(client: &async_nats::Client) -> Option<Arc<ConnectionHealth>> {
+    let stats = client.statistics();
+    health_entries()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|entry| entry.stats.ptr_eq(&Arc::downgrade(&stats)))
+        .map(|entry| entry.health.clone())
+}
+
+/// A fresh handshake proves the broker can accept this client's credentials.
+/// It never retries, and neither its traffic nor its errors advance the
+/// original client's progress clock or refusal accounting.
+async fn witness(health: &ConnectionHealth) -> ProbeOutcome {
+    let attempt = async {
+        let mut opts = async_nats::ConnectOptions::new()
+            .name("auth-witness")
+            .connection_timeout(HEALTH_TIMEOUT);
+        match &health.creds.user {
+            Some(user) => match probe_user(&health.url, user).await {
+                ProbeOutcome::Accepted => {
+                    opts = opts.user_and_password(user.name.clone(), user.password.clone());
+                }
+                ProbeOutcome::Rejected => match &health.creds.token {
+                    Some(token) => opts = opts.token(token.clone()),
+                    None => return ProbeOutcome::Rejected,
+                },
+                ProbeOutcome::Unreachable => return ProbeOutcome::Unreachable,
+            },
+            None => {
+                if let Some(token) = &health.creds.token {
+                    opts = opts.token(token.clone());
+                }
+            }
+        }
+        match opts.connect(&health.url).await {
+            Ok(_) => ProbeOutcome::Accepted,
+            Err(error) if error.kind() == async_nats::ConnectErrorKind::AuthorizationViolation => {
+                ProbeOutcome::Rejected
+            }
+            Err(_) => ProbeOutcome::Unreachable,
+        }
+    };
+    tokio::time::timeout(HEALTH_TIMEOUT, attempt)
+        .await
+        .unwrap_or(ProbeOutcome::Unreachable)
 }
 
 /// Pick the credential for one attempt from the probe's answer.
 ///
-/// Pure so the whole decision table is testable without a broker. `Err`
-/// carries the credential that is missing.
+/// Pure so the whole decision table is testable without a broker. The cached
+/// decision is intentionally ignored: it describes a previous broker mode.
 fn select(
     outcome: ProbeOutcome,
-    last_worked: Option<Choice>,
+    _last_worked: Option<Choice>,
     have_token: bool,
 ) -> std::result::Result<Choice, &'static str> {
     match outcome {
@@ -490,7 +579,9 @@ fn select(
         ProbeOutcome::Rejected => {
             Err("the broker rejected the NATS user and no NatsToken is provisioned")
         }
-        ProbeOutcome::Unreachable => Ok(last_worked.unwrap_or(Choice::User)),
+        ProbeOutcome::Unreachable => {
+            Err("NATS credential probe inconclusive; deferring this attempt")
+        }
     }
 }
 
@@ -532,9 +623,24 @@ where
 {
     let outcome = probe().await;
     let previous = live.get();
-    let choice = select(outcome, previous, have_token)?;
+    let choice = select(outcome, previous, have_token).inspect_err(|_| {
+        if outcome == ProbeOutcome::Rejected {
+            live.observe(&async_nats::Event::ClientError(
+                async_nats::ClientError::Other(
+                    async_nats::ConnectErrorKind::AuthorizationViolation.to_string(),
+                ),
+            ));
+        } else {
+            *live.refusals.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            debug!(
+                role = role.as_str(),
+                "NATS credential probe inconclusive; deferring this attempt"
+            );
+        }
+    })?;
     if outcome != ProbeOutcome::Unreachable {
         live.set(choice);
+        live_for(role).set(choice);
     }
     // Log what was selected and the outcome class, never a value; quiet when
     // nothing changed so a flapping broker does not fill the log.
@@ -799,7 +905,7 @@ pub async fn connect(role: NatsRole, url: &str) -> Result<async_nats::Client> {
         None,
         None::<fn(async_nats::Event) -> std::future::Ready<()>>,
         NatsCredentials::resolve(role)?,
-        live_for(role),
+        Arc::new(Live::default()),
     )
     .await
 }
@@ -836,16 +942,14 @@ where
         identity,
         Some(cb),
         NatsCredentials::resolve(role)?,
-        live_for(role),
+        Arc::new(Live::default()),
     )
     .await
 }
 
 /// Connect with explicitly supplied credentials instead of resolving them
-/// from the registry / environment, and with decision state private to this
-/// connection. For tests, which must not depend on process-global state
-/// (the per-role decision and refusal state is still shared, so concurrent
-/// tests should use different roles).
+/// from the registry / environment, with refusal state private to this
+/// connection. Credential reporting follows the latest decision for the role.
 pub async fn connect_with_credentials(
     role: NatsRole,
     url: &str,
@@ -857,7 +961,7 @@ pub async fn connect_with_credentials(
         None,
         None::<fn(async_nats::Event) -> std::future::Ready<()>>,
         creds,
-        live_for(role),
+        Arc::new(Live::default()),
     )
     .await
 }
@@ -874,7 +978,7 @@ where
     F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
 {
-    connect_inner(role, url, None, Some(cb), creds, live_for(role)).await
+    connect_inner(role, url, None, Some(cb), creds, Arc::new(Live::default())).await
 }
 
 async fn connect_inner<F, Fut>(
@@ -899,6 +1003,12 @@ where
     // returns Err when a provider is already installed — ignore it.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let health = Arc::new(ConnectionHealth {
+        live: live.clone(),
+        url: url.to_string(),
+        creds: creds.clone(),
+    });
+    publish_role_live(role, &live);
     let tracker = live.clone();
     // Only a provisioned user changes how the credential is presented; every
     // other host takes the token path untouched.
@@ -943,6 +1053,8 @@ where
     // calls queue the SUB frame until the link is up.
     let opts = opts
         .retry_on_initial_connect()
+        .connection_timeout(HEALTH_TIMEOUT)
+        .ping_interval(DEAD_CHECK_INTERVAL)
         // Names the connection in `nats server report connections`, in the
         // broker's own logs, and in `/connz`. Free observability while the
         // fleet is mid-migration: it shows which roles are connecting even
@@ -962,9 +1074,12 @@ where
             }
         }
     });
-    opts.connect(url)
+    let client = opts
+        .connect(url)
         .await
-        .with_context(|| format!("connect to NATS at {url}"))
+        .with_context(|| format!("connect to NATS at {url}"))?;
+    register_health(&client, health);
+    Ok(client)
 }
 
 /// Whether the client's connection task has terminated.
@@ -993,8 +1108,11 @@ pub async fn is_dead(client: &async_nats::Client) -> bool {
 }
 
 /// Resolve once `client` can no longer be expected to work: its connection
-/// task has terminated (see [`is_dead`]), or the broker has refused its
-/// credential on every attempt for [`AUTH_REJECTION_WINDOW`]. Checked every
+/// task has terminated (see [`is_dead`]), its credential is persistently
+/// refused, or receive progress stalls while a fresh handshake reaches the
+/// broker (accepted or explicitly refused).
+/// Protocol PING/PONG traffic provides progress even for idle roles. A flush
+/// alone only proves a local write, not that the broker answered. Checked every
 /// `interval`. A process that depends on the client should treat this as
 /// fatal and exit non-zero so its service manager restarts it.
 ///
@@ -1004,12 +1122,22 @@ pub async fn wait_until_dead_every(
     client: &async_nats::Client,
     interval: Duration,
 ) {
-    let live = live_for(role);
+    let health = connection_health(client);
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let stats = client.statistics();
+    let mut received = stats.in_bytes.load(Ordering::Relaxed);
+    let mut progressed = tokio::time::Instant::now();
     loop {
         tick.tick().await;
-        if live.auth_failed() {
+        let now_received = stats.in_bytes.load(Ordering::Relaxed);
+        if client.connection_state() == async_nats::connection::State::Connected
+            && now_received != received
+        {
+            progressed = tokio::time::Instant::now();
+        }
+        received = now_received;
+        if health.as_ref().is_some_and(|h| h.live.auth_failed()) {
             warn!(
                 role = role.as_str(),
                 "the NATS broker keeps refusing this role's credential; the client cannot connect"
@@ -1023,12 +1151,43 @@ pub async fn wait_until_dead_every(
             );
             return;
         }
+        if progressed.elapsed() >= RESUME_BOUND {
+            if let Some(health) = &health {
+                let outcome = witness(health).await;
+                if outcome != ProbeOutcome::Unreachable {
+                    // Recheck after the witness: a reconnect racing it is healthy.
+                    if client.connection_state() == async_nats::connection::State::Connected
+                        && stats.in_bytes.load(Ordering::Relaxed) != received
+                    {
+                        progressed = tokio::time::Instant::now();
+                        continue;
+                    }
+                    warn!(
+                        role = role.as_str(),
+                        witness = outcome.label(),
+                        "NATS client made no receive progress while a fresh credential witness reached the broker; exiting for a supervised restart"
+                    );
+                    return;
+                }
+            }
+        }
     }
 }
 
 /// [`wait_until_dead_every`] at the production cadence.
 pub async fn wait_until_dead(role: NatsRole, client: &async_nats::Client) {
     wait_until_dead_every(role, client, DEAD_CHECK_INTERVAL).await
+}
+
+/// Start supervision before subscriptions or bootstrap can block. Fatal
+/// liveness failure bypasses application shutdown so a blocked subsystem
+/// cannot keep a silent service alive beyond the exit deadline.
+pub fn exit_on_dead(role: NatsRole, client: &async_nats::Client) {
+    let client = client.clone();
+    tokio::spawn(async move {
+        wait_until_dead(role, &client).await;
+        std::process::exit(1);
+    });
 }
 
 #[cfg(test)]
@@ -1376,10 +1535,10 @@ mod tests {
         assert_eq!(select(Rejected, Some(User), true), Ok(Token));
         let missing = select(Rejected, None, false).unwrap_err();
         assert!(missing.contains("NatsToken"), "{missing}");
-        // Unreachable keeps what last worked, defaulting to the user.
-        assert_eq!(select(Unreachable, None, true), Ok(User));
-        assert_eq!(select(Unreachable, Some(Token), true), Ok(Token));
-        assert_eq!(select(Unreachable, Some(User), true), Ok(User));
+        // An inconclusive probe defers even when a previous mode is cached.
+        assert!(select(Unreachable, None, true).is_err());
+        assert!(select(Unreachable, Some(Token), true).is_err());
+        assert!(select(Unreachable, Some(User), true).is_err());
     }
 
     #[tokio::test]
@@ -1387,13 +1546,13 @@ mod tests {
         let live = Live::default();
         let role = NatsRole::Cli;
         let run = |o| choose(role, true, &live, move || async move { o });
-        // An unreachable broker is a guess, not evidence.
-        assert_eq!(run(ProbeOutcome::Unreachable).await, Ok(Choice::User));
+        // An unreachable broker cannot justify a handshake.
+        assert!(run(ProbeOutcome::Unreachable).await.is_err());
         assert_eq!(live.get(), None);
         assert_eq!(run(ProbeOutcome::Rejected).await, Ok(Choice::Token));
         assert_eq!(live.get(), Some(Choice::Token));
-        // The broker goes away: the token that last worked is reused.
-        assert_eq!(run(ProbeOutcome::Unreachable).await, Ok(Choice::Token));
+        // The broker goes away: its previous mode is no longer evidence.
+        assert!(run(ProbeOutcome::Unreachable).await.is_err());
         // ...and the flip back is followed.
         assert_eq!(run(ProbeOutcome::Accepted).await, Ok(Choice::User));
         assert_eq!(live.get(), Some(Choice::User));
@@ -1473,6 +1632,87 @@ mod tests {
         assert!(!live.auth_failed());
         live.observe(&refused());
         assert!(!live.auth_failed());
+    }
+
+    #[tokio::test]
+    async fn deferred_probes_do_not_count_as_credential_refusals() {
+        let live = Live::default();
+        for _ in 0..AUTH_REJECTION_LIMIT {
+            assert!(
+                choose(NatsRole::Cli, true, &live, || async {
+                    ProbeOutcome::Unreachable
+                })
+                .await
+                .is_err()
+            );
+            live.observe(&async_nats::Event::ClientError(
+                async_nats::ClientError::Other(
+                    async_nats::ConnectErrorKind::Authentication.to_string(),
+                ),
+            ));
+        }
+        assert!(live.refusals.lock().unwrap().is_none());
+        for _ in 0..AUTH_REJECTION_LIMIT {
+            assert!(
+                choose(NatsRole::Cli, false, &live, || async {
+                    ProbeOutcome::Rejected
+                })
+                .await
+                .is_err()
+            );
+            live.observe(&async_nats::Event::ClientError(
+                async_nats::ClientError::Other(
+                    async_nats::ConnectErrorKind::Authentication.to_string(),
+                ),
+            ));
+        }
+        assert_eq!(
+            live.refusals.lock().unwrap().as_ref().unwrap().1,
+            AUTH_REJECTION_LIMIT
+        );
+        assert!(!live.auth_failed(), "quick refusals must still allow retry");
+        assert!(
+            choose(NatsRole::Cli, true, &live, || async {
+                ProbeOutcome::Unreachable
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            live.refusals.lock().unwrap().is_none(),
+            "an outage interrupts the refusal run"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_role_connections_have_independent_health_state() {
+        let first = connect_with_credentials(
+            NatsRole::Agent,
+            "nats://127.0.0.1:1",
+            NatsCredentials::default(),
+        )
+        .await
+        .unwrap();
+        let second = connect_with_credentials(
+            NatsRole::Agent,
+            "nats://127.0.0.1:1",
+            NatsCredentials::default(),
+        )
+        .await
+        .unwrap();
+        let first_health = connection_health(&first).unwrap();
+        let second_health = connection_health(&second).unwrap();
+        assert!(!Arc::ptr_eq(&first_health.live, &second_health.live));
+        assert!(Arc::ptr_eq(
+            &first_health,
+            &connection_health(&first.clone()).unwrap()
+        ));
+        *first_health.live.refusals.lock().unwrap() = Some((
+            std::time::Instant::now() - AUTH_REJECTION_WINDOW,
+            AUTH_REJECTION_LIMIT,
+        ));
+        assert!(first_health.live.auth_failed());
+        assert!(!second_health.live.auth_failed());
     }
 
     #[test]
