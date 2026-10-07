@@ -155,9 +155,21 @@ jobs:
               "$(echo "$RUNNER_OS" | tr 'A-Z' 'a-z')" "$secs" "$outcome" >> "$timings"
             echo "run $i: $outcome in ${secs}s"
           done
+          status=0
           py=$(command -v python3 || command -v python)
-          "$py" scripts/ci/conformance_timings.py "$timings"
+          if [ -z "$py" ]; then
+            echo "::error::python is not available to summarize the conformance timings"
+            status=1
+          else
+            "$py" scripts/ci/conformance_timings.py "$timings"
+            summary_rc=$?
+            if [ "$summary_rc" -ne 0 ]; then
+              echo "::error::conformance timing summary failed (exit $summary_rc)"
+              status=1
+            fi
+          fi
           if [ "$failures" -ne 0 ]; then
             echo "$failures of $CONFORMANCE_REPEAT conformance runs failed" >&2
-            exit 1
+            status=1
           fi
+          exit "$status"
