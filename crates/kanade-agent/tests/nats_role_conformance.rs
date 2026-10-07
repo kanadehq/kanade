@@ -237,58 +237,87 @@ struct WaitKind {
     default_secs: u64,
 }
 
-// The defaults below are PROVISIONAL: generous guesses (the old fixed
-// deadlines were 15 to 120 s) set before any repeated CI run existed. They are
-// to be replaced by four to five times the worst value per kind in the
-// per-OS distribution that the workflow's step summary reports for a repeated
-// run (`conformance_repeat`). A bound is never what makes a healthy run pass:
-// it only has to be far enough away that a slow runner is not mistaken for a
-// defect, and finite so that a hang still fails.
+// The defaults below are derived from a measured distribution, not guessed.
+// Source: the integration workflow dispatched with `conformance_repeat=20` on
+// ubuntu, windows and macos (run 37533007122, commit fa790fd, 20 suite runs
+// per OS; the code under test is unchanged since). Each bound is the worst
+// successful wait seen for that kind on any OS, times five, rounded up to
+// 5 s, and never below 30 s. Five times leaves room for a runner several
+// times slower than the ones measured, so a slow machine is not mistaken for
+// a defect, while a hang still fails in well under the old 120 s deadlines.
+//
+//   kind                  worst ok (OS)      bound
+//   broker_ready          0.57 s (windows)    30 s (floor)
+//   backend_ready         6.37 s (windows)    35 s
+//   agent_first_heartbeat 0.28 s (macos)      30 s (floor)
+//   reconnect             7.01 s (windows)    40 s
+//   heartbeat_steady      1.01 s (macos)      30 s (floor)
+//   heartbeat_cadence     3.51 s (windows)    30 s (floor)
+//   catch_up             30.11 s (macos)     155 s
+//   operation            11.33 s (macos)      60 s
+//   violation_arrival     0.16 s (windows)    30 s (floor)
+//
+// Whole suite, seconds (p50 / max): linux 50 / 120, windows 51 / 123, macos
+// 51 / 81; the two long ones each include a heartbeat_cadence stall.
+//
+// Excluded: `heartbeat_cadence` hit its old 120 s bound without ever seeing
+// the faster heartbeats in 3 of 60 runs (1 linux, 2 windows). A stalled wait
+// is not a completion time, so these are not in the table above, and nothing
+// here explains them: the bounds are derived from successful waits only and
+// the cause of the stall is still open. With the 30 s bound a stall now fails
+// in 30 s instead of 120 s.
+//
+// To re-measure, dispatch the integration workflow with `conformance_repeat`
+// and read the per-OS table in the step summary; to run slower for a while,
+// set `KANADE_CONFORMANCE_WAIT_SCALE` or `KANADE_CONFORMANCE_WAIT_<NAME>_SECS`.
+// A bound is never what makes a healthy run pass: it only has to be far
+// enough away that a slow runner is not mistaken for a defect, and finite so
+// that a hang still fails.
 
 /// Spawning `nats-server` until its monitoring port answers.
 const BROKER_READY: WaitKind = WaitKind {
     name: "broker_ready",
-    default_secs: 60,
+    default_secs: 30,
 };
 /// Spawning the backend until its HTTP API answers.
 const BACKEND_READY: WaitKind = WaitKind {
     name: "backend_ready",
-    default_secs: 120,
+    default_secs: 35,
 };
 /// Spawning the agent until its first heartbeat (the helper's credential probe,
 /// the bootstrap and the first publish all sit in between).
 const AGENT_FIRST_HEARTBEAT: WaitKind = WaitKind {
     name: "agent_first_heartbeat",
-    default_secs: 180,
+    default_secs: 30,
 };
 /// A broker restart or a token-to-users reload until each process and role
 /// works again. This is the reconnect time the operations book quotes.
 const RECONNECT: WaitKind = WaitKind {
     name: "reconnect",
-    default_secs: 240,
+    default_secs: 40,
 };
 /// The next heartbeat from an agent that has not lost its connection (only
 /// the unix-only switch scenario waits for one).
 #[cfg_attr(not(unix), allow(dead_code))]
 const HEARTBEAT_STEADY: WaitKind = WaitKind {
     name: "heartbeat_steady",
-    default_secs: 90,
+    default_secs: 30,
 };
 /// Heartbeats speeding up after a KV change reached the agent.
 const HEARTBEAT_CADENCE: WaitKind = WaitKind {
     name: "heartbeat_cadence",
-    default_secs: 120,
+    default_secs: 30,
 };
 /// A projector, a consumer or the outbox catching up with work already done.
 const CATCH_UP: WaitKind = WaitKind {
     name: "catch_up",
-    default_secs: 120,
+    default_secs: 155,
 };
 /// One JetStream, HTTP or CLI operation that has to complete (a watch
 /// delivering, a replay, an object read, a CLI run).
 const OPERATION: WaitKind = WaitKind {
     name: "operation",
-    default_secs: 90,
+    default_secs: 60,
 };
 /// A broker log line, or a server error on a client, that has to arrive.
 const VIOLATION_ARRIVAL: WaitKind = WaitKind {
