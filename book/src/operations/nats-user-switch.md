@@ -257,21 +257,68 @@ reload or restart the broker. Know the exact revert command **before** the
 switch (prerequisite 8) and keep it where you can reach it without the fleet.
 Hand edits made inside the shipped token block are not restored by it.
 
-Set the expected authentication mode back to `token`. Nothing on any agent is
-touched. Agents retry on their own and rejoin; confirm with:
+Set the expected authentication mode back to `token`. Nothing on any agent
+needs to be touched: what each process does on its own is the next section.
+Confirm with:
 
 ```powershell
 ./scripts/ops/nats-switch-check.ps1 -Mode Compare -SnapshotPath before.json `
     -SwitchedAt <time of the revert, UTC> -WaitSeconds <as in step 4> -MaxDisappeared 0
 ```
 
-Caveat on "agents retry forever": this is not exactly what the code does. A
-client that holds only the token and is refused repeatedly stops waiting and
-the agent process exits non-zero, relying on the service manager (SCM
-recovery, systemd `Restart=on-failure`) to start it again; a client with a
-user pair keeps one connection and retries. Hosts whose service manager does
-not restart a failed agent will not return by themselves. This is why the
-service-restart settings are a prerequisite.
+## What is guaranteed during a switch or a restart
+
+After the broker starts answering in its new authentication mode (a restart,
+or a reload between `token` and `users`, in either direction), every role's
+client does one of two things, and a process that stays alive without doing
+either is a defect:
+
+* **it talks again within 30 s** (`RESUME_BOUND`), on the same connection and
+  without being touched; or
+* **its process exits non-zero within 45 s** (`EXIT_BOUND`), so the service
+  manager starts it again.
+
+Both are counted from the moment the broker answers in the new mode, not from
+the moment it went away: a broker that is down is waited for without limit, and
+the clients do not exit for it. They are derived from the client's own timers
+in `crates/kanade-shared/src/nats_client.rs`. One reconnect attempt takes at
+most 13 s (the library's 4 s reconnect backoff, the 3 s credential probe plus
+its 1 s guard, the 5 s handshake); a probe that cannot decide, because the
+broker is mid-restart, can make the first attempt present the wrong credential
+and be refused, so the resume bound allows two attempts and slack (30 s). A
+client that is still refused after that is exited by the liveness check that
+runs every 15 s (45 s). The `nats_auth_switch` integration test asserts both
+bounds on Ubuntu, Windows and macOS against a real broker switched in both
+directions, with the probe dropped, held or slowed on purpose while the broker
+comes back. The reload path needs a signal and is only part of the
+conformance suite on Linux and macOS; Windows is covered for restarts.
+
+On top of the exit bound comes the service manager's own delay, which the
+deployment does not let you shorten: up to 60 s for the Windows service
+recovery actions (restart after 5 s, then 15 s, then 60 s), 5 s for systemd
+(`RestartSec`), and 10 s for launchd (`ThrottleInterval`). A start-rate limit
+of the service manager can also hold a process that exits repeatedly. The
+`kanade` CLI is not a service: it exits non-zero and whoever ran it runs it
+again.
+
+### What you will see
+
+During a switch, in an agent's or the backend's log:
+
+* `event: disconnected`, then a few `client error: nats: IO error` lines and
+  `expected INFO, got nothing` while the broker restarts;
+* one or two `authorization violation` errors from the library, which are
+  attempts refused while the credential choice was still settling. They are
+  expected and are retried;
+* `NATS credential selected ... credential="user"` (or `"token"`) once the
+  broker's mode is known, and `event: connected`.
+
+If the client cannot resume, it logs `the NATS broker keeps refusing this
+role's credential` (or `NATS connection task has terminated`) and the process
+exits non-zero; the service manager then restarts it and the same lines
+appear on the next start. A host whose process is alive, is not logging any of
+this and is not heartbeating is not covered by this guarantee and is worth
+reporting.
 
 ## Telling a locked-out host from an offline one
 

@@ -166,7 +166,10 @@ async fn manage(
         )
         .await;
 
-        let mut manual_watch = match manual_kv.watch(&pc_id).await {
+        // `watch_with_history` replays the current row: the prime above and
+        // the watch are separate round trips, and a row written between them
+        // would otherwise be missed until its next edit.
+        let mut manual_watch = match manual_kv.watch_with_history(&pc_id).await {
             Ok(w) => w,
             Err(e) => {
                 warn!(error = %e, "watch agent_groups KV key failed; reopening");
@@ -174,7 +177,7 @@ async fn manage(
                 continue;
             }
         };
-        let mut derived_watch = match derived_kv.watch(&pc_id).await {
+        let mut derived_watch = match derived_kv.watch_with_history(&pc_id).await {
             Ok(w) => w,
             Err(e) => {
                 warn!(error = %e, "watch agent_groups_derived KV key failed; reopening");

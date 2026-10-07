@@ -45,7 +45,14 @@
 //!   * anything else (unreachable, timeout) → reuse whichever credential
 //!     last worked, defaulting to the user.
 //!
-//! A wrong guess is thus survivable and the process keeps one `Client`.
+//! A wrong guess is thus survivable and the process keeps one `Client`: the
+//! refused attempt is retried, re-probed, and presents the right credential.
+//! That a refusal is retried and never ends the connection task is pinned
+//! against a real broker for the pinned async-nats, so a version change that
+//! breaks it fails a test instead of leaving a silent client.
+//!
+//! What a switch or restart guarantees is stated as [`RESUME_BOUND`] and
+//! [`EXIT_BOUND`].
 //! A client whose connection task has terminated for any reason (a panic in
 //! it, a drain, a version that treats a violation as terminal) is detected by
 //! [`wait_until_dead`] so its process can exit for a supervised restart. The
@@ -154,6 +161,34 @@ const PROBE_NAME: &str = "auth-probe";
 
 /// How often [`wait_until_dead`] checks the connection task is still there.
 const DEAD_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The longest async-nats waits between reconnect attempts (its backoff cap).
+const RECONNECT_DELAY_MAX_SECS: u64 = 4;
+
+/// async-nats' default timeout for one connection handshake.
+const CONNECT_TIMEOUT_SECS: u64 = 5;
+
+/// The longest a single reconnect attempt can take: the backoff, then the
+/// credential probe (its own timeout plus the guard around it), then the
+/// handshake the probe's answer decides.
+const ATTEMPT_MAX_SECS: u64 =
+    RECONNECT_DELAY_MAX_SECS + PROBE_TIMEOUT.as_secs() + 1 + CONNECT_TIMEOUT_SECS;
+
+/// How long after the broker starts answering in its new authentication mode
+/// (a restart, or a switch between `token` and `users`) a client may take to
+/// talk again: two attempts, because a probe that could not decide may make
+/// the first one present the wrong credential, plus slack. Both bounds are
+/// counted from the moment the broker answers, not from the moment it went
+/// away; a broker that is down is waited for indefinitely.
+pub const RESUME_BOUND: Duration = Duration::from_secs(2 * ATTEMPT_MAX_SECS + 4);
+
+/// How long after the broker starts answering in its new mode a client that
+/// has *not* resumed may stay alive before its process exits non-zero for the
+/// service manager to restart: the resume bound, then the next
+/// [`wait_until_dead`] check that notices a sustained refusal. The service
+/// manager's own restart delay comes on top.
+pub const EXIT_BOUND: Duration =
+    Duration::from_secs(RESUME_BOUND.as_secs() + DEAD_CHECK_INTERVAL.as_secs());
 
 /// A connection that has been refused this many times in a row, over at
 /// least [`AUTH_REJECTION_WINDOW`], with no successful connect in between, is
