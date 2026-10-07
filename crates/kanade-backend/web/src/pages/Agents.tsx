@@ -1241,7 +1241,7 @@ export function Agents() {
           {t('errorTitle')}: {(error as Error).message}
         </p>
       )}
-      <Table resizeKey="agents" picker metaColumns>
+      <Table resizeKey="agents" picker metaColumns sortFilter="page">
         <TableHeader>
           <TableRow>
             <TableHead colId="status">{t('columns.status')}</TableHead>
@@ -1249,30 +1249,30 @@ export function Agents() {
                 hostname column duplicated it. The hostname now rides the
                 pc_id cell, shown only when it genuinely differs. pc_id is
                 the row identity + detail link, so it's never hideable. */}
-            <TableHead colId="pcId" aria-sort={ariaSort(SORT_FIELDS.pcId)}>
+            <TableHead colId="pcId" sortable={false} aria-sort={ariaSort(SORT_FIELDS.pcId)}>
               {sortBtn(SORT_FIELDS.pcId, t('columns.pcId'))}
             </TableHead>
-            <TableHead colId="os" aria-sort={ariaSort(SORT_FIELDS.os)}>
+            <TableHead colId="os" sortable={false} aria-sort={ariaSort(SORT_FIELDS.os)}>
               {sortBtn(SORT_FIELDS.os, t('columns.os'))}
             </TableHead>
-            <TableHead colId="agent" aria-sort={ariaSort(SORT_FIELDS.agent)}>
+            <TableHead colId="agent" sortable={false} aria-sort={ariaSort(SORT_FIELDS.agent)}>
               {sortBtn(SORT_FIELDS.agent, t('columns.agent'))}
             </TableHead>
-            <TableHead colId="lastHeartbeat" aria-sort={ariaSort(SORT_FIELDS.lastHeartbeat)}>
+            <TableHead colId="lastHeartbeat" sortable={false} aria-sort={ariaSort(SORT_FIELDS.lastHeartbeat)}>
               {sortBtn(SORT_FIELDS.lastHeartbeat, t('columns.lastHeartbeat'))}
             </TableHead>
-            <TableHead colId="lastLogon" aria-sort={ariaSort(SORT_FIELDS.lastLogon)}>
+            <TableHead colId="lastLogon" sortable={false} aria-sort={ariaSort(SORT_FIELDS.lastLogon)}>
               {sortBtn(SORT_FIELDS.lastLogon, t('columns.lastLogon'), t('columnTitles.lastLogon'))}
             </TableHead>
-            <TableHead colId="signing" title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
-            <TableHead colId="credential" title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
+            <TableHead colId="signing" sortable={false} filterable={false} title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
+            <TableHead colId="credential" sortable={false} filterable={false} title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
             <TableHead colId="cpu" className="text-right" title={t('columnTitles.cpu')}>
               {t('columns.cpu')}
             </TableHead>
             <TableHead colId="rss" className="text-right" title={t('columnTitles.rss')}>
               {t('columns.rss')}
             </TableHead>
-            <TableHead colId="actions">{t('columns.actions')}</TableHead>
+            <TableHead colId="actions" sortable={false} filterable={false}>{t('columns.actions')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -1361,8 +1361,8 @@ export function Agents() {
                 <TableCell label={t('columns.credential')}>
                   <CredentialBadge agent={a} />
                 </TableCell>
-                <TableCell label={t('columns.cpu')} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
-                <TableCell label={t('columns.rss')} className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
+                <TableCell label={t('columns.cpu')} sortValue={a.agent_cpu_pct ?? undefined} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
+                <TableCell label={t('columns.rss')} sortValue={a.agent_rss_bytes ?? undefined} className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
                 <TableCell>
                   {/* #actions-menu: was a row of standalone icon buttons
                       (facts / ping / groups / effective / delete), which

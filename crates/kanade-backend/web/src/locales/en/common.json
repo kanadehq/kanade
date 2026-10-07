@@ -107,6 +107,30 @@
       "moveDown": "Move {{name}} right",
       "resetOrder": "Reset column order",
       "metaSection": "Metadata"
+    },
+    "sort": {
+      "group": "Sort",
+      "asc": "Ascending",
+      "desc": "Descending",
+      "hint": "Sort by {{name}} (click to cycle ascending, descending, off)"
+    },
+    "filter": {
+      "button": "Filter {{name}}",
+      "contains": "Contains…",
+      "containsAria": "{{name}} contains",
+      "search": "Search values",
+      "values": "Values",
+      "selectAll": "(Select all)",
+      "blanks": "(blanks)",
+      "truncated": "Showing the first {{n}} values — search to narrow",
+      "clear": "Clear filter",
+      "clearAll": "Clear all filters",
+      "remove": "Remove the filter on {{name}}",
+      "count": "{{shown}} / {{total}} rows",
+      "noMatch": "No rows match the filters.",
+      "pageOnly": "Applies to the rows on this page only.",
+      "menu": "Sort / filter",
+      "column": "Column"
     }
   },
   "comingSoon": {

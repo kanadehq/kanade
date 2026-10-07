@@ -438,3 +438,56 @@ export function TableWithPclessRow() {
     </Table>
   );
 }
+
+const SF_ROWS = [
+  { name: 'banana', size: 9, kind: 'fruit' },
+  { name: 'apple', size: 10, kind: 'fruit' },
+  { name: 'cherry', size: 100, kind: 'fruit' },
+  // No size: blanks sort last in either direction.
+  { name: 'carrot', size: null, kind: 'veg' },
+];
+
+/**
+ * A `sortFilter` table. `size` renders formatted text but sorts by number
+ * (`sortValue`), `note` opts out of both, and `pinned` adds the two row
+ * shapes that must never be sorted or filtered — a one-cell group header
+ * and a row whose cell count doesn't match the header.
+ */
+export function SortFilterTable({ pinned = false, page = false }: { pinned?: boolean; page?: boolean }) {
+  return (
+    <Table resizeKey="ct-sf" picker sortFilter={page ? 'page' : true}>
+      <TableHeader>
+        <TableRow>
+          <TableHead colId="name">name</TableHead>
+          <TableHead colId="size">size</TableHead>
+          <TableHead colId="kind">kind</TableHead>
+          <TableHead colId="note" sortable={false} filterable={false}>
+            note
+          </TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {pinned && (
+          <TableRow>
+            <TableCell colSpan={4}>group header</TableCell>
+          </TableRow>
+        )}
+        {SF_ROWS.map((r) => (
+          <TableRow key={r.name}>
+            <TableCell label="name">{r.name}</TableCell>
+            <TableCell label="size" sortValue={r.size ?? undefined}>
+              {r.size === null ? '' : `${r.size} B`}
+            </TableCell>
+            <TableCell label="kind">{r.kind}</TableCell>
+            <TableCell label="note">n/a</TableCell>
+          </TableRow>
+        ))}
+        {pinned && (
+          <TableRow>
+            <TableCell colSpan={4}>detail row</TableCell>
+          </TableRow>
+        )}
+      </TableBody>
+    </Table>
+  );
+}
