@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 use kanade_shared::nats_client::{
     NatsCredentials, NatsRole, connect_with_credentials, is_dead, wait_until_dead_every,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+const STARTUP_ATTEMPTS: usize = 3;
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const TOKEN: &str = "fleet-token";
 const USER: &str = "cli-user";
@@ -61,6 +64,10 @@ struct Broker {
     _dir: tempfile::TempDir,
     port: u16,
     http_port: u16,
+    /// Kept so `reload` rewrites the same `server_name`; nats-server rejects
+    /// a reload that changes it.
+    #[cfg(unix)]
+    server_name: String,
 }
 
 impl Broker {
@@ -69,14 +76,14 @@ impl Broker {
             return None;
         }
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let port = portpicker::pick_unused_port().expect("pick port");
-        let http_port = portpicker::pick_unused_port().expect("pick http port");
-        let child = spawn_server(dir.path(), port, http_port, auth).await;
+        let (child, port, http_port, _server_name) = spawn_server(dir.path(), auth, None).await;
         Some(Self {
             child,
             _dir: dir,
             port,
             http_port,
+            #[cfg(unix)]
+            server_name: _server_name,
         })
     }
 
@@ -87,7 +94,10 @@ impl Broker {
     #[cfg(unix)]
     async fn restart(&mut self, auth: &str) {
         self.child.kill().await.expect("stop broker");
-        self.child = spawn_server(self._dir.path(), self.port, self.http_port, auth).await;
+        let (child, _, _, server_name) =
+            spawn_server(self._dir.path(), auth, Some((self.port, self.http_port))).await;
+        self.child = child;
+        self.server_name = server_name;
     }
 
     fn url(&self) -> String {
@@ -97,7 +107,13 @@ impl Broker {
     /// Rewrite the authorization block and signal a config reload.
     #[cfg(unix)]
     fn reload(&self, auth: &str) {
-        write_config(self._dir.path(), self.port, self.http_port, auth);
+        write_config(
+            self._dir.path(),
+            self.port,
+            self.http_port,
+            &self.server_name,
+            auth,
+        );
         let pid = self.child.id().expect("nats-server pid").to_string();
         let status = std::process::Command::new("kill")
             .args(["-HUP", &pid])
@@ -131,36 +147,160 @@ impl Broker {
     }
 }
 
+/// Port probes do not reserve their sockets. Retry initial starts on fresh,
+/// distinct ports; restarts must preserve the live client's reconnect address.
 async fn spawn_server(
     dir: &std::path::Path,
-    port: u16,
-    http_port: u16,
     auth: &str,
-) -> tokio::process::Child {
-    write_config(dir, port, http_port, auth);
-    let child = tokio::process::Command::new("nats-server")
-        .arg("-c")
-        .arg(dir.join("nats.conf"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn nats-server");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while tokio::net::TcpStream::connect(("127.0.0.1", http_port))
-        .await
-        .is_err()
-    {
-        assert!(Instant::now() < deadline, "nats-server did not come up");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    fixed_ports: Option<(u16, u16)>,
+) -> (tokio::process::Child, u16, u16, String) {
+    let mut failures = Vec::new();
+    for attempt in 1..=STARTUP_ATTEMPTS {
+        let (port, http_port) = fixed_ports.unwrap_or_else(|| {
+            let port = portpicker::pick_unused_port().expect("pick port");
+            let http_port = loop {
+                let candidate = portpicker::pick_unused_port().expect("pick http port");
+                if candidate != port {
+                    break candidate;
+                }
+            };
+            (port, http_port)
+        });
+        // Unique files also retain logs from before a restart. A shared file
+        // handle captures both streams without a pipe that could fill up.
+        let log = tempfile::Builder::new()
+            .prefix(&format!("nats-start-{attempt}-"))
+            .suffix(".log")
+            .tempfile_in(dir)
+            .expect("create nats-server log");
+        let (output, log_path) = log.keep().expect("retain nats-server log");
+        let server_name = log_path
+            .file_name()
+            .expect("log filename")
+            .to_string_lossy()
+            .into_owned();
+        write_config(dir, port, http_port, &server_name, auth);
+        let started = Instant::now();
+        let spawned = tokio::process::Command::new("nats-server")
+            .arg("-c")
+            .arg(dir.join("nats.conf"))
+            .stdout(output.try_clone().expect("clone nats-server log"))
+            .stderr(output)
+            .kill_on_drop(true)
+            .spawn();
+        let reason = match spawned {
+            Ok(mut child) => {
+                match wait_for_start(&mut child, port, http_port, &server_name).await {
+                    Ok(()) => return (child, port, http_port, server_name),
+                    Err(reason) => {
+                        // kill() waits for exit too. Reap before releasing ports or
+                        // reading the log, including when startup already exited.
+                        let stopped = child.kill().await;
+                        let status = child.wait().await;
+                        format!("{reason}; stop={stopped:?}; exit={status:?}")
+                    }
+                }
+            }
+            Err(error) => format!("spawn failed: {error}"),
+        };
+        let failure = format!(
+            "attempt {attempt}: client port={port}, monitor port={http_port}, elapsed={:?}: {reason}\nlog tail:\n{}",
+            started.elapsed(),
+            log_tail(&log_path),
+        );
+        eprintln!("{failure}");
+        failures.push(failure);
+        if attempt < STARTUP_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
-    child
+    panic!(
+        "nats-server did not come up after {STARTUP_ATTEMPTS} attempts:\n{}",
+        failures.join("\n\n")
+    );
 }
 
-fn write_config(dir: &std::path::Path, port: u16, http_port: u16, auth: &str) {
+async fn wait_for_start(
+    child: &mut tokio::process::Child,
+    port: u16,
+    http_port: u16,
+    server_name: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!("nats-server exited before readiness: {status}"));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(format!("could not check nats-server status: {error}")),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("startup timed out after {STARTUP_TIMEOUT:?}"));
+        }
+        // A TCP accept alone could belong to another test's broker. /varz
+        // identifies this attempt's unique server name (it has no PID field),
+        // and the whole request (including reads) is bounded so a foreign or
+        // stalled listener cannot hang startup.
+        if let Ok(Some(())) = tokio::time::timeout(
+            remaining.min(Duration::from_millis(250)),
+            server_ready(port, http_port, server_name),
+        )
+        .await
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(50)),
+        )
+        .await;
+    }
+}
+
+async fn server_ready(port: u16, http_port: u16, server_name: &str) -> Option<()> {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", http_port))
+        .await
+        .ok()?;
+    stream.write_all(b"GET /varz HTTP/1.0\r\n\r\n").await.ok()?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).await.ok()?;
+    let body: serde_json::Value = serde_json::from_str(raw.split_once("\r\n\r\n")?.1).ok()?;
+    if body["server_name"].as_str()? != server_name {
+        return None;
+    }
+    // Monitoring can start before the client listener. Require its INFO too,
+    // so a client-port collision is retried instead of escaping the harness.
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .ok()?;
+    let mut reader = tokio::io::BufReader::new(stream.take(8192));
+    let mut info = String::new();
+    reader.read_line(&mut info).await.ok()?;
+    let info: serde_json::Value = serde_json::from_str(info.strip_prefix("INFO ")?).ok()?;
+    (info["server_name"].as_str()? == server_name).then_some(())
+}
+
+fn log_tail(path: &std::path::Path) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes);
+            let mut lines: Vec<_> = text.lines().rev().take(40).collect();
+            lines.reverse();
+            lines.join("\n")
+        }
+        Err(error) => format!("could not read nats-server log: {error}"),
+    }
+}
+
+fn write_config(dir: &std::path::Path, port: u16, http_port: u16, server_name: &str, auth: &str) {
     std::fs::write(
         dir.join("nats.conf"),
-        format!("host: 127.0.0.1\nport: {port}\nhttp: 127.0.0.1:{http_port}\n{auth}\n"),
+        format!(
+            "host: 127.0.0.1\nport: {port}\nhttp: 127.0.0.1:{http_port}\nserver_name: \"{server_name}\"\n{auth}\n"
+        ),
     )
     .expect("write nats.conf");
 }
