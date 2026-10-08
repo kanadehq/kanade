@@ -64,6 +64,9 @@ struct Broker {
     _dir: tempfile::TempDir,
     port: u16,
     http_port: u16,
+    /// Kept so `reload` rewrites the same `server_name`; nats-server rejects
+    /// a reload that changes it.
+    server_name: String,
 }
 
 impl Broker {
@@ -72,12 +75,13 @@ impl Broker {
             return None;
         }
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let (child, port, http_port) = spawn_server(dir.path(), auth, None).await;
+        let (child, port, http_port, server_name) = spawn_server(dir.path(), auth, None).await;
         Some(Self {
             child,
             _dir: dir,
             port,
             http_port,
+            server_name,
         })
     }
 
@@ -88,8 +92,10 @@ impl Broker {
     #[cfg(unix)]
     async fn restart(&mut self, auth: &str) {
         self.child.kill().await.expect("stop broker");
-        (self.child, _, _) =
+        let (child, _, _, server_name) =
             spawn_server(self._dir.path(), auth, Some((self.port, self.http_port))).await;
+        self.child = child;
+        self.server_name = server_name;
     }
 
     fn url(&self) -> String {
@@ -99,7 +105,13 @@ impl Broker {
     /// Rewrite the authorization block and signal a config reload.
     #[cfg(unix)]
     fn reload(&self, auth: &str) {
-        write_config(self._dir.path(), self.port, self.http_port, auth);
+        write_config(
+            self._dir.path(),
+            self.port,
+            self.http_port,
+            &self.server_name,
+            auth,
+        );
         let pid = self.child.id().expect("nats-server pid").to_string();
         let status = std::process::Command::new("kill")
             .args(["-HUP", &pid])
@@ -139,7 +151,7 @@ async fn spawn_server(
     dir: &std::path::Path,
     auth: &str,
     fixed_ports: Option<(u16, u16)>,
-) -> (tokio::process::Child, u16, u16) {
+) -> (tokio::process::Child, u16, u16, String) {
     let mut failures = Vec::new();
     for attempt in 1..=STARTUP_ATTEMPTS {
         let (port, http_port) = fixed_ports.unwrap_or_else(|| {
@@ -152,7 +164,6 @@ async fn spawn_server(
             };
             (port, http_port)
         });
-        write_config(dir, port, http_port, auth);
         // Unique files also retain logs from before a restart. A shared file
         // handle captures both streams without a pipe that could fill up.
         let log = tempfile::Builder::new()
@@ -164,13 +175,13 @@ async fn spawn_server(
         let server_name = log_path
             .file_name()
             .expect("log filename")
-            .to_string_lossy();
+            .to_string_lossy()
+            .into_owned();
+        write_config(dir, port, http_port, &server_name, auth);
         let started = Instant::now();
         let spawned = tokio::process::Command::new("nats-server")
             .arg("-c")
             .arg(dir.join("nats.conf"))
-            .arg("--name")
-            .arg(server_name.as_ref())
             .stdout(output.try_clone().expect("clone nats-server log"))
             .stderr(output)
             .kill_on_drop(true)
@@ -178,7 +189,7 @@ async fn spawn_server(
         let reason = match spawned {
             Ok(mut child) => {
                 match wait_for_start(&mut child, port, http_port, &server_name).await {
-                    Ok(()) => return (child, port, http_port),
+                    Ok(()) => return (child, port, http_port, server_name),
                     Err(reason) => {
                         // kill() waits for exit too. Reap before releasing ports or
                         // reading the log, including when startup already exited.
@@ -282,10 +293,12 @@ fn log_tail(path: &std::path::Path) -> String {
     }
 }
 
-fn write_config(dir: &std::path::Path, port: u16, http_port: u16, auth: &str) {
+fn write_config(dir: &std::path::Path, port: u16, http_port: u16, server_name: &str, auth: &str) {
     std::fs::write(
         dir.join("nats.conf"),
-        format!("host: 127.0.0.1\nport: {port}\nhttp: 127.0.0.1:{http_port}\n{auth}\n"),
+        format!(
+            "host: 127.0.0.1\nport: {port}\nhttp: 127.0.0.1:{http_port}\nserver_name: \"{server_name}\"\n{auth}\n"
+        ),
     )
     .expect("write nats.conf");
 }
