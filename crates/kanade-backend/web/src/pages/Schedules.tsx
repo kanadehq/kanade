@@ -14,7 +14,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { Fragment, useState } from 'react';
+import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
@@ -182,6 +182,25 @@ export function summariseWhen(when: WhenSpec): string {
   if ('on' in when) return `on [${when.on.join(',')}]`;
   const c = when.calendar;
   return c.days?.length ? `at ${c.at} [${c.days.join(',')}]` : `at ${c.at}`;
+}
+
+/** Sort key for the When column. `calendar.at` is accepted by the backend
+ *  as `HH:MM` (daily) or `YYYY-MM-DD HH:MM`, `YYYY-MM-DDTHH:MM`,
+ *  `YYYY/MM/DD HH:MM` (one-shot), so those are normalised to one
+ *  zero-padded form: daily times first by clock, then one-shots by date.
+ *  Anything else keeps its summary text and sorts after. Exported for
+ *  tests. */
+export function whenSortKey(when: WhenSpec): string {
+  if ('calendar' in when) {
+    const at = when.calendar.at.trim();
+    const p2 = (n: string) => n.padStart(2, '0');
+    const dt = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})$/.exec(at);
+    if (dt) return `1 ${dt[1]}-${p2(dt[2])}-${p2(dt[3])} ${p2(dt[4])}:${dt[5]}`;
+    const tm = /^(\d{1,2}):(\d{2})$/.exec(at);
+    if (tm) return `0 ${p2(tm[1])}:${tm[2]}`;
+    return `2 ${at}`;
+  }
+  return `3 ${summariseWhen(when)}`;
 }
 
 function summariseActive(active: ScheduleRow['active']): string | null {
@@ -465,7 +484,7 @@ export function Schedules() {
         {/* `w-full max-w-0` — this cell soaks up the leftover
             width and truncates, same as the Jobs id+description
             cell. */}
-        <TableCell label={t('columns.schedule')} className="w-full max-w-0">
+        <TableCell label={t('columns.schedule')} className="w-full max-w-0" sortValue={s.id}>
           <div className="flex flex-col gap-0.5">
             <code className="text-xs font-medium">{s.id}</code>
             <span className="block truncate text-xs text-muted" title={s.job_id}>
@@ -529,11 +548,18 @@ export function Schedules() {
             )}
           </div>
         </TableCell>
-        <TableCell label={t('columns.when')}><code className="text-xs whitespace-nowrap">{summariseWhen(s.when)}</code></TableCell>
+        <TableCell label={t('columns.when')} sortValue={whenSortKey(s.when)}><code className="text-xs whitespace-nowrap">{summariseWhen(s.when)}</code></TableCell>
         <TableCell label={t('columns.target')} className="text-xs max-w-48 truncate" title={summariseTarget(s.target, t('target.all'))}>
           {summariseTarget(s.target, t('target.all'))}
         </TableCell>
-        <TableCell label={t('columns.coverage')}>
+        <TableCell
+          label={t('columns.coverage')}
+          // Fraction done; unknown / empty rollouts are blank so they sort last.
+          sortValue={(() => {
+            const c = coverageById.get(s.id);
+            return c && c.total > 0 ? c.ok / c.total : '';
+          })()}
+        >
           {(() => {
             const c = coverageById.get(s.id);
             return c ? <CoverageBar {...c} /> : <span className="text-muted text-xs">…</span>;
@@ -742,15 +768,15 @@ export function Schedules() {
           </div>
         )}
       </div>
-      <Table resizeKey="schedules" picker>
+      <Table resizeKey="schedules" picker sortFilter sortFilterGroups>
         <TableHeader>
           <TableRow>
             <TableHead>{t('columns.schedule')}</TableHead>
             <TableHead>{t('columns.when')}</TableHead>
             <TableHead>{t('columns.target')}</TableHead>
-            <TableHead>{t('columns.coverage')}</TableHead>
+            <TableHead filterable={false}>{t('columns.coverage')}</TableHead>
             <TableHead>{t('columns.enabled')}</TableHead>
-            <TableHead>{t('columns.actions')}</TableHead>
+            <TableHead sortable={false} filterable={false}>{t('columns.actions')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -761,14 +787,16 @@ export function Schedules() {
               </TableCell>
             </TableRow>
           ) : (
-            groups.map((g) => {
+            groups.flatMap((g) => {
               const isCollapsed = collapsed.has(g.key);
-              return (
-                <Fragment key={g.key}>
-                  {/* Group header — clicking (or Enter/Space when
+              // Flat (header row, then data rows) rather than a Fragment:
+              // the table's sort/filter only sees direct row children.
+              return [
+                  /* Group header — clicking (or Enter/Space when
                       focused) toggles collapse for the whole prefix.
-                      colSpan covers all six columns. */}
+                      colSpan covers all six columns. */
                   <TableRow
+                    key={`group:${g.key}`}
                     tabIndex={0}
                     role="button"
                     aria-expanded={!isCollapsed}
@@ -795,10 +823,9 @@ export function Schedules() {
                         </Badge>
                       </div>
                     </TableCell>
-                  </TableRow>
-                  {!isCollapsed && g.rows.map((s) => renderScheduleRow(s))}
-                </Fragment>
-              );
+                  </TableRow>,
+                  ...(isCollapsed ? [] : g.rows.map((s) => renderScheduleRow(s))),
+              ];
             })
           )}
         </TableBody>

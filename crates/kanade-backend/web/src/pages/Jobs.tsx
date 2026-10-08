@@ -18,7 +18,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { Fragment, useState } from 'react';
+import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -458,7 +458,7 @@ export function Jobs() {
             description to fit (same trick the old 11-column
             layout used, now on the merged id+description
             cell). */}
-        <TableCell label={t('columns.job')} className="w-full max-w-0">
+        <TableCell label={t('columns.job')} className="w-full max-w-0" sortValue={j.id}>
           <div className="flex flex-col gap-0.5">
             <code className="text-xs font-medium">{j.id}</code>
             <span
@@ -526,7 +526,9 @@ export function Jobs() {
           </div>
         </TableCell>
         <TableCell label={t('columns.status')}>{statusBadge(j.id)}</TableCell>
-        <TableCell label={t('columns.live')}>{liveChips(j)}</TableCell>
+        <TableCell label={t('columns.live')} sortValue={j.live.running + j.live.pending}>
+          {liveChips(j)}
+        </TableCell>
         {/* stopPropagation so clicking an action (or the dead
             space between buttons) doesn't also open the
             drawer underneath the confirm dialog. */}
@@ -744,13 +746,13 @@ export function Jobs() {
           </div>
         )}
       </div>
-      <Table>
+      <Table resizeKey="jobs" sortFilter sortFilterGroups>
         <TableHeader>
           <TableRow>
-            <TableHead>{t('columns.job')}</TableHead>
-            <TableHead>{t('columns.status')}</TableHead>
-            <TableHead>{t('columns.live')}</TableHead>
-            <TableHead>{t('columns.actions')}</TableHead>
+            <TableHead colId="job">{t('columns.job')}</TableHead>
+            <TableHead colId="status">{t('columns.status')}</TableHead>
+            <TableHead colId="live" filterable={false}>{t('columns.live')}</TableHead>
+            <TableHead colId="actions" sortable={false} filterable={false}>{t('columns.actions')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -761,14 +763,16 @@ export function Jobs() {
               </TableCell>
             </TableRow>
           ) : (
-            groups.map((g) => {
+            groups.flatMap((g) => {
               const isCollapsed = collapsed.has(g.key);
-              return (
-                <Fragment key={g.key}>
-                  {/* Group header — clicking (or Enter/Space when
+              // Flat (header row, then data rows) rather than a Fragment:
+              // the table's sort/filter only sees direct row children.
+              return [
+                  /* Group header — clicking (or Enter/Space when
                       focused) toggles collapse for the whole prefix.
-                      colSpan covers all four columns. */}
+                      colSpan covers all four columns. */
                   <TableRow
+                    key={`group:${g.key}`}
                     tabIndex={0}
                     role="button"
                     aria-expanded={!isCollapsed}
@@ -795,10 +799,9 @@ export function Jobs() {
                         </Badge>
                       </div>
                     </TableCell>
-                  </TableRow>
-                  {!isCollapsed && g.rows.map((j) => renderJobRow(j))}
-                </Fragment>
-              );
+                  </TableRow>,
+                  ...(isCollapsed ? [] : g.rows.map((j) => renderJobRow(j))),
+              ];
             })
           )}
         </TableBody>

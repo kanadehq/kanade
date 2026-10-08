@@ -147,6 +147,9 @@ export interface ProcessInput {
   flags: Record<string, ColumnFlags>;
   language: string;
   empty: () => ReactNode;
+  /** Sort within the runs of data rows between non-data rows (group
+   *  headers) instead of across the whole body. */
+  groups?: boolean;
 }
 
 export interface ProcessResult {
@@ -201,27 +204,44 @@ export function processSortFilter(input: ProcessInput): ProcessResult {
   const kept = data.filter((u) => matches(u));
 
   const sortAt = input.sort && flags[input.sort.id]?.sortable !== false ? ids.indexOf(input.sort.id) : -1;
-  if (input.sort && sortAt >= 0) {
+  const sortRun = (run: Unit[]) => {
+    if (!input.sort || sortAt < 0) return;
     const sign = input.sort.dir === 'asc' ? 1 : -1;
     const blank = (v: string | number) => v === '';
     // Array#sort is stable, so ties — and the "no sort" order — are the
     // order the page gave. Blanks go last in both directions.
-    kept.sort((a, b) => {
+    run.sort((a, b) => {
       const x = a.cells![sortAt].sort;
       const y = b.cells![sortAt].sort;
       if (blank(x) || blank(y)) return blank(x) === blank(y) ? 0 : blank(x) ? 1 : -1;
       if (typeof x === 'number' && typeof y === 'number') return sign * (x - y);
       return sign * collator.compare(String(x), String(y));
     });
-  }
+  };
 
   // Sorted rows fill the data rows' own slots, in order; any other node
-  // (empty state, group header, ...) stays exactly where it was.
-  let next = 0;
+  // (empty state, group header, ...) stays exactly where it was. With
+  // `groups`, such a node also ends the current run, so rows are only
+  // ordered among the rows of their own group.
   const out: ReactNode[] = [];
+  const runs: Unit[][] = [[]];
   for (const u of units) {
-    if (!u.cells) out.push(u.node);
-    else if (next < kept.length) out.push(kept[next++].node);
+    if (u.cells) runs[runs.length - 1].push(u);
+    else if (input.groups) runs.push([]);
+  }
+  const sortedRuns = input.groups
+    ? runs.map((r) => r.filter((u) => matches(u)))
+    : [kept];
+  sortedRuns.forEach(sortRun);
+  const cursor = sortedRuns.map(() => 0);
+  let at = 0;
+  for (const u of units) {
+    if (!u.cells) {
+      out.push(u.node);
+      if (input.groups) at++;
+    } else if (cursor[at] < sortedRuns[at].length) {
+      out.push(sortedRuns[at][cursor[at]++].node);
+    }
   }
   if (data.length > 0 && kept.length === 0) out.push(input.empty());
 
