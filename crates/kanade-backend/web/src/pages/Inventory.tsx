@@ -18,6 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { apiFetch, formatError } from '@/lib/api';
 import { downloadCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
+import { fleetSortValue, isoSortValue } from '@/lib/inventorySort';
 import { cn, fmtAccount, fmtIsoLocal } from '@/lib/utils';
 
 type DisplayField = {
@@ -469,6 +470,102 @@ function FleetOverview({
   );
 }
 
+/// The fleet grid itself, split out of `FleetProbeTable` so a component test
+/// can mount the real table without the fetch / paging around it. The
+/// server pages and `q`-filters; sort and filter here act on the page shown.
+export function FleetTable({
+  columns,
+  rows,
+  pickPc,
+}: {
+  columns: DisplayField[];
+  rows: InventoryRow[];
+  pickPc: (pc: string) => void;
+}) {
+  const { t } = useTranslation('inventory');
+  // `—` is fmtAccount's "no sign-in recorded"; it sorts last, the rest by text.
+  const account = (r: InventoryRow) => fmtAccount(r.last_logon_display_name, r.last_logon_user);
+  return (
+    <Table
+      resizeKey="inventory.fleet"
+      picker
+      metaColumns
+      sortFilter="page"
+    >
+      <TableHeader>
+        <TableRow>
+          <TableHead colId="pcId">{t('fleet.columns.pcId')}</TableHead>
+          <TableHead colId="lastLogon">{t('fleet.columns.lastLogon')}</TableHead>
+          {/* `colId` keyed by the manifest field, not by position:
+              the column set here is manifest-driven, so a stored
+              width has to follow its field across manifest switches
+              rather than land on whatever column now sits third. */}
+          {columns.map((c) => (
+            <TableHead key={c.field} colId={`f:${c.field}`}>
+              {c.label}
+            </TableHead>
+          ))}
+          <TableHead colId="collected" className="text-muted text-xs">
+            {t('fleet.columns.collected')}
+          </TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((r) => (
+          <TableRow
+            key={r.pc_id}
+            pcId={r.pc_id}
+            className="cursor-pointer hover:bg-muted/5"
+            onClick={() => pickPc(r.pc_id)}
+          >
+            <TableCell label={t('fleet.columns.pcId')}><code className="text-xs">{r.pc_id}</code></TableCell>
+            <TableCell
+              label={t('fleet.columns.lastLogon')}
+              sortValue={account(r) === '—' ? '' : undefined}
+              className="text-xs"
+            >
+              {account(r)}
+            </TableCell>
+            {columns.map((c) => {
+              // Gemini #84 medium fix: extract once. `Array.isArray`
+              // acts as a type guard so the inner accesses don't
+              // need the `as unknown[]` cast repeated.
+              const val = r.facts[c.field];
+              return (
+                <TableCell key={c.field} label={c.label} sortValue={fleetSortValue(val, c.type)}>
+                  {/* v0.30 / #39: fleet summary cells must
+                      stay compact (one row per PC, many
+                      columns). For `type: table` collapse to
+                      a row count instead of expanding the
+                      nested table inline — operator drills
+                      into the PC detail view to see the full
+                      sub-table. */}
+                  {c.type === 'table' ? (
+                    <code className="text-xs">
+                      {Array.isArray(val)
+                        ? t('fleet.nestedRowCount', { count: val.length })
+                        : '—'}
+                    </code>
+                  ) : (
+                    <code className="text-xs">{renderCell(val, c.type)}</code>
+                  )}
+                </TableCell>
+              );
+            })}
+            <TableCell
+              label={t('fleet.columns.collected')}
+              sortValue={isoSortValue(r.collected_at)}
+              className="text-muted text-xs"
+            >
+              {fmtIsoLocal(r.collected_at)}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
 function FleetProbeTable({
   job,
   pickPc,
@@ -664,74 +761,7 @@ function FleetProbeTable({
             </div>
           )
         ) : (
-          <Table
-            resizeKey="inventory.fleet"
-            picker
-            metaColumns
-          >
-            <TableHeader>
-              <TableRow>
-                <TableHead colId="pcId">{t('fleet.columns.pcId')}</TableHead>
-                <TableHead colId="lastLogon">{t('fleet.columns.lastLogon')}</TableHead>
-                {/* `colId` keyed by the manifest field, not by position:
-                    the column set here is manifest-driven, so a stored
-                    width has to follow its field across manifest switches
-                    rather than land on whatever column now sits third. */}
-                {columns.map((c) => (
-                  <TableHead key={c.field} colId={`f:${c.field}`}>
-                    {c.label}
-                  </TableHead>
-                ))}
-                <TableHead colId="collected" className="text-muted text-xs">
-                  {t('fleet.columns.collected')}
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {(byJob.data?.rows ?? []).map((r) => (
-                <TableRow
-                  key={r.pc_id}
-                  pcId={r.pc_id}
-                  className="cursor-pointer hover:bg-muted/5"
-                  onClick={() => pickPc(r.pc_id)}
-                >
-                  <TableCell label={t('fleet.columns.pcId')}><code className="text-xs">{r.pc_id}</code></TableCell>
-                  <TableCell label={t('fleet.columns.lastLogon')} className="text-xs">
-                    {fmtAccount(r.last_logon_display_name, r.last_logon_user)}
-                  </TableCell>
-                  {columns.map((c) => {
-                    // Gemini #84 medium fix: extract once. `Array.isArray`
-                    // acts as a type guard so the inner accesses don't
-                    // need the `as unknown[]` cast repeated.
-                    const val = r.facts[c.field];
-                    return (
-                      <TableCell key={c.field} label={c.label}>
-                        {/* v0.30 / #39: fleet summary cells must
-                            stay compact (one row per PC, many
-                            columns). For `type: table` collapse to
-                            a row count instead of expanding the
-                            nested table inline — operator drills
-                            into the PC detail view to see the full
-                            sub-table. */}
-                        {c.type === 'table' ? (
-                          <code className="text-xs">
-                            {Array.isArray(val)
-                              ? t('fleet.nestedRowCount', { count: val.length })
-                              : '—'}
-                          </code>
-                        ) : (
-                          <code className="text-xs">{renderCell(val, c.type)}</code>
-                        )}
-                      </TableCell>
-                    );
-                  })}
-                  <TableCell label={t('fleet.columns.collected')} className="text-muted text-xs">
-                    {fmtIsoLocal(r.collected_at)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <FleetTable columns={columns} rows={byJob.data?.rows ?? []} pickPc={pickPc} />
         )}
         {/* offset > 0 keeps the controls visible when the fleet
             shrinks under the current page, so "prev" remains the
