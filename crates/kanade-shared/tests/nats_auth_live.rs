@@ -66,6 +66,7 @@ struct Broker {
     http_port: u16,
     /// Kept so `reload` rewrites the same `server_name`; nats-server rejects
     /// a reload that changes it.
+    #[cfg(unix)]
     server_name: String,
 }
 
@@ -75,13 +76,14 @@ impl Broker {
             return None;
         }
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let (child, port, http_port, server_name) = spawn_server(dir.path(), auth, None).await;
+        let (child, port, http_port, _server_name) = spawn_server(dir.path(), auth, None).await;
         Some(Self {
             child,
             _dir: dir,
             port,
             http_port,
-            server_name,
+            #[cfg(unix)]
+            server_name: _server_name,
         })
     }
 
