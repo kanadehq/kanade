@@ -224,6 +224,9 @@ $roleSpec = @{
         # we always Invoke-WebRequest from nats-io/nats-server.
         ExeName     = 'nats-server.exe'
         ConfigName  = 'nats-server.conf'
+        # Staged beside the token config so `deploy-nats.ps1 -UseNatsUsers`
+        # has its template on the target; nothing installs it by default.
+        ExtraConfig = 'nats-server.users.conf'
         DeployScript = 'deploy-nats.ps1'
         ServiceName = 'KanadeNats'
         External    = $true
@@ -436,6 +439,9 @@ Original error: $($_.Exception.Message)
     if (-not $spec.BinaryOnly) {
         Copy-Item $cfgSrc    (Join-Path $stage $cfgName)    -Force
         Copy-Item $deploySrc (Join-Path $stage $deployPs)   -Force
+        if ($spec.ExtraConfig) {
+            Copy-Item (Join-Path $configsDir $spec.ExtraConfig) (Join-Path $stage $spec.ExtraConfig) -Force
+        }
     }
 
     Write-Host "Staged $stage"

@@ -18,6 +18,39 @@
 # alone; new values replace both halves. Nothing here switches the broker
 # from the token to users.
 #
+# Optional, explicit: run the broker on the three role users (agent, backend,
+# breakglass) instead of the single shared token. Nothing selects this unless
+# asked, and what was asked is remembered:
+#
+#   sudo KANADE_DOMAIN=kanade.example.com KANADE_NATS_AUTH_MODE=users \
+#        KANADE_NATS_AGENT_PASSWORD_HASH='$2a$...' \
+#        KANADE_NATS_BACKEND_PASSWORD_HASH='$2a$...' \
+#        KANADE_NATS_BREAKGLASS_PASSWORD_HASH='$2a$...' \
+#        ./setup.sh
+#
+# KANADE_NATS_AUTH_MODE is `token` (the default, today's configuration) or
+# `users`. The mode is recorded in /etc/kanade/nats-auth-mode (root only), so
+# a later plain re-run keeps installing the recorded configuration instead of
+# silently reverting it; setting the variable again changes it, and
+# KANADE_NATS_AUTH_MODE=token is the revert. `users` installs the token
+# config with its `authorization` block replaced by an include of
+# /etc/kanade/nats-server.users.conf (the shipped template). The three values
+# are bcrypt hashes (scripts/ops/nats-password-hash.sh mints one), never
+# plaintext: they go into nats.env, the broker's own env file, mode 0600,
+# next to the token and nowhere else. Once recorded, a re-run reuses the
+# hashes already in nats.env, so they need not be supplied again. Anything
+# that is not a `$2a$` bcrypt hash is refused before a file changes.
+#
+# WARNING: the switch is atomic. A config cannot carry both a token and
+# users, and a token is rejected once users exist, so every agent, backend
+# and CLI host must ALREADY hold a user pair before the broker flips (see the
+# readiness procedure in the NATS operations chapter of the book).
+#
+# Restart behaviour is unchanged: this script enables the unit with
+# `enable --now`, which does not restart a broker that is already running.
+# After a mode change the new configuration takes effect only when you run
+# `systemctl restart nats-server` yourself; the end of the run says so.
+#
 # This mirrors the Windows model: CI/build produces the artifacts, the
 # target only installs them — it never builds or fetches.
 #
@@ -60,6 +93,44 @@ if [ -n "$nats_user" ] || [ -n "$nats_pass" ]; then
 fi
 # <<< nats-user
 
+# >>> nats-auth-input
+# Which broker configuration to install. Precedence: the variable, then what
+# an earlier run recorded, then `token`. All of it is validated here, before
+# any file changes.
+auth_mode_file=/etc/kanade/nats-auth-mode
+recorded_mode=""
+if [ -f "$auth_mode_file" ]; then
+	recorded_mode="$(head -n 1 "$auth_mode_file")"
+fi
+auth_mode_set="${KANADE_NATS_AUTH_MODE:-}"
+auth_mode="${auth_mode_set:-${recorded_mode:-token}}"
+case "$auth_mode" in
+	users|token) ;;
+	*) echo "KANADE_NATS_AUTH_MODE / ${auth_mode_file} must be 'users' or 'token' — nothing was changed" >&2; exit 1 ;;
+esac
+# The format nats-server treats as a hash is `$2a$` only; `$2b$` / `$2y$` would
+# be read as a plaintext password equal to the hash text. Quotes, backslashes
+# and line breaks are outside the character set, so nothing needs escaping.
+hash_re='^\$2a\$[0-9]{2}\$[./A-Za-z0-9]{53}$'
+nats_env_hash() { # ROLE: the hash already in nats.env, if any
+	[ -f /etc/kanade/nats.env ] || return 0
+	sed -n "s/^KANADE_NATS_$1_PASSWORD_HASH='\"\(.*\)\"'\$/\1/p" /etc/kanade/nats.env | head -n 1
+}
+if [ "$auth_mode" = users ]; then
+	for role in AGENT BACKEND BREAKGLASS; do
+		var="KANADE_NATS_${role}_PASSWORD_HASH"
+		val="${!var:-}"
+		if [ -n "$val" ]; then
+			[[ "$val" =~ $hash_re ]] || { echo "$var is not a bcrypt \$2a\$ hash (mint one with scripts/ops/nats-password-hash.sh; never pass the plaintext) — nothing was changed" >&2; exit 1; }
+		else
+			val="$(nats_env_hash "$role")"
+			[[ "$val" =~ $hash_re ]] || { echo "users mode needs $var (no usable hash is recorded in /etc/kanade/nats.env yet) — nothing was changed" >&2; exit 1; }
+		fi
+		printf -v "nats_hash_$role" '%s' "$val"
+	done
+fi
+# <<< nats-auth-input
+
 # The bundle root is this script's directory. Everything is installed from
 # here; nothing is downloaded.
 bundle="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,6 +141,11 @@ for f in bin/kanade-backend bin/nats-server bin/caddy \
 	systemd/kanade-backend.service systemd/nats-server.service systemd/caddy.service; do
 	[ -e "$bundle/$f" ] || { echo "bundle is missing $f — rebuild it with bundle.sh" >&2; exit 1; }
 done
+
+if [ "$auth_mode" = users ] && [ ! -e "$bundle/etc/nats-server.users.conf" ]; then
+	echo "bundle is missing etc/nats-server.users.conf — rebuild it with bundle.sh" >&2
+	exit 1
+fi
 
 echo "==> Creating users and directories"
 id -u kanade >/dev/null 2>&1 || useradd --system --home /var/lib/kanade --shell /usr/sbin/nologin kanade
@@ -148,7 +224,8 @@ fi
 # the new one appended in one rename, so both halves change together.
 # >>> backend-env
 env_stage=""
-trap '[ -z "$env_stage" ] || rm -f "$env_stage"' EXIT
+conf_stage=""
+trap '[ -z "$env_stage" ] || rm -f "$env_stage"; [ -z "$conf_stage" ] || rm -rf "$conf_stage"' EXIT
 if [ -n "$nats_user" ]; then
 	env_stage="$(umask 077; mktemp /etc/kanade/.kanade-env.XXXXXX)"
 	{
@@ -165,7 +242,80 @@ fi
 # <<< backend-env
 
 echo "==> NATS config + Caddyfile + systemd units (from bundle)"
-install -o kanade -g kanade -m 0644 "$bundle/etc/nats-server.conf" /etc/kanade/nats-server.conf
+# >>> nats-auth-install
+# The recorded mode, not the script, decides which broker config is installed,
+# so a re-run no longer puts the token configuration back over a users one.
+if [ "$auth_mode" = users ]; then
+	# The shipped token config with its `authorization` block (a line starting
+	# `authorization {` up to the first line that is a bare `}`) replaced by an
+	# include of the users template; every other line is copied unchanged.
+	conf_stage="$(umask 077; mktemp -d /etc/kanade/.nats-conf.XXXXXX)"
+	awk -v inc='include "nats-server.users.conf"' '
+		/^authorization[ \t]*\{/ { n++; if (n == 1) { skipping = 1 } }
+		skipping { if ($0 ~ /^\}[ \t\r]*$/) { print inc; skipping = 0 } next }
+		{ print }
+		END { if (n != 1 || skipping) exit 3 }
+	' "$bundle/etc/nats-server.conf" > "$conf_stage/nats-server.conf" \
+		|| { echo "etc/nats-server.conf has no single authorization block to replace — nothing was changed" >&2; exit 1; }
+	cp "$bundle/etc/nats-server.users.conf" "$conf_stage/nats-server.users.conf"
+	# The broker's env file: every line but the old hashes is kept (the token
+	# above all), the three hashes are appended, mode 0600, in one rename.
+	# Double quotes inside single quotes: nats-server parses an environment
+	# value as configuration, and an unquoted bcrypt string reads `$2a` as a
+	# variable reference.
+	env_stage="$(umask 077; mktemp /etc/kanade/.nats-env.XXXXXX)"
+	{
+		grep -Ev '^KANADE_NATS_(AGENT|BACKEND|BREAKGLASS)_PASSWORD_HASH=' /etc/kanade/nats.env 2>/dev/null || true
+		printf "KANADE_NATS_AGENT_PASSWORD_HASH='\"%s\"'\n" "$nats_hash_AGENT"
+		printf "KANADE_NATS_BACKEND_PASSWORD_HASH='\"%s\"'\n" "$nats_hash_BACKEND"
+		printf "KANADE_NATS_BREAKGLASS_PASSWORD_HASH='\"%s\"'\n" "$nats_hash_BREAKGLASS"
+	} > "$env_stage"
+	# Let the real broker parse the candidate before anything is replaced; its
+	# output is not shown because a parse error can quote the offending line.
+	(
+		export KANADE_NATS_AGENT_PASSWORD_HASH="\"$nats_hash_AGENT\""
+		export KANADE_NATS_BACKEND_PASSWORD_HASH="\"$nats_hash_BACKEND\""
+		export KANADE_NATS_BREAKGLASS_PASSWORD_HASH="\"$nats_hash_BREAKGLASS\""
+		/usr/local/bin/nats-server -t -c "$conf_stage/nats-server.conf"
+	) >/dev/null 2>&1 || { echo "nats-server rejected the users configuration — nothing was changed" >&2; exit 1; }
+	chown kanade:kanade "$env_stage"
+	chmod 0600 "$env_stage"
+	mv -f "$env_stage" /etc/kanade/nats.env
+	env_stage=""
+	install -o kanade -g kanade -m 0644 "$conf_stage/nats-server.users.conf" /etc/kanade/nats-server.users.conf
+	install -o kanade -g kanade -m 0644 "$conf_stage/nats-server.conf" /etc/kanade/nats-server.conf
+	rm -rf "$conf_stage"
+	conf_stage=""
+	echo "    users mode: /etc/kanade/nats-server.conf includes nats-server.users.conf; hashes in nats.env"
+else
+	install -o kanade -g kanade -m 0644 "$bundle/etc/nats-server.conf" /etc/kanade/nats-server.conf
+	# Only an explicit `token` or a recorded `users` earns the removal: an
+	# unrecorded file next to a default run was never this script's to delete.
+	if [ "$auth_mode_set" = token ] || [ "$recorded_mode" = users ]; then
+		rm -f /etc/kanade/nats-server.users.conf
+	fi
+	# Back to the token: the broker's env file loses the hashes and keeps the
+	# rest. Nothing is rewritten when there were none.
+	if grep -Eq '^KANADE_NATS_(AGENT|BACKEND|BREAKGLASS)_PASSWORD_HASH=' /etc/kanade/nats.env 2>/dev/null; then
+		env_stage="$(umask 077; mktemp /etc/kanade/.nats-env.XXXXXX)"
+		grep -Ev '^KANADE_NATS_(AGENT|BACKEND|BREAKGLASS)_PASSWORD_HASH=' /etc/kanade/nats.env > "$env_stage" || true
+		chown kanade:kanade "$env_stage"
+		chmod 0600 "$env_stage"
+		mv -f "$env_stage" /etc/kanade/nats.env
+		env_stage=""
+	fi
+fi
+# Record last: an interrupted run is simply repeated. Only written when the
+# mode was asked for, so a deployment that never opts in has no such file.
+auth_switched=0
+if [ -n "$auth_mode_set" ] && [ "$auth_mode_set" != "$recorded_mode" ]; then
+	printf '%s\n' "$auth_mode" | (umask 077; cat > "$auth_mode_file.tmp")
+	chown root:root "$auth_mode_file.tmp"
+	chmod 0600 "$auth_mode_file.tmp"
+	mv -f "$auth_mode_file.tmp" "$auth_mode_file"
+	[ "$auth_mode" = "${recorded_mode:-token}" ] || auth_switched=1
+fi
+# <<< nats-auth-install
 sed "s|__KANADE_DOMAIN__|${KANADE_DOMAIN}|g" "$bundle/etc/Caddyfile" > /etc/caddy/Caddyfile
 # The secret-generation block above set `umask 077`, which persists and would
 # make this redirect create the Caddyfile mode 0600 — caddy runs as an
@@ -190,3 +340,9 @@ echo "    systemctl status nats-server kanade-backend caddy"
 echo "    journalctl -u kanade-backend -f"
 echo "    curl https://${KANADE_DOMAIN}/      (SPA; log in as admin)"
 echo "    agents connect with: nats_url = wss://nats.${KANADE_DOMAIN}"
+if [ "$auth_switched" -eq 1 ]; then
+	echo
+	echo "    NATS auth mode is now '${auth_mode}'. A running broker keeps its old configuration"
+	echo "    until you restart it:  sudo systemctl restart nats-server"
+	echo "    (every client must already hold a matching credential — the switch is atomic)"
+fi

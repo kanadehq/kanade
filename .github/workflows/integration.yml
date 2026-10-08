@@ -183,3 +183,12 @@ jobs:
             status=1
           fi
           exit "$status"
+
+      - name: Broker auth-mode deploy scripts (Linux setup.sh, hash helper)
+        if: always() && runner.os != 'Windows'
+        run: bash deploy/test-nats-auth-mode.sh
+
+      - name: Broker auth-mode deploy script (deploy-nats.ps1 users config)
+        if: always()
+        shell: pwsh
+        run: ./scripts/deploy/nats-users.Tests.ps1

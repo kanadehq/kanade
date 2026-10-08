@@ -6,7 +6,9 @@
 //! dropped, a request times out — so the only trustworthy evidence that the
 //! block is right is to run every role's real flows against a real
 //! `nats-server` started with it. This file does that, and is the gate for the
-//! later broker switch. It changes no production configuration.
+//! broker switch the deployment scripts offer as an explicit opt-in. The
+//! broker gets the file byte for byte, with bcrypt hashes of throwaway
+//! passwords in the environment exactly as `setup.sh` supplies them.
 //!
 //! Ignored by default (needs `nats-server` and the three binaries):
 //!
@@ -207,7 +209,18 @@ impl Role {
     }
 
     fn env_name(self) -> String {
-        format!("KANADE_CONFORMANCE_{}_PASSWORD", self.user().to_uppercase())
+        format!("KANADE_NATS_{}_PASSWORD_HASH", self.user().to_uppercase())
+    }
+
+    /// bcrypt (cost 4, `$2a$`) of `password()`, as `nats server passwd` would
+    /// mint it. Fixed rather than computed so the test needs no hashing
+    /// dependency; the plaintext above is throwaway.
+    fn password_hash(self) -> &'static str {
+        match self {
+            Role::Agent => "$2a$04$hp8sSRHivlHlui1HEcNGee1fLUvKMbC9H3KPoVYuIltSr90aCzoOi",
+            Role::Backend => "$2a$04$tPooi64/C8SMMIZ9Dr0i9eAduFcR9jOZ/Wl.upFfo4KdDFRqVLIzO",
+            Role::Breakglass => "$2a$04$JM0AX5q9kVFyZDkRC5R9AuazrRXX8UeHwH8o760Ku5LXkn0OyW9eG",
+        }
     }
 
     fn nats_role(self) -> NatsRole {
@@ -788,7 +801,10 @@ impl Broker {
             .stderr(Stdio::from(log2))
             .kill_on_drop(true);
         for role in Role::ALL {
-            cmd.env(role.env_name(), role.password());
+            // The form `setup.sh` writes into the broker's env file: the hash
+            // inside double quotes, because the server parses an environment
+            // value as configuration and bcrypt contains `$`.
+            cmd.env(role.env_name(), format!("\"{}\"", role.password_hash()));
         }
         let spawned = Instant::now();
         self.sentinel.set(cmd.spawn().expect("spawn nats-server"));
