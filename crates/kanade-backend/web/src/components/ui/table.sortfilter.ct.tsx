@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/experimental-ct-react';
 
-import { PlainTable, SortFilterTable } from './table.ct.harness';
+import { GroupedSortFilterTable, PlainTable, SortFilterTable } from './table.ct.harness';
 
 // Excel-style sorting / filtering is opt-in (`<Table sortFilter>`). What is
 // worth asserting here only exists in a real browser: the portalled popover
@@ -237,6 +237,28 @@ test.describe('Table sort and filter', () => {
     await openFilter(c, 'name');
     await page.getByRole('searchbox', { name: 'name contains' }).fill('an');
     await expect(c.getByText('Applies to the rows on this page only.')).toBeVisible();
+  });
+});
+
+test.describe('Table sort and filter with group headers', () => {
+  test.use({ viewport: DESKTOP });
+
+  const rows = (c: { locator(sel: string): Texts }) => c.locator('tbody tr td:first-child').allTextContents();
+
+  test('sorts inside each group and never across a header', async ({ mount }) => {
+    const c = await mount(<GroupedSortFilterTable />);
+    expect(await rows(c)).toEqual(['g1', 'delta', 'alpha', 'g2', 'charlie', 'bravo']);
+    await c.locator('th[data-col-id="name"]').getByRole('button', { name: 'name', exact: true }).click();
+    expect(await rows(c)).toEqual(['g1', 'alpha', 'delta', 'g2', 'bravo', 'charlie']);
+    await c.locator('th[data-col-id="n"]').getByRole('button', { name: 'n', exact: true }).click();
+    expect(await rows(c)).toEqual(['g1', 'delta', 'alpha', 'g2', 'charlie', 'bravo']);
+  });
+
+  test('a filter drops rows from every group and keeps the headers', async ({ mount, page }) => {
+    const c = await mount(<GroupedSortFilterTable />);
+    await openFilter(c, 'name');
+    await page.getByRole('checkbox', { name: /^alpha/ }).uncheck();
+    expect(await rows(c)).toEqual(['g1', 'delta', 'g2', 'charlie', 'bravo']);
   });
 });
 

@@ -976,6 +976,10 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    * headers, detail rows) should not opt in.
    */
   sortFilter?: boolean | 'page';
+  /** The body is runs of rows separated by full-width group header rows
+   *  (flat children, no Fragments): sort inside each run, never across a
+   *  header. Filtering still spans every group. */
+  sortFilterGroups?: boolean;
 }
 
 export const Table = forwardRef<HTMLTableElement, TableProps>(
@@ -988,6 +992,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       picker = false,
       metaColumns = false,
       sortFilter = false,
+      sortFilterGroups = false,
       style,
       children,
       ...props
@@ -1219,6 +1224,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         children,
         bodyType: TableBody,
         rowType: TableRow,
+        groups: sortFilterGroups,
         ids: sourceIds,
         ownCount: sourceIds.length - metaKeys.length,
         metaKeys,
@@ -1238,7 +1244,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       return { result, flags, filters, sort };
       // `sourceIds` / `metaKeys` are rebuilt every render; their contents are the dependency.
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sfOn, children, sourceIds.join('\u0000'), metaKeys.join('\u0000'), metaByPc, filterState, sortState, i18n.language, t]);
+    }, [sfOn, children, sourceIds.join('\u0000'), metaKeys.join('\u0000'), metaByPc, filterState, sortState, sortFilterGroups, i18n.language, t]);
     const sf: SortFilterApi | null =
       sfOn && sfOut && resizeKey
         ? {

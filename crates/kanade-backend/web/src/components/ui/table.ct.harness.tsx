@@ -491,3 +491,37 @@ export function SortFilterTable({ pinned = false, page = false }: { pinned?: boo
     </Table>
   );
 }
+
+const GROUPED = [
+  { group: 'g1', rows: [{ name: 'delta', n: 2 }, { name: 'alpha', n: 10 }] },
+  { group: 'g2', rows: [{ name: 'charlie', n: 1 }, { name: 'bravo', n: 5 }] },
+];
+
+/** A `sortFilterGroups` table: flat group-header rows between data rows. */
+export function GroupedSortFilterTable() {
+  return (
+    <Table resizeKey="ct-sfg" sortFilter sortFilterGroups>
+      <TableHeader>
+        <TableRow>
+          <TableHead colId="name">name</TableHead>
+          <TableHead colId="n">n</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {GROUPED.flatMap((g) => [
+          <TableRow key={`h-${g.group}`}>
+            <TableCell colSpan={2}>{g.group}</TableCell>
+          </TableRow>,
+          ...g.rows.map((r) => (
+            <TableRow key={r.name}>
+              <TableCell label="name">{r.name}</TableCell>
+              <TableCell label="n" sortValue={r.n}>
+                {r.n} units
+              </TableCell>
+            </TableRow>
+          )),
+        ])}
+      </TableBody>
+    </Table>
+  );
+}
