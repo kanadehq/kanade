@@ -29,13 +29,25 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use kanade_shared::nats_client::{
-    EXIT_BOUND, NatsCredentials, NatsRole, RESUME_BOUND, connect_with_credentials,
+    Liveness, NatsCredentials, NatsRole, RESUME_BOUND, connect_with_credentials,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
 const TOKEN: &str = "fleet-token";
+
+/// The supervision timing the child processes run with: the production
+/// mechanism, shortened so a stalled client is judged in tens of seconds
+/// instead of minutes. The children talk every second, so the stall bound
+/// here is far above their silence while healthy.
+const TEST_LIVENESS: Liveness = Liveness {
+    check_interval: Duration::from_secs(1),
+    stall_bound: Duration::from_secs(30),
+};
+
+/// The exit bound the scenarios hold the shortened supervision to.
+const EXIT_BOUND: Duration = TEST_LIVENESS.exit_bound();
 
 /// Pause between a process exiting and its replacement starting. Stands in for
 /// the service manager's restart delay, which the book adds on top of the
@@ -371,6 +383,14 @@ fn spawn_process(role: NatsRole, url: String) -> Process {
                     ])
                     .env("AUTH_SWITCH_CHILD_ROLE", role.as_str())
                     .env("AUTH_SWITCH_CHILD_URL", &url)
+                    .env(
+                        "AUTH_SWITCH_CHILD_CHECK_MS",
+                        TEST_LIVENESS.check_interval.as_millis().to_string(),
+                    )
+                    .env(
+                        "AUTH_SWITCH_CHILD_STALL_MS",
+                        TEST_LIVENESS.stall_bound.as_millis().to_string(),
+                    )
                     .stdout(Stdio::piped())
                     .stderr(Stdio::inherit())
                     .kill_on_drop(true)
@@ -733,6 +753,46 @@ async fn stalled_role_handshakes_exit_within_the_bound() {
     }
 }
 
+/// An unreachable broker is not a stalled client: with the broker down for
+/// longer than the stall bound plus the exit bound, no process exits, and all
+/// of them talk again once it is back.
+#[tokio::test]
+#[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+async fn an_offline_broker_longer_than_the_stall_bound_does_not_exit_the_process() {
+    assert!(nats_server_available(), "nats-server is required");
+    let _serial = SERIAL.lock().await;
+    let mut broker = Broker::start(Mode::Token).await;
+    let proxy = Proxy::start(broker.port).await;
+    let processes: Vec<_> = ROLES
+        .iter()
+        .map(|role| spawn_process(*role, proxy.url()))
+        .collect();
+    let started = Instant::now();
+    for process in &processes {
+        assert!(wait_talking(process, started, RESUME_BOUND).await.is_some());
+    }
+    broker.down().await;
+    tokio::time::sleep(EXIT_BOUND + TEST_LIVENESS.stall_bound).await;
+    for process in &processes {
+        assert_eq!(
+            process.exits.load(Ordering::SeqCst),
+            0,
+            "{:?} exited while the broker was offline",
+            process.role
+        );
+    }
+    broker.up(Mode::Token).await;
+    let back = Instant::now();
+    for process in &processes {
+        assert!(
+            wait_talking(process, back, RESUME_BOUND).await.is_some(),
+            "{:?} did not resume after the broker returned",
+            process.role
+        );
+        assert_eq!(process.exits.load(Ordering::SeqCst), 0);
+    }
+}
+
 /// Child entry point for the real process supervisor above. Without the
 /// private child environment this is a no-op when the whole suite runs.
 #[tokio::test]
@@ -752,7 +812,19 @@ async fn supervised_role_client() {
     let client = connect_with_credentials(role, &url, creds)
         .await
         .expect("connect");
-    kanade_shared::nats_client::exit_on_dead(role, &client);
+    let millis = |name: &str| {
+        Duration::from_millis(
+            std::env::var(name)
+                .unwrap_or_else(|_| panic!("{name} missing"))
+                .parse()
+                .expect("milliseconds"),
+        )
+    };
+    let liveness = Liveness {
+        check_interval: millis("AUTH_SWITCH_CHILD_CHECK_MS"),
+        stall_bound: millis("AUTH_SWITCH_CHILD_STALL_MS"),
+    };
+    kanade_shared::nats_client::exit_on_dead_with(role, &client, liveness);
     let subject = format!("echo.{}", role.as_str());
     let mut sub = client.subscribe(subject.clone()).await.expect("subscribe");
     let mut tick = tokio::time::interval(Duration::from_secs(1));
