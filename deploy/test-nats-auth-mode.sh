@@ -10,7 +10,8 @@ set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/.." && pwd)"
 setup="$here/linux/setup.sh"
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/nats-auth-mode-test.XXXXXX")"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/nats-auth-mode-test.XXXXXX")" || { echo "cannot create a temporary directory" >&2; exit 1; }
+[ -n "$tmp" ] && [ -d "$tmp" ] || { echo "cannot create a temporary directory" >&2; exit 1; }
 trap 'rm -rf "$tmp"' EXIT
 fail=0
 check() { # name, ok(0/1)
