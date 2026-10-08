@@ -184,12 +184,23 @@ export function summariseWhen(when: WhenSpec): string {
   return c.days?.length ? `at ${c.at} [${c.days.join(',')}]` : `at ${c.at}`;
 }
 
-/** Sort key for the When column: calendar schedules order by clock time
- *  (zero-padded so "9:00" precedes "10:00") and come before the
- *  reconcile / event shapes, which keep their summary text. */
-function whenSortKey(when: WhenSpec): string {
-  if ('calendar' in when) return `0 ${when.calendar.at.padStart(5, '0')}`;
-  return `1 ${summariseWhen(when)}`;
+/** Sort key for the When column. `calendar.at` is accepted by the backend
+ *  as `HH:MM` (daily) or `YYYY-MM-DD HH:MM`, `YYYY-MM-DDTHH:MM`,
+ *  `YYYY/MM/DD HH:MM` (one-shot), so those are normalised to one
+ *  zero-padded form: daily times first by clock, then one-shots by date.
+ *  Anything else keeps its summary text and sorts after. Exported for
+ *  tests. */
+export function whenSortKey(when: WhenSpec): string {
+  if ('calendar' in when) {
+    const at = when.calendar.at.trim();
+    const p2 = (n: string) => n.padStart(2, '0');
+    const dt = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})$/.exec(at);
+    if (dt) return `1 ${dt[1]}-${p2(dt[2])}-${p2(dt[3])} ${p2(dt[4])}:${dt[5]}`;
+    const tm = /^(\d{1,2}):(\d{2})$/.exec(at);
+    if (tm) return `0 ${p2(tm[1])}:${tm[2]}`;
+    return `2 ${at}`;
+  }
+  return `3 ${summariseWhen(when)}`;
 }
 
 function summariseActive(active: ScheduleRow['active']): string | null {
