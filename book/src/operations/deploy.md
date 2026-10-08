@@ -34,6 +34,35 @@ The NATS server acts as the messaging core.
    ```
 This installs the **KanadeNats** service, configures it to run under the local system account, sets up JetStream data directories, and locks down the secure authorization token in the Windows registry.
 
+### Optional: per-role users instead of the shared token
+
+By default the broker runs on the single shared token above. To run the three
+role users (`agent`, `backend`, `breakglass`) instead, deliberately:
+
+```powershell
+# Hashes only, minted with scripts/ops/nats-password-hash.ps1 (or .sh); never plaintext.
+$env:KANADE_NATS_AGENT_PASSWORD_HASH      = '<hash>'
+$env:KANADE_NATS_BACKEND_PASSWORD_HASH    = '<hash>'
+$env:KANADE_NATS_BREAKGLASS_PASSWORD_HASH = '<hash>'
+& "dist\nats\deploy-nats.ps1" -UseNatsUsers      # switch
+& "dist\nats\deploy-nats.ps1" -UseNatsToken -NatsToken "your-secure-nats-token"   # revert
+```
+
+`-UseNatsUsers` replaces the `authorization` block of the installed config with
+an include of `nats-server.users.conf` (the template with the hashes
+substituted) and gives both files the SYSTEM + Administrators ACL;
+`-UseNatsToken` restores the shipped token block (hand edits inside it are not
+restored) and removes the users file. The service is stopped and started by
+the script as always (`-NoStart` defers the start). On Linux the equivalent is
+`KANADE_NATS_AUTH_MODE=users|token` for `setup.sh`, recorded so re-runs keep it,
+with a manual `systemctl restart nats-server` to apply it (see
+`deploy/linux/README.md`).
+
+**The switch is atomic:** a config cannot hold both a token and users, and a
+client presenting a token is rejected once users exist. Every agent, backend
+and CLI host must already hold a user pair before the broker flips; follow the
+separately documented readiness procedure first.
+
 ### Expected authentication mode and connection findings
 
 The backend watches how every connection to the broker authenticated and

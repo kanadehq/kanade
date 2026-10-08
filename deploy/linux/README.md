@@ -164,6 +164,36 @@ sudo KANADE_DOMAIN=kanade.example.com bash ./setup.sh
 5. installs the NATS conf, Caddyfile (with your domain) and the three
    systemd units, then enables and starts everything.
 
+Optional, and off by default: `KANADE_NATS_AUTH_MODE=users` switches the
+broker from the shared token to the three role users (`agent`, `backend`,
+`breakglass`); `token` is the default and the revert.
+
+```bash
+sudo KANADE_DOMAIN=kanade.example.com KANADE_NATS_AUTH_MODE=users \
+     KANADE_NATS_AGENT_PASSWORD_HASH='$2a$…' \
+     KANADE_NATS_BACKEND_PASSWORD_HASH='$2a$…' \
+     KANADE_NATS_BREAKGLASS_PASSWORD_HASH='$2a$…' bash ./setup.sh
+sudo systemctl restart nats-server     # setup.sh does not restart a running broker
+```
+
+- The values are bcrypt hashes (`scripts/ops/nats-password-hash.sh` mints one
+  without echoing the password); plaintext stays on the roles' own hosts.
+  Anything else is refused before a file changes.
+- `users` installs the shipped broker config with its `authorization` block
+  replaced by an include of `/etc/kanade/nats-server.users.conf`, and puts the
+  hashes in `nats.env` (0600) beside the token — never plaintext or another
+  role's credential.
+- The mode is recorded in `/etc/kanade/nats-auth-mode` (root only), so a plain
+  re-run installs the recorded configuration instead of reverting it, and
+  reuses the hashes already in `nats.env`. `KANADE_NATS_AUTH_MODE=token`
+  reinstalls the token config, removes the hashes and records `token`.
+- Choosing a mode restarts nothing: `setup.sh` only `enable --now`s the unit.
+  The change applies when you run `systemctl restart nats-server`.
+- **The switch is atomic.** A config cannot hold both a token and users, and a
+  token is rejected once users exist, so every agent, backend and CLI host
+  must already hold a user pair first (the readiness procedure is documented
+  separately).
+
 Point two DNS records at the server's public IP first (Caddy needs them to
 issue certs): `kanade.example.com` and `nats.kanade.example.com`.
 
