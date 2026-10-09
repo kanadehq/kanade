@@ -281,7 +281,10 @@ async fn rollout(base: &str, args: RolloutArgs) -> Result<()> {
     let scope = match (args.global, args.group.as_deref(), args.pc.as_deref()) {
         (true, None, None) => RolloutScope::Global,
         (false, Some(g), None) => RolloutScope::Group(g.to_string()),
-        (false, None, Some(p)) => RolloutScope::Pc(p.to_string()),
+        (false, None, Some(p)) => {
+            kanade_shared::subject::validate_pc_id(p).map_err(|e| anyhow!(e))?;
+            RolloutScope::Pc(p.to_string())
+        }
         (false, None, None) => bail!(
             "must pick a scope: --global / --group <name> / --pc <pc_id>. \
              Refusing to rollout — explicit scope keeps a forgotten flag from \

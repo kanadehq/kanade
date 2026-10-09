@@ -400,11 +400,21 @@ pub struct RolloutResponse {
     pub jitter: Option<String>,
 }
 
+/// A rollout pinned to a pc_id the role-level NATS permissions cannot cover
+/// would update an agent that then cannot start, so refuse it first.
+fn check_rollout_scope(scope: &RolloutScope) -> Result<(), (StatusCode, String)> {
+    if let RolloutScope::Pc(p) = scope {
+        kanade_shared::subject::validate_pc_id(p).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+    Ok(())
+}
+
 pub async fn rollout(
     State(state): State<AppState>,
     caller: Caller,
     Json(body): Json<RolloutBody>,
 ) -> Result<Json<RolloutResponse>, (StatusCode, String)> {
+    check_rollout_scope(&body.scope)?;
     let (key, label) = match &body.scope {
         RolloutScope::Global => (KEY_AGENT_CONFIG_GLOBAL.to_string(), "global".to_string()),
         RolloutScope::Group(g) => (agent_config_group_key(g), format!("group:{g}")),
@@ -513,6 +523,16 @@ pub async fn rollout(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_rollout_pinned_to_a_pc_id_with_too_many_labels_is_refused() {
+        use super::*;
+        assert!(check_rollout_scope(&RolloutScope::Pc("a.b.c.d".into())).is_ok());
+        assert!(check_rollout_scope(&RolloutScope::Global).is_ok());
+        let (st, msg) = check_rollout_scope(&RolloutScope::Pc("a.b.c.d.e".into())).unwrap_err();
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("at most 4"), "{msg}");
+    }
+
     use super::*;
 
     #[test]
