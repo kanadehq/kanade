@@ -14,6 +14,10 @@
 //! is zero. Cleanup of `.old` / `.new` from any interrupted attempt
 //! happens at startup in `main.rs::cleanup_stale_upgrade_artifacts`.
 //!
+//! On macOS the swap must keep the release signature intact (TCC grants key
+//! on it): the downloaded Mach-O bytes are copied verbatim and only the mode
+//! bits change. Never re-sign or strip the binary on the device.
+//!
 //! `deploy-agent.ps1` is responsible for configuring `sc.exe failure`
 //! and `sc.exe failureflag 1` on the service so SCM treats the
 //! self-update exit (code 64) as a recoverable failure and restarts.

@@ -154,10 +154,11 @@ system_gui:  /bin/launchctl asuser <uid> /usr/bin/env -i <env> <host> <args…>
 ## Caveats
 
 - **Gatekeeper**: the binary is not notarized. The script strips
-  `com.apple.quarantine`, and launchd runs an unsigned command-line binary
-  without a prompt. Apple Silicon still needs at least an ad-hoc signature,
-  which the Rust linker applies — re-sign with `codesign --force --sign -`
-  if the binary is modified after the build.
+  `com.apple.quarantine`, and launchd runs a command-line binary without a
+  prompt. Release builds are signed with a stable self-signed identity
+  (`com.kanade.agent`) so TCC / PPPC grants survive self-updates — do not
+  re-sign on the device. See
+  [macOS code signing](../../book/src/operations/macos-code-signing.md).
 - **Command signing**: the keyring lives in `/etc/kanade/command-keys.json`
   (root:wheel, 0600) and enforcement in `/etc/kanade/require-signed-commands`,
   both written by `setup-agent-macos.sh` from `KANADE_COMMAND_KEYS` (JSON
