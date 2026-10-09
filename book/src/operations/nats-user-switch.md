@@ -364,6 +364,40 @@ evidence outside the broker:
 4. **Broker side**, on the broker host: the server log shows authorization
    violations for refused connections.
 
+## Dotted pc_ids
+
+A pc_id is the agent's `[agent] id`, and on Linux and macOS that is often an OS
+hostname with dots (`m1air.local`, `host.example.com`). Each dot makes another
+subject token, so the permission lists in the users configuration cannot use a
+single `*` where the pc_id goes. A pc_id of **up to 4 dot-separated labels**
+is supported (`host.sub.example.com` is the longest shape intended); the lists
+spell out one pattern per label count wherever a wildcard cannot express "one
+or more tokens".
+
+A pc_id with 5 or more labels is refused up front, on the token configuration
+too: the agent exits at startup with an error naming the limit, `kanade run`
+and `kanade agent logs` fail before sending anything, and the backend API
+answers `400`. Under the users configuration such an agent would otherwise
+connect and then lose every publish.
+
+**Before the switch**, list the registered pc_ids and look for any with 5 or
+more labels (that is, 4 or more dots). Give those hosts a shorter `[agent] id`
+first; an existing deployment that has one will not start the agent after the
+upgrade that adds this check.
+
+**How a lock-out looks** if a host slips through (for example an agent built
+before the limit existed): the agent connects as `agent`, so the backend shows
+it with the new user, but nothing it publishes arrives. The host goes silent in
+the SPA, and the broker log shows lines such as
+
+```text
+Publish Violation - Subject "heartbeat.m1air.local"
+```
+
+(logged against the `agent` user), and likewise for `host_perf.`, `obs.` and
+the other subjects that carry the pc_id. Fix the id and restart the agent; it
+needs no broker change.
+
 ## Hosts that stay out
 
 Use the same evidence path. A host that is powered off returns when someone

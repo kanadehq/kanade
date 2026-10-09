@@ -360,6 +360,7 @@ async fn read_rejected(op: &str, resp: reqwest::Response) -> anyhow::Error {
 }
 
 async fn logs(base: &str, pc_id: String, tail: u32) -> Result<()> {
+    kanade_shared::subject::validate_pc_id(&pc_id).map_err(|e| anyhow!(e))?;
     let mut url = Url::parse(base).with_context(|| format!("invalid backend URL {base:?}"))?;
     url.path_segments_mut()
         .map_err(|_| anyhow!("backend URL {base:?} cannot carry a path"))?

@@ -32,6 +32,7 @@ pub async fn tail(
     Path(pc_id): Path<String>,
     Query(params): Query<TailParams>,
 ) -> Result<Response, (StatusCode, String)> {
+    subject::validate_pc_id(&pc_id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let req = LogsRequest {
         tail_lines: params.tail,
     };

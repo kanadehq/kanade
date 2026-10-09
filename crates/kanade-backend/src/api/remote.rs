@@ -564,6 +564,7 @@ async fn request_ctrl(
     ctrl: &RemoteCtrl,
     timeout: Duration,
 ) -> Result<RemoteCtrlReply, CtrlError> {
+    subject::validate_pc_id(pc_id).map_err(CtrlError::NotDelivered)?;
     let payload = serde_json::to_vec(ctrl)
         .map_err(|e| CtrlError::NotDelivered(format!("backend encode failed: {e}")))?;
     let request = state
