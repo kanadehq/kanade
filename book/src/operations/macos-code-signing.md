@@ -53,7 +53,8 @@ extendedKeyUsage = critical, codeSigning
 basicConstraints = critical, CA:false
 CNF
 openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 3650 -config cs.cnf
-openssl pkcs12 -export -inkey key.pem -in cert.pem -out kanade-sign.p12
+# -legacy: macOS `security import` rejects OpenSSL 3's default AES/PBKDF2 p12
+openssl pkcs12 -export -legacy -inkey key.pem -in cert.pem -out kanade-sign.p12
 ```
 
 ### 2. Store it in the repo secrets

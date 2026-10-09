@@ -34,20 +34,21 @@ bins=$(cargo metadata --no-deps --format-version 1 \
 
 ident_for() { if [[ "$1" == kanade-agent ]]; then echo com.kanade.agent; else echo "com.kanade.$1"; fi; }
 
-# Expected leaf SHA-1 (uppercase hex), "" when not pinned yet.
+# Expected leaf SHA-1 (lowercase hex, as codesign prints it), "" when not pinned yet.
 expected_sha=""
 if [[ -f "$sha_file" ]]; then
-  expected_sha=$(tr -d ' \t\r\n:' < "$sha_file" | tr 'a-f' 'A-F')
+  expected_sha=$(tr -d ' \t\r\n:' < "$sha_file" | tr 'A-F' 'a-f')
 fi
 
 # verify_bin <path> <identifier> <sha1>
 verify_bin() {
-  local f="$1" id="$2" sha="$3" dr
+  local f="$1" id="$2" sha="$3" dr dr_l
   codesign --verify --strict -v "$f"
   codesign -dv "$f"
   dr=$(codesign -dr - "$f" 2>&1)
   echo "$dr"
-  if [[ "$dr" != *"identifier \"$id\""* || "$dr" != *"certificate leaf = H\"$sha\""* ]]; then
+  dr_l=$(printf '%s' "$dr" | tr 'A-F' 'a-f')
+  if [[ "$dr_l" != *"identifier \"$id\""* || "$dr_l" != *"certificate leaf = h\"$sha\""* ]]; then
     echo "::error::$f: designated requirement lacks identifier \"$id\" / certificate leaf H\"$sha\" (ad-hoc or wrong identity?)"
     return 1
   fi
@@ -83,7 +84,7 @@ imported_sha=$(openssl pkcs12 -in "$work/cert.p12" -passin env:MACOS_SIGN_CERT_P
   | openssl x509 -noout -fingerprint -sha1 2>/dev/null \
   || openssl pkcs12 -in "$work/cert.p12" -passin env:MACOS_SIGN_CERT_PASSWORD -nokeys -clcerts 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha1)
-imported_sha=$(echo "${imported_sha#*=}" | tr -d ':' | tr 'a-f' 'A-F')
+imported_sha=$(echo "${imported_sha#*=}" | tr -d ':' | tr 'A-F' 'a-f')
 [[ -n "$imported_sha" ]] || { echo "::error::could not read certificate from p12"; exit 1; }
 sha=$(resolve_sha "$imported_sha")
 
