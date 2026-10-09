@@ -34,6 +34,15 @@ use crate::api::agent_groups;
 use crate::audit;
 use crate::audit::Caller;
 
+/// Refuse a target pc_id the role-level NATS permissions cannot cover, before
+/// anything is published to `notifications.pc.<id>`.
+fn check_target_pcs(pcs: &[String]) -> Result<(), (StatusCode, String)> {
+    for pc in pcs {
+        kanade_shared::subject::validate_pc_id(pc).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+    Ok(())
+}
+
 /// `POST /api/notifications` — publish an end-user notification.
 pub async fn publish(
     State(s): State<AppState>,
@@ -46,6 +55,7 @@ pub async fn publish(
             "target must set at least one of `all`, `groups`, or `pcs`".to_string(),
         ));
     }
+    check_target_pcs(&req.target.pcs)?;
     if req.title.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1086,6 +1096,14 @@ fn dedup_newest_first(raw: Vec<Notification>, max_items: usize) -> Vec<Notificat
 mod tests {
     use super::*;
     use kanade_shared::ipc::notifications::NotificationPriority;
+
+    #[test]
+    fn target_pcs_with_too_many_labels_are_refused() {
+        assert!(check_target_pcs(&["a.b.c.d".into(), "pc".into()]).is_ok());
+        let (st, msg) = check_target_pcs(&["a.b.c.d.e".into()]).unwrap_err();
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("at most 4"), "{msg}");
+    }
 
     fn notif(id: &str, issued: chrono::DateTime<chrono::Utc>) -> Notification {
         Notification {
