@@ -7,7 +7,8 @@
 #   macos-codesign.sh verify-dist  verify the binaries inside dist/*.tar.gz
 #
 # Env: TARGET, MACOS_SIGN_CERT_P12_BASE64, MACOS_SIGN_CERT_PASSWORD.
-# No secrets  -> notice + exit 0 (forks / CI without secrets still build).
+# No secrets  -> notice + exit 0 (forks / CI without secrets still build),
+#                unless deploy/macos/signing-cert.sha1 pins the identity (then exit 1).
 # Half-set or any import/sign/verify failure -> exit 1.
 set -euo pipefail
 
@@ -20,6 +21,10 @@ sha_file="deploy/macos/signing-cert.sha1"
 if [[ "$TARGET" != *apple-darwin ]]; then exit 0; fi
 
 if [[ -z "$p12_b64" && -z "$p12_pass" ]]; then
+  if [[ -f "$sha_file" ]]; then
+    echo "::error::$sha_file pins the signing identity but MACOS_SIGN_CERT_P12_BASE64 / MACOS_SIGN_CERT_PASSWORD are not set; refusing to ship ad-hoc signed binaries"
+    exit 1
+  fi
   echo "::notice::macOS code signing skipped: MACOS_SIGN_CERT_P12_BASE64 / MACOS_SIGN_CERT_PASSWORD not set (binaries keep the linker ad-hoc signature)"
   exit 0
 fi
@@ -102,7 +107,9 @@ case "$mode" in
       f="target/$TARGET/release/$bin"
       [[ -f "$f" ]] || { echo "::error::missing $f"; exit 1; }
       id=$(ident_for "$bin")
-      codesign --force --sign "$sha" --keychain "$kc" --identifier "$id" --timestamp=none "$f"
+      codesign --force --sign "$sha" --keychain "$kc" --identifier "$id" \
+        -r="designated => identifier \"$id\" and certificate leaf = H\"$sha\"" \
+        --timestamp=none "$f"
       verify_bin "$f" "$id" "$sha"
       echo "signed $f as $id (leaf $sha)"
     done
