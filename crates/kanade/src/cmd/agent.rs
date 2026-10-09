@@ -281,7 +281,10 @@ async fn rollout(base: &str, args: RolloutArgs) -> Result<()> {
     let scope = match (args.global, args.group.as_deref(), args.pc.as_deref()) {
         (true, None, None) => RolloutScope::Global,
         (false, Some(g), None) => RolloutScope::Group(g.to_string()),
-        (false, None, Some(p)) => RolloutScope::Pc(p.to_string()),
+        (false, None, Some(p)) => {
+            kanade_shared::subject::validate_pc_id(p).map_err(|e| anyhow!(e))?;
+            RolloutScope::Pc(p.to_string())
+        }
         (false, None, None) => bail!(
             "must pick a scope: --global / --group <name> / --pc <pc_id>. \
              Refusing to rollout — explicit scope keeps a forgotten flag from \
@@ -360,6 +363,7 @@ async fn read_rejected(op: &str, resp: reqwest::Response) -> anyhow::Error {
 }
 
 async fn logs(base: &str, pc_id: String, tail: u32) -> Result<()> {
+    kanade_shared::subject::validate_pc_id(&pc_id).map_err(|e| anyhow!(e))?;
     let mut url = Url::parse(base).with_context(|| format!("invalid backend URL {base:?}"))?;
     url.path_segments_mut()
         .map_err(|_| anyhow!("backend URL {base:?} cannot carry a path"))?

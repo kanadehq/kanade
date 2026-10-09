@@ -43,6 +43,9 @@ struct ExecResponse {
 }
 
 pub async fn execute(backend_url: &str, args: ExecArgs) -> Result<()> {
+    for pc in &args.pcs {
+        kanade_shared::subject::validate_pc_id(pc).map_err(|e| anyhow::anyhow!(e))?;
+    }
     let target = Target {
         all: args.all,
         groups: args.groups,

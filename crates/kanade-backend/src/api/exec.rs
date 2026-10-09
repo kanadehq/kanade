@@ -63,6 +63,10 @@ pub async fn exec_manifest(
         ));
     }
 
+    for pc in &plan.target.pcs {
+        subject::validate_pc_id(pc).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+
     // Defensive — the write paths (`POST /api/jobs`, `kanade job
     // create`) already gate every manifest through
     // `Manifest::validate()` before it lands in BUCKET_JOBS, so by

@@ -209,6 +209,7 @@ pub async fn put_pc(
     Path(pc_id): Path<String>,
     Json(scope): Json<ConfigScope>,
 ) -> Result<Json<ConfigScope>, (StatusCode, String)> {
+    kanade_shared::subject::validate_pc_id(&pc_id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let kv = open_cfg(&state).await?;
     let key = agent_config_pc_key(&pc_id);
     write_scope(&kv, &key, &scope).await?;
@@ -236,6 +237,7 @@ pub async fn set_field_pc(
     Path((pc_id, field)): Path<(String, String)>,
     Json(body): Json<FieldValue>,
 ) -> Result<Json<FieldUpdate>, (StatusCode, String)> {
+    kanade_shared::subject::validate_pc_id(&pc_id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     set_field(
         &state,
         &caller,

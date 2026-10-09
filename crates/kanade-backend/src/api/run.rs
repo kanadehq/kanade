@@ -83,6 +83,8 @@ pub async fn run(
         }
     };
 
+    subject::validate_pc_id(&req.pc_id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
     let request_id = Uuid::new_v4().to_string();
     let cmd = Command {
         id: "adhoc-run".to_string(),
@@ -237,6 +239,7 @@ pub async fn ping(
     // ever reaches NATS — a fingerprint that looks like an offline
     // agent but isn't. 1 s is still well above the single-digit-ms
     // round trip a healthy agent serves.
+    subject::validate_pc_id(&pc_id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let wait_secs = q.wait_secs.max(1);
     let subj = subject::ping(&pc_id);
     info!(pc_id = %pc_id, subject = %subj, "ping: request");

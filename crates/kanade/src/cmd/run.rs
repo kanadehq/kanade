@@ -231,6 +231,7 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
     if args.script.is_empty() {
         anyhow::bail!("script is empty (did you forget `--`?)");
     }
+    subject::validate_pc_id(&args.pc_id).map_err(|e| anyhow::anyhow!(e))?;
     let script = args.script.join(" ");
     let request_id = Uuid::new_v4().to_string();
     let shell = match args.shell.as_str() {

@@ -1,3 +1,24 @@
+/// Most dot-separated labels a pc_id may carry. A dotted pc_id (an OS
+/// hostname such as `host.example.com`) becomes several NATS subject
+/// tokens, and the role-level permission block in
+/// `configs/nats-server.users.conf` can only enumerate that many label
+/// counts where the pc_id sits in the middle of a subject. Keep the two in
+/// step: the conformance test asserts the config against this constant.
+pub const MAX_PC_ID_LABELS: usize = 4;
+
+/// Reject a pc_id the role-level NATS permissions cannot cover. The only
+/// refusal is "too many labels": every other pc_id that was valid before
+/// stays valid.
+pub fn validate_pc_id(pc_id: &str) -> Result<(), String> {
+    let labels = pc_id.split('.').count();
+    if labels > MAX_PC_ID_LABELS {
+        return Err(format!(
+            "pc_id {pc_id:?} has {labels} dot-separated labels; at most {MAX_PC_ID_LABELS} are supported"
+        ));
+    }
+    Ok(())
+}
+
 pub const COMMANDS_ALL: &str = "commands.all";
 
 pub fn commands_group(name: &str) -> String {
@@ -277,6 +298,15 @@ pub fn remote_input(session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_pc_id_limits_label_count_only() {
+        for ok in ["pc", "a.b", "a.b.c.d", "PC 1/x?", "", "m1air.local"] {
+            assert!(validate_pc_id(ok).is_ok(), "{ok:?}");
+        }
+        let err = validate_pc_id("a.b.c.d.e").unwrap_err();
+        assert!(err.contains("at most 4"), "{err}");
+    }
 
     #[test]
     fn commands_all_constant() {

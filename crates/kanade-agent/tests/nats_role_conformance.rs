@@ -88,6 +88,9 @@ use tokio::process::{Child, Command};
 const USERS_CONF: &str = include_str!("../../../configs/nats-server.users.conf");
 const TOKEN: &str = "conformance-fleet-token";
 
+/// An OS-hostname-style pc_id: three labels, three subject tokens.
+const DOTTED_PC_ID: &str = "host.example.local";
+
 /// Whether the agent may still subscribe to the broadcast command subjects.
 /// The block keeps them for now (the command plane is not yet narrowed). When
 /// the `NARROWING` lines leave the conf, flip this to `Denied` and the
@@ -775,8 +778,11 @@ impl Broker {
             #[cfg(unix)]
             Auth::Token => format!("authorization {{ token: \"{TOKEN}\" }}"),
         };
+        // The default file-store limit is a share of the disk that is free;
+        // the bootstrap's streams reserve more than a small disk offers, which
+        // fails the bootstrap for a reason unrelated to what is under test.
         let conf = format!(
-            "host: 127.0.0.1\nport: {}\nhttp: 127.0.0.1:{}\njetstream {{ store_dir: \"{}\" }}\n{}\n",
+            "host: 127.0.0.1\nport: {}\nhttp: 127.0.0.1:{}\njetstream {{ store_dir: \"{}\", max_file_store: 1TB }}\n{}\n",
             self.port,
             self.http_port,
             store.to_string_lossy().replace('\\', "/"),
@@ -1197,6 +1203,12 @@ impl Fleet {
         }
     }
 
+    /// Use `pc_id` for the agent instead of the generated one.
+    fn with_pc_id(mut self, pc_id: &str) -> Self {
+        self.pc_id = pc_id.to_string();
+        self
+    }
+
     /// Every process that is meant to be running right now. A wait fails at
     /// once if one of them has exited.
     fn watch(&self) -> Vec<Sentinel> {
@@ -1247,7 +1259,7 @@ impl Fleet {
         .await;
     }
 
-    async fn start_agent(&mut self) {
+    fn agent_cmd(&self) -> Command {
         let cfg_dir = self.agent_dir.path();
         let toml = format!(
             "[agent]\nid = \"{}\"\nnats_url = \"{}\"\n\n[log]\npath = {:?}\nlevel = \"info\"\nkeep_days = 0\n",
@@ -1263,6 +1275,11 @@ impl Fleet {
             .env("KANADE_AGENT_DATA_DIR", self.data_dir())
             .env("RUST_LOG", "info,kanade_agent=debug");
         creds_env(&mut cmd, Role::Agent, self.with_token);
+        cmd
+    }
+
+    async fn start_agent(&mut self) {
+        let cmd = self.agent_cmd();
         self.agent_spawned = Some(Instant::now());
         self.agent = Some(Proc::spawn(cmd, "[agent]"));
     }
@@ -1628,8 +1645,24 @@ fn deliberate(seen: &[Violation]) -> BTreeSet<Violation> {
 #[tokio::test]
 #[ignore = "requires nats-server in PATH and built binaries; cargo test -- --ignored"]
 async fn allowed_flows_complete_under_the_users_block() {
+    allowed_flows(None).await;
+}
+
+/// The same flows for an agent whose pc_id is an OS hostname with dots. Each
+/// test has its own broker, so the sanitised durable name (`a.b` and `a_b`
+/// share one) cannot collide with the plain agent's.
+#[tokio::test]
+#[ignore = "requires nats-server in PATH and built binaries; cargo test -- --ignored"]
+async fn allowed_flows_complete_for_a_dotted_pc_id() {
+    allowed_flows(Some(DOTTED_PC_ID)).await;
+}
+
+async fn allowed_flows(pc_id: Option<&str>) {
     prereqs_or_skip!();
     let mut f = Fleet::new(Auth::Users, false, None).await;
+    if let Some(pc) = pc_id {
+        f = f.with_pc_id(pc);
+    }
 
     prove_the_violation_oracle(&f).await;
     let baseline = deliberate(&f.broker.violations());
@@ -1756,7 +1789,7 @@ async fn allowed_flows_complete_under_the_users_block() {
     // The same command was also retained by the command stream and replayed
     // through the agent's durable consumer: the consumer exists under the
     // agent's credential and its position advanced.
-    let replay = format!("agent_replay_{}", f.pc_id);
+    let replay = replay_consumer(&f.pc_id);
     acked(&f, "EXEC", &replay).await;
 
     // Offline agent: a break-glass command sent while the agent is down lands
@@ -2348,6 +2381,23 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Agent, Publish("commands.all"), Denied),
         (Agent, Publish("commands.group.victim"), Denied),
         (Agent, Publish("kill.victim"), Denied),
+        // Another host's subjects, spelled with a dotted pc_id. The agent user
+        // is shared by every host, so only publishes the agent never makes at
+        // all can be refused; its own heartbeat / obs / events subjects
+        // cannot be told from another host's (see the conf header).
+        (Agent, Publish("commands.pc.other.example.local"), Denied),
+        (
+            Agent,
+            Publish("notifications.pc.other.example.local"),
+            Denied,
+        ),
+        (Agent, Publish("agents.other.example.local.ping"), Denied),
+        (Agent, Publish("logs.fetch.other.example.local"), Denied),
+        (Agent, Publish("job.tail.other.example.local"), Denied),
+        (Agent, Publish("remote.ctrl.other.example.local"), Denied),
+        (Agent, Publish("kill.other.example.local"), Denied),
+        (Agent, Subscribe("results.other.example.local"), Denied),
+        (Agent, Subscribe("heartbeat.other.example.local"), Denied),
         (Agent, Publish("notif-amend"), Denied),
         (Agent, Publish("audit.operator.run.x"), Denied),
         (Agent, Publish("notifications.all"), Denied),
@@ -2440,6 +2490,13 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Breakglass, Publish("commands.all"), Denied),
         (Breakglass, Publish("commands.group.x"), Denied),
         (Breakglass, Publish("heartbeat.x"), Denied),
+        (Breakglass, Publish("heartbeat.host.example.local"), Denied),
+        (
+            Breakglass,
+            Publish("agents.host.example.local.ping"),
+            Denied,
+        ),
+        (Breakglass, Publish("logs.fetch.host.example.local"), Denied),
         (Breakglass, Publish("results.x"), Denied),
         (Breakglass, Publish("audit.operator.exec.x"), Denied),
         (Breakglass, Publish("audit.backend.run.x"), Denied),
@@ -2459,6 +2516,11 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Breakglass, Publish("_INBOX.forged.reply"), Denied),
         (Breakglass, Subscribe(">"), Denied),
         (Breakglass, Publish("commands.pc.x"), Allowed),
+        (
+            Breakglass,
+            Publish("commands.pc.host.example.local"),
+            Allowed,
+        ),
         (Breakglass, Publish("kill.x"), Allowed),
         (Breakglass, Publish("audit.operator.run.x"), Allowed),
         (Breakglass, Publish("audit.operator.kill.x"), Allowed),
@@ -2471,6 +2533,10 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Backend, Subscribe("heartbeat.>"), Allowed),
         (Backend, Subscribe("results.*"), Allowed),
         (Backend, Publish("heartbeat.x"), Denied),
+        (Backend, Publish("heartbeat.host.example.local"), Denied),
+        (Backend, Publish("commands.pc.host.example.local"), Allowed),
+        (Backend, Publish("agents.host.example.local.ping"), Allowed),
+        (Backend, Subscribe("heartbeat.host.example.local"), Allowed),
         (Backend, Publish("results.x"), Denied),
         (Backend, Publish("_INBOX.forged.reply"), Denied),
         (Backend, Subscribe("commands.>"), Denied),
@@ -2604,6 +2670,32 @@ async fn denied_operations_are_denied_per_role() {
             .await
             .is_err(),
         "an agent's forged command reached another subscriber"
+    );
+    // Same forgery against a dotted pc_id's inbox.
+    let mut seen_dotted = observer
+        .client
+        .subscribe(format!("commands.pc.{DOTTED_PC_ID}"))
+        .await
+        .unwrap();
+    observer.settle(f.watch()).await;
+    agent
+        .client
+        .publish(
+            format!("commands.pc.{DOTTED_PC_ID}"),
+            Bytes::from_static(b"forged"),
+        )
+        .await
+        .unwrap();
+    agent.settle(f.watch()).await;
+    assert!(
+        agent.violated("Publish", &format!("commands.pc.{DOTTED_PC_ID}")),
+        "agent publish to a dotted commands.pc.* was not refused"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), seen_dotted.next())
+            .await
+            .is_err(),
+        "an agent's forged command reached a dotted pc_id's inbox"
     );
 
     // KV writes the agent must not make, through the real `kv.put`. Control
@@ -3268,3 +3360,644 @@ async fn consumer_delivery_target_residual_is_recorded() {
 
 /// `(consumer created, bytes delivered)` observed on the pinned broker.
 const RECORDED_DELIVERY_BYPASS: (bool, Option<&[u8]>) = (true, Some(b"ATTACKER-BYTES"));
+
+// ═════════════════════════ C. pc_id-bearing subjects ═════════════════════════
+
+/// Which side of a role's permission list a subject is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dir {
+    Publish,
+    Subscribe,
+}
+
+/// One subject that embeds a pc_id (or a name derived from it), the helper
+/// that builds it, and the role that needs to be allowed to use it.
+/// `{pc}` stands for the pc_id (1..=N dot-separated labels), `{consumer}` for
+/// the durable name derived from it. `bounded` marks subjects whose pc_id is
+/// followed by more tokens, where the block lists one pattern per label count
+/// and a pc_id with more labels has to be refused.
+struct PcSubject {
+    helper: &'static str,
+    role: Role,
+    dir: Dir,
+    template: &'static str,
+    bounded: bool,
+}
+
+const fn entry(
+    helper: &'static str,
+    role: Role,
+    dir: Dir,
+    template: &'static str,
+    bounded: bool,
+) -> PcSubject {
+    PcSubject {
+        helper,
+        role,
+        dir,
+        template,
+        bounded,
+    }
+}
+
+/// The inventory. A new `pc_id: &str` helper in `subject.rs` / `kv.rs`
+/// that is neither here nor in [`PC_ID_HELPERS_WITHOUT_A_GRANT`] fails
+/// [`every_pc_id_helper_is_in_the_inventory`].
+const PC_SUBJECTS: &[PcSubject] = &[
+    entry(
+        "heartbeat",
+        Role::Agent,
+        Dir::Publish,
+        "heartbeat.{pc}",
+        false,
+    ),
+    entry(
+        "heartbeat",
+        Role::Backend,
+        Dir::Subscribe,
+        "heartbeat.{pc}",
+        false,
+    ),
+    entry(
+        "host_perf",
+        Role::Agent,
+        Dir::Publish,
+        "host_perf.{pc}",
+        false,
+    ),
+    entry(
+        "host_perf",
+        Role::Backend,
+        Dir::Subscribe,
+        "host_perf.{pc}",
+        false,
+    ),
+    entry(
+        "process_perf",
+        Role::Agent,
+        Dir::Publish,
+        "process_perf.{pc}",
+        false,
+    ),
+    entry(
+        "process_perf",
+        Role::Backend,
+        Dir::Subscribe,
+        "process_perf.{pc}",
+        false,
+    ),
+    entry("obs", Role::Agent, Dir::Publish, "obs.{pc}", false),
+    entry("obs", Role::Backend, Dir::Publish, "obs.{pc}", false),
+    entry(
+        "events_started",
+        Role::Agent,
+        Dir::Publish,
+        "events.started.ex1.{pc}",
+        false,
+    ),
+    entry(
+        "events_notifications_acked",
+        Role::Agent,
+        Dir::Publish,
+        "events.notifications.acked.{pc}.sid1.n1",
+        true,
+    ),
+    entry(
+        "events_notifications_unacked",
+        Role::Agent,
+        Dir::Publish,
+        "events.notifications.unacked.{pc}.sid1.n1",
+        true,
+    ),
+    entry(
+        "commands_pc",
+        Role::Agent,
+        Dir::Subscribe,
+        "commands.pc.{pc}",
+        false,
+    ),
+    entry(
+        "commands_pc",
+        Role::Backend,
+        Dir::Publish,
+        "commands.pc.{pc}",
+        false,
+    ),
+    entry(
+        "commands_pc",
+        Role::Breakglass,
+        Dir::Publish,
+        "commands.pc.{pc}",
+        false,
+    ),
+    entry(
+        "notifications_pc",
+        Role::Agent,
+        Dir::Subscribe,
+        "notifications.pc.{pc}",
+        false,
+    ),
+    entry(
+        "notifications_pc",
+        Role::Backend,
+        Dir::Publish,
+        "notifications.pc.{pc}",
+        false,
+    ),
+    entry(
+        "logs_fetch",
+        Role::Agent,
+        Dir::Subscribe,
+        "logs.fetch.{pc}",
+        false,
+    ),
+    entry(
+        "logs_fetch",
+        Role::Backend,
+        Dir::Publish,
+        "logs.fetch.{pc}",
+        false,
+    ),
+    entry(
+        "job_tail",
+        Role::Agent,
+        Dir::Subscribe,
+        "job.tail.{pc}",
+        false,
+    ),
+    entry(
+        "job_tail",
+        Role::Backend,
+        Dir::Publish,
+        "job.tail.{pc}",
+        false,
+    ),
+    entry(
+        "remote_ctrl",
+        Role::Agent,
+        Dir::Subscribe,
+        "remote.ctrl.{pc}",
+        false,
+    ),
+    entry(
+        "remote_ctrl",
+        Role::Backend,
+        Dir::Publish,
+        "remote.ctrl.{pc}",
+        false,
+    ),
+    entry(
+        "ping",
+        Role::Agent,
+        Dir::Subscribe,
+        "agents.{pc}.ping",
+        true,
+    ),
+    entry(
+        "ping",
+        Role::Backend,
+        Dir::Publish,
+        "agents.{pc}.ping",
+        true,
+    ),
+    // The CLI's `run` audit record, `audit.operator.run.<pc_id>`, built by
+    // `kanade::audit::record` from the target rather than by a helper, so the
+    // source scan cannot see it (see [`CLI_RUN_SRC`]).
+    entry(
+        "audit_record",
+        Role::Breakglass,
+        Dir::Publish,
+        "audit.operator.run.{pc}",
+        false,
+    ),
+    // The replay durable: `agent_replay_<sanitised pc_id>`, one token.
+    entry(
+        "consumer_name",
+        Role::Agent,
+        Dir::Publish,
+        "$JS.API.CONSUMER.CREATE.EXEC.{consumer}",
+        false,
+    ),
+    entry(
+        "consumer_name",
+        Role::Agent,
+        Dir::Publish,
+        "$JS.API.CONSUMER.INFO.EXEC.{consumer}",
+        false,
+    ),
+    entry(
+        "consumer_name",
+        Role::Agent,
+        Dir::Publish,
+        "$JS.API.CONSUMER.MSG.NEXT.EXEC.{consumer}",
+        false,
+    ),
+    // KV keys carry the pc_id inside `$KV.<bucket>.` / `DIRECT.GET`, which
+    // are already `>`.
+    entry(
+        "notifications_read_key",
+        Role::Agent,
+        Dir::Publish,
+        "$KV.notifications_read.{pc}.sid1.n1",
+        false,
+    ),
+    entry(
+        "agent_config_pc_key",
+        Role::Agent,
+        Dir::Publish,
+        "$JS.API.DIRECT.GET.KV_agent_config.$KV.agent_config.pcs.{pc}",
+        false,
+    ),
+    entry(
+        "dispatch_mark_pc_key",
+        Role::Backend,
+        Dir::Publish,
+        "$KV.scheduler_dispatch.sched1.{pc}",
+        false,
+    ),
+    // The prefix is a consumer filter in a request body; the request subject
+    // names the stream only.
+    entry(
+        "notifications_read_prefix",
+        Role::Agent,
+        Dir::Publish,
+        "$JS.API.CONSUMER.CREATE.KV_notifications_read",
+        false,
+    ),
+];
+
+/// Helpers that exist but that no role may use: nothing publishes them, so
+/// the block grants nothing. Whoever starts using one adds the grant and a row
+/// to [`PC_SUBJECTS`], and this entry goes.
+const PC_ID_HELPERS_WITHOUT_A_GRANT: &[(&str, &str)] = &[("inventory", "inventory.{pc}.hw")];
+
+/// Agent-side code that derives the durable name; its rule is mirrored by
+/// [`replay_consumer`] and checked against the source below.
+const CLI_RUN_SRC: &str = include_str!("../../kanade/src/cmd/run.rs");
+const COMMAND_REPLAY_SRC: &str = include_str!("../src/command_replay.rs");
+const SUBJECT_SRC: &str = include_str!("../../kanade-shared/src/subject.rs");
+const KV_SRC: &str = include_str!("../../kanade-shared/src/kv.rs");
+
+/// The replay durable's name for `pc_id`, as `command_replay::consumer_name`
+/// builds it.
+fn replay_consumer(pc_id: &str) -> String {
+    let safe: String = pc_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("agent_replay_{safe}")
+}
+
+/// A pc_id of `n` labels.
+fn pc_labels(n: usize) -> String {
+    ["host", "sub", "example", "com", "extra", "more"][..n].join(".")
+}
+
+fn expand(template: &str, pc_id: &str) -> String {
+    template
+        .replace("{pc}", pc_id)
+        .replace("{consumer}", &replay_consumer(pc_id))
+}
+
+/// NATS subject matching: `*` is one token, `>` is one or more trailing ones.
+fn subject_matches(pattern: &str, subject: &str) -> bool {
+    let p: Vec<&str> = pattern.split('.').collect();
+    let s: Vec<&str> = subject.split('.').collect();
+    for (i, tok) in p.iter().enumerate() {
+        match *tok {
+            ">" => return i == p.len() - 1 && s.len() > i,
+            "*" if i < s.len() => {}
+            t if t != "*" && s.get(i) == Some(&t) => {}
+            _ => return false,
+        }
+    }
+    p.len() == s.len()
+}
+
+/// The quoted entries of one role's `publish` / `subscribe` allow list in the
+/// users configuration.
+fn conf_allow(role: Role, dir: Dir) -> Vec<String> {
+    let (mut user, mut side) = (String::new(), None);
+    let mut out = Vec::new();
+    for line in USERS_CONF.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("user:") {
+            user = rest.trim().trim_matches('"').to_string();
+            side = None;
+        } else if line.starts_with("publish:") {
+            side = Some(Dir::Publish);
+        } else if line.starts_with("subscribe:") {
+            side = Some(Dir::Subscribe);
+        } else if user == role.user()
+            && side == Some(dir)
+            && line.len() > 1
+            && line.starts_with('"')
+            && line.ends_with('"')
+        {
+            out.push(line[1..line.len() - 1].to_string());
+        }
+    }
+    out
+}
+
+fn conf_allows(role: Role, dir: Dir, subject: &str) -> bool {
+    conf_allow(role, dir)
+        .iter()
+        .any(|pat| subject_matches(pat, subject))
+}
+
+/// Names of the `pub fn`s in `src` (above its test module) that take a
+/// `pc_id: &str`.
+fn pc_id_helpers(src: &str) -> BTreeSet<String> {
+    let src = src.split("#[cfg(test)]").next().unwrap();
+    let mut out = BTreeSet::new();
+    let mut lines = src.lines();
+    while let Some(line) = lines.next() {
+        let Some(sig) = line.trim_start().strip_prefix("pub fn ") else {
+            continue;
+        };
+        let mut sig = sig.to_string();
+        let mut open = line.contains('{');
+        while !open {
+            let Some(next) = lines.next() else { break };
+            open = next.contains('{');
+            sig.push_str(next);
+        }
+        if sig.contains("pc_id: &str") {
+            out.insert(sig.split('(').next().unwrap().trim().to_string());
+        }
+    }
+    out
+}
+
+#[test]
+fn every_pc_id_helper_is_in_the_inventory() {
+    let mut found = pc_id_helpers(SUBJECT_SRC);
+    // The entry-point check, not a subject builder.
+    found.remove("validate_pc_id");
+    found.extend(pc_id_helpers(KV_SRC));
+    // Private to the agent crate, so it is not in the scan above.
+    assert!(
+        COMMAND_REPLAY_SRC.contains("fn consumer_name(pc_id: &str) -> String"),
+        "command_replay::consumer_name moved or changed signature; update this test"
+    );
+    found.insert("consumer_name".to_string());
+    assert!(
+        CLI_RUN_SRC.contains("\"run\",\n        Some(&args.pc_id),"),
+        "`kanade run` no longer audits against the pc_id; update the audit_record row"
+    );
+    found.insert("audit_record".to_string());
+
+    let mut known: BTreeSet<String> = PC_SUBJECTS.iter().map(|r| r.helper.to_string()).collect();
+    known.extend(
+        PC_ID_HELPERS_WITHOUT_A_GRANT
+            .iter()
+            .map(|(h, _)| h.to_string()),
+    );
+    let missing: Vec<_> = found.difference(&known).collect();
+    assert!(
+        missing.is_empty(),
+        "pc_id helpers with no row in PC_SUBJECTS (add the subject to the users \
+         conf for 1..=N labels and a row here): {missing:?}"
+    );
+    let stale: Vec<_> = known.difference(&found).collect();
+    assert!(
+        stale.is_empty(),
+        "inventory rows for helpers that are gone: {stale:?}"
+    );
+}
+
+#[test]
+fn the_replay_durable_name_is_one_token_whatever_the_pc_id() {
+    assert!(
+        COMMAND_REPLAY_SRC.contains("c.is_ascii_alphanumeric() || c == '_' || c == '-'"),
+        "command_replay::consumer_name's sanitising rule changed; update replay_consumer"
+    );
+    for n in 1..=kanade_shared::subject::MAX_PC_ID_LABELS + 1 {
+        let name = replay_consumer(&pc_labels(n));
+        assert!(!name.contains('.'), "{name}");
+    }
+    assert_eq!(
+        replay_consumer(DOTTED_PC_ID),
+        "agent_replay_host_example_local"
+    );
+}
+
+#[test]
+fn the_users_block_covers_every_pc_id_subject_for_one_to_n_labels() {
+    let n = kanade_shared::subject::MAX_PC_ID_LABELS;
+    assert!(
+        USERS_CONF.contains(&format!("N = {n}")),
+        "the conf header must state N = {n}"
+    );
+    let mut wrong = Vec::new();
+    for row in PC_SUBJECTS {
+        for labels in 1..=n {
+            let subject = expand(row.template, &pc_labels(labels));
+            if !conf_allows(row.role, row.dir, &subject) {
+                wrong.push(format!(
+                    "{:?} {:?} refused {subject} ({labels} labels)",
+                    row.role, row.dir
+                ));
+            }
+        }
+        if row.bounded {
+            let over = expand(row.template, &pc_labels(n + 1));
+            if conf_allows(row.role, row.dir, &over) {
+                wrong.push(format!(
+                    "{:?} {:?} allows {over}: more than {n} labels must stay refused",
+                    row.role, row.dir
+                ));
+            }
+            // Not widened beyond the shape: a token short, or a different
+            // literal where the shape ends in one, is refused.
+            let mut toks: Vec<&str> = row.template.split('.').collect();
+            let last = toks.pop().unwrap();
+            let mut bad = vec![expand(&toks.join("."), &pc_labels(1))];
+            if last == "ping" {
+                bad.push(expand(&format!("{}.pong", toks.join(".")), &pc_labels(1)));
+            }
+            for bad in bad {
+                if conf_allows(row.role, row.dir, &bad) {
+                    wrong.push(format!("{:?} {:?} allows {bad}", row.role, row.dir));
+                }
+            }
+        }
+    }
+    for (helper, template) in PC_ID_HELPERS_WITHOUT_A_GRANT {
+        for role in Role::ALL {
+            for dir in [Dir::Publish, Dir::Subscribe] {
+                let subject = expand(template, &pc_labels(1));
+                if conf_allows(role, dir, &subject) {
+                    wrong.push(format!("{role:?} {dir:?} allows {subject} ({helper})"));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "users block mismatches:\n{}",
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn a_pc_id_with_too_many_labels_is_refused_up_front() {
+    use kanade_shared::subject::{MAX_PC_ID_LABELS, validate_pc_id};
+    for n in 1..=MAX_PC_ID_LABELS {
+        validate_pc_id(&pc_labels(n)).unwrap_or_else(|e| panic!("{n} labels: {e}"));
+    }
+    let err = validate_pc_id(&pc_labels(MAX_PC_ID_LABELS + 1)).unwrap_err();
+    assert!(
+        err.contains(&format!("at most {MAX_PC_ID_LABELS}")),
+        "{err}"
+    );
+}
+
+/// Every row of the inventory, for 1..=N labels, through a real broker on the
+/// role's own credential: nothing is refused. Past N the broker must agree
+/// with the matcher that the bounded rows are refused, so the offline check
+/// above is tied to what nats-server does.
+#[tokio::test]
+#[ignore = "requires nats-server in PATH and built binaries; cargo test -- --ignored"]
+async fn pc_id_subjects_work_on_a_real_broker_for_one_to_n_labels() {
+    prereqs_or_skip!();
+    let n = kanade_shared::subject::MAX_PC_ID_LABELS;
+    let f = Fleet::new(Auth::Users, false, None).await;
+    let mut clients = std::collections::HashMap::new();
+    for role in Role::ALL {
+        clients.insert(role, f.role_fast(role).await);
+    }
+    let mut wrong = Vec::new();
+    for row in PC_SUBJECTS {
+        for labels in 1..=n + 1 {
+            if labels > n && !row.bounded {
+                continue;
+            }
+            let subject: &'static str =
+                Box::leak(expand(row.template, &pc_labels(labels)).into_boxed_str());
+            let op = match row.dir {
+                Dir::Publish => Op::Publish(subject),
+                Dir::Subscribe => Op::Subscribe(subject),
+            };
+            let c = &clients[&row.role];
+            let mark = c.errors.lock().unwrap().len();
+            run_op(c, op).await;
+            c.settle(f.watch()).await;
+            let denied = c.violated_since(mark, op.kind(), subject);
+            let expected_denied = !subject_matches_any(row, subject);
+            if denied != expected_denied {
+                wrong.push(format!(
+                    "{:?} {op:?} ({labels} labels): broker denied={denied}, conf says denied={expected_denied}",
+                    row.role
+                ));
+            }
+            if labels <= n && denied {
+                wrong.push(format!("{:?} {op:?} was refused", row.role));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+fn subject_matches_any(row: &PcSubject, subject: &str) -> bool {
+    conf_allows(row.role, row.dir, subject)
+}
+
+/// A pc_id with N+1 labels is turned away at every entry point, with a
+/// message that names the limit, instead of connecting and going silent.
+#[tokio::test]
+#[ignore = "requires nats-server in PATH and built binaries; cargo test -- --ignored"]
+async fn a_pc_id_with_too_many_labels_is_refused_by_the_agent_cli_and_api() {
+    prereqs_or_skip!();
+    let n = kanade_shared::subject::MAX_PC_ID_LABELS;
+    let too_long = pc_labels(n + 1);
+    let mut f = Fleet::new(Auth::Users, false, None)
+        .await
+        .with_pc_id(&too_long);
+    f.start_backend().await;
+
+    // The agent exits on its own, non-zero, before it opens a connection.
+    let mut cmd = f.agent_cmd();
+    cmd.stdin(Stdio::null()).kill_on_drop(true);
+    let out = guarded(
+        &OPERATION,
+        "agent to refuse the pc_id",
+        f.watch(),
+        cmd.output(),
+    )
+    .await
+    .expect("run agent");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !out.status.success(),
+        "agent started with {too_long}: {said}"
+    );
+    assert!(
+        said.contains(&format!("at most {n}")) && said.contains(&too_long),
+        "agent's refusal does not name the limit: {said}"
+    );
+
+    // The CLI.
+    let out = f
+        .cli(&["run", &too_long, "--shell", "sh", "--", "echo hi"])
+        .await;
+    assert!(!out.status.success(), "kanade run accepted {too_long}");
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(said.contains(&format!("at most {n}")), "cli: {said}");
+
+    // The API: 400 for every route that takes a pc_id, and nothing published.
+    let yaml = Some("application/yaml");
+    let manifest = "id: pc-id-limit\nversion: 0.1.0\nexecute:\n  shell: sh\n  timeout: 30s\n  script: |\n    echo hi\n";
+    let (st, body) = f.api("POST", "/api/jobs", yaml, manifest).await;
+    assert!(st == 200 || st == 201, "job create: {st} {body}");
+    let json = Some("application/json");
+    let run =
+        serde_json::json!({"pc_id": too_long, "script": "echo hi", "shell": "sh"}).to_string();
+    let plan = serde_json::json!({"target": {"pcs": [too_long]}}).to_string();
+    for (method, path, ct, body) in [
+        (
+            "POST",
+            format!("/api/agents/{too_long}/ping"),
+            None,
+            String::new(),
+        ),
+        (
+            "GET",
+            format!("/api/agents/{too_long}/logs?tail=5"),
+            None,
+            String::new(),
+        ),
+        ("POST", "/api/run".to_string(), json, run),
+        ("POST", "/api/exec/pc-id-limit".to_string(), json, plan),
+    ] {
+        let (st, resp) = f.api(method, &path, ct, &body).await;
+        assert_eq!(st, 400, "{method} {path}: {resp}");
+        assert!(
+            resp.contains(&format!("at most {n}")),
+            "{method} {path}: {resp}"
+        );
+    }
+    let unwanted: Vec<_> = f
+        .broker
+        .violations()
+        .into_iter()
+        .filter(|v| v.subject.contains(&too_long))
+        .collect();
+    assert!(
+        unwanted.is_empty(),
+        "something reached the broker: {unwanted:?}"
+    );
+}

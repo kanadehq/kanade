@@ -615,6 +615,9 @@ pub(crate) async fn run_agent() -> Result<()> {
     let _log_guard = init_tracing(&cfg.log)
         .with_context(|| format!("init tracing from [log] in {cfg_path:?}"))?;
 
+    kanade_shared::subject::validate_pc_id(&cfg.agent.id)
+        .map_err(|e| anyhow::anyhow!("invalid [agent] id in {cfg_path:?}: {e}"))?;
+
     cleanup_stale_upgrade_artifacts();
 
     info!(

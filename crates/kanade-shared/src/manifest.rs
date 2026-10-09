@@ -5415,6 +5415,19 @@ execute:
     }
 
     #[test]
+    fn schedule_validate_refuses_a_pc_id_with_too_many_labels() {
+        let parse = |pc: &str| -> Schedule {
+            serde_yaml::from_str(&format!(
+                "id: s\nwhen:\n  per_pc: {{ every: 1h }}\njob_id: j\ntarget:\n  pcs: [\"{pc}\"]\n"
+            ))
+            .expect("parse")
+        };
+        assert!(parse("a.b.c.d").validate().is_ok());
+        let err = parse("a.b.c.d.e").validate().unwrap_err();
+        assert!(err.contains("at most 4"), "{err}");
+    }
+
+    #[test]
     fn schedule_carries_target_and_rollout() {
         let yaml = r#"
 id: hourly-cleanup-canary
@@ -9346,6 +9359,9 @@ impl Schedule {
     /// `POST /api/schedules`. The job_id-exists check lives in the
     /// API handler instead — it needs the JOBS KV.
     pub fn validate(&self) -> Result<(), String> {
+        for pc in &self.plan.target.pcs {
+            crate::subject::validate_pc_id(pc)?;
+        }
         if matches!(self.runs_on, RunsOn::Agent) && matches!(self.when, When::PerTarget(_)) {
             return Err(
                 "when.per_target needs fleet-wide completion data and is backend-only; \
