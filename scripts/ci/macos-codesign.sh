@@ -48,7 +48,7 @@ verify_bin() {
   dr=$(codesign -dr - "$f" 2>&1)
   echo "$dr"
   dr_l=$(printf '%s' "$dr" | tr 'A-F' 'a-f')
-  if [[ "$dr_l" != *"identifier \"$id\""* || "$dr_l" != *"certificate leaf = h\"$sha\""* ]]; then
+  if [[ "$dr_l" != *"identifier \"$id\""* || "$dr_l" != *"certificate leaf = H\"$sha\""* ]]; then
     echo "::error::$f: designated requirement lacks identifier \"$id\" / certificate leaf H\"$sha\" (ad-hoc or wrong identity?)"
     return 1
   fi
