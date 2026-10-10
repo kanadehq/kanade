@@ -650,6 +650,48 @@ ul.checks {
   color: #fff;
 }
 
+/* Collapse toggle: pushed to the right edge of the header. The chevron
+   flips when collapsed. */
+.runs-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.runs-toggle:hover,
+.runs-toggle:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.runs-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+
+.runs-collapsed .runs-toggle svg {
+  transform: rotate(180deg);
+}
+
+/* Collapsed: just the header bar (balanced padding); the freed height
+   returns to the view above. `[hidden]` must beat .runs-scroll's rules. */
+.runs-collapsed .runs-header {
+  padding-bottom: 12px;
+}
+
+.runs-scroll[hidden] {
+  display: none;
+}
+
 /* The dock's one scrolling region: the run rows. */
 .runs-scroll {
   flex: 1 1 auto;

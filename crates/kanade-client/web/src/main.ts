@@ -573,8 +573,35 @@ function orderedRuns(): Run[] {
   return [...active, ...terminal];
 }
 
+// Dock collapse state (session memory only — the app has no persistence
+// layer for UI prefs). The one sync point for the list, the section class
+// and the toggle button's ARIA / label.
+let runsCollapsed = false;
+// Non-terminal run ids seen by the previous renderRuns(): a new id here is
+// a freshly started run, which auto-expands a collapsed dock. A run going
+// terminal never adds an id, so finishing never re-expands.
+let knownActiveRunIds = new Set<string>();
+
+function setRunsCollapsed(collapsed: boolean): void {
+  runsCollapsed = collapsed;
+  $("runs").hidden = collapsed;
+  $("runs-section").classList.toggle("runs-collapsed", collapsed);
+  const btn = $("runs-toggle");
+  const label = collapsed ? "実行状況を表示" : "実行状況を折りたたむ";
+  btn.setAttribute("aria-expanded", String(!collapsed));
+  btn.setAttribute("aria-label", label);
+  btn.title = label;
+}
+
 function renderRuns(): void {
   evictOldRuns();
+  const activeIds = new Set(
+    [...runs.values()].filter((r) => !isTerminal(r.status)).map((r) => r.runId),
+  );
+  if (runsCollapsed && [...activeIds].some((id) => !knownActiveRunIds.has(id))) {
+    setRunsCollapsed(false);
+  }
+  knownActiveRunIds = activeIds;
   const section = $("runs-section");
   section.hidden = runs.size === 0;
   if (runs.size > 0) {
@@ -2124,6 +2151,11 @@ window.addEventListener("DOMContentLoaded", () => {
   // the innerHTML churn that per-element listeners wouldn't.
   document.addEventListener("click", (e) => {
     const t = e.target as HTMLElement;
+
+    if (t.closest("#runs-toggle")) {
+      setRunsCollapsed(!runsCollapsed);
+      return;
+    }
 
     // The support-mode opener: N quick taps on the version label. Handled
     // before anything else so it can't be swallowed by a broader selector.
