@@ -630,10 +630,11 @@ async fn run_config(n: usize, cost: u32, timeout_label: &str, deadline_secs: u64
         .map(|s| s.connected.load(Ordering::SeqCst) + 1)
         .collect();
     broker.down().await;
-    let restarted = broker.up().await;
-    // Taken once the port answers: refusals while the broker was down never
-    // reach it, so they are not authentication outcomes.
+    // Taken while the broker is down: refusals never reach it (they do not
+    // increment `conns`), whereas reconnects can land as soon as the port
+    // opens, before `up()` returns, and must be counted.
     let before: Vec<Snapshot> = stats.iter().map(|s| s.snapshot()).collect();
+    let restarted = broker.up().await;
     let since_us = (restarted - base).as_micros() as u64;
     let deadline = restarted + Duration::from_secs(deadline_secs);
     let sc = Scenario {
