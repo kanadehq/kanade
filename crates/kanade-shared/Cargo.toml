@@ -53,3 +53,5 @@ futures = { workspace = true }
 # agent's offline_boot harness does.
 portpicker = "0.1.1"
 tempfile = "3.27.0"
+# nats_auth_burst.rs mints bcrypt hashes of a chosen cost for the broker.
+bcrypt = "0.19.3"
