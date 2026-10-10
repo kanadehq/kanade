@@ -9,6 +9,15 @@
          kanade_shared::DEFAULT_CLIENT_DISPLAY_NAME (and main.ts's
          DEFAULT_DISPLAY_NAME) — keep all in sync. -->
     <title>端末管理支援ツール</title>
+    <!-- Restore the user's theme choice synchronously, before the
+         stylesheet and first paint (the window is shown immediately).
+         Key and values mirror src/theme.ts — keep in sync. -->
+    <script>
+      try {
+        var t = localStorage.getItem("kanade-client.theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
@@ -40,9 +49,12 @@
           </svg>
           <span class="brand-name">端末管理支援ツール</span>
         </div>
-        <div class="conn conn-connecting" id="conn" title="エージェント接続状態">
-          <span class="conn-dot"></span>
-          <span class="conn-label">接続待ち</span>
+        <div class="header-right">
+          <div class="conn conn-connecting" id="conn" title="エージェント接続状態">
+            <span class="conn-dot"></span>
+            <span class="conn-label">接続待ち</span>
+          </div>
+          <button type="button" id="theme-toggle" class="icon-btn"></button>
         </div>
       </header>
 
