@@ -40,8 +40,12 @@
 //! `retry_on_initial_connect` the helper returns before any authentication.
 //! A client is `not converged` when it has not connected by the deadline;
 //! the distribution covers converged clients only, so read it together with
-//! that count. Errors are counted from the client's event callback, and from
-//! the broker's own log as a cross-check.
+//! that count. Each client reaches the broker through a listener of its own
+//! that counts the broker's `Authentication Timeout` and `Authorization
+//! Violation` answers (async-nats hands the first to the event callback only as
+//! a generic I/O error, and the credential probe has no callback), so errors
+//! and retries are per client; the broker's own log is the cross-check.
+//! `KANADE_AUTH_BURST_JSONL=<file>` appends one JSON line per client.
 //!
 //! Each user client costs the broker two bcrypt verifications per attempt: the
 //! credential probe and the real connection.
@@ -166,12 +170,14 @@ struct Broker {
 
 impl Broker {
     fn new(cost: u32, auth_timeout: Option<u64>) -> Self {
+        Self::with_conf(&users_conf(auth_timeout), cost)
+    }
+
+    /// A broker on a free port whose authorization is `auth_conf`.
+    fn with_conf(auth_conf: &str, cost: u32) -> Self {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let port = portpicker::pick_unused_port().expect("broker port");
-        let conf = format!(
-            "host: 127.0.0.1\nport: {port}\n{}\n",
-            users_conf(auth_timeout)
-        );
+        let conf = format!("host: 127.0.0.1\nport: {port}\n{auth_conf}\n");
         std::fs::write(dir.path().join("nats.conf"), conf).expect("write nats.conf");
         Self {
             child: None,
@@ -231,7 +237,9 @@ impl Broker {
         }
     }
 
-    /// Lines of the current spawn's log that mention each rejection.
+    /// Lines of the current spawn's log: connections closed before they were
+    /// registered (what an authentication timeout leaves; the broker does not
+    /// log the timeout itself at the default level), and explicit auth errors.
     fn log_counts(&self) -> (usize, usize) {
         let text = std::fs::read_to_string(self.log_path()).unwrap_or_default();
         let count = |needle: &str| {
@@ -239,20 +247,47 @@ impl Broker {
                 .filter(|l| l.to_lowercase().contains(needle))
                 .count()
         };
-        (count("authentication timeout"), count("authorization violation"))
+        (
+            count("problem registering with account"),
+            count("authorization violation")
+                + count("authentication error")
+                + count("authentication timeout"),
+        )
+    }
+
+    /// The most frequent log messages with addresses and ids stripped, so a
+    /// failure the counters do not name is still visible.
+    fn log_digest(&self) -> Vec<(String, usize)> {
+        let text = std::fs::read_to_string(self.log_path()).unwrap_or_default();
+        let mut seen: std::collections::HashMap<String, usize> = Default::default();
+        for line in text.lines() {
+            let msg = line.split(" - ").last().unwrap_or(line);
+            let norm: String = msg.chars().filter(|c| !c.is_ascii_digit()).collect();
+            *seen.entry(norm).or_default() += 1;
+        }
+        let mut v: Vec<_> = seen.into_iter().collect();
+        v.sort_by_key(|a| std::cmp::Reverse(a.1));
+        v.truncate(3);
+        v
     }
 }
 
-/// What one client saw, written from its event callback.
+/// What one client saw: its own event callback, and the counting proxy that
+/// sits between it and the broker. The proxy is what makes the broker's
+/// `Authentication Timeout` visible per client: async-nats reports it to the
+/// event callback only as a generic I/O error, and the credential probe has
+/// no callback at all.
 struct Stat {
     base: Instant,
     connected: AtomicU64,
     last_connected_us: AtomicU64,
-    errors: AtomicU64,
+    event_errors: AtomicU64,
+    /// TCP connections that reached the broker, probes included.
+    conns: AtomicU64,
+    /// Of those, the credential probes (recognised by name in CONNECT).
+    probe_conns: AtomicU64,
     timeouts: AtomicU64,
     violations: AtomicU64,
-    other: AtomicU64,
-    retries_before_first: AtomicU64,
     notify: Notify,
 }
 
@@ -262,11 +297,11 @@ impl Stat {
             base,
             connected: AtomicU64::new(0),
             last_connected_us: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
+            event_errors: AtomicU64::new(0),
+            conns: AtomicU64::new(0),
+            probe_conns: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
             violations: AtomicU64::new(0),
-            other: AtomicU64::new(0),
-            retries_before_first: AtomicU64::new(0),
             notify: Notify::new(),
         }
     }
@@ -274,26 +309,14 @@ impl Stat {
     fn on_event(&self, ev: async_nats::Event) {
         match ev {
             async_nats::Event::Connected => {
-                if self.connected.load(Ordering::SeqCst) == 0 {
-                    self.retries_before_first
-                        .store(self.errors.load(Ordering::SeqCst), Ordering::SeqCst);
-                }
                 self.last_connected_us
                     .store(self.base.elapsed().as_micros() as u64, Ordering::SeqCst);
                 self.connected.fetch_add(1, Ordering::SeqCst);
                 self.notify.notify_one();
             }
             async_nats::Event::Disconnected => {}
-            other => {
-                let text = format!("{other:?}").to_lowercase();
-                self.errors.fetch_add(1, Ordering::SeqCst);
-                if text.contains("authentication timeout") {
-                    self.timeouts.fetch_add(1, Ordering::SeqCst);
-                } else if text.contains("authorization") {
-                    self.violations.fetch_add(1, Ordering::SeqCst);
-                } else {
-                    self.other.fetch_add(1, Ordering::SeqCst);
-                }
+            _ => {
+                self.event_errors.fetch_add(1, Ordering::SeqCst);
             }
         }
     }
@@ -312,35 +335,95 @@ impl Stat {
 
     fn snapshot(&self) -> Snapshot {
         Snapshot {
-            errors: self.errors.load(Ordering::SeqCst),
+            event_errors: self.event_errors.load(Ordering::SeqCst),
+            conns: self.conns.load(Ordering::SeqCst),
+            probe_conns: self.probe_conns.load(Ordering::SeqCst),
             timeouts: self.timeouts.load(Ordering::SeqCst),
             violations: self.violations.load(Ordering::SeqCst),
-            other: self.other.load(Ordering::SeqCst),
         }
     }
 }
 
 #[derive(Clone, Copy, Default)]
 struct Snapshot {
-    errors: u64,
+    event_errors: u64,
+    conns: u64,
+    probe_conns: u64,
     timeouts: u64,
     violations: u64,
-    other: u64,
 }
 
-struct Report {
-    scenario: &'static str,
-    cost: u32,
-    timeout: String,
-    n: usize,
-    times_ms: Vec<f64>,
-    clients_with_errors: usize,
-    timeouts: u64,
-    violations: u64,
-    other: u64,
-    max_retries: u64,
-    broker_timeouts: usize,
-    broker_violations: usize,
+/// One client's own listener, forwarding to the broker. Port 0, so the OS
+/// picks it. Counts, per accepted-and-forwarded connection, what the broker
+/// answered; it adds no delay of its own.
+async fn client_proxy(upstream: u16, stat: Arc<Stat>) -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("proxy listener");
+    let port = listener.local_addr().expect("proxy addr").port();
+    let accept = tokio::spawn(async move {
+        loop {
+            let Ok((client, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(proxy_conn(client, upstream, stat.clone()));
+        }
+    });
+    (port, accept)
+}
+
+async fn proxy_conn(mut client: TcpStream, upstream: u16, stat: Arc<Stat>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(mut server) = TcpStream::connect(("127.0.0.1", upstream)).await else {
+        return;
+    };
+    stat.conns.fetch_add(1, Ordering::SeqCst);
+    let (mut cr, mut cw) = client.split();
+    let (mut sr, mut sw) = server.split();
+    let to_client = async {
+        let mut buf = [0u8; 4096];
+        loop {
+            match sr.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                    if text.contains("authentication timeout") {
+                        stat.timeouts.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if text.contains("authorization violation") {
+                        stat.violations.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if cw.write_all(&buf[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    };
+    let to_server = async {
+        let mut buf = [0u8; 4096];
+        let mut probe = false;
+        loop {
+            match cr.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    if !probe
+                        && String::from_utf8_lossy(&buf[..n]).contains("\"name\":\"auth-probe\"")
+                    {
+                        probe = true;
+                        stat.probe_conns.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if sw.write_all(&buf[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! {
+        _ = to_client => {}
+        _ = to_server => {}
+    }
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -351,106 +434,164 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
+/// One client's outcome in one scenario.
+struct ClientResult {
+    time_ms: Option<f64>,
+    timeouts: u64,
+    violations: u64,
+    /// Real (non-probe) connection attempts beyond the first.
+    retries: u64,
+    event_errors: u64,
+}
+
+struct Report {
+    scenario: &'static str,
+    cost: u32,
+    timeout: String,
+    clients: Vec<ClientResult>,
+    attempts: u64,
+    broker_timeouts: usize,
+    broker_violations: usize,
+}
+
 impl Report {
     fn header() -> &'static str {
-        "| scenario | cost | auth timeout | N | not converged | min ms | median ms | p95 ms | max ms | clients with auth errors | client Authentication Timeout | client Authorization Violation | client other errors | max retries | broker Authentication Timeout | broker Authorization Violation |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+        "| scenario | cost | auth timeout | N | not converged | min ms | median ms | p95 ms | max ms | clients with auth errors | Authentication Timeout (proxy) | Authorization Violation (proxy) | max retries | connections to broker | broker log 'Problem registering' | broker log auth errors |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     }
 
     fn row(&self) -> String {
-        let mut t = self.times_ms.clone();
+        let mut t: Vec<f64> = self.clients.iter().filter_map(|c| c.time_ms).collect();
         t.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let ok = t.len();
+        let n = self.clients.len();
+        let sum = |f: fn(&ClientResult) -> u64| self.clients.iter().map(f).sum::<u64>();
         format!(
             "| {} | {} | {} | {} | {} | {:.0} | {:.0} | {:.0} | {:.0} | {} | {} | {} | {} | {} | {} | {} |",
             self.scenario,
             self.cost,
             self.timeout,
-            self.n,
-            self.n - ok,
+            n,
+            n - t.len(),
             t.first().copied().unwrap_or(f64::NAN),
             percentile(&t, 0.5),
             percentile(&t, 0.95),
             t.last().copied().unwrap_or(f64::NAN),
-            self.clients_with_errors,
-            self.timeouts,
-            self.violations,
-            self.other,
-            self.max_retries,
+            self.clients
+                .iter()
+                .filter(|c| c.timeouts + c.violations > 0)
+                .count(),
+            sum(|c| c.timeouts),
+            sum(|c| c.violations),
+            self.clients.iter().map(|c| c.retries).max().unwrap_or(0),
+            self.attempts,
             self.broker_timeouts,
             self.broker_violations,
         )
     }
+
+    /// One JSON line per client, when `KANADE_AUTH_BURST_JSONL` names a file.
+    fn append_jsonl(&self) {
+        use std::io::Write as _;
+        let Ok(path) = std::env::var("KANADE_AUTH_BURST_JSONL") else {
+            return;
+        };
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("jsonl file");
+        for (i, c) in self.clients.iter().enumerate() {
+            let time = c.time_ms.map_or("null".to_string(), |t| format!("{t:.1}"));
+            writeln!(
+                f,
+                "{{\"scenario\":\"{}\",\"cost\":{},\"auth_timeout\":\"{}\",\"client\":{i},\"time_ms\":{time},\"authentication_timeouts\":{},\"authorization_violations\":{},\"retries\":{},\"event_errors\":{}}}",
+                self.scenario, self.cost, self.timeout, c.timeouts, c.violations, c.retries, c.event_errors
+            )
+            .expect("jsonl write");
+        }
+    }
+}
+
+/// What a scenario is measured against.
+struct Scenario<'a> {
+    name: &'static str,
+    cost: u32,
+    timeout: &'a str,
+    broker: &'a Broker,
+    stats: &'a [Arc<Stat>],
 }
 
 /// Wait for every client to reach `targets[i]` connections and fold the result
-/// into a report. `since` is the scenario start on the clients' clock.
+/// into a report. `since_us` is the scenario start on the clients' clock;
+/// counters are reported relative to `before`.
 async fn collect(
-    scenario: &'static str,
-    cost: u32,
-    timeout: &str,
-    stats: &[Arc<Stat>],
+    sc: &Scenario<'_>,
     targets: &[u64],
     before: &[Snapshot],
     since_us: u64,
     deadline: Instant,
-    broker: &Broker,
 ) -> Report {
-    let mut times_ms = Vec::new();
-    let (mut with_err, mut to, mut av, mut ot, mut max_retries) = (0, 0, 0, 0, 0);
-    for (i, s) in stats.iter().enumerate() {
+    let mut clients = Vec::new();
+    let mut attempts = 0;
+    for (i, s) in sc.stats.iter().enumerate() {
         let ok = s.wait_connected(targets[i], deadline).await;
-        if ok {
-            let us = s.last_connected_us.load(Ordering::SeqCst);
-            times_ms.push(us.saturating_sub(since_us) as f64 / 1000.0);
-        }
         let now = s.snapshot();
-        let d = (
-            now.errors - before[i].errors,
-            now.timeouts - before[i].timeouts,
-            now.violations - before[i].violations,
-            now.other - before[i].other,
+        let conns = now.conns - before[i].conns;
+        let real = conns - (now.probe_conns - before[i].probe_conns);
+        attempts += conns;
+        clients.push(ClientResult {
+            time_ms: ok.then(|| {
+                s.last_connected_us
+                    .load(Ordering::SeqCst)
+                    .saturating_sub(since_us) as f64
+                    / 1000.0
+            }),
+            timeouts: now.timeouts - before[i].timeouts,
+            violations: now.violations - before[i].violations,
+            retries: real.saturating_sub(1),
+            event_errors: now.event_errors - before[i].event_errors,
+        });
+    }
+    let (broker_timeouts, broker_violations) = sc.broker.log_counts();
+    let report = Report {
+        scenario: sc.name,
+        cost: sc.cost,
+        timeout: sc.timeout.to_string(),
+        clients,
+        attempts,
+        broker_timeouts,
+        broker_violations,
+    };
+    report.append_jsonl();
+    for (line, n) in sc.broker.log_digest() {
+        eprintln!(
+            "  [{} cost {} timeout {}] broker log x{n}: {line}",
+            sc.name, sc.cost, sc.timeout
         );
-        if d.1 + d.2 > 0 {
-            with_err += 1;
-        }
-        to += d.1;
-        av += d.2;
-        ot += d.3;
-        max_retries = max_retries.max(d.0);
     }
-    let (bt, bv) = broker.log_counts();
-    Report {
-        scenario,
-        cost,
-        timeout: timeout.to_string(),
-        n: stats.len(),
-        times_ms,
-        clients_with_errors: with_err,
-        timeouts: to,
-        violations: av,
-        other: ot,
-        max_retries,
-        broker_timeouts: bt,
-        broker_violations: bv,
-    }
+    report
 }
 
 async fn run_config(n: usize, cost: u32, timeout_label: &str, deadline_secs: u64) -> Vec<Report> {
     let auth_timeout = timeout_label.parse::<u64>().ok();
     let mut broker = Broker::new(cost, auth_timeout);
     broker.up().await;
-    let url = broker.url();
     let base = Instant::now();
     let stats: Vec<Arc<Stat>> = (0..n).map(|_| Arc::new(Stat::new(base))).collect();
+    let mut proxies = Vec::new();
+    for s in &stats {
+        proxies.push(client_proxy(broker.port, s.clone()).await);
+    }
     let barrier = Arc::new(Barrier::new(n + 1));
-    let started_us = Arc::new(AtomicU64::new(0));
 
     let mut handles = Vec::new();
-    for s in &stats {
-        let (s, url, barrier) = (s.clone(), url.clone(), barrier.clone());
+    for (s, (port, _)) in stats.iter().zip(&proxies) {
+        let (s, url, barrier) = (
+            s.clone(),
+            format!("nats://127.0.0.1:{port}"),
+            barrier.clone(),
+        );
         handles.push(tokio::spawn(async move {
             let creds = NatsCredentials::new(None, Some(("agent".into(), password("agent"))));
-            barrier.wait().await;
             let cb = {
                 let s = s.clone();
                 move |ev| {
@@ -458,12 +599,12 @@ async fn run_config(n: usize, cost: u32, timeout_label: &str, deadline_secs: u64
                     async move { s.on_event(ev) }
                 }
             };
+            barrier.wait().await;
             connect_with_credentials_and_event_callback(NatsRole::Agent, &url, creds, cb)
                 .await
                 .expect("connect returns before authentication")
         }));
     }
-    started_us.store(base.elapsed().as_micros() as u64, Ordering::SeqCst);
     let start = Instant::now();
     barrier.wait().await;
     let since_us = (start - base).as_micros() as u64;
@@ -474,10 +615,14 @@ async fn run_config(n: usize, cost: u32, timeout_label: &str, deadline_secs: u64
     let deadline = start + Duration::from_secs(deadline_secs);
     let zero = vec![Snapshot::default(); n];
     let ones = vec![1u64; n];
-    let start_report = collect(
-        "start", cost, timeout_label, &stats, &ones, &zero, since_us, deadline, &broker,
-    )
-    .await;
+    let sc = Scenario {
+        name: "start",
+        cost,
+        timeout: timeout_label,
+        broker: &broker,
+        stats: &stats,
+    };
+    let start_report = collect(&sc, &ones, &zero, since_us, deadline).await;
 
     // Restart under N connected clients.
     let targets: Vec<u64> = stats
@@ -486,17 +631,24 @@ async fn run_config(n: usize, cost: u32, timeout_label: &str, deadline_secs: u64
         .collect();
     broker.down().await;
     let restarted = broker.up().await;
-    // Taken once the port answers: refusals while the broker was down are
-    // connection errors, not authentication ones.
+    // Taken once the port answers: refusals while the broker was down never
+    // reach it, so they are not authentication outcomes.
     let before: Vec<Snapshot> = stats.iter().map(|s| s.snapshot()).collect();
     let since_us = (restarted - base).as_micros() as u64;
     let deadline = restarted + Duration::from_secs(deadline_secs);
-    let restart_report = collect(
-        "restart", cost, timeout_label, &stats, &targets, &before, since_us, deadline, &broker,
-    )
-    .await;
+    let sc = Scenario {
+        name: "restart",
+        cost,
+        timeout: timeout_label,
+        broker: &broker,
+        stats: &stats,
+    };
+    let restart_report = collect(&sc, &targets, &before, since_us, deadline).await;
 
     drop(clients);
+    for (_, accept) in &proxies {
+        accept.abort();
+    }
     broker.down().await;
     vec![start_report, restart_report]
 }
@@ -514,7 +666,7 @@ async fn burst_of_user_connections() {
     let timeouts = env_list("KANADE_AUTH_BURST_AUTH_TIMEOUTS", "shipped");
     require_fd_limit(n);
     println!(
-        "nats-server: {}; N={n}; GOMAXPROCS={}; deadline={deadline_secs}s",
+        "{}; N={n}; GOMAXPROCS={}; deadline={deadline_secs}s",
         nats_server_version(),
         std::env::var("KANADE_AUTH_BURST_GOMAXPROCS").unwrap_or_else(|_| "(all cores)".into())
     );
@@ -530,8 +682,8 @@ async fn burst_of_user_connections() {
 }
 
 /// Cost of one verification: a loop of `bcrypt::verify` on this thread, and
-/// the median of serial user connects to a real broker (which includes the
-/// connection itself; the cost-4 row is the floor to subtract).
+/// serial user connects to a real broker (which include the connection
+/// itself; the cost-4 row is the floor to subtract).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs nats-server in PATH; measurement, run with --nocapture"]
 async fn cost_of_one_verification() {
@@ -541,29 +693,33 @@ async fn cost_of_one_verification() {
     }
     let mut costs = vec!["4".to_string()];
     costs.extend(env_list("KANADE_AUTH_BURST_COSTS", "8,9,10,11,12"));
-    println!("nats-server: {}", nats_server_version());
-    println!("| cost | bcrypt::verify ms (1 thread) | serial connect median ms (broker) |\n|---|---|---|");
+    println!("{}", nats_server_version());
+    println!(
+        "| cost | bcrypt::verify median ms (1 thread) | serial connect median ms (broker) | serial connect min ms |\n|---|---|---|---|"
+    );
     for cost in costs {
         let cost: u32 = cost.parse().expect("cost is a number");
         let hash = bcrypt::hash_with_result("probe-pw", cost)
             .unwrap()
             .format_for_version(bcrypt::Version::TwoA);
-        let iters = 8;
-        let t = tokio::task::spawn_blocking(move || {
-            let start = Instant::now();
-            for _ in 0..iters {
-                assert!(bcrypt::verify("probe-pw", &hash).unwrap());
-            }
-            start.elapsed().as_secs_f64() * 1000.0 / iters as f64
+        let mut local = tokio::task::spawn_blocking(move || {
+            (0..9)
+                .map(|_| {
+                    let start = Instant::now();
+                    assert!(bcrypt::verify("probe-pw", &hash).unwrap());
+                    start.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect::<Vec<_>>()
         })
         .await
         .unwrap();
+        local.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let mut broker = Broker::new(cost, None);
         broker.up().await;
         let url = broker.url();
         let mut samples = Vec::new();
-        for _ in 0..12 {
+        for _ in 0..15 {
             let start = Instant::now();
             let c = async_nats::ConnectOptions::new()
                 .user_and_password("agent".into(), password("agent"))
@@ -574,7 +730,68 @@ async fn cost_of_one_verification() {
             samples.push(start.elapsed().as_secs_f64() * 1000.0);
         }
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!("| {cost} | {t:.1} | {:.1} |", percentile(&samples, 0.5));
+        println!(
+            "| {cost} | {:.1} | {:.1} | {:.1} |",
+            percentile(&local, 0.5),
+            percentile(&samples, 0.5),
+            samples[0]
+        );
+        broker.down().await;
+    }
+}
+
+/// Whether `authorization { timeout }` is accepted where the repository puts
+/// its authorization, and whether it is enforced: a connection that never
+/// sends CONNECT is timed from the broker's greeting until the broker answers
+/// `Authentication Timeout` and closes it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs nats-server in PATH; measurement, run with --nocapture"]
+async fn authorization_timeout_is_enforced() {
+    use tokio::io::AsyncReadExt;
+    if !nats_server_available() {
+        eprintln!("nats-server not in PATH; skipping");
+        return;
+    }
+    println!("{}", nats_server_version());
+    println!(
+        "| configuration | seconds until the silent connection is cut | broker said |\n|---|---|---|"
+    );
+    let token = |t: Option<u64>| {
+        let timeout = t.map_or(String::new(), |t| format!(", timeout: {t}"));
+        format!("authorization {{ token: \"burst-token\"{timeout} }}\n")
+    };
+    let variants: Vec<(String, Option<String>, Option<u64>)> = vec![
+        ("users, shipped file".into(), None, None),
+        ("users, timeout 5".into(), None, Some(5)),
+        ("users, timeout 10".into(), None, Some(10)),
+        ("token, no timeout".into(), Some(token(None)), None),
+        ("token, timeout 5".into(), Some(token(Some(5))), None),
+    ];
+    for (label, conf, timeout) in variants {
+        let mut broker = match conf {
+            Some(text) => Broker::with_conf(&text, 4),
+            None => Broker::new(4, timeout),
+        };
+        broker.up().await;
+        let mut sock = TcpStream::connect(("127.0.0.1", broker.port))
+            .await
+            .expect("connect");
+        let start = Instant::now();
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 1024];
+        let cut = loop {
+            match tokio::time::timeout(Duration::from_secs(30), sock.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => break start.elapsed(),
+                Ok(Ok(n)) => seen.extend_from_slice(&buf[..n]),
+                Err(_) => break Duration::from_secs(30),
+            }
+        };
+        let said = String::from_utf8_lossy(&seen)
+            .lines()
+            .find(|l| l.starts_with("-ERR"))
+            .unwrap_or("(nothing)")
+            .to_string();
+        println!("| {label} | {:.2} | {said} |", cut.as_secs_f64());
         broker.down().await;
     }
 }
