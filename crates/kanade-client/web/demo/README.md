@@ -94,6 +94,17 @@ happens next:
   disabled states never appear, so a viewer never sees the app handle
   them.
 
+## Checking the collapsible run dock
+
+Run a job, then use the chevron button in the 実行状況 header:
+
+- Collapsing leaves a slim bar; the 実行中 badge keeps updating.
+- A run finishing does not re-expand it; starting another job does. (On
+  launch, a replayed running job also expands the dock.)
+- The button works from the keyboard (Tab, Enter / Space).
+- Both light and dark themes render correctly.
+- Collapsing gives the freed height back to the view above.
+
 ## Adding a fixture
 
 An unmocked `invoke` logs one line and returns `null`:
