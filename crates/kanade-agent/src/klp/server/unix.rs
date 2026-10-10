@@ -134,13 +134,22 @@ fn prepare_parent_dir(sock: &Path) -> Result<()> {
         bail!("{} is not a directory", dir.display());
     }
     // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } == 0 && (meta.uid() != 0 || meta.mode() & 0o022 != 0) {
-        bail!(
-            "refusing to use {}: as root the KLP socket directory must be root-owned and not group/other-writable (uid {}, mode {:o})",
-            dir.display(),
-            meta.uid(),
-            meta.mode() & 0o7777
-        );
+    if unsafe { libc::geteuid() } == 0 {
+        if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            bail!(
+                "refusing to use {}: as root the KLP socket directory must be root-owned and not group/other-writable (uid {}, mode {:o})",
+                dir.display(),
+                meta.uid(),
+                meta.mode() & 0o7777
+            );
+        }
+        // Root-owned and not writable by others, so tightening or opening the
+        // read/execute bits is safe: SPEC §2.12.1 wants exactly 0755 so that
+        // unprivileged users can reach the socket (e.g. a pre-existing 0700 dir).
+        if meta.mode() & 0o7777 != 0o755 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+                .with_context(|| format!("chmod 0755 {}", dir.display()))?;
+        }
     }
     if meta.mode() & 0o005 != 0o005 {
         warn!(dir = %dir.display(), mode = format!("{:o}", meta.mode() & 0o7777), "KLP socket directory is not world-traversable; clients cannot connect");

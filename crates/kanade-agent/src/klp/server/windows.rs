@@ -139,6 +139,7 @@ async fn handle_connection(pipe: NamedPipeServer, ctx: ListenerContext) -> Resul
     };
     debug!(
         user = %peer.user_display,
+        pid = peer.pid,
         session = ?peer.session,
         "KLP peer connected",
     );
