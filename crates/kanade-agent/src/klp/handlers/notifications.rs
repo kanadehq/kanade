@@ -51,7 +51,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::super::connection::ConnectionState;
-use super::super::notify_bus::filter_subjects;
+use super::super::notify_bus::{filter_subjects, is_addressed_subject};
 use super::system::HandlerResult;
 use crate::groups::parse_groups;
 
@@ -168,6 +168,7 @@ pub async fn handle_notifications_ack(
     let acked_at = Utc::now();
 
     let js = async_nats::jetstream::new(client.clone());
+    ensure_addressed(&js, pc_id, notif_id).await?;
 
     // 1. Persist the per-user read mark. Value matches SPEC §2.3.2:
     //    `{"acked_at": ..., "acked_by": "<sid>"}`.
@@ -285,6 +286,7 @@ pub async fn handle_notifications_unack(
     let unacked_at = Utc::now();
 
     let js = async_nats::jetstream::new(client.clone());
+    ensure_addressed(&js, pc_id, notif_id).await?;
 
     // 1. Delete the per-user read mark (tombstone ⇒ unread again).
     let kv = js
@@ -376,7 +378,14 @@ pub async fn handle_notifications_list(
 
     let my_groups = read_my_groups(&js, &conn.pc_id).await?;
     let subjects = filter_subjects(&conn.pc_id, &my_groups);
-    let notifications = replay_notifications(&js, subjects).await?;
+    let notifications: Vec<Notification> = replay_notifications(&js, subjects)
+        .await?
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    // `acks` is keyed by id but only ever looked up for ids in the
+    // audience-filtered `notifications` above, so an ack row for a
+    // notification not addressed to this PC is never surfaced.
     let acks = read_user_acks(&js, &conn.pc_id, user_sid).await?;
 
     let limit = (params.limit as usize).clamp(1, MAX_LIMIT);
@@ -443,7 +452,7 @@ async fn read_membership_bucket(
 async fn replay_notifications(
     js: &async_nats::jetstream::Context,
     subjects: Vec<String>,
-) -> HandlerResult<Vec<Notification>> {
+) -> HandlerResult<Vec<(String, Notification)>> {
     let stream = js.get_stream(STREAM_NOTIFICATIONS).await.map_err(|e| {
         warn!(error = %e, "notifications.list: get_stream NOTIFICATIONS failed");
         RpcError::new(
@@ -474,7 +483,7 @@ async fn replay_notifications(
     // overflows) so that if the stream ever exceeds the cap the page
     // still surfaces the *freshest* notifications — the ones an
     // unread-first UI cares about — rather than a wall of stale history.
-    let mut buf: std::collections::VecDeque<Notification> =
+    let mut buf: std::collections::VecDeque<(String, Notification)> =
         std::collections::VecDeque::with_capacity(REPLAY_BATCH.min(MAX_REPLAY));
     let mut dropped = 0usize;
     loop {
@@ -507,7 +516,7 @@ async fn replay_notifications(
             got += 1;
             match serde_json::from_slice::<Notification>(&m.payload) {
                 Ok(n) => {
-                    buf.push_back(n);
+                    buf.push_back((m.subject.to_string(), n));
                     if buf.len() > MAX_REPLAY {
                         buf.pop_front();
                         dropped += 1;
@@ -535,6 +544,44 @@ async fn replay_notifications(
         );
     }
     Ok(Vec::from(buf))
+}
+
+/// Find notification `id` among replayed `(subject, notification)` entries,
+/// returning it only when it was published to a subject this PC is addressed
+/// by (`all` / this PC / one of its groups — [`is_addressed_subject`]). `None`
+/// covers both "unknown id" and "addressed to someone else": the two are
+/// deliberately indistinguishable so ack can't probe other audiences.
+fn find_addressed<'a>(
+    entries: &'a [(String, Notification)],
+    id: &str,
+    pc_id: &str,
+    groups: &[String],
+) -> Option<&'a Notification> {
+    entries
+        .iter()
+        .find(|(subj, n)| n.id == id && is_addressed_subject(subj, pc_id, groups))
+        .map(|(_, n)| n)
+}
+
+/// Authorize `ack` / `unack`: the notification must be addressed to this PC
+/// (SPEC §2.12.4). Replays only this PC's audience subjects, so a notification
+/// for another PC/group is never even fetched. Broker failures surface as
+/// InternalError, never as "not addressed".
+async fn ensure_addressed(
+    js: &async_nats::jetstream::Context,
+    pc_id: &str,
+    notif_id: &str,
+) -> HandlerResult<()> {
+    let groups = read_my_groups(js, pc_id).await?;
+    let entries = replay_notifications(js, filter_subjects(pc_id, &groups)).await?;
+    if find_addressed(&entries, notif_id, pc_id, &groups).is_some() {
+        Ok(())
+    } else {
+        Err(RpcError::new(
+            ErrorKind::Unauthorized,
+            "notification is not addressed to this PC/user",
+        ))
+    }
 }
 
 /// Value side of a `notifications_read` KV row — the agent writes
@@ -873,6 +920,65 @@ mod tests {
             agent_version: "0.43.0".into(),
             target_version: "0.43.0".into(),
         }
+    }
+
+    fn addressed_entries() -> Vec<(String, Notification)> {
+        vec![
+            ("notifications.all".into(), sample_notification("n-all")),
+            ("notifications.pc.PC1".into(), sample_notification("n-pc")),
+            (
+                "notifications.pc.PC2".into(),
+                sample_notification("n-other-pc"),
+            ),
+            (
+                "notifications.group.ops".into(),
+                sample_notification("n-grp"),
+            ),
+            (
+                "notifications.group.dev".into(),
+                sample_notification("n-other-grp"),
+            ),
+        ]
+    }
+
+    fn find(id: &str) -> Option<String> {
+        let groups = vec!["ops".to_string()];
+        find_addressed(&addressed_entries(), id, "PC1", &groups).map(|n| n.id.clone())
+    }
+
+    #[test]
+    fn find_addressed_by_pc() {
+        assert_eq!(find("n-pc").as_deref(), Some("n-pc"));
+    }
+
+    #[test]
+    fn find_addressed_by_group() {
+        assert_eq!(find("n-grp").as_deref(), Some("n-grp"));
+    }
+
+    #[test]
+    fn find_addressed_by_all() {
+        assert_eq!(find("n-all").as_deref(), Some("n-all"));
+    }
+
+    #[test]
+    fn find_addressed_rejects_other_audience() {
+        assert_eq!(find("n-other-pc"), None);
+        assert_eq!(find("n-other-grp"), None);
+    }
+
+    #[test]
+    fn find_addressed_unknown_id_is_none() {
+        assert_eq!(find("nope"), None);
+    }
+
+    #[test]
+    fn find_addressed_group_subject_is_case_sensitive() {
+        let entries = vec![(
+            "notifications.group.OPS".to_string(),
+            sample_notification("x"),
+        )];
+        assert!(find_addressed(&entries, "x", "PC1", &["ops".to_string()]).is_none());
     }
 
     fn sample_notification(id: &str) -> Notification {
