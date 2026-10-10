@@ -48,6 +48,10 @@ kanade-shared = { workspace = true }
 
 # Cross-platform bits used by the non-Windows shim path too.
 anyhow = { workspace = true }
+# Needed by `window_size`, whose pure logic is built + tested on every
+# platform (the Tauri wiring that uses it is Windows-only).
+serde      = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Tauri 2.x runtime.
@@ -87,9 +91,6 @@ windows = { version = "0.62.2", features = [
     "UI_Notifications",
     "Data_Xml_Dom",
 ] }
-# Serde for the IPC commands' params / results.
-serde      = { workspace = true }
-serde_json = { workspace = true }
 # Tokio runtime for the KLP pipe I/O. Reuse the workspace's
 # pin so the wire types stay in lockstep with the agent side.
 tokio    = { workspace = true }

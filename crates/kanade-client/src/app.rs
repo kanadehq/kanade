@@ -42,6 +42,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{info, warn};
 
 use crate::klp_client::KlpClient;
+use crate::window_size;
 
 /// Built-in fallback product name the client shows when no operator
 /// has configured `agent_config.client_display_name`. Aliases the
@@ -712,6 +713,131 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
     }
 }
 
+/// Debounce generation for resize-driven saves; a newer resize supersedes
+/// any pending save so a stale task never overwrites a newer size.
+static RESIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+
+fn window_size_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_local_data_dir()
+        .ok()
+        .map(|d| d.join(window_size::FILE_NAME))
+}
+
+/// Configured (minWidth, minHeight) of the main window, in logical px.
+fn main_window_min(app: &tauri::AppHandle) -> (f64, f64) {
+    let (dw, dh) = window_size::DEFAULT_MIN;
+    app.config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .map(|w| (w.min_width.unwrap_or(dw), w.min_height.unwrap_or(dh)))
+        .unwrap_or((dw, dh))
+}
+
+/// Largest client-area size (logical px) that fits the window's monitor work
+/// area, minus the non-client frame. `None` when no monitor is known.
+fn max_client_size(win: &tauri::Window) -> Option<(f64, f64)> {
+    let mon = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| win.primary_monitor().ok().flatten())?;
+    let scale = mon.scale_factor();
+    if !(scale.is_finite() && scale > 0.0) {
+        return None;
+    }
+    let wa = mon.work_area().size;
+    let (mut fw, mut fh) = (0.0, 0.0);
+    if let (Ok(o), Ok(i)) = (win.outer_size(), win.inner_size()) {
+        fw = f64::from(o.width.saturating_sub(i.width));
+        fh = f64::from(o.height.saturating_sub(i.height));
+    }
+    Some((
+        (f64::from(wa.width) - fw) / scale,
+        (f64::from(wa.height) - fh) / scale,
+    ))
+}
+
+/// Save the current client size. Skipped while minimized / maximized /
+/// fullscreen (or when that state can't be read). Failures are only logged.
+pub(crate) fn persist_window_size(win: &tauri::Window) {
+    if win.label() != "main" {
+        return;
+    }
+    let normal = matches!(
+        (win.is_minimized(), win.is_maximized(), win.is_fullscreen()),
+        (Ok(false), Ok(false), Ok(false))
+    );
+    if !normal {
+        return;
+    }
+    let (Ok(inner), Ok(scale)) = (win.inner_size(), win.scale_factor()) else {
+        return;
+    };
+    if !(scale.is_finite() && scale > 0.0) {
+        return;
+    }
+    let app = win.app_handle();
+    let Some(path) = window_size_path(app) else {
+        return;
+    };
+    let res = window_size::save(
+        &path,
+        f64::from(inner.width) / scale,
+        f64::from(inner.height) / scale,
+        main_window_min(app),
+        max_client_size(win),
+    );
+    if let Err(e) = res {
+        warn!(error = %e, "window size: save failed");
+    }
+}
+
+fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    use std::sync::atomic::Ordering;
+    if window.label() != "main" {
+        return;
+    }
+    match event {
+        tauri::WindowEvent::Resized(_) => {
+            let id = RESIZE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+            let win = window.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(RESIZE_DEBOUNCE).await;
+                if RESIZE_GEN.load(Ordering::SeqCst) == id {
+                    persist_window_size(&win);
+                }
+            });
+        }
+        // Flush immediately; the debounce task may never get to run.
+        tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed => {
+            persist_window_size(window);
+        }
+        _ => {}
+    }
+}
+
+/// Apply the saved size before the window is first shown. Never fails startup.
+fn restore_window_size(app: &tauri::AppHandle) {
+    let Some(webview_window) = app.get_webview_window("main") else {
+        return;
+    };
+    let win = AsRef::<tauri::Webview>::as_ref(&webview_window).window();
+    let Some(path) = window_size_path(app) else {
+        return;
+    };
+    let Some(size) = window_size::load(&path, main_window_min(app), max_client_size(&win)) else {
+        return;
+    };
+    let _ = win.set_size(tauri::LogicalSize::new(
+        f64::from(size.width),
+        f64::from(size.height),
+    ));
+}
+
 pub fn run() {
     // Pin the process AUMID before anything else so toasts render (#102).
     set_app_user_model_id();
@@ -747,6 +873,7 @@ pub fn run() {
         // WebView via @tauri-apps/plugin-notification).
         .plugin(tauri_plugin_notification::init())
         .manage(state)
+        .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             get_handshake,
             ping_agent,
@@ -769,6 +896,8 @@ pub fn run() {
             open_external_url
         ])
         .setup(move |app| {
+            // Size first, while the window is still hidden.
+            restore_window_size(app.handle());
             // Supervise the KLP connection for the app's lifetime:
             // connect, and reconnect whenever the agent's pipe drops
             // (the agent self-updates, so restarts are routine) — #468.
