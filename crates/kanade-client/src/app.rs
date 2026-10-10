@@ -873,7 +873,7 @@ pub fn run() {
         // WebView via @tauri-apps/plugin-notification).
         .plugin(tauri_plugin_notification::init())
         .manage(state)
-        .on_window_event(|window, event| on_window_event(window, event))
+        .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             get_handshake,
             ping_agent,
