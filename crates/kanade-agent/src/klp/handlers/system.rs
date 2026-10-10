@@ -230,7 +230,7 @@ pub async fn handle_log_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::klp::auth::PeerCredentials;
+    use crate::klp::auth::PeerIdentity;
     use crate::log_tail::{TAIL_AVG_LINE_BYTES, TAIL_WHOLE_FILE_THRESHOLD};
     use kanade_shared::ipc::state::StateSnapshot;
     use kanade_shared::wire::EffectiveConfig;
@@ -253,10 +253,11 @@ mod tests {
         let (_state_tx, state_rx) = watch::channel(dummy_snapshot());
         let (push_tx, _push_rx) = mpsc::channel(8);
         ConnectionState::new(
-            PeerCredentials {
-                user: "DOMAIN\\alice".into(),
-                user_sid: "S-1-5-21-1001".into(),
-                session_id: 2,
+            PeerIdentity {
+                user_key: "S-1-5-21-1001".into(),
+                user_display: "DOMAIN\\alice".into(),
+                pid: 1234,
+                session: Some(2),
             },
             "PC1234".into(),
             "0.40.0".into(),

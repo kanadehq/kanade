@@ -20,7 +20,7 @@ use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::wire::EffectiveConfig;
 use tokio::sync::{broadcast, mpsc, watch};
 
-use super::auth::PeerCredentials;
+use super::auth::PeerIdentity;
 use super::subscriptions::SubscriptionRegistry;
 
 /// State shared across handlers for a single open KLP connection.
@@ -34,10 +34,10 @@ use super::subscriptions::SubscriptionRegistry;
 /// `peer` is captured at connect time from the OS — never from
 /// the payload — per SPEC §2.12.4.
 pub struct ConnectionState {
-    /// Peer SID + session id derived from
-    /// [`super::auth::resolve_peer`]. Authoritative identity for
+    /// Peer identity derived from the OS at connect time
+    /// (see [`super::auth`]). Authoritative identity for
     /// every audit-log entry on this connection.
-    pub peer: PeerCredentials,
+    pub peer: PeerIdentity,
     /// Agent's configured `pc_id`. Plumbed in so handlers don't
     /// reach into global state to find it.
     pub pc_id: String,
@@ -118,7 +118,7 @@ impl ConnectionState {
     /// via owned values — into the fresh state.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        peer: PeerCredentials,
+        peer: PeerIdentity,
         pc_id: String,
         agent_version: String,
         config_rx: watch::Receiver<EffectiveConfig>,
@@ -221,8 +221,8 @@ impl ConnectionState {
     /// みなす").
     pub fn session(&self) -> HandshakeSession {
         HandshakeSession {
-            user: self.peer.user.clone(),
-            session_id: self.peer.session_id,
+            user: self.peer.user_display.clone(),
+            session_id: self.peer.handshake_session_id(),
             pc_id: self.pc_id.clone(),
         }
     }
@@ -232,12 +232,32 @@ impl ConnectionState {
 mod tests {
     use super::*;
 
-    fn dummy_peer() -> PeerCredentials {
-        PeerCredentials {
-            user: "DOMAIN\\alice".into(),
-            user_sid: "S-1-5-21-1001".into(),
-            session_id: 2,
+    fn dummy_peer() -> PeerIdentity {
+        PeerIdentity {
+            user_key: dummy_key().into(),
+            user_display: "DOMAIN\\alice".into(),
+            pid: 1234,
+            session: Some(2),
         }
+    }
+
+    // Windows echoes the OS session; Unix echoes the UID parsed from `user_key`.
+    #[cfg(windows)]
+    fn expected_session_id() -> u32 {
+        2
+    }
+    #[cfg(not(windows))]
+    fn expected_session_id() -> u32 {
+        1001
+    }
+
+    #[cfg(windows)]
+    fn dummy_key() -> &'static str {
+        "S-1-5-21-1001"
+    }
+    #[cfg(not(windows))]
+    fn dummy_key() -> &'static str {
+        "uid-1001"
     }
 
     fn dummy_snapshot() -> StateSnapshot {
@@ -286,7 +306,7 @@ mod tests {
         let s = fresh_state();
         let session = s.session();
         assert_eq!(session.user, "DOMAIN\\alice");
-        assert_eq!(session.session_id, 2);
+        assert_eq!(session.session_id, expected_session_id());
         assert_eq!(session.pc_id, "PC1234");
     }
 }

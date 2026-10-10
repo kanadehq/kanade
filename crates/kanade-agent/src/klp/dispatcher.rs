@@ -239,7 +239,7 @@ async fn dispatch_inner(
             warn!(
                 method = %unknown,
                 pc_id = %conn.pc_id,
-                user = %conn.peer.user,
+                user = %conn.peer.user_display,
                 "KLP method not yet implemented in this PR",
             );
             Err(RpcError::new(
@@ -261,7 +261,7 @@ fn internal(e: serde_json::Error) -> RpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::klp::auth::PeerCredentials;
+    use crate::klp::auth::PeerIdentity;
     use kanade_shared::ipc::envelope::RpcResponsePayload;
     use kanade_shared::ipc::handshake::PROTOCOL_V1;
     use kanade_shared::ipc::state::StateSnapshot;
@@ -284,10 +284,11 @@ mod tests {
         let (_state_tx, state_rx) = watch::channel(dummy_snapshot());
         let (push_tx, _push_rx) = mpsc::channel(8);
         ConnectionState::new(
-            PeerCredentials {
-                user: "DOMAIN\\alice".into(),
-                user_sid: "S-1-5-21-1001".into(),
-                session_id: 2,
+            PeerIdentity {
+                user_key: "S-1-5-21-1001".into(),
+                user_display: "DOMAIN\\alice".into(),
+                pid: 1234,
+                session: Some(2),
             },
             "PC1234".into(),
             "0.41.0".into(),

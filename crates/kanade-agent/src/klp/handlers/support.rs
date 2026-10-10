@@ -58,14 +58,14 @@ pub async fn handle_support_unlock(
     conn: &ConnectionState,
     params: SupportUnlockParams,
 ) -> HandlerResult<SupportUnlockResult> {
-    let sid = conn.peer.user_sid.clone();
+    let sid = conn.peer.user_key.clone();
 
     // Rate limit BEFORE touching KV or argon2: a locked-out caller must cost
     // us nothing (argon2 is deliberately expensive, which makes an unbounded
     // attempt loop a local DoS as well as a guessing oracle).
     if let Some(remaining) = unlock::lockout_remaining(&sid) {
         warn!(
-            user = %conn.peer.user,
+            user = %conn.peer.user_display,
             secs = remaining.as_secs(),
             "support.unlock: refused, caller is rate-limited",
         );
@@ -110,7 +110,7 @@ pub async fn handle_support_unlock(
     let Some(code) = matched else {
         let lockout = unlock::record_failure(&sid);
         warn!(
-            user = %conn.peer.user,
+            user = %conn.peer.user_display,
             locked_out = lockout.is_some(),
             "support.unlock: rejected an unrecognised code",
         );
@@ -125,7 +125,7 @@ pub async fn handle_support_unlock(
     let ttl = code.effective_ttl_minutes();
     let grants = unlock::grant(&sid, &code.scope, code.label.clone(), ttl);
     info!(
-        user = %conn.peer.user,
+        user = %conn.peer.user_display,
         scope = %code.scope,
         ttl_minutes = ttl,
         "support.unlock: granted",
@@ -145,9 +145,9 @@ pub fn handle_support_lock(
     conn: &ConnectionState,
     _params: SupportLockParams,
 ) -> HandlerResult<SupportLockResult> {
-    let released = unlock::lock(&conn.peer.user_sid);
+    let released = unlock::lock(&conn.peer.user_key);
     if released > 0 {
-        info!(user = %conn.peer.user, released, "support.lock: grants released");
+        info!(user = %conn.peer.user_display, released, "support.lock: grants released");
         audit(
             conn,
             "support_lock",
@@ -164,7 +164,7 @@ pub fn handle_support_status(
     _params: SupportStatusParams,
 ) -> HandlerResult<SupportStatusResult> {
     Ok(SupportStatusResult {
-        grants: unlock::grants(&conn.peer.user_sid),
+        grants: unlock::grants(&conn.peer.user_key),
     })
 }
 
@@ -308,8 +308,8 @@ async fn read_legacy_codes(js: &async_nats::jetstream::Context) -> HandlerResult
 /// operator reviewing the timeline actually asks.
 fn audit(conn: &ConnectionState, kind: &str, mut payload: serde_json::Value) {
     if let Some(obj) = payload.as_object_mut() {
-        obj.insert("user".into(), conn.peer.user.clone().into());
-        obj.insert("user_sid".into(), conn.peer.user_sid.clone().into());
+        obj.insert("user".into(), conn.peer.user_display.clone().into());
+        obj.insert("user_sid".into(), conn.peer.user_key.clone().into());
     }
     let event = ObsEvent {
         pc_id: conn.pc_id.clone(),

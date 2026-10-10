@@ -180,7 +180,7 @@ pub async fn handle_jobs_list(
     // a live grant for its scope (`support.unlock`). Resolved per call from
     // the process-wide grant store, so a grant that lapsed mid-session drops
     // the rows on the next refresh with no client cooperation needed.
-    let unlocked = |scope: &str| unlock::holds(&conn.peer.user_sid, scope);
+    let unlocked = |scope: &str| unlock::holds(&conn.peer.user_key, scope);
     Ok(build_job_list(
         &manifests,
         params.category,
@@ -1731,10 +1731,11 @@ mod tests {
         let (_state_tx, state_rx) = watch::channel(snapshot);
         let (push_tx, _push_rx) = mpsc::channel(8);
         ConnectionState::new(
-            crate::klp::auth::PeerCredentials {
-                user: "DOMAIN\\alice".into(),
-                user_sid: "S-1-5-21-1001".into(),
-                session_id: 2,
+            crate::klp::auth::PeerIdentity {
+                user_key: "S-1-5-21-1001".into(),
+                user_display: "DOMAIN\\alice".into(),
+                pid: 1234,
+                session: Some(2),
             },
             "PC1".into(),
             "0.0.0".into(),
