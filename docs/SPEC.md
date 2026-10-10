@@ -1914,11 +1914,18 @@ Windows は SD (`Authenticated Users`) が同等のゲートで、追加の Agen
 ```jsonc
 {"jsonrpc":"2.0","id":null,"error":{
   "code": -32000, "message": "Unauthorized",
-  "data": {"kind":"Unauthorized","detail":"uid 998 is below the minimum interactive uid 1000"}
+  "data": {"kind":"Unauthorized","retryable":false,"detail":"uid 998 is below the minimum interactive uid 1000"}
 }}
 ```
 
-`detail` には拒否理由 (上記 1〜5 のどれか) を入れる。Client の扱いは §2.12.10。
+`detail` には拒否理由 (上記 1〜5 のどれか) を入れる。さらに `data.retryable` (bool) で拒否の性質を区別する。
+
+| 規則 | 性質 | `data.retryable` |
+|---|---|---|
+| 1 (UID 下限) / 2 (root) / 4 (非対話 shell) | 恒久。アカウント自体が不適格 | `false` |
+| 3 (passwd エントリなし) / 5 (取得失敗) | 一時的でありうる。sssd / LDAP / opendirectoryd の再起動や短時間のディレクトリ障害で起きる (Agent の self-update 直後の再接続など) | `true` |
+
+規則 3・5 は fail closed (接続は拒否する) が、恒久拒否とは扱わない。Client の扱いは §2.12.10。
 
 **後続実装での制限事項 (記録)**:
 - 認可前の接続は誰でも張れるため、認可前接続の同時数と持続時間 (判定は即時なので短い timeout) を後続実装で制限する。
@@ -2180,7 +2187,7 @@ A→C {"jsonrpc":"2.0","id":"u4","result":{"acked_at":"2026-05-20T12:00:05Z"}}
 | 初回接続失敗 | exponential backoff (1s, 2s, 4s, ..., cap 30s) で再試行 |
 | 接続中の切断 | 即座に再接続 → handshake → `state.snapshot` → 各種 `subscribe` を張り直す |
 | Agent 起動前 (boot 時の race) | 上記 backoff で待つ |
-| 接続直後に `id: null` の `-32000 Unauthorized` を受けた (§2.12.4.1 の拒否) | **再接続しない**。認可条件を満たさないアカウントなので、バックオフで再試行しても結果は変わらない。トレイ等で理由 (`detail`) を表示するに留める |
+| 接続直後に `id: null` の `-32000 Unauthorized` を受けた (§2.12.4.1 の拒否) | `data.retryable` が `false` (または欠落) なら**再接続しない**。認可条件を満たさないアカウントなので、再試行しても結果は変わらない。トレイ等で理由 (`detail`) を表示するに留める。`true` (passwd 引き失敗・資格情報取得失敗など一時的な拒否) なら通常の exponential backoff で再接続する |
 | Pipe / Socket が存在しない | Agent service が停止中。トレイアイコンを ⚠️ 表示、「Agent サービスを開始してください」 案内 |
 
 ### 2.12.11 Schema 共有
