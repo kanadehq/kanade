@@ -378,7 +378,7 @@ pub async fn handle_notifications_list(
 
     let my_groups = read_my_groups(&js, &conn.pc_id).await?;
     let subjects = filter_subjects(&conn.pc_id, &my_groups);
-    let notifications: Vec<Notification> = replay_notifications(&js, subjects)
+    let notifications: Vec<Notification> = replay_notifications(&js, subjects, None)
         .await?
         .into_iter()
         .map(|(_, n)| n)
@@ -449,9 +449,15 @@ async fn read_membership_bucket(
 /// new messages), so the loop ends when a fetch yields nothing.
 /// Unparseable payloads are skipped (logged). Capped at [`MAX_REPLAY`]
 /// with a warn — never a silent truncation.
+///
+/// `want_id = Some(id)` switches to a lookup for authorization: the
+/// [`MAX_REPLAY`] display window does not apply, only the entry with that id
+/// is kept, and the scan stops at the first match — so a retained
+/// notification is found however much newer traffic the audience has seen.
 async fn replay_notifications(
     js: &async_nats::jetstream::Context,
     subjects: Vec<String>,
+    want_id: Option<&str>,
 ) -> HandlerResult<Vec<(String, Notification)>> {
     let stream = js.get_stream(STREAM_NOTIFICATIONS).await.map_err(|e| {
         warn!(error = %e, "notifications.list: get_stream NOTIFICATIONS failed");
@@ -515,6 +521,12 @@ async fn replay_notifications(
             })?;
             got += 1;
             match serde_json::from_slice::<Notification>(&m.payload) {
+                Ok(n) if want_id.is_some() => {
+                    if want_id == Some(n.id.as_str()) {
+                        buf.push_back((m.subject.to_string(), n));
+                        return Ok(Vec::from(buf));
+                    }
+                }
                 Ok(n) => {
                     buf.push_back((m.subject.to_string(), n));
                     if buf.len() > MAX_REPLAY {
@@ -564,8 +576,9 @@ fn find_addressed<'a>(
 }
 
 /// Authorize `ack` / `unack`: the notification must be addressed to this PC
-/// (SPEC §2.12.4). Replays only this PC's audience subjects, so a notification
-/// for another PC/group is never even fetched. Broker failures surface as
+/// (SPEC §2.12.4). Scans only this PC's audience subjects, so a notification
+/// for another PC/group is never even fetched, and independent of the list
+/// display window ([`MAX_REPLAY`]). Broker failures surface as
 /// InternalError, never as "not addressed".
 async fn ensure_addressed(
     js: &async_nats::jetstream::Context,
@@ -573,7 +586,7 @@ async fn ensure_addressed(
     notif_id: &str,
 ) -> HandlerResult<()> {
     let groups = read_my_groups(js, pc_id).await?;
-    let entries = replay_notifications(js, filter_subjects(pc_id, &groups)).await?;
+    let entries = replay_notifications(js, filter_subjects(pc_id, &groups), Some(notif_id)).await?;
     if find_addressed(&entries, notif_id, pc_id, &groups).is_some() {
         Ok(())
     } else {
