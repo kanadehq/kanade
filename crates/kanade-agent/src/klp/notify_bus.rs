@@ -222,9 +222,12 @@ fn forward(
                     // #647: a toast notification live-pushed while the screen
                     // is locked toasts silently to the Action Center — flag it
                     // so it re-pops on unlock.
+                    #[cfg(target_os = "windows")]
                     if toast {
                         super::emergency_notify::note_toast_live_pushed();
                     }
+                    #[cfg(not(target_os = "windows"))]
+                    let _ = toast;
                 }
                 // `send` returns the un-delivered notification in the
                 // error: no Client App is subscribed (the normal idle,
@@ -235,12 +238,22 @@ fn forward(
                 // `notifications.list`.
                 Err(broadcast::error::SendError(dropped)) => {
                     if dropped.toast {
-                        warn!(
+                        // Toast surfacing is Windows-only for now (SPEC §2.12.4.4).
+                        #[cfg(target_os = "windows")]
+                        {
+                            warn!(
+                                pc_id = %pc_id,
+                                notification_id = %id,
+                                "notify_bus: toast notification with no subscribed client; launching client to toast it",
+                            );
+                            super::emergency_notify::surface_toast_notification(&id);
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        debug!(
                             pc_id = %pc_id,
                             notification_id = %id,
-                            "notify_bus: toast notification with no subscribed client; launching client to toast it",
+                            "notify_bus: toast notification with no subscribed client; no toast surfacing on this OS (recoverable via notifications.list)",
                         );
-                        super::emergency_notify::surface_toast_notification(&id);
                     } else {
                         debug!(
                             pc_id = %pc_id,

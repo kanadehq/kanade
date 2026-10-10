@@ -136,7 +136,7 @@ pub async fn handle_notifications_ack(
     // Validate inputs before touching NATS so a bad request fails
     // cheaply (and so the guard paths are unit-testable without a
     // broker).
-    let user_sid = conn.peer.user_sid.as_str();
+    let user_sid = conn.peer.user_key.as_str();
     if user_sid.is_empty() || user_sid == "<unknown>" {
         // Identity problem, not a server fault, and not retryable —
         // Unauthorized rather than InternalError (matches the same
@@ -203,7 +203,7 @@ pub async fn handle_notifications_ack(
     // backend's PC-last-logon fallback takes over instead of recording a
     // useless `<unknown>`.
     let account = {
-        let u = conn.peer.user.as_str();
+        let u = conn.peer.user_display.as_str();
         (!u.is_empty() && u != "<unknown>").then(|| u.to_string())
     };
     let event = NotificationAcked {
@@ -262,7 +262,7 @@ pub async fn handle_notifications_unack(
     conn: &ConnectionState,
     params: NotificationsUnackParams,
 ) -> HandlerResult<NotificationsUnackResult> {
-    let user_sid = conn.peer.user_sid.as_str();
+    let user_sid = conn.peer.user_key.as_str();
     if user_sid.is_empty() || user_sid == "<unknown>" {
         return Err(RpcError::new(
             ErrorKind::Unauthorized,
@@ -308,7 +308,7 @@ pub async fn handle_notifications_unack(
 
     // 2. Publish the unack event (acknowledged publish, mirroring ack).
     let account = {
-        let u = conn.peer.user.as_str();
+        let u = conn.peer.user_display.as_str();
         (!u.is_empty() && u != "<unknown>").then(|| u.to_string())
     };
     let event = NotificationUnacked {
@@ -364,7 +364,7 @@ pub async fn handle_notifications_list(
             "notifications.list: NATS client not wired into the connection",
         )
     })?;
-    let user_sid = conn.peer.user_sid.as_str();
+    let user_sid = conn.peer.user_key.as_str();
     if user_sid.is_empty() || user_sid == "<unknown>" {
         // An unresolved caller SID is an identity problem, not a
         // server fault — and it won't fix itself on retry, so signal
@@ -916,7 +916,7 @@ fn encode_push<P: serde::Serialize>(method: &str, params: &P, pc_id: &str) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::klp::auth::PeerCredentials;
+    use crate::klp::auth::PeerIdentity;
     use kanade_shared::ipc::envelope::RpcMessage;
     use kanade_shared::ipc::notifications::NotificationPriority;
     use kanade_shared::ipc::state::StateSnapshot;
@@ -1018,10 +1018,11 @@ mod tests {
         let (_cfg_tx, cfg_rx) = watch::channel(EffectiveConfig::builtin_defaults());
         let (_state_tx, state_rx) = watch::channel(dummy_snapshot());
         ConnectionState::new(
-            PeerCredentials {
-                user: "DOMAIN\\alice".into(),
-                user_sid: "S-1-5-21-1001".into(),
-                session_id: 2,
+            PeerIdentity {
+                user_key: "S-1-5-21-1001".into(),
+                user_display: "DOMAIN\\alice".into(),
+                pid: 1234,
+                session: Some(2),
             },
             "PC1234".into(),
             "0.43.0".into(),
@@ -1161,10 +1162,11 @@ mod tests {
         let (_state_tx, state_rx) = watch::channel(dummy_snapshot());
         let (push_tx, _push_rx) = mpsc::channel(8);
         ConnectionState::new(
-            PeerCredentials {
-                user: "DOMAIN\\alice".into(),
-                user_sid: user_sid.into(),
-                session_id: 2,
+            PeerIdentity {
+                user_key: user_sid.into(),
+                user_display: "DOMAIN\\alice".into(),
+                pid: 1234,
+                session: Some(2),
             },
             "PC1234".into(),
             "0.43.0".into(),

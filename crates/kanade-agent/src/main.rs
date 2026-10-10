@@ -22,14 +22,10 @@ mod process;
 mod process_perf;
 mod self_update;
 
-// KLP (SPEC §2.12) is Windows-only in this PR — Linux UDS lands
-// in a follow-up. Compiling the module on non-Windows would just
-// emit dead-code warnings (the listener's call sites are all
-// Windows-gated), so the simplest gate is the mod declaration
-// itself. Cross-platform unit tests (framing, etc.) move with the
-// module; CI on Linux/macOS skips them, but the production target
-// is Windows-only so coverage stays meaningful.
-#[cfg(target_os = "windows")]
+// KLP (SPEC §2.12): Named Pipe on Windows, Unix domain socket on
+// Linux / macOS. Other targets have no listener, so the module (and
+// its call sites below) stay out of the build there.
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod klp;
 
 mod admission_ledger;
@@ -803,7 +799,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     // it) and the `notify_bus` task spawned once `groups_rx` exists.
     // The initial receiver is dropped — receivers are minted on demand
     // by `notifications.subscribe`; until then `send` is a no-op.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     let notif_tx =
         tokio::sync::broadcast::channel::<kanade_shared::ipc::notifications::Notification>(
             klp::notify_bus::BROADCAST_CAPACITY,
@@ -811,12 +807,16 @@ pub(crate) async fn run_agent() -> Result<()> {
         .0;
     // Sibling broadcast for post-send amends (recall). Same lifecycle as
     // `notif_tx`: one sender feeds the listener + the notify_bus task.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     let amend_tx = tokio::sync::broadcast::channel::<
         kanade_shared::ipc::notifications::NotificationAmend,
     >(klp::notify_bus::BROADCAST_CAPACITY)
     .0;
-    #[cfg(target_os = "windows")]
+    // Held for the life of the agent: dropping it stops the listener and
+    // removes the socket file.
+    #[cfg(unix)]
+    let mut klp_server: Option<klp::server::unix::KlpServer> = None;
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     {
         let initial_snapshot = klp::state::eval_once(
             &pc_id,
@@ -834,7 +834,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             client.clone(),
             check_sink.clone(),
         ));
-        let _klp_handle = klp::server::spawn(klp::server::ListenerContext {
+        let listener_ctx = klp::server::ListenerContext {
             pc_id: std::sync::Arc::from(pc_id.as_str()),
             agent_version: std::sync::Arc::from(AGENT_VERSION),
             config_rx: cfg_rx.clone(),
@@ -843,7 +843,26 @@ pub(crate) async fn run_agent() -> Result<()> {
             nats: client.clone(),
             notif_tx: notif_tx.clone(),
             amend_tx: amend_tx.clone(),
-        });
+        };
+        #[cfg(target_os = "windows")]
+        let _klp_handle = klp::server::windows::spawn(listener_ctx);
+        // Unix: a listener that cannot be established (unsafe socket
+        // directory, foreign file in the way, ...) must not take the
+        // command path down with it; log and carry on without KLP.
+        #[cfg(unix)]
+        {
+            match klp::server::unix::start(
+                listener_ctx,
+                klp::server::unix::ListenerConfig::from_env(),
+            )
+            .await
+            {
+                Ok(server) => klp_server = Some(server),
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "KLP listener failed to start; Client App will not connect")
+                }
+            }
+        }
     }
 
     // Group membership: Sprint 5 moves this from agent.toml (per-box
@@ -930,7 +949,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     // incoming notification to every connected Client App. Follows
     // `groups_rx` so the subject set tracks group membership, just like
     // command_replay. Windows-only (the whole KLP module is).
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     klp::notify_bus::spawn(
         client.clone(),
         pc_id.clone(),
@@ -1047,6 +1066,21 @@ pub(crate) async fn run_agent() -> Result<()> {
             ),
         );
     };
+    // A deliberate stop (SIGTERM from systemd / launchd, Ctrl-C) leaves
+    // through here so the KLP socket is unlinked and the exit is clean;
+    // everything else keeps the pre-KLP-on-Unix behaviour below.
+    #[cfg(unix)]
+    {
+        tokio::select! {
+            _ = loops => {}
+            _ = shutdown_signal() => {
+                info!("shutdown signal received; stopping");
+                drop(klp_server);
+                return Ok(());
+            }
+        }
+    }
+    #[cfg(not(unix))]
     loops.await;
 
     // The command subscriptions only end when the NATS client itself is gone
@@ -1056,11 +1090,28 @@ pub(crate) async fn run_agent() -> Result<()> {
     // stop: it must exit NON-zero for launchd (`KeepAlive.SuccessfulExit =
     // false`), systemd (`Restart=on-failure`) and the SCM recovery actions to
     // bring it back. A deliberate stop never reaches here — the Windows
-    // service path cancels this future on SCM stop, and a signal kills the
-    // process.
+    // service path cancels this future on SCM stop, and on Unix a
+    // SIGTERM/SIGINT returns cleanly above.
     anyhow::bail!(
         "command subscriptions ended — NATS client closed; exiting for a supervised restart"
     )
+}
+
+/// Resolves on SIGTERM or SIGINT.
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut int)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        // Could not install handlers: never resolve, keep default signal behaviour.
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
 }
 
 /// Build the tracing subscriber: stdout (useful in foreground /

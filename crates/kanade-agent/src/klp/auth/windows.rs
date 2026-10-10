@@ -8,54 +8,22 @@
 //! *authoritative* answer per SPEC §2.12.4; we never trust
 //! user-supplied identity fields in the payload, even on a
 //! single-user PC.
-//!
-//! Unix (Linux/macOS): not implemented. SPEC §2.12.1 puts the
-//! Linux socket at `/run/kanade/agent.sock` and §2.12.4 specifies
-//! `SO_PEERCRED`; the full implementation lands with the UDS
-//! listener in a follow-up PR. Until then the parent module
-//! ([`crate::klp`]) carries a `compile_error!` guard for
-//! non-Windows targets, so this file is only ever compiled on
-//! Windows and needs no non-Windows fallback.
 
 use anyhow::Result;
 
 use tokio::net::windows::named_pipe::NamedPipeServer;
 
-/// What the auth shim derives from the OS at connect time. The
-/// dispatcher pairs this with the agent's configured `pc_id` to
-/// build the [`kanade_shared::ipc::handshake::HandshakeSession`]
-/// returned to the client.
-#[derive(Debug, Clone)]
-pub struct PeerCredentials {
-    /// `DOMAIN\\user` on Windows (or `"<unknown>"` when
-    /// `LookupAccountSidW` finds no friendly name — orphaned
-    /// account, deleted user, …). `username` on Unix once that
-    /// path lands.
-    pub user: String,
-    /// Canonical SID string (`S-1-5-21-…`) of the connected user,
-    /// from `ConvertSidToStringSidW` (or `"<unknown>"` if that call
-    /// fails — effectively never for a valid token SID). This — NOT
-    /// the renameable friendly [`user`](Self::user) — is the stable
-    /// per-user key KLP uses for the `notifications_read` KV row and
-    /// the `events.notifications.acked.>` subject (SPEC §2.12.4 / Phase
-    /// E): a shared PC tracks each user's notification acks
-    /// independently, and a SID survives an account rename.
-    pub user_sid: String,
-    /// Console / RDP session id (Windows) or UID (Unix). Session
-    /// 0 is the services session; user-interactive sessions start
-    /// at 1.
-    pub session_id: u32,
-}
+use super::PeerIdentity;
 
 /// Resolve the peer's identity for a freshly-accepted KLP
 /// connection. Synchronous Win32 calls; small enough to inline at
 /// connect time rather than `spawn_blocking`.
-pub fn resolve_peer(pipe: &NamedPipeServer) -> Result<PeerCredentials> {
+pub fn resolve_peer(pipe: &NamedPipeServer) -> Result<PeerIdentity> {
     windows_impl::resolve(pipe)
 }
 
 mod windows_impl {
-    use super::PeerCredentials;
+    use super::PeerIdentity;
     use anyhow::{Context, Result, bail};
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
@@ -72,7 +40,7 @@ mod windows_impl {
     };
     use windows::core::PWSTR;
 
-    pub(super) fn resolve(pipe: &NamedPipeServer) -> Result<PeerCredentials> {
+    pub(super) fn resolve(pipe: &NamedPipeServer) -> Result<PeerIdentity> {
         let pipe_handle = HANDLE(pipe.as_raw_handle());
 
         let mut pid: u32 = 0;
@@ -89,7 +57,7 @@ mod windows_impl {
                 .with_context(|| format!("OpenProcess(pid={pid}) failed"))?
         };
 
-        let creds = read_token_info(proc_handle);
+        let creds = read_token_info(proc_handle, pid);
 
         // Always close, even on error path. windows-rs doesn't
         // ship an RAII handle wrapper for HANDLE.
@@ -99,14 +67,14 @@ mod windows_impl {
         creds
     }
 
-    fn read_token_info(proc_handle: HANDLE) -> Result<PeerCredentials> {
+    fn read_token_info(proc_handle: HANDLE, pid: u32) -> Result<PeerIdentity> {
         let mut token = HANDLE::default();
         unsafe {
             OpenProcessToken(proc_handle, TOKEN_QUERY, &mut token)
                 .context("OpenProcessToken failed")?;
         }
 
-        let result = read_user_and_session(token);
+        let result = read_user_and_session(token, pid);
 
         unsafe {
             let _ = CloseHandle(token);
@@ -114,7 +82,7 @@ mod windows_impl {
         result
     }
 
-    fn read_user_and_session(token: HANDLE) -> Result<PeerCredentials> {
+    fn read_user_and_session(token: HANDLE, pid: u32) -> Result<PeerIdentity> {
         // TokenSessionId: fixed 4-byte u32, no two-call pattern.
         let mut session_id: u32 = 0;
         let mut returned: u32 = 0;
@@ -176,10 +144,11 @@ mod windows_impl {
             (user, user_sid)
         };
 
-        Ok(PeerCredentials {
-            user,
-            user_sid,
-            session_id,
+        Ok(PeerIdentity {
+            user_key: user_sid,
+            user_display: user,
+            pid,
+            session: Some(session_id),
         })
     }
 

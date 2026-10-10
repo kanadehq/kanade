@@ -129,7 +129,7 @@ async fn forward_state_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::klp::auth::PeerCredentials;
+    use crate::klp::auth::PeerIdentity;
     use kanade_shared::ipc::envelope::RpcMessage;
     use kanade_shared::wire::EffectiveConfig;
     use std::path::PathBuf;
@@ -151,10 +151,11 @@ mod tests {
     ) -> ConnectionState {
         let (_cfg_tx, cfg_rx) = watch::channel(EffectiveConfig::builtin_defaults());
         ConnectionState::new(
-            PeerCredentials {
-                user: "DOMAIN\\alice".into(),
-                user_sid: "S-1-5-21-1001".into(),
-                session_id: 2,
+            PeerIdentity {
+                user_key: "S-1-5-21-1001".into(),
+                user_display: "DOMAIN\\alice".into(),
+                pid: 1234,
+                session: Some(2),
             },
             "PC1234".into(),
             "0.41.0".into(),

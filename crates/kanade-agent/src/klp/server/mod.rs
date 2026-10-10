@@ -1,26 +1,21 @@
-//! Windows Named Pipe listener for KLP (SPEC §2.12.1).
+//! KLP listener, shared half (SPEC §2.12.1).
 //!
-//! One listener, multiple concurrent connections (FUS / RDP / a
-//! few admin tabs all welcome). Standard tokio Named Pipe re-arm
-//! pattern: create initial instance → `connect()` blocks until a
-//! client shows up → re-create the next instance immediately so
-//! the next connect lands without a race → spawn the connected
-//! pipe into a per-connection task.
+//! The transport-specific accept loops live next door:
 //!
-//! Linux UDS (SPEC §2.12.1's `/run/kanade/agent.sock`) lives in a
-//! follow-up PR; the entire `klp` module is `#[cfg(target_os =
-//! "windows")]` gated in `main.rs` until that lands. Non-Windows
-//! CI builds skip the module rather than compile cross-platform
-//! scaffolding that the production code path can't reach (avoids
-//! dead-code warnings on clippy's Linux/macOS jobs).
+//! - [`windows`] — Named Pipe, SDDL-protected, peer identity from the
+//!   process token.
+//! - [`unix`] — Unix domain socket (`0666`), peer identity from
+//!   `SO_PEERCRED` / `LOCAL_PEERCRED` plus the connect-time admission
+//!   rules.
 //!
-//! Security descriptor: every pipe instance is created with the
-//! SDDL-derived [`PipeSecurity`] (`Authenticated Users RW, deny
-//! Anonymous` per SPEC §2.12.1). The SD is built once on listener
-//! startup and reused for every re-arm because Windows copies the
-//! SD into each new pipe handle internally
-//! (`CreateNamedPipe`-with-`lpSecurityAttributes`). See
-//! `crate::klp::security` for the SDDL breakdown.
+//! Everything from "we have an authenticated peer on a duplex byte
+//! stream" onwards — the reader/writer split, the per-connection
+//! state, the read loop — is transport-agnostic and lives here.
+
+#[cfg(unix)]
+pub mod unix;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,19 +26,14 @@ use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::notifications::{Notification, NotificationAmend};
 use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::wire::EffectiveConfig;
-use tokio::io::{ReadHalf, WriteHalf};
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-use crate::klp::auth::resolve_peer;
+use crate::klp::auth::PeerIdentity;
 use crate::klp::connection::ConnectionState;
 use crate::klp::dispatcher::dispatch_request;
 use crate::klp::framing::{read_frame, write_frame};
-use crate::klp::security::PipeSecurity;
-
-/// SPEC §2.12.1 — Windows Named Pipe endpoint.
-pub const PIPE_NAME: &str = r"\\.\pipe\kanade-agent";
 
 /// Bounded capacity of the per-connection push channel that bridges
 /// dispatcher responses + subscription forwarders to the writer
@@ -99,129 +89,22 @@ pub struct ListenerContext {
     pub amend_tx: broadcast::Sender<NotificationAmend>,
 }
 
-/// Spawn the KLP listener. Returns immediately with a detached
-/// `JoinHandle`; the loop runs forever inside the spawned task.
-///
-/// The foundation PR has no graceful-shutdown path. A future PR
-/// adds a `CancellationToken` once we have a use case (e.g.
-/// service stop must drain in-flight handlers).
-pub fn spawn(ctx: ListenerContext) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(run(ctx))
-}
-
-async fn run(ctx: ListenerContext) -> Result<()> {
-    // Build the SECURITY_DESCRIPTOR once and reuse for every
-    // pipe instance — Windows copies the SD into each new pipe
-    // handle internally, so the same SA pointer is safe across
-    // arbitrarily many `create` calls. Built before any pipe
-    // operations so a malformed SDDL fails fast at agent startup
-    // instead of mid-loop.
-    let security = PipeSecurity::new().context("build KLP pipe SECURITY_DESCRIPTOR")?;
-
-    // `first_pipe_instance(true)` makes the initial create fail
-    // loudly if another process is squatting the pipe name —
-    // safer than silently sharing a name. This one creation IS
-    // allowed to bubble up because there's no working state yet
-    // and the agent operator should see the failure on startup.
-    //
-    // SAFETY: `security.as_ptr()` is valid for the duration of
-    // this synchronous call; `security` is borrowed (not moved)
-    // through the loop so the pointer stays valid.
-    let mut server = unsafe {
-        ServerOptions::new()
-            .first_pipe_instance(true)
-            .create_with_security_attributes_raw(PIPE_NAME, security.as_ptr())
-    }
-    .with_context(|| format!("create Named Pipe {PIPE_NAME}"))?;
-    info!(
-        pipe = PIPE_NAME,
-        sd = "Authenticated Users RW, deny Anonymous",
-        "KLP listener ready",
-    );
-
-    loop {
-        if let Err(e) = server.connect().await {
-            warn!(error = %e, "KLP server.connect() failed; reseating listener");
-            // A connect failure usually means the current handle
-            // is broken; reseat with the same retry policy used
-            // for re-arm below so the listener doesn't die from a
-            // transient OS hiccup.
-            server = create_with_retry(&security).await;
-            continue;
-        }
-
-        // Re-arm BEFORE spawning the connection task so the next
-        // client doesn't see a brief "no listener" window.
-        let next = create_with_retry(&security).await;
-        let connected = std::mem::replace(&mut server, next);
-
-        let task_ctx = ctx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(connected, task_ctx).await {
-                warn!(error = %e, "KLP connection task failed");
-            }
-        });
-    }
-}
-
-/// Re-create the Named Pipe instance, retrying with bounded
-/// exponential backoff on transient failures. Returns only on
-/// success — the listener task MUST stay alive for the agent's
-/// lifetime, so a propagated `?` exit (foundation PR's earlier
-/// approach) would let a momentary OS-resource pressure (handle
-/// table full, etc.) permanently kill the KLP transport with no
-/// path back short of an agent restart.
-///
-/// Backoff schedule: 200 ms, 400 ms, 800 ms, … capped at 30 s.
-/// Logs each failure at WARN so operators can spot a persistent
-/// issue in the agent log instead of a silent stall.
-async fn create_with_retry(security: &PipeSecurity) -> NamedPipeServer {
-    let mut delay_ms: u64 = 200;
-    loop {
-        // SAFETY: `security.as_ptr()` is valid for the duration
-        // of this synchronous call (the caller borrows
-        // `security` through the loop body).
-        let result = unsafe {
-            ServerOptions::new().create_with_security_attributes_raw(PIPE_NAME, security.as_ptr())
-        };
-        match result {
-            Ok(server) => return server,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    delay_ms,
-                    pipe = PIPE_NAME,
-                    "KLP create() failed; backing off and retrying",
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                delay_ms = (delay_ms * 2).min(30_000);
-            }
-        }
-    }
-}
-
-async fn handle_connection(pipe: NamedPipeServer, ctx: ListenerContext) -> Result<()> {
-    // Auth BEFORE any I/O so the per-connection state is correct
-    // from the very first frame.
-    let peer = match resolve_peer(&pipe) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(error = %e, "KLP peer auth failed; closing connection");
-            return Ok(());
-        }
-    };
-    debug!(
-        user = %peer.user,
-        session_id = peer.session_id,
-        "KLP peer connected",
-    );
-
+/// Serve one already-authenticated connection on any duplex byte
+/// stream (Named Pipe or Unix socket).
+pub(crate) async fn serve_connection<S>(
+    stream: S,
+    peer: PeerIdentity,
+    ctx: ListenerContext,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // Split the pipe so the read loop can decode requests while
     // the writer task (and subscription forwarders) push outbound
     // frames concurrently. SPEC §2.12.3's notification path
     // requires this — without it, a long-running handler would
     // block any push from getting out.
-    let (reader, writer) = tokio::io::split(pipe);
+    let (reader, writer) = tokio::io::split(stream);
     let (push_tx, push_rx) = mpsc::channel::<Vec<u8>>(PUSH_CHANNEL_CAPACITY);
 
     let writer_log_pc = ctx.pc_id.to_string();
@@ -265,16 +148,19 @@ async fn handle_connection(pipe: NamedPipeServer, ctx: ListenerContext) -> Resul
 /// (the writer task drains and writes to the pipe). Returns when
 /// the client disconnects, the pipe errors out, or the writer
 /// task exits (push_tx send returns Err).
-async fn run_read_loop(
-    mut reader: ReadHalf<NamedPipeServer>,
+async fn run_read_loop<S>(
+    mut reader: ReadHalf<S>,
     conn: &mut ConnectionState,
     push_tx: &mpsc::Sender<Vec<u8>>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: AsyncRead + Unpin,
+{
     loop {
         let frame = match read_frame(&mut reader).await {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                debug!(user = %conn.peer.user, "KLP client disconnected (EOF)");
+                debug!(user = %conn.peer.user_display, "KLP client disconnected (EOF)");
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
@@ -294,7 +180,7 @@ async fn run_read_loop(
                 // frame the writer can't deliver. Close silently.
                 debug!(
                     error = %e,
-                    user = %conn.peer.user,
+                    user = %conn.peer.user_display,
                     "KLP connection torn down by I/O error",
                 );
                 return Ok(());
@@ -320,7 +206,7 @@ async fn run_read_loop(
                 if push_tx.send(body).await.is_err() {
                     // Writer task exited (pipe broken). No point
                     // trying to deliver further responses.
-                    debug!(user = %conn.peer.user, "KLP push channel closed, exiting read loop");
+                    debug!(user = %conn.peer.user_display, "KLP push channel closed, exiting read loop");
                     return Ok(());
                 }
             }
@@ -345,11 +231,13 @@ async fn run_read_loop(
 /// (responses + push notifications) and writes each frame to the
 /// pipe. Exits when the channel is closed (all senders dropped)
 /// or on a write error.
-async fn writer_task(
-    mut writer: WriteHalf<NamedPipeServer>,
+async fn writer_task<S>(
+    mut writer: WriteHalf<S>,
     mut push_rx: mpsc::Receiver<Vec<u8>>,
     pc_id_for_log: String,
-) {
+) where
+    S: AsyncWrite + Unpin,
+{
     while let Some(body) = push_rx.recv().await {
         if let Err(e) = write_frame(&mut writer, &body).await {
             warn!(

@@ -1825,7 +1825,7 @@ Client App ⇄ Agent の IPC プロトコル。OS の認証機構をそのまま
 
 **OS 間の共通性**: Framing (§2.12.2)、JSON-RPC (§2.12.3)、Method 名前空間 (§2.12.5)、Handshake (§2.12.6)、Error Model (§2.12.9) は **OS 非依存で Windows / Linux / macOS 共通**。OS ごとに異なるのは Transport の実体 (§2.12.1) と、接続元 identity の取得方法 (§2.12.4) のみ。
 
-**実装状況**: 現行実装は Windows のみ (`crates/kanade-agent/src/klp` は `cfg(windows)`、他 OS では `compile_error!`)。Linux / macOS の記述は後続実装のための仕様であり、本仕様の策定時点でコードは変更しない。
+**実装状況**: Agent 側は Windows (Named Pipe)・Linux・macOS (UDS) とも実装済み (`crates/kanade-agent/src/klp`)。Unix のソケットパスは環境変数 `KANADE_KLP_SOCKET_PATH` で上書きできる (テスト・開発用)。Client App 側の Linux / macOS 対応は後続。
 
 ### 2.12.1 Transport
 
@@ -2250,9 +2250,9 @@ pub struct JobProgress {
 
 | 責務 | 配置 |
 |---|---|
-| KLP listener (Pipe / UDS) | `crates/kanade-agent/src/klp/server.rs` (現行は Named Pipe のみ。UDS は後続) |
-| `PeerIdentity` 定義と OS peer 認証 | `crates/kanade-agent/src/klp/auth.rs` (`cfg(windows)`: Pipe → token / `cfg(target_os = "linux")`: `SO_PEERCRED` / `cfg(target_os = "macos")`: `LOCAL_PEERCRED` + `LOCAL_PEERPID`) |
-| 接続認可 (UID 下限・非対話アカウント拒否) | Unix 側の `klp/auth.rs` (後続実装)。Windows は `klp/security.rs` の SDDL |
+| KLP listener (Pipe / UDS) | `crates/kanade-agent/src/klp/server/` (`windows.rs`: Named Pipe / `unix.rs`: UDS / 共通部は `mod.rs`) |
+| `PeerIdentity` 定義と OS peer 認証 | `crates/kanade-agent/src/klp/auth/` (`mod.rs`: 型、`windows.rs`: `cfg(windows)`: Pipe → token / `cfg(target_os = "linux")`: `SO_PEERCRED` / `cfg(target_os = "macos")`: `LOCAL_PEERCRED` + `LOCAL_PEERPID`) |
+| 接続認可 (UID 下限・非対話アカウント拒否) | Unix 側の `klp/auth/unix.rs`。Windows は `klp/security.rs` の SDDL |
 | Pipe security descriptor | `crates/kanade-agent/src/klp/security.rs` (Windows) |
 | 接続状態 (購読・自接続の run 集合) | `crates/kanade-agent/src/klp/connection.rs` |
 | GUI session の在席・ロック検知 (toast 起動可否) | Windows: `klp/emergency_notify.rs` + `session_supervisor.rs`。Linux / macOS は後続実装 (§2.12.4.4) |
@@ -2329,7 +2329,7 @@ pub struct JobProgress {
 ### Sprint 8 (v0.4.0): Client App + KLP (エンドユーザー向け)
 
 - [ ] `crates/kanade-shared/src/ipc/` — KLP v1 の params / result / error 型定義 + ts-rs export
-- [ ] Agent: KLP listener (Windows: Named Pipe / Linux: UDS `/run/kanade/agent.sock` / macOS: UDS `/var/run/kanade/agent.sock`) + OS peer 認証 (Windows token / Unix peercred) + subscription manager。現行実装は Windows のみ、Unix の listener・認可は後続
+- [ ] Agent: KLP listener (Windows: Named Pipe / Linux: UDS `/run/kanade/agent.sock` / macOS: UDS `/var/run/kanade/agent.sock`) + OS peer 認証 (Windows token / Unix peercred) + subscription manager。Agent 側は 3 OS 実装済み、Client 側の Unix 対応は後続
 - [ ] Agent: `klp::handlers` (state / notifications / jobs / support / maintenance)
 - [ ] Manifest schema 拡張: `user_invokable` / `category` / `display_name` / `display_description` / `icon`
 - [ ] Notification Manifest (`notifications/*.yaml`) + `NOTIFICATIONS` Stream + `notifications_read` KV bucket
