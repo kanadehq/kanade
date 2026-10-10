@@ -822,9 +822,10 @@ fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
 
 /// Apply the saved size before the window is first shown. Never fails startup.
 fn restore_window_size(app: &tauri::AppHandle) {
-    let Some(win) = app.get_window("main") else {
+    let Some(webview_window) = app.get_webview_window("main") else {
         return;
     };
+    let win = AsRef::<tauri::Webview>::as_ref(&webview_window).window();
     let Some(path) = window_size_path(app) else {
         return;
     };
