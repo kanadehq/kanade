@@ -1882,7 +1882,7 @@ Connect 時に Agent が **OS から接続元 identity を取得**し、platform
 |---|---|---|---|
 | user (所有権キー) | SID | UID (`SO_PEERCRED`) | UID (`LOCAL_PEERCRED`) |
 | pid | `GetNamedPipeClientProcessId()` | `SO_PEERCRED` | `LOCAL_PEERPID` |
-| session | `OpenProcessToken()` → `GetTokenInformation(TokenSessionId)` | peer pid の logind session (`sd_pid_get_session`)、取得不能なら `None` (提案、§2.12.4.4) | `None` (提案、§2.12.4.4) |
+| session | `OpenProcessToken()` → `GetTokenInformation(TokenSessionId)` | peer pid の logind session (`sd_pid_get_session`)、取得不能なら `None` (§2.12.4.4) | `None` (§2.12.4.4) |
 
 **PeerIdentity** (論理形。実装は `klp/auth.rs` の OS 別 cfg で埋める):
 
@@ -1957,19 +1957,19 @@ Windows 実装を調べた結果、peer の Session ID は**認可にも所有�
 
 - レート制限: 1 接続あたり 60 req/min を超えたら `-32003 RateLimit`
 
-#### 2.12.4.4 未決事項 (提案 — オーナー確認待ち)
+#### 2.12.4.4 確定事項 (同一ユーザーの別接続・Session の等価物)
 
-**(1) 同一ユーザーの別接続による kill / ack の扱い — 提案: 現行の「自接続限定」を維持**
-- `jobs.kill` は引き続き自接続の run のみ。Client 再起動後は既存 run を `jobs.list` / `jobs.progress` で見ることはできても kill はできない。run は実行中の副作用を持つため、同じ UID の別プロセスに run を乗っ取られる余地を作らない。
-- `notifications.ack` / `unack` と `support.unlock` / `lock` は元々接続限定ではなく、同じ `user_key` の別接続から更新できる (再起動・多重起動で状態が引き継がれる)。
-- **オーナーがこの提案を覆す場合** (同一 `user_key` なら kill 可とする等) は、本節の本文と §2.12.4.3 の依存表 (kill の行を「接続」から「`user_key`」へ) の両方、および §2.12.5 の `jobs.kill` 行を直す必要がある。
+**(1) 同一ユーザーの別接続による kill / ack の扱い — 決定: 現行の「自接続限定」を維持**
+- `jobs.kill` は引き続き run を開始した接続のみとする。run は実行中の副作用を持つため、同じ UID の別プロセスに run を乗っ取られる余地を作らないことを最優先する。
+- `notifications.ack` / `unack` と `support.unlock` / `lock` は引き続き `user_key` 単位とし、同じ `user_key` の別接続から更新できる (再起動・多重起動で状態が引き継がれる)。
+- 既知の制約: Client の再起動や自動再接続のあと、実行中の run を `jobs.list` / `jobs.progress` で見ることはできても kill できない。将来緩める場合は「同一 `user_key` **かつ** 開始元接続がすでに切れている」を条件とする後続検討であり、現在の許可条件ではない (「同一 `user_key` なら可」とはしない)。
 
-**(2) Session の等価物 — 提案**
-- Session は認可に使われていない (§2.12.4.2) ため、等価物がなくても Linux / macOS の KLP は成立する。
-- Linux: peer pid の logind session (`sd_pid_get_session`) を**任意情報**として保持。取得できなければ `None`。
+**(2) Session の等価物 — 決定: 任意情報のみ、認可には使わない**
+- Session は認可に使われていない (§2.12.4.2) ため、等価物がなくても Linux / macOS の KLP は成立する。session は任意の表示・ログ用情報であり、認可には一切使わない。
+- Linux: peer pid の logind session (`sd_pid_get_session`) が取得できればそれを保持し、取得できなければ `None` とする。
 - macOS: `None` とする。SCDynamicStore の console user は UID の一致しか示さず、同じ UID の SSH 接続や fast user switching の裏セッションを区別できないため、console 一致や audit session id による判定は誤判定のリスクから採らない。
-- SSH / ヘッドレス等で session が無くても**接続は拒否しない**。適格なアカウントなら KLP を許可し、GUI の不在を認可の拒否理由にしない。
-- toast / `session_supervisor` に相当する機能は、peer の Session とは別の「**GUI session の在席・切替・ロック状態**」責務として分離する。Linux は logind のアクティブなグラフィカル session、macOS は SCDynamicStore の console user を基準にする。GUI が確認できなければ toast を出さず、通知は `notifications.list` の履歴から回復する。この責務の実装は後続段階。
+- session が無い (SSH / ヘッドレス等) ことを理由に接続は拒否しない。これは資格情報 (UID 等) の取得失敗による拒否規則とは別物であり、適格なアカウントなら KLP を許可し、GUI の不在を認可の拒否理由にしない。
+- toast / `session_supervisor` に相当する機能は、peer の Session とは別の「**GUI session の在席・切替・ロック状態**」責務として分離し、後続で扱う。Linux は logind のアクティブなグラフィカル session、macOS は SCDynamicStore の console user を基準にする。GUI が確認できなければ toast を出さず、通知は `notifications.list` の履歴から回復する。
 
 ### 2.12.5 Method 名前空間 (v1)
 
@@ -1990,7 +1990,7 @@ Windows 実装を調べた結果、peer の Session ID は**認可にも所有�
 | `jobs.execute` | req-rep | 実行依頼。返り値は `run_id`。`visible_to` は再判定するが `show_when` / `unlock` は表示ゲートなので見ない |
 | `jobs.subscribe` | req-rep | `jobs.progress` 購読開始 |
 | `jobs.progress` | push (A→C) | stdout chunk / exit code / status 変化 |
-| `jobs.kill` | req-rep | 自接続で投げた run の停止 (同一ユーザーの別接続からは不可 — 提案、§2.12.4.4) |
+| `jobs.kill` | req-rep | 自接続で投げた run の停止 (同一ユーザーの別接続からは不可、§2.12.4.4) |
 | `support.upload_diagnostics` | req-rep | サポート問い合わせ用 zip を Object Store にアップロード |
 | `support.unlock` | req-rep | サポートコードを照合し `client.unlock` スコープを時限表示 (listing のみ) |
 | `support.lock` | req-rep | 保持中の解錠グラントを即時破棄 |
