@@ -1941,7 +1941,7 @@ Windows 実装を調べた結果、peer の Session ID は**認可にも所有�
   - `notifications.ack` / `unack`、既読一覧、`support.unlock` / `lock` / `status`、`jobs.list` の解錠状態: peer の SID (`user_sid`) で判定
   - 通知の配信先: pc / group / all で決まり、購読中の全接続に fan-out する (Session では絞らない)
 - toast 起動 (`emergency_notify`) と `session_supervisor` が対象にするのは、peer の Session ではなく `WTSGetActiveConsoleSessionId()` の**アクティブなコンソール session** (在席・ロック状態を含む)。KLP 接続の identity とは独立。
-- 現状の差分 (注記): 現行の `notifications.ack` handler は SID と通知 ID を検証して保存するだけで、通知が自分宛 (pc / group / all) かは確認していない。下記の「自分宛のみ」は仕様上の制約であり、実装との差を後続で埋める。
+- 実装 (注記): `notifications.ack` / `unack` は、SID と通知 ID の検証後に、通知が自分宛 (pc / 自分の所属 group / all) かを配信と同じ `filter_subjects` の対象 subject で確認する。宛先外の通知と未知 ID はどちらも `Unauthorized` を返す (他宛ての存在を探れないようにするため)。宛先内の通知の再 ack は冪等。保持期限切れや purge 済みの通知は ack / unack できない。
 
 → **Linux / macOS の等価物が提供すべきもの**: (a) 安定した user_key (= UID)、(b) 接続単位の識別 (pid・接続オブジェクト)、(c) 任意の session 情報 (表示・ログ用)。Session の厳密な等価物は認可上は必須ではない。toast / session_supervisor 相当の「GUI session の在席・切替・ロック状態」は KLP 接続の identity とは別責務として後続実装で扱う (§2.12.4.4)。
 

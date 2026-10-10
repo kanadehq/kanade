@@ -69,6 +69,13 @@ pub(crate) fn filter_subjects(pc_id: &str, groups: &[String]) -> Vec<String> {
     subjects
 }
 
+/// Whether a notification published on `subject` is addressed to this agent
+/// (`all`, its own PC, or one of its groups). Defined in terms of
+/// [`filter_subjects`] so authorization can never drift from delivery.
+pub(crate) fn is_addressed_subject(subject: &str, pc_id: &str, groups: &[String]) -> bool {
+    filter_subjects(pc_id, groups).iter().any(|s| s == subject)
+}
+
 /// Spawn the notification bus. `notif_tx` is created by the caller
 /// (main.rs) so it can also hand a clone to the KLP `ListenerContext`
 /// before this task starts. Returns the detached `JoinHandle`.
