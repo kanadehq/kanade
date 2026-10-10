@@ -1787,6 +1787,8 @@ C:\ProgramData\Mgmt\logs\
 
 ### 2.11.6 Client App 配置 (Windows)
 
+本節の配置・配布・自己アップデートは **Windows 専用**。Linux / macOS は §2.11.7 を参照 (未設計)。
+
 ```
 C:\Program Files\Kanade\
 └── kanade-client.exe           # Tauri バイナリ (WebView2 ランタイムは OS 既定)
@@ -1808,23 +1810,43 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 **自己アップデート**: Tauri の updater は使わず、**Agent の self-update と同じ Object Store 経路** (`client_releases` bucket) で配布する。Client は KLP で「自分のバージョン更新が必要か」 を Agent に問い合わせ、Agent (`LocalSystem`) が新バイナリを Object Store からダウンロード → 起動中の `kanade-client.exe` を停止 → `C:\Program Files\Kanade\` 配下を swap → 再起動。Swap 自体は `Program Files` への書き込みで特権が必要だが、これは **Agent が自身の権限で実施するため、エンドユーザーへの UAC 昇格要求は発生しない**。
 
+### 2.11.7 Client App 配置 (Linux / macOS) — 後続段階で決定
+
+KLP の仕様 (§2.12) は 3 OS 分を先に定める。一方で Client App 自体の Linux / macOS 配置は**後続段階**であり、本節では決めるべき項目を列挙するだけで設計はしない。
+
+- インストール先 (バイナリ・アプリバンドルの配置、権限、署名 / notarization の要否)
+- ユーザーごとの config / log / cache のパス (XDG Base Directory / `~/Library/...` のどちらに置くか)
+- 自動起動 (macOS: LaunchAgent、Linux: XDG autostart) と、ユーザー初回ログイン時の展開方法 (Windows の ActiveSetup 相当)
+- 自己アップデートの swap 手順 (Agent は root で動くため特権昇格は不要の見込みだが、起動中バイナリの停止・差し替え・再起動の手順は未定)
+
 ## 2.12 KLP (Kanade Local Protocol)
 
 Client App ⇄ Agent の IPC プロトコル。OS の認証機構をそのまま使い、追加の鍵管理を不要にする。「**エンドユーザーに NATS credentials を渡さない**」 を確実に守るための層。
 
+**OS 間の共通性**: Framing (§2.12.2)、JSON-RPC (§2.12.3)、Method 名前空間 (§2.12.5)、Handshake (§2.12.6)、Error Model (§2.12.9) は **OS 非依存で Windows / Linux / macOS 共通**。OS ごとに異なるのは Transport の実体 (§2.12.1) と、接続元 identity の取得方法 (§2.12.4) のみ。
+
+**実装状況**: 現行実装は Windows のみ (`crates/kanade-agent/src/klp` は `cfg(windows)`、他 OS では `compile_error!`)。Linux / macOS の記述は後続実装のための仕様であり、本仕様の策定時点でコードは変更しない。
+
 ### 2.12.1 Transport
 
-| OS | エンドポイント |
-|---|---|
-| Windows | Named Pipe `\\.\pipe\kanade-agent` |
-| Linux | Unix Domain Socket `/run/kanade/agent.sock` |
-| macOS (将来) | Unix Domain Socket `/var/run/kanade/agent.sock` |
+| OS | エンドポイント | Agent の動作形態 |
+|---|---|---|
+| Windows | Named Pipe `\\.\pipe\kanade-agent` | `LocalSystem` の Windows Service |
+| Linux | Unix Domain Socket `/run/kanade/agent.sock` | root の systemd service。ディレクトリは unit の `RuntimeDirectory=kanade` (mode 0755) で作成 |
+| macOS | Unix Domain Socket `/var/run/kanade/agent.sock` | root の launchd daemon (`com.kanade.agent`、`deploy/macos/README.md` 参照) |
 
-**ACL**:
-- Windows: Pipe security descriptor を `Authenticated Users` に RW、`Everyone` / `Anonymous` は拒否
-- Linux: ファイルパーミッション `0660`、`kanade-users` グループ所属のみアクセス可
+**ACL / 認可**:
+- Windows: Pipe security descriptor を `Authenticated Users` に RW、`Everyone` / `Anonymous` は拒否 (SDDL `D:(D;;GA;;;AN)(A;;GA;;;AU)`)
+- Linux / macOS: **ソケット mode `0666`、親ディレクトリ mode `0755` (root 所有)**。ファイルシステム権限では絞らず、**認可は Agent が connect 時に peer credentials から行う** (§2.12.4.1)。意図は Windows の「Authenticated Users RW」と同じ (= 認証済みの通常ユーザーなら接続できる)。
 
-Agent は **1 listener、複数同時接続** を受け付ける (Fast User Switching / RDP の同時セッション対応)。
+**グループ方式 (`0660` + `kanade-users`) を採らない理由**:
+- macOS には全ユーザーに自然に付与される共有グループがなく、Linux と同じ規則にできない。
+- グループ所属は端末ごと・ユーザーごとの配布作業になり、ユーザー追加・ドメイン/ディレクトリ連携のたびに運用負担が発生する。
+- OS ごとに ACL の意味が割れるより、「ソケットは広く開け、Agent が peer を判定する」で 3 OS の意図を揃えるほうが仕様として単純。
+
+**トレードオフ**: ファイルシステム権限という防御層を捨てて Agent の判定に集約する。判定のバグ = 防御層ゼロとなるため、拒否条件は §2.12.4.1 で数値・規則として固定し、テスト可能な契約とする。
+
+Agent は **1 listener、複数同時接続** を受け付ける。対象は Windows の Fast User Switching / RDP の同時セッション、Linux の複数ユーザー (複数ログイン)、macOS の fast user switching。接続ごとに peer identity を取得するため、同時に複数ユーザーが接続しても互いの状態 (購読・ack・unlock) は混ざらない。
 
 ### 2.12.2 Framing
 
@@ -1852,15 +1874,95 @@ Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可
 
 ### 2.12.4 Authentication / Authorization
 
-- Connect 時に Agent が **OS から接続元 token を取得**:
-  - Windows: `GetNamedPipeClientProcessId()` → `OpenProcessToken()` → `GetTokenInformation(TokenUser, TokenSessionId)` で SID + Session ID
-  - Linux: `SO_PEERCRED` で UID + PID
-- **Payload に user_id を入れない** (Agent は OS 由来の SID/UID を真とみなす)
-- 各 method ごとに以下を強制:
-  - `jobs.execute`: manifest に `user_invokable: true` 必須 (false なら `IpcError::Unauthorized`)
-  - `jobs.kill`: 自分の接続で投げた `run_id` のみ kill 可 (それ以外は `Unauthorized`)。cancel は agent プロセス内の kill registry へ直接伝えるため broker に依存せず、agent は `kill.*` を publish しない (broker 越しの `kill.{exec_id}` による remote kill は backend API / CLI 用に従来どおり)。結果は run の終端 `jobs.progress` (status = Killed) で届く。終了済み・未知の run への kill は no-op
-  - `notifications.ack`: 自分宛 (`pc` / 自分の所属 `group` / `all`) のみ ack 可
+#### 2.12.4.1 Peer identity の取得と接続認可
+
+Connect 時に Agent が **OS から接続元 identity を取得**し、platform-neutral な `PeerIdentity` を作る。
+
+| 項目 | Windows | Linux | macOS |
+|---|---|---|---|
+| user (所有権キー) | SID | UID (`SO_PEERCRED`) | UID (`LOCAL_PEERCRED`) |
+| pid | `GetNamedPipeClientProcessId()` | `SO_PEERCRED` | `LOCAL_PEERPID` |
+| session | `OpenProcessToken()` → `GetTokenInformation(TokenSessionId)` | peer pid の logind session (`sd_pid_get_session`)、取得不能なら `None` (提案、§2.12.4.4) | `None` (提案、§2.12.4.4) |
+
+**PeerIdentity** (論理形。実装は `klp/auth.rs` の OS 別 cfg で埋める):
+
+```
+PeerIdentity {
+  user_key:     String,        // 認可・状態キー。Windows: SID 文字列 / Unix: "uid-<UID>" (NATS KV キー・subject に使える文字のみ)
+  user_display: String,        // 表示・ログ用。Windows: "DOMAIN\\user" / Unix: ユーザー名 (引けなければ "<unknown>")
+  pid:          u32,           // OS 上の接続元の特定・session 照合専用。所有権キーには使わない
+  session:      Option<u32>,   // OS の session 識別子。Unix では取れないことがある
+}
+```
+
+- **Payload に user_id を入れない**。Agent は OS 由来の identity を真とみなす (この原則は 3 OS 共通で維持)。
+- `user_key` は改名に耐える安定キーとする (Windows の SID と同じ理由で、Unix ではユーザー名でなく UID)。`user_display` は表示専用で認可に使わない。
+- **リスク**: Unix では UID が再利用されうる (ユーザー削除後に同じ UID を別人に割り当てる等)。その場合、既読 (`notifications_read`) や unlock グラントが別人に引き継がれうる。Windows の SID は再利用されない点で非対称。運用上は UID を再利用しない前提とし、後続実装で影響を再評価する。
+
+**接続認可 (Linux / macOS)**: Agent は accept 直後、**要求を 1 バイトも読む前に** peer を判定し、次のいずれかに当てはまる peer を拒否する。
+
+1. UID が下限未満 — Linux は `UID < 1000`、macOS は `UID < 500` (システムアカウント)
+2. UID が 0 (root)。例外は設けない (root 用の操作は KLP を経由せず Agent/CLI 側で行う)
+3. passwd エントリ (`getpwuid`) が存在しない
+4. ログイン shell が空、または絶対パスでない、`/etc/shells` に未登録、あるいは basename が `nologin` / `false` (非対話アカウント)
+5. 資格情報・アカウント情報の取得に失敗した (**fail closed**)
+
+Windows は SD (`Authenticated Users`) が同等のゲートで、追加の Agent 側拒否規則は置かない。
+
+**拒否時の応答**: 拒否した peer には、`id: null` の Error 応答を 1 フレームだけ書いて close する。以降は一切 read しない (0666 では未認可の peer が誰でも接続できるため、拒否した相手からは読まないほうが資源枯渇に強い)。
+
+```jsonc
+{"jsonrpc":"2.0","id":null,"error":{
+  "code": -32000, "message": "Unauthorized",
+  "data": {"kind":"Unauthorized","detail":"uid 998 is below the minimum interactive uid 1000"}
+}}
+```
+
+`detail` には拒否理由 (上記 1〜5 のどれか) を入れる。Client の扱いは §2.12.10。
+
+**後続実装での制限事項 (記録)**:
+- 認可前の接続は誰でも張れるため、認可前接続の同時数と持続時間 (判定は即時なので短い timeout) を後続実装で制限する。
+- UID の下限 (`UID_MIN` の変更、MDM 管理下の特殊アカウント等) は環境により例外が出うる。設定での上書きは今回は決めない。
+
+#### 2.12.4.2 現行実装で peer の Session ID が使われている箇所 (調査結果)
+
+Windows 実装を調べた結果、peer の Session ID は**認可にも所有権にも使われていない**。
+
+- 使用箇所は handshake 応答の `HandshakeSession.session_id` (u32) と、`server.rs` / `klp_client.rs` のログ出力のみ。
+- 所有・状態の判定:
+  - `jobs.kill`: 接続ごとの `runs` 集合 (`Connection::owns_run`) で判定
+  - `notifications.ack` / `unack`、既読一覧、`support.unlock` / `lock` / `status`、`jobs.list` の解錠状態: peer の SID (`user_sid`) で判定
+  - 通知の配信先: pc / group / all で決まり、購読中の全接続に fan-out する (Session では絞らない)
+- toast 起動 (`emergency_notify`) と `session_supervisor` が対象にするのは、peer の Session ではなく `WTSGetActiveConsoleSessionId()` の**アクティブなコンソール session** (在席・ロック状態を含む)。KLP 接続の identity とは独立。
+- 現状の差分 (注記): 現行の `notifications.ack` handler は SID と通知 ID を検証して保存するだけで、通知が自分宛 (pc / group / all) かは確認していない。下記の「自分宛のみ」は仕様上の制約であり、実装との差を後続で埋める。
+
+→ **Linux / macOS の等価物が提供すべきもの**: (a) 安定した user_key (= UID)、(b) 接続単位の識別 (pid・接続オブジェクト)、(c) 任意の session 情報 (表示・ログ用)。Session の厳密な等価物は認可上は必須ではない。toast / session_supervisor 相当の「GUI session の在席・切替・ロック状態」は KLP 接続の identity とは別責務として後続実装で扱う (§2.12.4.4)。
+
+#### 2.12.4.3 Method ごとの認可と、依存する identity
+
+| Method | 強制する規則 | 依存する identity |
+|---|---|---|
+| `jobs.execute` | manifest に `user_invokable: true` 必須 (false なら `IpcError::Unauthorized`) | `user_key` (監査ログの actor) |
+| `jobs.kill` | **自分の接続で投げた `run_id` のみ** kill 可 (それ以外は `Unauthorized`)。cancel は agent プロセス内の kill registry へ直接伝えるため broker に依存せず、agent は `kill.*` を publish しない (broker 越しの `kill.{exec_id}` による remote kill は backend API / CLI 用に従来どおり)。結果は run の終端 `jobs.progress` (status = Killed) で届く。終了済み・未知の run への kill は no-op | **接続** (`Connection::runs`)。user_key は関与しない |
+| `notifications.ack` / `unack` / 既読一覧 | 自分宛 (`pc` / 自分の所属 `group` / `all`) のみ ack 可。既読状態は `user_key` ごとに独立 | `user_key` |
+| `support.unlock` / `lock` / `status`、`jobs.list` の解錠状態 | 解錠グラントは `user_key` ごとに保持 | `user_key` |
+| `system.handshake` 応答 / ログ | 表示・相関のみ | `user_display`、`session`、`pid` |
+
 - レート制限: 1 接続あたり 60 req/min を超えたら `-32003 RateLimit`
+
+#### 2.12.4.4 未決事項 (提案 — オーナー確認待ち)
+
+**(1) 同一ユーザーの別接続による kill / ack の扱い — 提案: 現行の「自接続限定」を維持**
+- `jobs.kill` は引き続き自接続の run のみ。Client 再起動後は既存 run を `jobs.list` / `jobs.progress` で見ることはできても kill はできない。run は実行中の副作用を持つため、同じ UID の別プロセスに run を乗っ取られる余地を作らない。
+- `notifications.ack` / `unack` と `support.unlock` / `lock` は元々接続限定ではなく、同じ `user_key` の別接続から更新できる (再起動・多重起動で状態が引き継がれる)。
+- **オーナーがこの提案を覆す場合** (同一 `user_key` なら kill 可とする等) は、本節の本文と §2.12.4.3 の依存表 (kill の行を「接続」から「`user_key`」へ) の両方、および §2.12.5 の `jobs.kill` 行を直す必要がある。
+
+**(2) Session の等価物 — 提案**
+- Session は認可に使われていない (§2.12.4.2) ため、等価物がなくても Linux / macOS の KLP は成立する。
+- Linux: peer pid の logind session (`sd_pid_get_session`) を**任意情報**として保持。取得できなければ `None`。
+- macOS: `None` とする。SCDynamicStore の console user は UID の一致しか示さず、同じ UID の SSH 接続や fast user switching の裏セッションを区別できないため、console 一致や audit session id による判定は誤判定のリスクから採らない。
+- SSH / ヘッドレス等で session が無くても**接続は拒否しない**。適格なアカウントなら KLP を許可し、GUI の不在を認可の拒否理由にしない。
+- toast / `session_supervisor` に相当する機能は、peer の Session とは別の「**GUI session の在席・切替・ロック状態**」責務として分離する。Linux は logind のアクティブなグラフィカル session、macOS は SCDynamicStore の console user を基準にする。GUI が確認できなければ toast を出さず、通知は `notifications.list` の履歴から回復する。この責務の実装は後続段階。
 
 ### 2.12.5 Method 名前空間 (v1)
 
@@ -1881,7 +1983,7 @@ Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可
 | `jobs.execute` | req-rep | 実行依頼。返り値は `run_id`。`visible_to` は再判定するが `show_when` / `unlock` は表示ゲートなので見ない |
 | `jobs.subscribe` | req-rep | `jobs.progress` 購読開始 |
 | `jobs.progress` | push (A→C) | stdout chunk / exit code / status 変化 |
-| `jobs.kill` | req-rep | 自接続で投げた run の停止 |
+| `jobs.kill` | req-rep | 自接続で投げた run の停止 (同一ユーザーの別接続からは不可 — 提案、§2.12.4.4) |
 | `support.upload_diagnostics` | req-rep | サポート問い合わせ用 zip を Object Store にアップロード |
 | `support.unlock` | req-rep | サポートコードを照合し `client.unlock` スコープを時限表示 (listing のみ) |
 | `support.lock` | req-rep | 保持中の解錠グラントを即時破棄 |
@@ -1982,6 +2084,7 @@ A→C {"jsonrpc":"2.0","id":"01931a8e-...",
                "session":{"user":"DOMAIN\\alice","session_id":2,"pc_id":"PC1234"}}}
 ```
 
+- `session.session_id` (u32): 表示・互換のためのフィールド。Windows は Session ID、Unix は UID を入れる (wire 型は 3 OS 共通で維持)。**認可キーでも実 session の識別子でもない**ため、Client UI は「セッション番号」として表示しない。Unix で実 session は §2.12.4.1 の `PeerIdentity.session` に別途保持し、wire には出さない
 - `protocol`: Client が話せるバージョンの配列。Agent が話せる最大版を選んで `result.protocol` で返す。合意できなければ `-32004 StaleProtocol`
 - `features`: optional method の availability。後方互換のため追加機能は **features bit** で表明する
 - Handshake 未完了の状態で他 method を呼ぶと `-32600 InvalidRequest`
@@ -2077,6 +2180,7 @@ A→C {"jsonrpc":"2.0","id":"u4","result":{"acked_at":"2026-05-20T12:00:05Z"}}
 | 初回接続失敗 | exponential backoff (1s, 2s, 4s, ..., cap 30s) で再試行 |
 | 接続中の切断 | 即座に再接続 → handshake → `state.snapshot` → 各種 `subscribe` を張り直す |
 | Agent 起動前 (boot 時の race) | 上記 backoff で待つ |
+| 接続直後に `id: null` の `-32000 Unauthorized` を受けた (§2.12.4.1 の拒否) | **再接続しない**。認可条件を満たさないアカウントなので、バックオフで再試行しても結果は変わらない。トレイ等で理由 (`detail`) を表示するに留める |
 | Pipe / Socket が存在しない | Agent service が停止中。トレイアイコンを ⚠️ 表示、「Agent サービスを開始してください」 案内 |
 
 ### 2.12.11 Schema 共有
@@ -2139,11 +2243,15 @@ pub struct JobProgress {
 
 | 責務 | 配置 |
 |---|---|
-| KLP listener (Pipe / UDS) | `crates/kanade-agent/src/klp/server.rs` |
-| OS token → SID/UID 取得 | `crates/kanade-agent/src/klp/auth.rs` (cfg(windows) / cfg(unix)) |
+| KLP listener (Pipe / UDS) | `crates/kanade-agent/src/klp/server.rs` (現行は Named Pipe のみ。UDS は後続) |
+| `PeerIdentity` 定義と OS peer 認証 | `crates/kanade-agent/src/klp/auth.rs` (`cfg(windows)`: Pipe → token / `cfg(target_os = "linux")`: `SO_PEERCRED` / `cfg(target_os = "macos")`: `LOCAL_PEERCRED` + `LOCAL_PEERPID`) |
+| 接続認可 (UID 下限・非対話アカウント拒否) | Unix 側の `klp/auth.rs` (後続実装)。Windows は `klp/security.rs` の SDDL |
+| Pipe security descriptor | `crates/kanade-agent/src/klp/security.rs` (Windows) |
+| 接続状態 (購読・自接続の run 集合) | `crates/kanade-agent/src/klp/connection.rs` |
+| GUI session の在席・ロック検知 (toast 起動可否) | Windows: `klp/emergency_notify.rs` + `session_supervisor.rs`。Linux / macOS は後続実装 (§2.12.4.4) |
 | Method ディスパッチ + ハンドラ | `crates/kanade-agent/src/klp/handlers/*.rs` |
 | 共有型 (params / result / error) | `crates/kanade-shared/src/ipc/` (ts-rs export) |
-| KLP client (Rust 側) | `crates/kanade-client/src-tauri/src/klp_client.rs` |
+| KLP client (Rust 側) | `crates/kanade-client/src/klp_client.rs` |
 | Tauri command bridge | `crates/kanade-client/src-tauri/src/commands.rs` |
 | WebView 側 (TS) | `crates/kanade-client/web/src/lib/klp.ts` |
 
@@ -2214,7 +2322,7 @@ pub struct JobProgress {
 ### Sprint 8 (v0.4.0): Client App + KLP (エンドユーザー向け)
 
 - [ ] `crates/kanade-shared/src/ipc/` — KLP v1 の params / result / error 型定義 + ts-rs export
-- [ ] Agent: KLP listener (Named Pipe / UDS) + OS token 認証 + subscription manager
+- [ ] Agent: KLP listener (Windows: Named Pipe / Linux: UDS `/run/kanade/agent.sock` / macOS: UDS `/var/run/kanade/agent.sock`) + OS peer 認証 (Windows token / Unix peercred) + subscription manager。現行実装は Windows のみ、Unix の listener・認可は後続
 - [ ] Agent: `klp::handlers` (state / notifications / jobs / support / maintenance)
 - [ ] Manifest schema 拡張: `user_invokable` / `category` / `display_name` / `display_description` / `icon`
 - [ ] Notification Manifest (`notifications/*.yaml`) + `NOTIFICATIONS` Stream + `notifications_read` KV bucket
@@ -2224,8 +2332,9 @@ pub struct JobProgress {
 - [ ] Client App: handshake / トレイ常駐 / 起動時未読通知ポップアップ / モーダル (emergency)
 - [ ] Client App: 通知タブ / 状態タブ (コンプライアンスチェック) / アップデートタブ / トラブルシュートタブ
 - [ ] Client App: サポート問い合わせ (`support.upload_diagnostics`) + メンテ予約延期 (`maintenance.defer`)
-- [ ] MSI パッケージング (WiX) + ActiveSetup によるユーザー初回ログオン時の自動展開
-- [ ] Client App 自己アップデート (`client_releases` Object Store bucket)
+- [ ] MSI パッケージング (WiX) + ActiveSetup によるユーザー初回ログオン時の自動展開 (Windows)
+- [ ] (後続段階) Linux / macOS の Client 配置・自動起動 (LaunchAgent / XDG autostart)・自己アップデート swap (§2.11.7)
+- [ ] Client App 自己アップデート (`client_releases` Object Store bucket) (Windows。Unix の swap は §2.11.7)
 
 ### Sprint 8.5: Client App 拡張機能 (順次)
 
