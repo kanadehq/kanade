@@ -115,3 +115,9 @@ An unmocked `invoke` logs one line and returns `null`:
 
 Add the case to `demo/tauri-core.ts`; the response shapes are the `type`
 declarations near the top of `src/main.ts`.
+
+### Theme
+
+The header theme button stores its choice in `localStorage`, which is
+per origin: the demo (`localhost:1421`), dev (`localhost:1420`) and the
+packaged app each keep their own value.

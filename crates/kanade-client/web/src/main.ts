@@ -24,6 +24,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { initThemeToggle } from "./theme";
 import { marked } from "marked";
 import createDOMPurify from "dompurify";
 
@@ -2128,6 +2129,7 @@ function renderMarkdown(body: string): string {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  initThemeToggle(hydrateIcons);
   // Hydrate the static sidebar / dashboard icons once.
   hydrateIcons();
 

@@ -1,32 +1,47 @@
 /* Kanade Client App — dashboard UI.
    Header + left sidebar nav + switchable content views. Design tokens
    are CSS custom properties so light / dark only re-points a handful of
-   variables (see the :root / prefers-color-scheme blocks). */
+   variables (see the :root block and theme.ts). */
 
 :root {
   /* `color-scheme` makes the native UA chrome (scrollbars, form
-     controls, the scrollbar corner) follow the theme — without it the
-     WebView paints a light scrollbar even under the dark palette below,
-     which reads as a stray white bar. The dark block re-points it. */
-  color-scheme: light;
+     controls, the scrollbar corner) follow the theme. `light dark`
+     follows the OS; the data-theme rules below pin it when the user
+     picks a theme (theme.ts). Every palette value is a
+     `light-dark(light, dark)` pair, so there is a single palette and
+     the OS setting updates it live without a media query. */
+  color-scheme: light dark;
 
-  --bg: #f4f4f6;
-  --panel: #ffffff;
-  --panel-2: #f7f7f9;
-  --border: #e3e3e8;
-  --text: #1a1a1a;
-  --muted: #6b6b72;
-  --accent: #5b3a8c; /* baton violet */
-  --accent-soft: rgba(91, 58, 140, 0.1);
-  --ok: #2e7d32;
-  --warn: #8a6d00;
-  --fail: #b00020;
+  --bg: light-dark(#f4f4f6, #17171a);
+  --panel: light-dark(#ffffff, #1f1f23);
+  --panel-2: light-dark(#f7f7f9, #26262b);
+  --border: light-dark(#e3e3e8, #33333a);
+  --text: light-dark(#1a1a1a, #f0f0f2);
+  --muted: light-dark(#6b6b72, #a2a2ab);
+  --accent: light-dark(#5b3a8c, #b89be0); /* baton violet */
+  --accent-hover: light-dark(#4a2f73, #9f7fd0);
+  --on-accent: light-dark(#ffffff, #1a1a1a);
+  --accent-soft: light-dark(rgba(91, 58, 140, 0.1), rgba(184, 155, 224, 0.16));
+  --ok: light-dark(#2e7d32, #7cc47f);
+  --warn: light-dark(#8a6d00, #e0b341);
+  --fail: light-dark(#b00020, #ff6b6b);
+  --badge-bg: #b00020;
+  --fail-flash: light-dark(rgba(176, 0, 32, 0.18), rgba(255, 107, 107, 0.22));
+  --overlay: rgba(0, 0, 0, 0.45);
   --sidebar-w: 188px;
   --radius: 10px;
   /* Custom scrollbar thumb — a soft translucent track-on-content look so
      it blends into either palette instead of the chunky default bar. */
-  --scrollbar-thumb: rgba(0, 0, 0, 0.24);
-  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.4);
+  --scrollbar-thumb: light-dark(rgba(0, 0, 0, 0.24), rgba(255, 255, 255, 0.22));
+  --scrollbar-thumb-hover: light-dark(rgba(0, 0, 0, 0.4), rgba(255, 255, 255, 0.38));
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 * {
@@ -647,7 +662,7 @@ ul.checks {
    the red --fail of the unread-notifications badge. Hidden at zero. */
 .runs-active-badge {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 /* Collapse toggle: pushed to the right edge of the header. The chevron
@@ -807,7 +822,7 @@ ul.checks {
   line-height: 18px;
   text-align: center;
   color: #fff;
-  background: var(--fail);
+  background: var(--badge-bg);
   border-radius: 999px;
   vertical-align: middle;
 }
@@ -1081,7 +1096,7 @@ ul.checks {
 @keyframes notif-flash {
   0%,
   40% {
-    background: rgba(176, 0, 32, 0.18);
+    background: var(--fail-flash);
   }
   100% {
     background: transparent;
@@ -1149,14 +1164,14 @@ button {
   padding: 6px 14px;
   font-size: 14px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: 0;
   border-radius: 6px;
   cursor: pointer;
 }
 
 button:hover {
-  background: #4a2f73;
+  background: var(--accent-hover);
 }
 
 /* Reset for the structural buttons that aren't "primary" actions. */
@@ -1187,7 +1202,7 @@ button.nav-item.active:hover {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--overlay);
 }
 
 .confirm-dialog {
@@ -1323,31 +1338,36 @@ button.nav-item.active:hover {
   user-select: none;
 }
 
-/* ---- Dark theme ---- */
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
+/* ---- Theme toggle (header, next to the connection dot) ---- */
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 
-    --bg: #17171a;
-    --panel: #1f1f23;
-    --panel-2: #26262b;
-    --border: #33333a;
-    --text: #f0f0f2;
-    --muted: #a2a2ab;
-    --accent: #b89be0;
-    --accent-soft: rgba(184, 155, 224, 0.16);
-    --ok: #7cc47f;
-    --warn: #e0b341;
-    --fail: #ff6b6b;
-    --scrollbar-thumb: rgba(255, 255, 255, 0.22);
-    --scrollbar-thumb-hover: rgba(255, 255, 255, 0.38);
-  }
+/* Same quiet look as .runs-toggle; undoes the global purple `button`. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
 
-  button:hover {
-    background: #9f7fd0;
-  }
+.icon-btn:hover,
+.icon-btn:focus-visible {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+}
 
-  .badge {
-    background: #b00020;
-  }
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
 }
