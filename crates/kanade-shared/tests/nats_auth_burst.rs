@@ -34,8 +34,8 @@
 //! * `KANADE_AUTH_BURST_SIZES`          comma list of fleet sizes (overrides N)
 //! * `KANADE_AUTH_BURST_REPEATS`        repetitions per condition (default 3)
 //! * `KANADE_AUTH_BURST_VARIANTS`       production,no-proxy,baseline,baseline-no-proxy,
-//!   probe,probe-cancel,connect,both,before,before-both,jitter,both-jitter,
-//!   direct,direct-no-proxy (default production); experimental
+//!   probe,probe-cancel,connect,both,before,before-both,probe-first-adaptive,
+//!   jitter,both-jitter,direct,direct-no-proxy (default production); experimental
 //!   variants require `--features nats-auth-measurement`
 //! * `KANADE_AUTH_BURST_LONG_TIMEOUT_SECS` experimental budget (default 60)
 //! * `KANADE_AUTH_BURST_FRAMES_JSONL`   handshake timestamps per socket,
@@ -62,8 +62,9 @@
 //! and retries are per client; the broker's own log is the cross-check.
 //! `KANADE_AUTH_BURST_JSONL=<file>` appends one JSON line per client.
 //!
-//! Each user client costs the broker two bcrypt verifications per attempt: the
-//! credential probe and the real connection.
+//! In the probing variants each user attempt costs the broker two bcrypt
+//! verifications: the credential probe and the real connection. The
+//! production path presents one credential per attempt and costs one.
 
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -77,7 +78,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{Barrier, Notify};
 
 #[cfg(feature = "nats-auth-measurement")]
-use kanade_shared::nats_client::{ConnectTiming, connect_with_measurement_timing};
+use kanade_shared::nats_client::{ConnectTiming, Presentation, connect_with_measurement_timing};
 
 const USERS_CONF: &str = include_str!("../../../configs/nats-server.users.conf");
 const ROLES: [&str; 3] = ["agent", "backend", "breakglass"];
@@ -816,9 +817,9 @@ where
                 timing.probe_timeout = long;
                 timing.connect_timeout = long;
             }
-            "before" => timing.probe_before_connect = true,
+            "before" => timing.presentation = Presentation::ProbeBeforeConnect,
             "before-both" => {
-                timing.probe_before_connect = true;
+                timing.presentation = Presentation::ProbeBeforeConnect;
                 timing.probe_timeout = long;
                 timing.connect_timeout = long;
             }
@@ -828,8 +829,14 @@ where
                 timing.connect_timeout = long;
                 timing.jitter = true;
             }
+            "probe-first-adaptive" => {
+                timing.presentation = Presentation::ProbeBeforeConnect;
+                timing.adaptive_probe_max = Some(Duration::from_secs(30));
+                timing.connect_timeout = Duration::from_secs(30);
+                timing.cancel_probe = true;
+            }
             "direct" | "direct-no-proxy" => {
-                timing.direct_user = true;
+                timing.presentation = Presentation::DirectUser;
                 timing.connect_timeout = long;
             }
             _ => panic!("unknown variant: {variant}"),

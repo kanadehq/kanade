@@ -31,25 +31,26 @@
 //!
 //! With a user provisioned the broker may be on either side of the
 //! token → `users` switch, and the switch is atomic on the broker, so the
-//! credential is chosen per connection attempt (initial and every reconnect)
-//! from an auth callback. Whether a rejected attempt is retried is up to the
-//! async-nats version (0.50 keeps retrying, and re-runs the callback, while
-//! another version may end the connection task for good, leaving a `Client`
-//! that never talks again), so "present the user, and on rejection retry with
-//! the token" is not left to its retry loop. Instead each attempt first opens
-//! a short-lived *probe* connection with the user, which does not retry:
+//! credential is chosen per connection attempt (initial and every reconnect).
+//! Each attempt presents the shape the broker last accepted on the real
+//! connection (the user, before any answer):
 //!
-//!   * accepted → present the user;
-//!   * rejected (authorization violation) → present the token, or fail
-//!     naming the missing token if there is none;
-//!   * anything else (unreachable, timeout) → defer the attempt with an
-//!     authentication callback error. A cached answer describes an old broker
-//!     mode and must not become a refused handshake after a restart.
+//!   * accepted → keep presenting it;
+//!   * refused (authorization violation) → the next attempt presents the
+//!     other shape, or the user again when no token is provisioned;
+//!   * anything else (unreachable, timeout) → retry with the same shape.
 //!
-//! The process keeps one `Client`: a deferred attempt is retried and re-probed.
-//! That a refusal is retried and never ends the connection task is pinned
-//! against a real broker for the pinned async-nats, so a version change that
-//! breaks it fails a test instead of leaving a silent client.
+//! Nothing else is opened on the connection path, so an attempt costs the
+//! broker one credential verification. A separate credential probe on every
+//! attempt doubled the bcrypt work of a fleet reconnecting at once, which is
+//! what turned a broker restart into a queue the broker could not drain. A
+//! mode switch costs one refused handshake per client.
+//!
+//! Relying on the retry after a refusal needs a connection library that
+//! retries a refused attempt and re-runs the callbacks. That a refusal is
+//! retried and never ends the connection task is pinned against a real broker
+//! for the pinned async-nats, so a version change that breaks it fails a test
+//! instead of leaving a silent client. The process keeps one `Client`.
 //!
 //! What a switch or restart guarantees is stated as [`RESUME_BOUND`] and
 //! [`EXIT_BOUND`].
@@ -153,19 +154,26 @@ const REG_PASSWORD: &str = "NatsPassword";
 
 /// One source for the user reconnect budgets and their recovery bounds.
 struct UserReconnectBudget {
-    initial_probe: Duration,
-    maximum_probe: Duration,
-    connect: Duration,
+    /// The credential probe used by the witness and the measurement controls.
+    probe: Duration,
+    /// Slack around the probe's own handshake timeout.
     probe_guard: Duration,
+    /// One handshake of the real connection.
+    connect: Duration,
+    /// async-nats' backoff cap between attempts.
     backoff_max: Duration,
+    /// Attempts a client may need once the broker answers in a new mode: one
+    /// in flight when it came back, one presenting the shape the broker no
+    /// longer accepts, and one presenting the other shape.
+    attempts_to_resume: u64,
 }
 
 const USER_RECONNECT: UserReconnectBudget = UserReconnectBudget {
-    initial_probe: Duration::from_secs(3),
-    maximum_probe: Duration::from_secs(30),
-    connect: Duration::from_secs(30),
+    probe: Duration::from_secs(3),
     probe_guard: Duration::from_secs(1),
+    connect: HEALTH_TIMEOUT,
     backoff_max: Duration::from_secs(4),
+    attempts_to_resume: 3,
 };
 
 fn growing_probe_timeout(initial: Duration, maximum: Duration, deferred: usize) -> Duration {
@@ -178,9 +186,25 @@ fn growing_probe_timeout(initial: Duration, maximum: Duration, deferred: usize) 
         .min(maximum)
 }
 
-/// How long the credential probe may take. Short on purpose: it runs inside
-/// the reconnect path, so a black-holed broker must not stall every attempt.
-const PROBE_TIMEOUT: Duration = USER_RECONNECT.initial_probe;
+/// How long the credential probe may take. Short on purpose: a black-holed
+/// broker must not stall the witness.
+const PROBE_TIMEOUT: Duration = USER_RECONNECT.probe;
+
+/// How a client holding a user chooses the credential for an attempt.
+#[doc(hidden)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Presentation {
+    /// Present the shape the broker last accepted (the user before any
+    /// answer) and switch to the other shape only after the broker refuses
+    /// the real handshake. One verification per attempt.
+    LastAccepted,
+    /// Measurement control: probe the user inside the auth callback.
+    ProbeInCallback,
+    /// Measurement control: probe the user before each attempt.
+    ProbeBeforeConnect,
+    /// Measurement control: always present the user; no token fallback.
+    DirectUser,
+}
 
 /// Connection budgets used by the burst measurement. Production callers always
 /// use `PRODUCTION`; the measurement entry point requires an explicit feature.
@@ -190,8 +214,7 @@ pub struct ConnectTiming {
     pub probe_timeout: Duration,
     pub connect_timeout: Duration,
     pub jitter: bool,
-    pub direct_user: bool,
-    pub probe_before_connect: bool,
+    pub presentation: Presentation,
     pub adaptive_probe_max: Option<Duration>,
     pub cancel_probe: bool,
 }
@@ -201,9 +224,8 @@ impl ConnectTiming {
         probe_timeout: PROBE_TIMEOUT,
         connect_timeout: USER_RECONNECT.connect,
         jitter: false,
-        direct_user: false,
-        probe_before_connect: true,
-        adaptive_probe_max: Some(USER_RECONNECT.maximum_probe),
+        presentation: Presentation::LastAccepted,
+        adaptive_probe_max: None,
         cancel_probe: true,
     };
 
@@ -213,8 +235,7 @@ impl ConnectTiming {
         probe_timeout: Duration::from_secs(3),
         connect_timeout: Duration::from_secs(5),
         jitter: false,
-        direct_user: false,
-        probe_before_connect: false,
+        presentation: Presentation::ProbeInCallback,
         adaptive_probe_max: None,
         cancel_probe: false,
     };
@@ -250,21 +271,18 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest async-nats waits between reconnect attempts (its backoff cap).
 const RECONNECT_DELAY_MAX_SECS: u64 = USER_RECONNECT.backoff_max.as_secs();
 
-/// The longest a single reconnect attempt can take: the backoff, then the
-/// credential probe (its own timeout plus the guard around it), then the
-/// handshake the probe's answer decides.
-const ATTEMPT_MAX_SECS: u64 = RECONNECT_DELAY_MAX_SECS
-    + USER_RECONNECT.maximum_probe.as_secs()
-    + USER_RECONNECT.probe_guard.as_secs()
-    + USER_RECONNECT.connect.as_secs();
+/// The longest a single reconnect attempt can take: the backoff, then one
+/// handshake. No credential probe runs on the connection path.
+const ATTEMPT_MAX_SECS: u64 = RECONNECT_DELAY_MAX_SECS + USER_RECONNECT.connect.as_secs();
 
 /// How long after the broker starts answering in its new authentication mode
 /// (a restart, or a switch between `token` and `users`) a client may take to
-/// talk again: two attempts, allowing a probe interrupted by the switch,
-/// plus slack. Both bounds are
+/// talk again: [`UserReconnectBudget::attempts_to_resume`] attempts plus
+/// slack. Both bounds are
 /// counted from the moment the broker answers, not from the moment it went
 /// away; a broker that is down is waited for indefinitely.
-pub const RESUME_BOUND: Duration = Duration::from_secs(2 * ATTEMPT_MAX_SECS + 4);
+pub const RESUME_BOUND: Duration =
+    Duration::from_secs(USER_RECONNECT.attempts_to_resume * ATTEMPT_MAX_SECS + 4);
 
 /// How long after the broker starts answering in its new mode a client that
 /// has *not* resumed may stay alive before its process exits non-zero for the
@@ -606,9 +624,10 @@ impl ProbeOutcome {
 }
 
 /// The credential the broker last *proved* it accepts or rejects for a role,
-/// shared between the connection (which writes it on every attempt) and the
-/// [`CredentialProbe`] (which reads it). Only a probe answer is recorded — a
-/// guess made while the broker was unreachable is not evidence.
+/// shared between the connection (which writes it) and the
+/// [`CredentialProbe`] (which reads it). Only a broker answer is recorded —
+/// an accepted handshake or a probe's answer; a guess made while the broker
+/// was unreachable is not evidence.
 #[derive(Default)]
 struct Live {
     decision: Mutex<Option<Choice>>,
@@ -775,6 +794,50 @@ fn select(
         ProbeOutcome::Unreachable => {
             Err("NATS credential probe inconclusive; deferring this attempt")
         }
+    }
+}
+
+/// The shape the next attempt presents. Only a refusal of the real handshake
+/// changes it: an unreachable or slow broker says nothing about the
+/// credential, and a refused shape is retried with the other one. Without a
+/// token the user is the only shape, and sustained refusals are left to
+/// [`Live::auth_failed`].
+fn next_presentation(current: Choice, refused: bool, have_token: bool) -> Choice {
+    match (current, refused) {
+        (current, false) => current,
+        (Choice::User, true) if have_token => Choice::Token,
+        (Choice::User | Choice::Token, true) => Choice::User,
+    }
+}
+
+/// Whether the broker refused the credential on the last attempt to `server`.
+/// async-nats keeps the attempt's error text and clears it on success.
+fn refused_last_attempt(server: &async_nats::Server) -> bool {
+    let violation = async_nats::ConnectErrorKind::AuthorizationViolation.to_string();
+    server.failed_attempts > 0
+        && server
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with(&violation))
+}
+
+/// Record a shape the broker has just accepted on the real connection.
+fn record_accepted(role: NatsRole, live: &Live, choice: Choice) {
+    let previous = live.get();
+    live.set(choice);
+    live_for(role).set(choice);
+    if previous == Some(choice) {
+        debug!(
+            role = role.as_str(),
+            credential = choice.label(),
+            "NATS credential accepted"
+        );
+    } else {
+        info!(
+            role = role.as_str(),
+            credential = choice.label(),
+            "NATS credential accepted"
+        );
     }
 }
 
@@ -1263,7 +1326,7 @@ where
     .await
 }
 
-fn select_probe_server(mut servers: Vec<async_nats::Server>) -> Option<async_nats::Server> {
+fn select_server(mut servers: Vec<async_nats::Server>) -> Option<async_nats::Server> {
     let minimum = servers.iter().map(|s| s.failed_attempts).min()?;
     servers.retain(|s| s.failed_attempts == minimum);
     let mut bytes = [0; 8];
@@ -1308,6 +1371,11 @@ where
     // Only a provisioned user changes how the credential is presented; every
     // other host takes the token path untouched.
     let have_user = creds.user.is_some();
+    // The shape the next attempt presents. Read back on `Connected`, which is
+    // the evidence that the broker accepts it.
+    let presented = Arc::new(Mutex::new(Choice::User));
+    let accepted =
+        (have_user && timing.presentation == Presentation::LastAccepted).then(|| presented.clone());
     let mut opts = match auth_plan(creds) {
         AuthPlan::Static(token) => {
             let opts = async_nats::ConnectOptions::new();
@@ -1317,7 +1385,7 @@ where
             }
         }
         AuthPlan::Select { token, user } => {
-            if timing.direct_user {
+            if timing.presentation == Presentation::DirectUser {
                 async_nats::ConnectOptions::new()
                     .user_and_password(user.name.clone(), user.password.clone())
             } else {
@@ -1325,34 +1393,40 @@ where
                 let prepared = Arc::new(Mutex::new(None));
                 let deferred = Arc::new(AtomicUsize::new(0));
                 let auth_prepared = prepared.clone();
+                let auth_presented = presented.clone();
                 let probe_user = user.clone();
                 let probe_live = live.clone();
                 let have_token = token.is_some();
                 let opts = async_nats::ConnectOptions::with_auth_callback(move |_nonce| {
-                    let (url, token, user, live, prepared) = (
+                    let (url, token, user, live, prepared, presented) = (
                         url.clone(),
                         token.clone(),
                         user.clone(),
                         live.clone(),
                         auth_prepared.clone(),
+                        auth_presented.clone(),
                     );
                     async move {
-                        let choice = if timing.probe_before_connect {
-                            prepared
+                        let choice = match timing.presentation {
+                            Presentation::LastAccepted => {
+                                Ok(*presented.lock().unwrap_or_else(|e| e.into_inner()))
+                            }
+                            Presentation::ProbeBeforeConnect => prepared
                                 .lock()
                                 .unwrap()
                                 .take()
-                                .unwrap_or(Err("no fresh NATS credential probe"))
-                        } else {
-                            choose(role, token.is_some(), &live, || {
-                                probe_user_with_timeout(
-                                    &url,
-                                    &user,
-                                    timing.probe_timeout,
-                                    timing.cancel_probe,
-                                )
-                            })
-                            .await
+                                .unwrap_or(Err("no fresh NATS credential probe")),
+                            Presentation::ProbeInCallback | Presentation::DirectUser => {
+                                choose(role, token.is_some(), &live, || {
+                                    probe_user_with_timeout(
+                                        &url,
+                                        &user,
+                                        timing.probe_timeout,
+                                        timing.cancel_probe,
+                                    )
+                                })
+                                .await
+                            }
                         }
                         .map_err(async_nats::AuthError::new)?;
                         let mut auth = async_nats::Auth::new();
@@ -1366,55 +1440,77 @@ where
                         Ok(auth)
                     }
                 });
-                if timing.probe_before_connect {
-                    opts.reconnect_to_server_callback(move |servers, _info| {
-                        let (user, live, prepared, deferred) = (
-                            probe_user.clone(),
-                            probe_live.clone(),
-                            prepared.clone(),
-                            deferred.clone(),
-                        );
-                        async move {
-                            *prepared.lock().unwrap() = None;
-                            let server = select_probe_server(servers)?;
-                            let timeout =
-                                timing
-                                    .adaptive_probe_max
-                                    .map_or(timing.probe_timeout, |max| {
-                                        growing_probe_timeout(
-                                            timing.probe_timeout,
-                                            max,
-                                            deferred.load(Ordering::Relaxed),
-                                        )
-                                    });
-                            let outcome = probe_user_at(
-                                server.addr.clone(),
-                                &user,
-                                timeout,
-                                timing.cancel_probe,
-                            )
-                            .await;
-                            if outcome == ProbeOutcome::Unreachable {
-                                let _ = deferred.fetch_update(
-                                    Ordering::Relaxed,
-                                    Ordering::Relaxed,
-                                    |n| Some(n.saturating_add(1)),
-                                );
-                            } else {
-                                deferred.store(0, Ordering::Relaxed);
+                match timing.presentation {
+                    Presentation::LastAccepted => {
+                        let last_server = Arc::new(Mutex::new(None));
+                        opts.reconnect_to_server_callback(move |servers, _info| {
+                            let (presented, last_server) = (presented.clone(), last_server.clone());
+                            async move {
+                                let mut last =
+                                    last_server.lock().unwrap_or_else(|e| e.into_inner());
+                                let refused = servers.iter().any(|s| {
+                                    Some(&s.addr) == last.as_ref() && refused_last_attempt(s)
+                                });
+                                let server = select_server(servers)?;
+                                let mut shape = presented.lock().unwrap_or_else(|e| e.into_inner());
+                                *shape = next_presentation(*shape, refused, have_token);
+                                *last = Some(server.addr.clone());
+                                Some(async_nats::ReconnectToServer {
+                                    addr: server.addr,
+                                    delay: None,
+                                })
                             }
-                            let result =
-                                choose(role, have_token, &live, || std::future::ready(outcome))
-                                    .await;
-                            *prepared.lock().unwrap() = Some(result);
-                            Some(async_nats::ReconnectToServer {
-                                addr: server.addr,
-                                delay: None,
-                            })
-                        }
-                    })
-                } else {
-                    opts
+                        })
+                    }
+                    Presentation::ProbeBeforeConnect => {
+                        opts.reconnect_to_server_callback(move |servers, _info| {
+                            let (user, live, prepared, deferred) = (
+                                probe_user.clone(),
+                                probe_live.clone(),
+                                prepared.clone(),
+                                deferred.clone(),
+                            );
+                            async move {
+                                *prepared.lock().unwrap() = None;
+                                let server = select_server(servers)?;
+                                let timeout =
+                                    timing
+                                        .adaptive_probe_max
+                                        .map_or(timing.probe_timeout, |max| {
+                                            growing_probe_timeout(
+                                                timing.probe_timeout,
+                                                max,
+                                                deferred.load(Ordering::Relaxed),
+                                            )
+                                        });
+                                let outcome = probe_user_at(
+                                    server.addr.clone(),
+                                    &user,
+                                    timeout,
+                                    timing.cancel_probe,
+                                )
+                                .await;
+                                if outcome == ProbeOutcome::Unreachable {
+                                    let _ = deferred.fetch_update(
+                                        Ordering::Relaxed,
+                                        Ordering::Relaxed,
+                                        |n| Some(n.saturating_add(1)),
+                                    );
+                                } else {
+                                    deferred.store(0, Ordering::Relaxed);
+                                }
+                                let result =
+                                    choose(role, have_token, &live, || std::future::ready(outcome))
+                                        .await;
+                                *prepared.lock().unwrap() = Some(result);
+                                Some(async_nats::ReconnectToServer {
+                                    addr: server.addr,
+                                    delay: None,
+                                })
+                            }
+                        })
+                    }
+                    Presentation::ProbeInCallback | Presentation::DirectUser => opts,
                 }
             }
         }
@@ -1466,6 +1562,10 @@ where
     // credential is noticed, since async-nats only retries it.
     let opts = opts.event_callback(move |ev| {
         tracker.observe(&ev);
+        if let (Some(presented), async_nats::Event::Connected) = (&accepted, &ev) {
+            let choice = *presented.lock().unwrap_or_else(|e| e.into_inner());
+            record_accepted(role, &tracker, choice);
+        }
         let forwarded = cb.as_ref().map(|cb| cb(ev));
         async move {
             if let Some(forwarded) = forwarded {
@@ -1623,19 +1723,51 @@ mod tests {
     #[test]
     fn deferred_probe_budgets_grow_and_saturate() {
         let actual: Vec<_> = (0..7)
-            .map(|n| {
-                growing_probe_timeout(
-                    USER_RECONNECT.initial_probe,
-                    USER_RECONNECT.maximum_probe,
-                    n,
-                )
-            })
+            .map(|n| growing_probe_timeout(PROBE_TIMEOUT, secs(30), n))
             .collect();
         assert_eq!(actual, [3, 6, 12, 24, 30, 30, 30].map(secs));
         assert_eq!(
-            growing_probe_timeout(PROBE_TIMEOUT, USER_RECONNECT.maximum_probe, usize::MAX),
+            growing_probe_timeout(PROBE_TIMEOUT, secs(30), usize::MAX),
             secs(30)
         );
+    }
+
+    #[test]
+    fn only_a_refusal_changes_the_presented_shape() {
+        use Choice::{Token, User};
+        for current in [User, Token] {
+            for have_token in [true, false] {
+                assert_eq!(next_presentation(current, false, have_token), current);
+            }
+        }
+        assert_eq!(next_presentation(User, true, true), Token);
+        assert_eq!(next_presentation(Token, true, true), User);
+        assert_eq!(next_presentation(User, true, false), User);
+        assert_eq!(next_presentation(Token, true, false), User);
+    }
+
+    #[test]
+    fn a_refusal_is_read_from_the_last_attempt_only() {
+        let server = |failed_attempts, last_error: Option<&str>| async_nats::Server {
+            addr: "nats://127.0.0.1:4222".parse().unwrap(),
+            failed_attempts,
+            did_connect: true,
+            is_discovered: false,
+            last_error: last_error.map(str::to_string),
+        };
+        let violation = async_nats::ConnectError::with_source(
+            async_nats::ConnectErrorKind::AuthorizationViolation,
+            std::io::Error::other("Authorization Violation"),
+        )
+        .to_string();
+        assert!(refused_last_attempt(&server(1, Some(&violation))));
+        assert!(!refused_last_attempt(&server(0, None)));
+        assert!(!refused_last_attempt(&server(2, Some("timed out"))));
+        assert!(!refused_last_attempt(&server(1, Some("IO error: reset"))));
+        assert!(!refused_last_attempt(&server(
+            1,
+            Some("failed signing nonce")
+        )));
     }
 
     #[tokio::test]
@@ -1721,8 +1853,8 @@ mod tests {
         assert!(EXIT_BOUND < secs(300));
         assert_eq!(PING_INTERVAL, secs(60));
         assert_eq!(STALL_BOUND, secs(180));
-        assert_eq!(RESUME_BOUND, secs(134));
-        assert_eq!(EXIT_BOUND, secs(298));
+        assert_eq!(RESUME_BOUND, secs(31));
+        assert_eq!(EXIT_BOUND, secs(195));
     }
 
     #[test]
