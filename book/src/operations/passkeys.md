@@ -171,7 +171,8 @@ rechecks disabled and forced-password-change restrictions when storing the key.
 An admin password reset (reset link or `must_change_pw`) does **not** remove
 passkeys — if the reset follows a suspected compromise, clear the passkeys too.
 Deleting an account deletes its passkeys with it, so a later account created
-under the same username inherits nothing.
+under the same username inherits neither credentials nor pending enrollments.
+Each account incarnation receives a distinct enrollment generation.
 
 > **Known limitation / accepted risk.** There is deliberately no setting that
 > forces a TOTP code *after* a passkey. An account whose password is
