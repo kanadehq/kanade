@@ -65,6 +65,9 @@ broker" — which everyone reinvents from scratch.
 
 ## Install
 
+For backend one-liner agent installation diagnostics, see
+[installation logs and operator retrieval](scripts/install/README.md).
+
 You'll need:
 
 - Rust 1.85+ (the workspace pins `edition = "2024"`)

@@ -157,6 +157,7 @@ echo "==> Creating user and directories"
 # itself runs as root (see the unit), but the data/log dirs are owned by
 # kanade for parity with the backend's layout.
 id -u kanade >/dev/null 2>&1 || useradd --system --home /var/lib/kanade --shell /usr/sbin/nologin kanade
+printf 'placement\n' >> "$bundle/install-stage" 2>/dev/null || true
 install -d -o kanade -g kanade /var/log/kanade
 # /etc/kanade is root-owned: the keyring and enforcement files in it are the
 # agent's trust root, and a directory the shared `kanade` account owns would
@@ -277,6 +278,7 @@ echo "==> systemd unit (from bundle)"
 install -m 0644 "$bundle/systemd/kanade-agent.service" /etc/systemd/system/kanade-agent.service
 
 echo "==> Enabling + (re)starting the agent"
+printf 'service_start\n' >> "$bundle/install-stage" 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable kanade-agent.service
 # `restart` (not `enable --now`): on a re-deploy the unit is already

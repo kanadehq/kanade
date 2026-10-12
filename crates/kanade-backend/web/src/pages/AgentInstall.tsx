@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
+import { useAuth } from '@/lib/auth';
 import { apiFetch, apiFetchBlob, formatError } from '@/lib/api';
 import type { BackendSigningKey } from '@/lib/signing';
 import { toast } from 'sonner';
@@ -85,6 +86,20 @@ export function oneLiner(os: InstallerOs, origin: string, token: string): string
 // reach; the endpoint is gated by the `agent-install` feature, not by role.
 export function AgentInstall() {
   const { t } = useTranslation('agent-install');
+  const { hasRole } = useAuth();
+  const [attemptId, setAttemptId] = useState('');
+  const attempts = useQuery({
+    queryKey: ['install-attempts'],
+    queryFn: () => apiFetch<{id: string; issuer: string | null; os: string; status: string}[]>('/api/agents/install-attempts'),
+    enabled: hasRole('operator'),
+    refetchInterval: 5000,
+  });
+  const events = useQuery({
+    queryKey: ['install-events', attemptId],
+    queryFn: () => apiFetch<{seq: number; stage: string; outcome: string; exit_code: number; error_kind?: string | null; received_at: number}[]>(`/api/agents/install-attempts/${attemptId}`),
+    enabled: hasRole('operator') && !!attemptId,
+    refetchInterval: 5000,
+  });
   // Preselect the visitor's own OS — the common case is downloading the
   // installer on (or for) a machine of the same platform. userAgentData is
   // Chromium-only; absent elsewhere, the UA string carries the same hint.
@@ -171,6 +186,20 @@ export function AgentInstall() {
 
   return (
     <div className="space-y-6">
+      {hasRole('operator') && (
+        <Card>
+          <CardHeader><CardTitle>{t('logs.title')}</CardTitle><CardDescription>{t('logs.description')}</CardDescription></CardHeader>
+          <CardContent className="space-y-3">
+            {attempts.error && <ErrorCard title={t('logs.title')} error={attempts.error} />}
+            <Select aria-label={t('logs.title')} value={attemptId} onChange={(e) => setAttemptId(e.target.value)}>
+              <option value="">{t('logs.select')}</option>
+              {attempts.data?.map((a) => <option key={a.id} value={a.id}>{a.id} — {a.issuer ?? '—'} — {a.os} — {t(`logs.status.${a.status}`)}</option>)}
+            </Select>
+            {events.error && <ErrorCard title={t('logs.title')} error={events.error} />}
+            {attemptId && <pre className="overflow-x-auto text-xs">{events.data?.map((e) => `${new Date(e.received_at * 1000).toISOString()} #${e.seq} ${e.stage}: ${e.outcome} (${e.exit_code})${e.error_kind ? ` — ${e.error_kind}` : ''}`).join('\n')}</pre>}
+          </CardContent>
+        </Card>
+      )}
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">{t('title')}</h2>
         <span className="text-xs text-muted">{t('intro')}</span>

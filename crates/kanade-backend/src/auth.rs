@@ -403,7 +403,11 @@ pub async fn verify(
     //    backend version probe (so the SPA can show it pre-login), and the
     //    #770 password setup/reset link + forgot-password flow (the user
     //    has no session yet — the one-time token IS the credential).
-    if path == "/api/auth/login"
+    if (req.method() == Method::POST
+        && path
+            .strip_prefix("/api/install-reports/")
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()))
+        || path == "/api/auth/login"
         || path == "/api/version"
         || path == "/api/auth/forgot-password"
         || path.starts_with("/api/auth/password-setup/")

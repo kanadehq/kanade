@@ -20,6 +20,7 @@ pub mod group_defs;
 pub mod group_sql;
 pub mod health;
 pub mod host_perf;
+pub mod install_attempts;
 pub mod inventory;
 pub mod jetstream_status;
 pub mod jobs;
@@ -461,6 +462,11 @@ pub fn router(state: AppState) -> Router {
 
     // Fleet mutations — operator+ only.
     let operator = Router::new()
+        .route("/api/agents/install-attempts", get(install_attempts::list))
+        .route(
+            "/api/agents/install-attempts/{id}",
+            get(install_attempts::detail),
+        )
         // Manually drop an agent from the registry (GET detail lives on
         // the viewer router; same path, different method, like the
         // /groups routes below). A live agent re-registers on its next
@@ -633,21 +639,25 @@ pub fn router(state: AppState) -> Router {
         .route("/api/query", post(query::execute))
         .route_layer(axum::middleware::from_fn(crate::auth::require_admin));
 
-    base.merge(operator)
-        .merge(admin)
-        .with_state(state)
-        // Per-account PAGE enforcement (horizontal axis), layered over the
-        // whole API. Runs after `auth::verify` (added in `main`, so it has
-        // injected `Claims`) and after routing (so `MatchedPath` is set,
-        // which `feature_for_path` keys off). Unrestricted callers pass
-        // straight through; restricted ones get only their allow-listed
-        // features plus a small infrastructure set — see
-        // `auth::require_features`.
-        .layer(axum::middleware::from_fn(crate::auth::require_features))
-        // Everything else (`/`, `/assets/...`, hash-router paths) is served
-        // from the rust-embed bundle. The fallback runs after the API routes
-        // above, so JSON endpoints take precedence.
-        .fallback(crate::web::serve)
+    base.route(
+        "/api/install-reports/{id}",
+        post(install_attempts::report).layer(axum::extract::DefaultBodyLimit::max(1024)),
+    )
+    .merge(operator)
+    .merge(admin)
+    .with_state(state)
+    // Per-account PAGE enforcement (horizontal axis), layered over the
+    // whole API. Runs after `auth::verify` (added in `main`, so it has
+    // injected `Claims`) and after routing (so `MatchedPath` is set,
+    // which `feature_for_path` keys off). Unrestricted callers pass
+    // straight through; restricted ones get only their allow-listed
+    // features plus a small infrastructure set — see
+    // `auth::require_features`.
+    .layer(axum::middleware::from_fn(crate::auth::require_features))
+    // Everything else (`/`, `/assets/...`, hash-router paths) is served
+    // from the rust-embed bundle. The fallback runs after the API routes
+    // above, so JSON endpoints take precedence.
+    .fallback(crate::web::serve)
 }
 
 /// Map a matched route pattern (`MatchedPath`, e.g. `/api/agents/{pc_id}`)
@@ -788,9 +798,11 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // Its own feature, NOT Rollout: the whole point is a restricted
         // "download user" (viewer + only this feature) that can fetch the
         // installer ZIP without also holding release publish/rollout.
-        "/api/agents/installer" | "/api/agents/installer.ps1" | "/api/agents/installer.sh" => {
-            Feature::AgentInstall
-        }
+        "/api/agents/install-attempts"
+        | "/api/agents/install-attempts/{id}"
+        | "/api/agents/installer"
+        | "/api/agents/installer.ps1"
+        | "/api/agents/installer.sh" => Feature::AgentInstall,
 
         // --- Apps (app packages + script objects) ---
         "/api/app-packages"
