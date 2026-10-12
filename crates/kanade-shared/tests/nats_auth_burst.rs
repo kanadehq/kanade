@@ -401,6 +401,7 @@ async fn client_proxy(upstream: u16, stat: Arc<Stat>) -> (u16, tokio::task::Join
 struct FrameTrace {
     opened_us: u64,
     tcp_us: u64,
+    reached_broker: bool,
     info_us: Option<u64>,
     connect_us: Option<u64>,
     pong_us: Option<u64>,
@@ -488,7 +489,11 @@ async fn proxy_conn(mut client: TcpStream, upstream: u16, stat: Arc<Stat>) {
     let Ok(mut server) = TcpStream::connect(("127.0.0.1", upstream)).await else {
         return;
     };
-    trace.lock().unwrap().tcp_us = opened.elapsed().as_micros() as u64;
+    {
+        let mut trace = trace.lock().unwrap();
+        trace.tcp_us = opened.elapsed().as_micros() as u64;
+        trace.reached_broker = true;
+    }
     stat.conns.fetch_add(1, Ordering::SeqCst);
     let (mut cr, mut cw) = client.split();
     let (mut sr, mut sw) = server.split();
@@ -719,6 +724,9 @@ async fn collect(
             if trace.opened_us < since_us {
                 continue;
             }
+            if !trace.reached_broker {
+                continue;
+            }
             probes += usize::from(trace.probe);
             abandoned += usize::from(
                 trace.connect_us.is_some() && trace.pong_us.is_none() && trace.closed_us.is_some(),
@@ -793,12 +801,19 @@ where
     }
     #[cfg(feature = "nats-auth-measurement")]
     {
-        let mut timing = ConnectTiming::PRODUCTION;
+        let mut timing = ConnectTiming::BASELINE;
         let long = Duration::from_secs(env_or("KANADE_AUTH_BURST_LONG_TIMEOUT_SECS", 60));
         match variant {
+            "baseline" | "baseline-no-proxy" => {}
             "probe" => timing.probe_timeout = long,
             "connect" => timing.connect_timeout = long,
             "both" => {
+                timing.probe_timeout = long;
+                timing.connect_timeout = long;
+            }
+            "before" => timing.probe_before_connect = true,
+            "before-both" => {
+                timing.probe_before_connect = true;
                 timing.probe_timeout = long;
                 timing.connect_timeout = long;
             }
@@ -837,7 +852,10 @@ async fn run_config(
     let stats: Vec<Arc<Stat>> = (0..n).map(|_| Arc::new(Stat::new(base))).collect();
     let mut proxies = Vec::new();
     for s in &stats {
-        if matches!(variant, "no-proxy" | "direct-no-proxy") {
+        if matches!(
+            variant,
+            "no-proxy" | "direct-no-proxy" | "baseline-no-proxy"
+        ) {
             proxies.push((broker.port, tokio::spawn(async {})));
         } else {
             proxies.push(client_proxy(broker.port, s.clone()).await);

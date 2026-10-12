@@ -331,8 +331,8 @@ injected-fault tests and the repeated conformance results must both pass.
 The client recovery targets, counted from when the broker becomes reachable
 and accepts the newly provisioned credential, are:
 
-* resume communication within **30 s** (`RESUME_BOUND`); or
-* exit non-zero within **195 s** (`EXIT_BOUND`) so supervision can restart it.
+* resume communication within **134 s** (`RESUME_BOUND`); or
+* exit non-zero within **298 s** (`EXIT_BOUND`) so supervision can restart it.
 
 These recovery bounds assume the broker can authenticate the fleet's
 reconnects within the clients' own timeouts. A high bcrypt cost can break
@@ -340,10 +340,16 @@ that assumption; see [Choosing the bcrypt cost](#choosing-the-bcrypt-cost).
 
 These timers are defined in `crates/kanade-shared/src/nats_client.rs` and all
 derive from the protocol PING interval, set explicitly to 60 s (async-nats'
-default). A reconnect attempt allows the 4 s backoff, 3 s probe plus 1 s
-guard, and 5 s handshake; 30 s allows two attempts plus slack. An
+default), and from one table of user-reconnect budgets (`USER_RECONNECT`). A
+reconnect attempt allows the randomised backoff (at most 4 s), a credential
+probe whose budget doubles with each consecutive inconclusive attempt from 3 s
+up to 30 s (plus a 1 s guard), and a 30 s handshake: 65 s at most. The resume
+bound is two attempts plus 4 s of slack, 134 s. Both numbers are compile-time
+derived, so changing a budget moves them. The probe answers once per attempt
+and the real connection reuses that answer instead of probing again, so a
+healthy user connect costs the broker one bcrypt verification, not two. An
 inconclusive probe skips the attempt instead of guessing from the previous
-broker mode.
+broker mode; the abandoned probe is aborted, so it stops costing the broker.
 
 The watchdog observes each connection's own receive progress. Idle clients
 send a protocol PING every 60 s and the broker's PONG is the progress, so
@@ -356,7 +362,7 @@ receive progress does it open a fresh credential witness. If the witness
 connects or is explicitly refused while the original connection still has no
 progress, the process logs the failure and exits. The exit budget adds the
 5 s check interval, 5 s flush timeout and 5 s witness timeout to the 180 s
-stall threshold: 195 s, inside the 5-minute target. Supervision starts
+stall threshold: 195 s on a stall with no preceding outage. Supervision starts
 immediately after client creation, before subscriptions or resource bootstrap
 can block; fatal failure bypasses application shutdown so it cannot extend
 this deadline.
@@ -366,10 +372,13 @@ reconnect backoff try again. A witness that cannot reach the broker never
 causes an exit and is repeated at most every 30 s; the first witness that
 reaches it again gives the client a further 30 s to resume, and any received
 progress clears the outage state, so a later genuine stall is judged against
-the normal 180 s threshold. The expected wait for a client that is merely
-reconnecting is therefore its reconnect backoff (up to 4 s) plus the handshake,
-well inside the 30 s resume bound; a silently stranded client costs up to
-195 s before its restart.
+the normal 180 s threshold. A broker that returns just after an outage
+witness costs one witness cadence, then the recovery grace (the resume bound)
+and a second check, which sets `EXIT_BOUND` to 298 s, still under 5 minutes.
+The expected wait for a client that is merely reconnecting is its backoff plus
+one probe and handshake, a few seconds in the measurements below and bounded
+by the 134 s resume bound; a silently stranded client costs up to 195 s
+(298 s after an outage) before its restart.
 
 A broker that is unavailable, or whose mode cannot be determined by the
 probe, is waited for indefinitely. The deadlines assume the client can reach
@@ -382,8 +391,8 @@ reload coverage is provided by conformance on Linux and macOS only.
 Service-manager delay is additional: Windows recovery actions wait 5 s, then
 15 s, then up to 60 s; systemd uses `RestartSec=5`; launchd uses
 `ThrottleInterval=10`. Thus the slowest configured restart after a watchdog
-exit is 255 s from broker availability on Windows, 200 s on systemd, and 205 s
-on launchd, before application startup and the next heartbeat. Start-rate
+exit is 358 s from broker availability on Windows, 303 s on systemd, and 308 s
+on launchd (worst case after an outage; 255 s, 200 s and 205 s otherwise), before application startup and the next heartbeat. Start-rate
 limits or disabled recovery can prevent a restart; check them before the
 switch. The CLI is not a service: its caller must rerun it after non-zero exit.
 
