@@ -1877,7 +1877,7 @@ Client が自身の UID で directory 0700 / file 0600 を作る。log は日次
 
 **代替案と却下理由**: macOS Login Items / SMAppService は OS の統合 UI に利点があるが、初期案では machine-wide package と Agent の session 起動を同じ plist で管理する。Linux の XDG entry から Client を直接常駐させる案は単純だが、停止・更新・GUI 環境の寿命を unit に揃えるため採らない。systemd user manager の存在、lingering、SSH login、`DISPLAY=:0` の推測は GUI 在席の証拠にならない。systemd / logind の無い desktop は初期対応外 (手動起動と履歴閲覧は可能)。
 
-**受入条件**: login ではウィンドウが割り込まず、Quit 後に再起動 loop が無い。GUI logout / SSH-only / lingering では Client を起動しない。自動起動を無効化してもアプリ一覧から起動できる。
+**受入条件**: 既存 / 新規の全 GUI user が login 時に `--tray` で非表示起動し、opt-out が更新後も保持されることを確認する。Quit 後に通常の再起動 loop が無く、緊急 fallback では再起動され得ることがユーザー向けに説明されている。GUI logout / SSH-only / lingering では Client を起動しない。自動起動を無効化してもアプリ一覧から起動できる。
 
 #### 2.11.7.5 緊急通知を正しいユーザーへ配送する
 
@@ -1944,7 +1944,7 @@ Tauri 2 の Linux 要件は **WebKit2GTK API / ABI 4.1** ([Tauri prerequisites](
 
 **代替案と却下理由**: WebView を同梱する案は security patch の責任と容量を増やす。AppImage / musl で全 distro を一つにする案は GTK / glibc / WebKit の ABI 問題を解決しない。対応 OS を Tauri の下限へ無条件に広げる案は製品として検証できない。現在の release matrix は Linux musl 2 arch / Windows / macOS aarch64 のバイナリ archive であり、Unix GUI package を提供しているとはしない。本変更では CI / Cargo / Tauri 設定を編集しない。
 
-**受入条件**: 最低 OS / arch の clean image に package dependency だけで導入・起動可能。WebKit 不足は installer 段階で検出し、headless Agent install は引き続き成功。実際の artifact が shim でないことと SPA embed を検証する。
+**受入条件**: 最低 OS / arch の clean image に package dependency と、macOS では文書化したアプリ単位の承認手順を前提に導入・起動可能。WebKit 不足は installer 段階で検出し、headless Agent install は引き続き成功。実際の artifact が shim でないことと SPA embed を検証する。
 
 #### 2.11.7.9 Kanade ジョブによる Client 導入・更新・復旧
 
@@ -1961,7 +1961,7 @@ OS 別の installer 呼び出しは以下で確定。
 | macOS | `installer -pkg <検証済み .pkg> -target /` | 実装対象 |
 | Linux | `apt` / `dnf` の local package transaction (distro に応じて選択) | **Ubuntu 24.04 / `apt` のみ初期の実装・サポート対象**。`dnf` 経路は選択の枠組みだけを設計に残し、Fedora 等は §2.11.7.8 の通り延期 |
 
-OS package manager を迂回した生ファイル上書きや rollback はしない。
+OS package manager を迂回した生ファイル上書きや rollback はしない。app-packages の名前と version は空でなく slash を含められない。同名・同版の再 upload は可能な既存契約であり、immutable artifact を仮定しない。取得 bytes は毎回 operator 指定 SHA-256 で検証する。
 
 **ジョブの契約 (既存 Windows ジョブの流儀に揃える。ただし以下の具体形は proposal)**:
 
@@ -1970,7 +1970,7 @@ OS package manager を迂回した生ファイル上書きや rollback はしな
 3. **外部管理の非奪取**: 外部の配布系 (別の apt repository / 端末管理製品 / 手動導入) が管理していると判定または判定不能な既存 package は、**黙って引き継がず、変更せずに拒否して結果を報告する**。管理移管は operator の明示操作によるものとし、ジョブが暗黙に行わない。
 4. **制御された停止**: 管理対象の固定 install path / bundle id と OS の process identity (実行ファイル path と UID) で照合した Client instance だけを対象にする。名前一致の `pkill` は使わない。新規 launch を一時抑制し、終了要求、猶予後に残る対象のみ停止。対象を確認できなければ install せず、延期として報告する。
 5. **導入**: 上表の installer を呼ぶ。package manager の lock 競合は上限付きで待ち、超過は延期として報告する。user data (§2.11.7.3) には触れない。
-6. **検証と復帰**: 導入後に OS database の版、実行ファイルの形式 (shim ではないこと) を確認する。再起動は **更新前に稼働していた現在も適格な GUI session** (§2.11.7.5 の保守的判定) の Client に限り、UID / session を再確認して `--tray` で戻す。logout 済み、SSH、headless、更新前に Quit 済みの Client は起動せず、前回の visibility や通知 click も復元しない。更新中に届いた通知は履歴から回復する。
+6. **検証と復帰**: 導入後に receipt / package database と実ファイル (bundle の `Info.plist` 等) から版を読み戻し、要求版だけを成功版として報告しない。実行ファイルの形式 (shim ではないこと) も確認する。再起動は **更新前に稼働していた現在も適格な GUI session** (§2.11.7.5 の保守的判定) の Client に限り、UID / session を再確認して `--tray` で戻す。logout 済み、SSH、headless、更新前に Quit 済みの Client は起動せず、前回の visibility や通知 click も復元しない。更新中に届いた通知は履歴から回復する。復帰対象の適格な GUI session がある場合は実際の起動、KLP 再接続、実稼働版を確認し、GUI 不在では GUI 検証未実施と job result に明記する。
 7. **有界実行**: ジョブ全体は manifest の `timeout:` で上限を持つ。download / lock 待ち / 停止猶予 / 導入 / 検証への配分は未解決 (下記)。timeout で中断し得るため、手順は再実行しても安全であることを要件とする。
 8. **報告**: 既存のジョブ結果 (exit code、stderr の進捗、stdout の単一 inventory JSON) で報告する。stdout は inventory projector が parse する JSON 一行のみとし、進捗は stderr に出す。inventory は少なくとも `version` と配置先を返す。新しい KLP メッセージやバックエンド側の更新状態テーブルは追加しない。
 9. **失敗時の復旧**: 失敗は原因 (検証失敗 / 延期 / install 失敗 / 検証失敗) とともに job result で報告する。復旧は **operator が既存ジョブを旧版の version / SHA-256 で再実行する** ことを候補とする。macOS の `.pkg` 再 install と apt の明示 downgrade は非原子的な処理であり、途中中断や電源断で中間状態が残り得る。自動 rollback は保証しない。復旧失敗時は要修復を報告し、同一 target を自動で retry し続けない。
@@ -1987,7 +1987,7 @@ OS package manager を迂回した生ファイル上書きや rollback はしな
 
 - 管理元の識別方法 (Kanade ジョブが導入した印の持たせ方、外部 apt repository / 端末管理製品の判別)。
 - 外部管理拒否の結果区分 (失敗 / スキップ / 延期のいずれとして job result に表すか)。
-- package の命名と、OS / arch / format の区別 (現行 endpoint は name + version のみ。名前に埋め込むか別の取り決めか、ならびに同一 version の再 upload の扱い)。
+- package の命名と、OS / arch / format の区別 (現行 endpoint は name + version のみ。名前に埋め込むか別の取り決めか、ならびに同名・同版の再 upload が可能な契約下での運用)。
 - pkg 自体の署名の有無と、ad-hoc 署名下での bundle 完全性の検証手段 (`codesign --verify` 等) の範囲。
 - ad-hoc 署名の bundle での通知許可と identity (designated requirement) が更新をまたいで保たれるか、保たれない場合の運用。
 - macOS で必要なアプリ単位の承認の具体的な操作と、管理 Mac への事前承認の可否。
