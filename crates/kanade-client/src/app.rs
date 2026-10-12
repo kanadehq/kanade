@@ -179,8 +179,8 @@ async fn get_handshake(state: State<'_, AppState>) -> Result<HandshakeResult, St
 
 /// Permanent admission failure, including one emitted before the WebView loaded.
 #[tauri::command]
-async fn get_connection_rejection(state: State<'_, AppState>) -> Option<String> {
-    state.rejection.lock().await.clone()
+async fn get_connection_rejection(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.rejection.lock().await.clone())
 }
 
 #[tauri::command]
