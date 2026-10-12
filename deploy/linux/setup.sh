@@ -34,8 +34,10 @@
 # silently reverting it; setting the variable again changes it, and
 # KANADE_NATS_AUTH_MODE=token is the revert. `users` installs the token
 # config with its `authorization` block replaced by an include of
-# /etc/kanade/nats-server.users.conf (the shipped template). The three values
-# are bcrypt hashes (scripts/ops/nats-password-hash.sh mints one), never
+# /etc/kanade/nats-server.users.conf (the shipped template).
+# Use the default cost 8 with a long random password (32 random alphanumeric
+# characters recommended); see book/src/operations/nats-user-switch.md.
+# The three values are bcrypt hashes (scripts/ops/nats-password-hash.sh mints one), never
 # plaintext: they go into nats.env, the broker's own env file, mode 0600,
 # next to the token and nowhere else. Once recorded, a re-run reuses the
 # hashes already in nats.env, so they need not be supplied again. Anything

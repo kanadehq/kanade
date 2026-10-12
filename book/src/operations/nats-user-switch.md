@@ -27,6 +27,60 @@ Both are done with `scripts/ops/nats-switch-check.ps1`, which talks only to
 the backend HTTP API with an API token. It never connects to the broker and
 never prints a credential.
 
+## Choosing the bcrypt cost
+
+Use **cost 8 with a long random password**, preferably 32 randomly generated
+alphanumeric characters, for each role. The hash helpers default to 8 and
+still accept an explicit cost. A higher cost adds no practical protection
+against guessing a 32-character random password, but consumes broker CPU on
+every authentication and can turn a reconnect storm into minutes of downtime.
+This recommendation depends on randomness: a memorable or reused password is
+not a substitute. Below cost 10, the helpers warn for fewer than 24 characters,
+letters only, digits only, or a case-insensitive run of `password`, `qwerty`,
+`letmein`, `welcome`, `admin`, or `kanade`. This heuristic does not prove
+randomness; no warning is not a strength guarantee. Warnings do not refuse the
+input, and the nats CLI's existing minimum-length refusal remains in force.
+
+These measurements came from `crates/kanade-shared/tests/nats_auth_burst.rs`
+against a **real nats-server 2.14.3**, using the role-level users configuration
+and the real `kanade_shared::nats_client` connect path. The host had an
+**AMD EPYC 7551 shared vCPU allocation, 2 vCPU and approximately 1 GB RAM**.
+The burst had **N = 50 clients connecting simultaneously**, at broker startup
+and again after broker restart. Absolute times belong to that machine;
+**re-measure on the real production broker host** with the fleet's load.
+
+| bcrypt cost | One verification, one thread | 50-client startup / restart burst |
+|---|---|---|
+| 8 | ~25 ms | All 50 authenticated; median 4–5 s, maximum 7.5 s, with authorization timeout 10 s and 30 s |
+| 9 | ~95 ms | All 50 authenticated, but median 66–88 s with authorization timeout 30 s; with the shipped 2 s, median 60–78 s and approximately 500–600 `Authentication Timeout` answers |
+| 10 | ~190 ms | Practically none authenticated within 90–120 s (0–2 of 50), with the shipped 2 s and with 10 s and 30 s |
+| 11 | ~375 ms | None or almost none authenticated (0–1 of 50), with the shipped 2 s |
+| 12 | ~720 ms | Burst not measured |
+
+A user-credential connect makes the broker perform **two bcrypt
+verifications**: the client's credential probe and the real connection.
+Retries repeat that work. `authorization { timeout }` is accepted in both
+token and users configurations; the default 2 s was verified to be enforced.
+Raising it did not rescue cost 9/10, so the limit is not only the broker's
+authorization timeout. Client-side probe/connect timeouts are a suspected
+amplifier, still requiring separate investigation. The cost 8 results above
+are not a guarantee for the shipped 2 s timeout or for 200 clients.
+
+A collapse looks like `Authentication Timeout` in both client and broker logs,
+clients repeatedly retrying, and heartbeats absent for minutes after a broker
+restart. Do not interpret that as a successful switch merely because the
+broker process is running.
+
+To measure on the real broker host, make `nats-server` available in PATH and
+run the same ignored test in release mode:
+
+```sh
+KANADE_AUTH_BURST_N=200 KANADE_AUTH_BURST_COSTS=8,9,10 cargo test -p kanade-shared --release --test nats_auth_burst -- --ignored --nocapture
+```
+
+Compare startup and restart results with the fleet's reconnect timeouts and
+recovery deadlines before switching production.
+
 ## Prerequisites
 
 1. **Client versions.** User credentials arrived in **0.61.0** (the release
@@ -279,6 +333,10 @@ and accepts the newly provisioned credential, are:
 
 * resume communication within **30 s** (`RESUME_BOUND`); or
 * exit non-zero within **195 s** (`EXIT_BOUND`) so supervision can restart it.
+
+These recovery bounds assume the broker can authenticate the fleet's
+reconnects within the clients' own timeouts. A high bcrypt cost can break
+that assumption; see [Choosing the bcrypt cost](#choosing-the-bcrypt-cost).
 
 These timers are defined in `crates/kanade-shared/src/nats_client.rs` and all
 derive from the protocol PING interval, set explicitly to 60 s (async-nats'

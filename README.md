@@ -533,6 +533,10 @@ without echoing the password or leaving it in history or a file:
 scripts/ops/nats-password-hash.sh        # or nats-password-hash.ps1; wraps `nats server passwd`
 ```
 
+Use the default bcrypt cost **8** with a long random password (32 random
+alphanumeric characters recommended). See [Choosing the bcrypt cost](book/src/operations/nats-user-switch.md#choosing-the-bcrypt-cost)
+for measurements and how to re-measure on the broker host.
+
 **The two switches**
 
 | | Windows (`deploy-nats.ps1`) | Linux (`setup.sh`) |

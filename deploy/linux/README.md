@@ -178,7 +178,9 @@ sudo systemctl restart nats-server     # setup.sh does not restart a running bro
 
 - The values are bcrypt hashes (`scripts/ops/nats-password-hash.sh` mints one
   without echoing the password); plaintext stays on the roles' own hosts.
-  Anything else is refused before a file changes.
+  Default cost 8 requires a long random password (32 random alphanumeric
+  characters recommended); see [Choosing the bcrypt cost](../../book/src/operations/nats-user-switch.md#choosing-the-bcrypt-cost).
+  Non-bcrypt values are refused before a file changes.
 - `users` installs the shipped broker config with its `authorization` block
   replaced by an include of `/etc/kanade/nats-server.users.conf`, and puts the
   hashes in `nats.env` (0600) beside the token — never plaintext or another

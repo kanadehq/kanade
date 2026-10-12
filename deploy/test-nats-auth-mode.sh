@@ -134,6 +134,35 @@ chmod +x "$tmp/stub/nats"
 out="$(printf 'a-long-password-1\na-long-password-1\n' | PATH="$tmp/stub:$PATH" bash "$helper" 2>"$tmp/err")"; rc=$?
 [ "$rc" -eq 0 ] && [ "$out" = "$ha" ]; check "helper prints only the hash" $?
 ! grep -qF 'a-long-password-1' "$tmp/stub/argv" "$tmp/err"; check "helper: the password is not on the command line or in the output" $?
+# Low cost warns about obvious weakness, while keeping stdout hash-only.
+check_hash() { # password, optional cost, expected warning, forwarded cost
+	local password="$1" cost_arg="$2" warn="$3" forwarded="$4" rc out
+	if [ -n "$cost_arg" ]; then
+		out="$(printf '%s\n%s\n' "$password" "$password" | PATH="$tmp/stub:$PATH" bash "$helper" "$cost_arg" 2>"$tmp/err")"; rc=$?
+	else
+		out="$(printf '%s\n%s\n' "$password" "$password" | PATH="$tmp/stub:$PATH" bash "$helper" 2>"$tmp/err")"; rc=$?
+	fi
+	[ "$rc" -eq 0 ] && [ "$out" = "$ha" ]; check "hash helper succeeds with hash-only stdout ($forwarded)" $?
+	[ "$(cat "$tmp/stub/argv")" = "server passwd --cost $forwarded" ]; check "hash helper forwards cost $forwarded" $?
+	if [ "$warn" -eq 1 ]; then
+		grep -q 'low bcrypt cost is only appropriate for long random passwords' "$tmp/err" && grep -q 'openssl rand -base64 36' "$tmp/err"
+	else
+		! grep -q 'warning:' "$tmp/err"
+	fi
+	check "hash helper expected warning=$warn ($forwarded)" $?
+	! grep -qF "$password" "$tmp/err" "$tmp/stub/argv"; check 'hash helper never exposes plaintext' $?
+}
+check_hash 'short-pass-1' '' 1 8
+check_hash 'abcdefghijklmnopqrstuvwxyzABCDEF' 8 1 8
+check_hash '12345678901234567890123456789012' 9 1 9
+for word in PASSWORD QwErTy letmein welcome admin kanade; do
+	check_hash "7xZ2mR9vK4sT8pL3nB6cD1fH5$word" 8 1 8
+done
+check_hash '7xZ2mR9vK4sT8pL3nB6cD1fH5qJ0aW9u' '' 0 8
+check_hash '7xZ2mR9vK4sT8pL3nB6cD1fH5qJ0aW9u' 9 0 9
+check_hash 'short-pass-1' 10 0 10
+check_hash 'short-pass-1' 11 0 11
+check_hash 'short-pass-1' 08 1 08
 printf 'a-long-password-1\nsomething-else-1\n' | PATH="$tmp/stub:$PATH" bash "$helper" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ]; check "helper refuses a mismatched confirmation" $?
 printf 'a-long-password-1\na-long-password-1\n' | PATH="/usr/bin:/bin" bash "$helper" >/dev/null 2>"$tmp/err"; rc=$?
