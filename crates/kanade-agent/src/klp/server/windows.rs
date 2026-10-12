@@ -24,7 +24,7 @@ use crate::klp::auth::resolve_peer;
 use crate::klp::security::PipeSecurity;
 
 /// SPEC §2.12.1 — Windows Named Pipe endpoint.
-pub const PIPE_NAME: &str = r"\\.\pipe\kanade-agent";
+pub use kanade_shared::ipc::transport::PIPE_NAME;
 
 /// Spawn the KLP listener. Returns immediately with a detached
 /// `JoinHandle`; the loop runs forever inside the spawned task.

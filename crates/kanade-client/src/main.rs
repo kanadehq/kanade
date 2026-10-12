@@ -14,14 +14,13 @@
 //! Sprint 8 ships only the Windows skeleton (Tauri 2.x + KLP
 //! Named Pipe client + handshake + ping). On non-Windows targets
 //! (CI cross-checks, dev curiosity) the binary is a stub that
-//! prints + exits — Tauri + the Pipe transport are both
-//! Windows-bound for now. Linux UDS support lands in a follow-up
-//! PR and will widen the cfg gate.
+//! prints + exits — the GUI remains Windows-only. The KLP library
+//! supports all three OSes.
 
 #[cfg(target_os = "windows")]
 mod app;
 #[cfg(target_os = "windows")]
-mod klp_client;
+use kanade_client::klp_client;
 // Pure logic, compiled everywhere so its tests run in non-Windows CI.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod window_size;
@@ -59,6 +58,6 @@ fn main() {
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
-    eprintln!("kanade-client is Windows-only in this build (Linux UDS variant is a follow-up PR).");
+    eprintln!("kanade-client GUI is Windows-only in this build.");
     std::process::exit(1);
 }

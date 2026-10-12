@@ -1,9 +1,9 @@
-//! Client-side KLP transport — Named Pipe client + framed JSON-RPC.
+//! Client-side KLP transport — Named Pipe / Unix socket + framed JSON-RPC.
 //!
 //! Owned by the Tauri runtime (one [`KlpClient`] per app instance,
 //! shared via `tauri::State`). On startup, [`KlpClient::connect`]
-//! opens the agent's Named Pipe (`\\.\pipe\kanade-agent`), runs the
-//! SPEC §2.12.6 handshake, then **splits the pipe** into a write half
+//! opens the agent transport, runs the
+//! SPEC §2.12.6 handshake, then **splits the stream** into a write half
 //! (guarded by a mutex for serialised sends) and a read half owned by
 //! a permanent reader task.
 //!
@@ -53,12 +53,100 @@ use kanade_shared::ipc::support::{
 use kanade_shared::ipc::system::{PingParams, PingResult};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf, split};
+#[cfg(target_os = "windows")]
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::sync::{Mutex, broadcast, oneshot, watch};
 use tracing::{debug, info, warn};
 
-/// SPEC §2.12.1 — the well-known Named Pipe the agent listens on.
-const PIPE_NAME: &str = r"\\.\pipe\kanade-agent";
+#[cfg(target_os = "windows")]
+type KlpStream = NamedPipeClient;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+type KlpStream = tokio::net::UnixStream;
+
+/// Connect-time authorization failure. Missing retryability fails closed.
+#[derive(Debug)]
+pub struct ConnectionRejected {
+    pub retryable: bool,
+    pub detail: String,
+}
+
+impl std::fmt::Display for ConnectionRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "KLP connection unauthorized: {} (retryable: {})",
+            self.detail, self.retryable
+        )
+    }
+}
+
+impl std::error::Error for ConnectionRejected {}
+
+/// Why opening a KLP connection or completing its handshake failed.
+#[derive(Debug)]
+pub enum ConnectError {
+    Rejected(ConnectionRejected),
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(rejection) => rejection.fmt(f),
+            Self::Failed(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Rejected(rejection) => rejection,
+            Self::Failed(error) => error.as_ref(),
+        })
+    }
+}
+
+impl From<anyhow::Error> for ConnectError {
+    fn from(error: anyhow::Error) -> Self {
+        match error.downcast::<ConnectionRejected>() {
+            Ok(rejection) => Self::Rejected(rejection),
+            Err(error) => Self::Failed(error),
+        }
+    }
+}
+
+impl From<ConnectionRejected> for ConnectError {
+    fn from(rejection: ConnectionRejected) -> Self {
+        Self::Rejected(rejection)
+    }
+}
+
+/// Retry transient connect errors with the SPEC §2.12.10 backoff.
+/// Returns permanent rejection to the supervisor instead of looping forever.
+async fn retry_connect<F, Fut>(
+    mut connect: F,
+    initial: std::time::Duration,
+) -> std::result::Result<KlpClient, ConnectError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<KlpClient, ConnectError>>,
+{
+    let mut delay = initial;
+    loop {
+        match connect().await {
+            Ok(client) => return Ok(client),
+            Err(error) => {
+                if matches!(&error, ConnectError::Rejected(r) if !r.retryable) {
+                    return Err(error);
+                }
+                warn!(%error, ?delay, "KLP connect failed; backing off");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+            }
+        }
+    }
+}
 
 /// SPEC §2.12.2 — 4-byte LE length prefix; 1 MiB cap.
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -120,7 +208,7 @@ pub struct KlpClient {
     /// Write half of the split pipe. Mutex-guarded so concurrent
     /// requests serialise their frame writes (a half-written frame
     /// would desync the agent's reader).
-    write: Arc<Mutex<WriteHalf<NamedPipeClient>>>,
+    write: Arc<Mutex<WriteHalf<KlpStream>>>,
     /// In-flight requests awaiting a correlated response.
     pending: Pending,
     /// Cached handshake result (one-shot per connection).
@@ -139,17 +227,48 @@ impl KlpClient {
     /// and spawn the reader task. Bubbles up the underlying error so
     /// the Tauri `setup` callback can surface a clear "agent not
     /// running" banner if the pipe isn't there yet.
-    pub async fn connect() -> Result<Self> {
-        let mut pipe = ClientOptions::new()
-            .open(PIPE_NAME)
-            .with_context(|| format!("open Named Pipe {PIPE_NAME}"))?;
-        info!(pipe = PIPE_NAME, "KLP client: pipe connected");
+    pub async fn connect() -> std::result::Result<Self, ConnectError> {
+        #[cfg(target_os = "windows")]
+        {
+            use kanade_shared::ipc::transport::PIPE_NAME;
+            let pipe = ClientOptions::new()
+                .open(PIPE_NAME)
+                .with_context(|| format!("open Named Pipe {PIPE_NAME}"))?;
+            info!(pipe = PIPE_NAME, "KLP client: pipe connected");
+            Self::from_stream(pipe).await
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Self::connect_to(kanade_shared::ipc::transport::socket_path()).await
+    }
 
+    /// Connect to an explicit socket endpoint (tests / development).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub async fn connect_to(
+        path: impl AsRef<std::path::Path>,
+    ) -> std::result::Result<Self, ConnectError> {
+        let pipe = KlpStream::connect(path.as_ref())
+            .await
+            .context("open KLP socket")?;
+        Self::from_stream(pipe).await
+    }
+
+    pub async fn connect_with_retry() -> std::result::Result<Self, ConnectError> {
+        retry_connect(Self::connect, std::time::Duration::from_secs(1)).await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub async fn connect_to_with_retry(
+        path: &std::path::Path,
+    ) -> std::result::Result<Self, ConnectError> {
+        retry_connect(|| Self::connect_to(path), std::time::Duration::from_secs(1)).await
+    }
+
+    async fn from_stream(mut pipe: KlpStream) -> std::result::Result<Self, ConnectError> {
         // Handshake inline on the un-split pipe — it's the one
         // strictly-ordered request/response exchange (must complete
         // before any push can arrive), so the reader task only takes
         // over afterwards.
-        let handshake = handshake(&mut pipe).await.context("KLP handshake")?;
+        let handshake = handshake(&mut pipe).await?;
         info!(
             agent_version = %handshake.agent_version,
             user = %handshake.session.user,
@@ -504,7 +623,7 @@ async fn await_response(
     }
 }
 
-async fn handshake(pipe: &mut NamedPipeClient) -> Result<HandshakeResult> {
+async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(pipe: &mut S) -> Result<HandshakeResult> {
     // Same v4-instead-of-v7 note as in `KlpClient::request`.
     let id = uuid::Uuid::new_v4().to_string();
     let req = RpcRequest::new(
@@ -519,8 +638,34 @@ async fn handshake(pipe: &mut NamedPipeClient) -> Result<HandshakeResult> {
     )
     .context("encode handshake request")?;
     let body = serde_json::to_vec(&req).context("serialise handshake request")?;
-    write_frame(pipe, &body).await.context("write handshake")?;
-    let resp_bytes = read_frame(pipe).await.context("read handshake response")?;
+    // Admission rejection can arrive before the agent reads our request.
+    // Read concurrently and prefer a rejection even if the write fails.
+    let exchange = async {
+        let (mut read, mut write) = split(pipe);
+        tokio::join!(write_frame(&mut write, &body), read_frame(&mut read))
+    };
+    let (sent, received) = tokio::time::timeout(REQUEST_TIMEOUT, exchange)
+        .await
+        .context("KLP handshake timed out")?;
+    let resp_bytes = received.context("read handshake response")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&resp_bytes).context("decode envelope")?;
+    if value.get("id").is_some_and(serde_json::Value::is_null)
+        && value["error"]["code"] == -32000
+        && value["error"]["data"]["kind"] == "Unauthorized"
+    {
+        return Err(ConnectionRejected {
+            retryable: value["error"]["data"]["retryable"]
+                .as_bool()
+                .unwrap_or(false),
+            detail: value["error"]["data"]["detail"]
+                .as_str()
+                .unwrap_or("Unauthorized")
+                .to_string(),
+        }
+        .into());
+    }
+    sent.context("write handshake")?;
     let msg: RpcMessage = serde_json::from_slice(&resp_bytes).context("decode envelope")?;
     let RpcMessage::Response(resp) = msg else {
         bail!("expected handshake Response, got {msg:?}");
@@ -578,6 +723,121 @@ mod tests {
     async fn push_frame<W: AsyncWrite + Unpin>(w: &mut W, value: &serde_json::Value) {
         let body = serde_json::to_vec(value).unwrap();
         write_frame(w, &body).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_handshake_is_bounded() {
+        let (mut client, _server) = tokio::io::duplex(4096);
+        let error = handshake(&mut client).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn admission_rejection_is_parsed_on_the_shared_transport_path() {
+        for flag in [Some(true), Some(false), None] {
+            let (mut client, mut server) = tokio::io::duplex(4096);
+            let send = async {
+                let mut value = serde_json::json!({"jsonrpc":"2.0", "id":null, "error":{
+                    "code":-32000, "message":"Unauthorized",
+                    "data":{"kind":"Unauthorized", "detail":"admission denied"}
+                }});
+                if let Some(flag) = flag {
+                    value["error"]["data"]["retryable"] = flag.into();
+                }
+                push_frame(&mut server, &value).await;
+            };
+            let (result, ()) = tokio::join!(handshake(&mut client), send);
+            let error = result.unwrap_err();
+            let rejected = error.downcast_ref::<ConnectionRejected>().unwrap();
+            assert_eq!(rejected.retryable, flag.unwrap_or(false));
+            assert_eq!(rejected.detail, "admission denied");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejection_survives_a_failed_handshake_write() {
+        struct FailedWriter(tokio::io::DuplexStream);
+        impl AsyncRead for FailedWriter {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+            }
+        }
+        impl AsyncWrite for FailedWriter {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let (client, mut server) = tokio::io::duplex(4096);
+        push_frame(
+            &mut server,
+            &serde_json::json!({"jsonrpc":"2.0", "id":null, "error":{
+                "code":-32000, "message":"Unauthorized",
+                "data":{"kind":"Unauthorized", "detail":"denied", "retryable":false}
+            }}),
+        )
+        .await;
+        let error = handshake(&mut FailedWriter(client)).await.unwrap_err();
+        assert!(
+            !error
+                .downcast_ref::<ConnectionRejected>()
+                .unwrap()
+                .retryable
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_backoff_doubles_and_caps_at_thirty_seconds() {
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = attempts.clone();
+        let result = retry_connect(
+            move || {
+                let mut times = recorded.lock().unwrap();
+                times.push(tokio::time::Instant::now());
+                let count = times.len();
+                async move {
+                    if count == 8 {
+                        Err(ConnectionRejected {
+                            retryable: false,
+                            detail: "stop".into(),
+                        }
+                        .into())
+                    } else {
+                        Err(ConnectError::Failed(anyhow::anyhow!(
+                            "temporarily unavailable"
+                        )))
+                    }
+                }
+            },
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(result.is_err());
+        let times = attempts.lock().unwrap();
+        let intervals: Vec<_> = times
+            .windows(2)
+            .map(|w| w[1].duration_since(w[0]).as_secs())
+            .collect();
+        assert_eq!(intervals, [1, 2, 4, 8, 16, 30, 30]);
     }
 
     #[tokio::test]
@@ -718,5 +978,210 @@ mod tests {
             .await
             .expect("delivered reply");
         assert_eq!(got.id.as_deref(), Some("req-ok"));
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod unix_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::net::UnixListener;
+
+    struct SocketDir(std::path::PathBuf);
+    impl SocketDir {
+        fn new() -> Self {
+            // Short even when macOS TMPDIR is long (sun_path is only 104 bytes).
+            let path =
+                std::path::PathBuf::from("/tmp").join(format!("klp-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn socket(&self) -> std::path::PathBuf {
+            self.0.join("s")
+        }
+    }
+    impl Drop for SocketDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn send(stream: &mut KlpStream, value: serde_json::Value) {
+        write_frame(stream, &serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
+    }
+    async fn request(stream: &mut KlpStream) -> serde_json::Value {
+        serde_json::from_slice(&read_frame(stream).await.unwrap()).unwrap()
+    }
+    async fn accept_handshake(listener: &UnixListener) -> KlpStream {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let req = request(&mut stream).await;
+        assert_eq!(req["method"], method::SYSTEM_HANDSHAKE);
+        assert_eq!(req["params"]["client"], CLIENT_NAME);
+        assert_eq!(req["params"]["protocol"], serde_json::json!([1]));
+        send(
+            &mut stream,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":req["id"], "result": {
+                    "protocol":1, "agent_version":"test", "features":[],
+                    "session":{"user":"test", "session_id":1000, "pc_id":"test"}
+                }
+            }),
+        )
+        .await;
+        stream
+    }
+    fn rejection(retryable: Option<bool>) -> serde_json::Value {
+        let mut value = serde_json::json!({"jsonrpc":"2.0", "id":null, "error":{
+            "code":-32000, "message":"Unauthorized",
+            "data":{"kind":"Unauthorized", "detail":"test admission rejected"}
+        }});
+        if let Some(flag) = retryable {
+            value["error"]["data"]["retryable"] = flag.into();
+        }
+        value
+    }
+
+    #[tokio::test]
+    async fn handshake_request_idle_push_and_restart() {
+        let dir = SocketDir::new();
+        let path = dir.socket();
+        let listener = UnixListener::bind(&path).unwrap();
+        let (client, mut server) =
+            tokio::join!(KlpClient::connect_to(&path), accept_handshake(&listener));
+        let client = client.unwrap();
+        let mut pushes = client.subscribe();
+        send(&mut server, serde_json::json!({"jsonrpc":"2.0", "method":"state.changed", "params":{"online":true}})).await;
+        let push = tokio::time::timeout(Duration::from_secs(2), pushes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(push.method, "state.changed");
+        let response = async {
+            let req = request(&mut server).await;
+            assert_eq!(req["method"], "test.echo");
+            // Interleave a push while this request is still awaiting its reply.
+            send(&mut server, serde_json::json!({"jsonrpc":"2.0", "method":"jobs.progress", "params":{"run_id":"in-flight", "status":"running"}})).await;
+            send(
+                &mut server,
+                serde_json::json!({"jsonrpc":"2.0", "id":req["id"], "result":42}),
+            )
+            .await;
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(client.request::<_, u32>("test.echo", &()), response)
+        })
+        .await
+        .expect("interleaved notification must not stall the response");
+        assert_eq!(result.unwrap(), 42);
+        let push = tokio::time::timeout(Duration::from_secs(2), pushes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(push.method, "jobs.progress");
+        assert_eq!(push.params["run_id"], "in-flight");
+        // A regular Unauthorized response does not change connect policy.
+        let response = async {
+            let req = request(&mut server).await;
+            let mut value = rejection(Some(false));
+            value["id"] = req["id"].clone();
+            send(&mut server, value).await;
+        };
+        let (result, ()) = tokio::join!(client.request::<_, u32>("test.denied", &()), response);
+        assert!(result.unwrap_err().to_string().contains("Unauthorized"));
+
+        let lost = client.request::<_, u32>("test.pending", &());
+        let shutdown = async {
+            let req = request(&mut server).await;
+            assert_eq!(req["method"], "test.pending");
+            drop(server);
+        };
+        let (result, ()) = tokio::join!(lost, shutdown);
+        assert!(result.unwrap_err().to_string().contains("closed"));
+        tokio::time::timeout(Duration::from_secs(2), client.wait_closed())
+            .await
+            .unwrap();
+        drop(listener);
+        std::fs::remove_file(&path).unwrap();
+        let restart = async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let listener = UnixListener::bind(&path).unwrap();
+            let mut stream = accept_handshake(&listener).await;
+            // The old pending request must never be replayed.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), read_frame(&mut stream))
+                    .await
+                    .is_err()
+            );
+            stream
+        };
+        let (new_client, _server) = tokio::join!(
+            retry_connect(|| KlpClient::connect_to(&path), Duration::from_millis(10)),
+            restart
+        );
+        assert_eq!(new_client.unwrap().handshake().protocol, 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_and_missing_retryable_stop_after_one_accept() {
+        for flag in [Some(false), None] {
+            let dir = SocketDir::new();
+            let path = dir.socket();
+            let listener = UnixListener::bind(&path).unwrap();
+            let server = async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                // Refuse without reading, exactly as the agent admission path does.
+                send(&mut stream, rejection(flag)).await;
+                drop(stream);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                        .await
+                        .is_err()
+                );
+            };
+            let (result, ()) = tokio::join!(
+                retry_connect(|| KlpClient::connect_to(&path), Duration::from_millis(5)),
+                server
+            );
+            let error = result.err().expect("must stop");
+            assert!(error.to_string().contains("test admission rejected"));
+            let ConnectError::Rejected(rejected) = error else {
+                panic!("expected an authorization rejection");
+            };
+            assert!(!rejected.retryable);
+            assert_eq!(rejected.detail, "test admission rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_socket_is_a_connection_failure() {
+        let dir = SocketDir::new();
+        let error = KlpClient::connect_to(dir.socket()).await.err().unwrap();
+        let ConnectError::Failed(error) = error else {
+            panic!("missing socket must be a connection failure");
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn retryable_rejection_retries_and_handshakes() {
+        let dir = SocketDir::new();
+        let path = dir.socket();
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            send(&mut stream, rejection(Some(true))).await;
+            drop(stream);
+            accept_handshake(&listener).await
+        };
+        let (result, _server) = tokio::join!(
+            retry_connect(|| KlpClient::connect_to(&path), Duration::from_millis(5)),
+            server
+        );
+        assert_eq!(result.unwrap().handshake().protocol, 1);
     }
 }

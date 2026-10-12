@@ -30,27 +30,12 @@ use crate::klp::auth::unix::{
 };
 use crate::klp::framing::write_frame;
 
-/// Environment override for the socket path (tests / development).
-pub const ENV_SOCKET_PATH: &str = "KANADE_KLP_SOCKET_PATH";
-
-/// SPEC §2.12.1 default endpoint.
-#[cfg(target_os = "linux")]
-pub const DEFAULT_SOCKET_PATH: &str = "/run/kanade/agent.sock";
-#[cfg(not(target_os = "linux"))]
-pub const DEFAULT_SOCKET_PATH: &str = "/var/run/kanade/agent.sock";
+pub use kanade_shared::ipc::transport::socket_path;
 
 /// How long a refused peer gets to accept the rejection frame.
 const REJECT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Bound on the "is anything still serving this socket?" probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Socket path from [`ENV_SOCKET_PATH`] if set and non-empty, else the default.
-pub fn socket_path() -> PathBuf {
-    match std::env::var_os(ENV_SOCKET_PATH) {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => PathBuf::from(DEFAULT_SOCKET_PATH),
-    }
-}
 
 /// Everything that varies between production and tests.
 pub struct ListenerConfig {
@@ -444,16 +429,5 @@ mod tests {
         let _other = std::os::unix::net::UnixListener::bind(&path).unwrap();
         drop(server);
         assert!(path.exists(), "someone else's socket must survive");
-    }
-
-    #[test]
-    fn env_override_wins() {
-        // Env mutation is process-global; this is the only test touching it.
-        // SAFETY: no other thread reads this variable concurrently.
-        unsafe { std::env::set_var(ENV_SOCKET_PATH, "/tmp/x/agent.sock") };
-        assert_eq!(socket_path(), PathBuf::from("/tmp/x/agent.sock"));
-        unsafe { std::env::set_var(ENV_SOCKET_PATH, "") };
-        assert_eq!(socket_path(), PathBuf::from(DEFAULT_SOCKET_PATH));
-        unsafe { std::env::remove_var(ENV_SOCKET_PATH) };
     }
 }
