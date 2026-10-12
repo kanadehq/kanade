@@ -155,6 +155,26 @@ const REG_PASSWORD: &str = "NatsPassword";
 /// the reconnect path, so a black-holed broker must not stall every attempt.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Connection budgets used by the burst measurement. Production callers always
+/// use `PRODUCTION`; the measurement entry point requires an explicit feature.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct ConnectTiming {
+    pub probe_timeout: Duration,
+    pub connect_timeout: Duration,
+    pub jitter: bool,
+    pub direct_user: bool,
+}
+
+impl ConnectTiming {
+    pub const PRODUCTION: Self = Self {
+        probe_timeout: PROBE_TIMEOUT,
+        connect_timeout: HEALTH_TIMEOUT,
+        jitter: false,
+        direct_user: false,
+    };
+}
+
 /// Name of the probe connection. Deliberately *not* a `kanade-` name: the
 /// backend attributes `kanade-<role>` connections to hosts, and a transient
 /// probe must not show up there as an unknown role.
@@ -704,14 +724,22 @@ fn select(
 /// Runs on a spawned task because the auth callback's future must be `Sync`
 /// and async-nats' connect future is not; a join handle is.
 async fn probe_user(url: &str, user: &UserCredential) -> ProbeOutcome {
+    probe_user_with_timeout(url, user, PROBE_TIMEOUT).await
+}
+
+async fn probe_user_with_timeout(
+    url: &str,
+    user: &UserCredential,
+    timeout: Duration,
+) -> ProbeOutcome {
     let (url, name, password) = (url.to_string(), user.name.clone(), user.password.clone());
     let probe = tokio::spawn(async move {
         let attempt = async_nats::ConnectOptions::new()
             .name(PROBE_NAME)
-            .connection_timeout(PROBE_TIMEOUT)
+            .connection_timeout(timeout)
             .user_and_password(name, password)
             .connect(url);
-        match tokio::time::timeout(PROBE_TIMEOUT + Duration::from_secs(1), attempt).await {
+        match tokio::time::timeout(timeout + Duration::from_secs(1), attempt).await {
             Ok(Ok(_client)) => ProbeOutcome::Accepted,
             Ok(Err(e)) if e.kind() == async_nats::ConnectErrorKind::AuthorizationViolation => {
                 ProbeOutcome::Rejected
@@ -1106,6 +1134,57 @@ where
     F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
 {
+    connect_inner_with_timing(
+        role,
+        url,
+        identity,
+        cb,
+        creds,
+        live,
+        ConnectTiming::PRODUCTION,
+    )
+    .await
+}
+
+/// Explicit measurement seam; never reads process-global environment variables.
+#[cfg(feature = "nats-auth-measurement")]
+#[doc(hidden)]
+pub async fn connect_with_measurement_timing<F, Fut>(
+    role: NatsRole,
+    url: &str,
+    creds: NatsCredentials,
+    cb: F,
+    timing: ConnectTiming,
+) -> Result<async_nats::Client>
+where
+    F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
+{
+    connect_inner_with_timing(
+        role,
+        url,
+        None,
+        Some(cb),
+        creds,
+        Arc::new(Live::default()),
+        timing,
+    )
+    .await
+}
+
+async fn connect_inner_with_timing<F, Fut>(
+    role: NatsRole,
+    url: &str,
+    identity: Option<&str>,
+    cb: Option<F>,
+    creds: NatsCredentials,
+    live: Arc<Live>,
+    timing: ConnectTiming,
+) -> Result<async_nats::Client>
+where
+    F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
+{
     // #1187: a workspace build unifies rustls features, so any binary built
     // alongside a reqwest user (the CLI, the backend) links BOTH aws-lc-rs and
     // ring. rustls 0.23 then cannot auto-pick a process-level provider, and the
@@ -1125,7 +1204,7 @@ where
     let tracker = live.clone();
     // Only a provisioned user changes how the credential is presented; every
     // other host takes the token path untouched.
-    let opts = match auth_plan(creds) {
+    let mut opts = match auth_plan(creds) {
         AuthPlan::Static(token) => {
             let opts = async_nats::ConnectOptions::new();
             match token {
@@ -1134,27 +1213,52 @@ where
             }
         }
         AuthPlan::Select { token, user } => {
-            let url = url.to_string();
-            async_nats::ConnectOptions::with_auth_callback(move |_nonce| {
-                let (url, token, user, live) =
-                    (url.clone(), token.clone(), user.clone(), live.clone());
-                async move {
-                    let choice = choose(role, token.is_some(), &live, || probe_user(&url, &user))
+            if timing.direct_user {
+                async_nats::ConnectOptions::new()
+                    .user_and_password(user.name.clone(), user.password.clone())
+            } else {
+                let url = url.to_string();
+                async_nats::ConnectOptions::with_auth_callback(move |_nonce| {
+                    let (url, token, user, live) =
+                        (url.clone(), token.clone(), user.clone(), live.clone());
+                    async move {
+                        let choice = choose(role, token.is_some(), &live, || {
+                            probe_user_with_timeout(&url, &user, timing.probe_timeout)
+                        })
                         .await
                         .map_err(async_nats::AuthError::new)?;
-                    let mut auth = async_nats::Auth::new();
-                    match choice {
-                        Choice::User => {
-                            auth.username = Some(user.name);
-                            auth.password = Some(user.password);
+                        let mut auth = async_nats::Auth::new();
+                        match choice {
+                            Choice::User => {
+                                auth.username = Some(user.name);
+                                auth.password = Some(user.password);
+                            }
+                            Choice::Token => auth.token = token,
                         }
-                        Choice::Token => auth.token = token,
+                        Ok(auth)
                     }
-                    Ok(auth)
-                }
-            })
+                })
+            }
         }
     };
+    if timing.jitter {
+        opts = opts.reconnect_delay_callback(|attempts| {
+            let cap_ms = if attempts <= 1 {
+                0
+            } else {
+                2_u64
+                    .saturating_pow((attempts - 1).try_into().unwrap_or(u32::MAX))
+                    .min(4000)
+            };
+            let mut bytes = [0; 8];
+            let delay = if getrandom::fill(&mut bytes).is_ok() {
+                u64::from_ne_bytes(bytes) % (cap_ms + 1)
+            } else {
+                cap_ms
+            };
+            Duration::from_millis(delay)
+        });
+    }
 
     // v0.38 / #137: offline-tolerant boot. Without
     // `retry_on_initial_connect`, `opts.connect(url).await` blocks-then-
@@ -1166,7 +1270,7 @@ where
     // calls queue the SUB frame until the link is up.
     let opts = opts
         .retry_on_initial_connect()
-        .connection_timeout(HEALTH_TIMEOUT)
+        .connection_timeout(timing.connect_timeout)
         .ping_interval(PING_INTERVAL)
         // Names the connection in `nats server report connections`, in the
         // broker's own logs, and in `/connz`. Free observability while the

@@ -526,3 +526,61 @@ The conformance test (`nats_role_conformance`, see the README) covers the
 broker-side behaviour of this switch with live processes; the rehearsal
 covers *your* hosts, tooling and access path, which is what goes wrong in
 practice.
+
+## Measuring a fleet authentication burst
+
+Before changing reconnect budgets, measure with the real broker and the host
+class that will run it. The ignored `nats_auth_burst` test supports an explicit
+measurement feature; ordinary entry points always use the production budgets
+(3 seconds for the user probe, 5 seconds for the outer handshake). The outer
+async-nats handshake includes the auth callback and therefore includes the
+probe. Its existing exponential backoff caps at 4 seconds without jitter.
+
+Run each condition serially, at least three times, recording the broker version,
+OS/architecture, available cores, GOMAXPROCS and authorization timeout:
+
+```sh
+ulimit -n 16384
+KANADE_AUTH_BURST_SIZES=50,200 \
+KANADE_AUTH_BURST_COSTS=9,10 \
+KANADE_AUTH_BURST_REPEATS=3 \
+KANADE_AUTH_BURST_AUTH_TIMEOUTS=30 \
+KANADE_AUTH_BURST_VARIANTS=production,probe,connect,both,jitter,both-jitter,direct,no-proxy,direct-no-proxy \
+KANADE_AUTH_BURST_JSONL=burst-clients.jsonl \
+KANADE_AUTH_BURST_FRAMES_JSONL=burst-frames.jsonl \
+cargo test -p kanade-shared --release --features nats-auth-measurement \
+  --test nats_auth_burst burst_of_user_connections -- --ignored --nocapture
+```
+
+`probe` raises only the probe budget to 60 seconds, `connect` only the outer
+budget, and `both` raises both. Override that experimental budget with
+`KANADE_AUTH_BURST_LONG_TIMEOUT_SECS`. `jitter` keeps the existing exponential
+backoff envelope and randomizes each delay uniformly within it. `direct` uses
+the same long outer budget but presents the user directly, so compare it with
+`both` to distinguish the second verification from retries. Direct connections
+are measurement controls and do not preserve token fallback. `no-proxy` and
+`direct-no-proxy` bypass the measurement proxy; their socket counters are zero,
+so compare their convergence times rather than their connection counts.
+GOMAXPROCS limits broker concurrency and does not emulate a shared two-vCPU
+host. Repeat the matrix with the host's own core count as well as the desired
+concurrency limit, and with the shipped authorization timeout when relevant.
+
+The frame trace records TCP completion, INFO, CONNECT, first PONG and closure,
+without frame contents or credentials. A closed CONNECT without PONG is an
+abandoned or refused handshake; use the recorded auth errors to distinguish
+refusals. A connection closed before CONNECT may be the outer connection whose
+callback never completed. INFO delay includes broker scheduling and is not by
+itself proof of accept-queue saturation; the no-proxy control is necessary.
+Probe tasks retain the existing cancellation behavior in these controls: an
+outer timeout can leave the bounded spawned probe running. The generous file
+limit allows those overlapping probes at the default experimental budget;
+raise it further if increasing that budget or the fleet size. Raising only the
+probe budget can consequently increase outstanding work.
+
+A restart is measured only after every startup client has authenticated.
+Min/median/max describe converged clients; population p95 is unavailable (`NaN`)
+when anyone fails to converge within the 120-second deadline. Always publish
+the not-converged count with the timings. After any evidence-driven fix, rerun
+cost 8 at N=50 and cost 9 at N=200 for both startup and restart on the target
+host. Measurement-only budgets are not production recovery guarantees; the
+existing resume/exit bounds and watchdog behavior remain unchanged.
