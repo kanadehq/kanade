@@ -11,6 +11,12 @@
   never on a command line. The CLI refuses passwords under 10 characters. The
   result is checked to be a `$2a$` hash, the only form nats-server recognises.
 
+  Defaults to cost 8; use -Cost to override. Costs below 10 are appropriate
+  only for long random passwords. Short or obviously non-random inputs warn
+  on stderr without adding a refusal. The heuristic cannot prove randomness
+  or guarantee password strength. See book/src/operations/nats-user-switch.md
+  for broker burst measurements.
+
   Use the output with deploy-nats.ps1 -AgentPasswordHash / -BackendPasswordHash
   / -BreakglassPasswordHash, or setup.sh's KANADE_NATS_<ROLE>_PASSWORD_HASH.
 
@@ -18,7 +24,7 @@
   PS> $agentHash = .\nats-password-hash.ps1
 #>
 [CmdletBinding()]
-param([int]$Cost = 11)
+param([int]$Cost = 8)
 
 $ErrorActionPreference = 'Stop'
 if (-not (Get-Command nats -ErrorAction SilentlyContinue)) {
@@ -33,6 +39,13 @@ function ConvertFrom-Secure([securestring]$s) {
 $p1 = ConvertFrom-Secure (Read-Host 'Password' -AsSecureString)
 $p2 = ConvertFrom-Secure (Read-Host 'Again' -AsSecureString)
 if (-not $p1 -or $p1 -cne $p2) { throw 'passwords are empty or do not match' }
+
+if ($Cost -lt 10 -and ($p1.Length -lt 24 -or $p1 -cmatch '^[a-zA-Z]+$' -or
+        $p1 -cmatch '^[0-9]+$' -or $p1 -match 'password|qwerty|letmein|welcome|admin|kanade')) {
+    [Console]::Error.WriteLine('warning: a low bcrypt cost is only appropriate for long random passwords (at least 24 characters). Mint a random password, for example:')
+    # Rejection sampling avoids modulo bias: 248 is a multiple of 62.
+    [Console]::Error.WriteLine('  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); try { $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"; $byte = New-Object byte[] 1; $pw = ""; while ($pw.Length -lt 32) { $rng.GetBytes($byte); if ($byte[0] -lt 248) { $pw += $chars[$byte[0] % 62] } }; $pw } finally { $rng.Dispose() }')
+}
 
 $env:PASSWORD = $p1
 try { $hash = (& nats server passwd --cost $Cost | Out-String).Trim() }

@@ -106,7 +106,9 @@
   substituted. Both files get the SYSTEM + Administrators-only ACL. The
   broker never holds a plaintext password -- only hashes (mint them with
   scripts/ops/nats-password-hash.sh); the plaintext stays on the roles' own
-  hosts, where deploy-agent.ps1 / deploy-backend.ps1 write it.
+  hosts, where deploy-agent.ps1 / deploy-backend.ps1 write it. Use the default
+  cost 8 with a long random password (32 random alphanumeric characters
+  recommended); see book/src/operations/nats-user-switch.md for measurements.
 
   The hashes come from -AgentPasswordHash / -BackendPasswordHash /
   -BreakglassPasswordHash, or from the environment variables

@@ -40,6 +40,7 @@ By default the broker runs on the single shared token above. To run the three
 role users (`agent`, `backend`, `breakglass`) instead, deliberately:
 
 ```powershell
+# Default cost 8 requires a long random password (32 random alphanumeric characters recommended).
 # Hashes only, minted with scripts/ops/nats-password-hash.ps1 (or .sh); never plaintext.
 $env:KANADE_NATS_AGENT_PASSWORD_HASH      = '<hash>'
 $env:KANADE_NATS_BACKEND_PASSWORD_HASH    = '<hash>'
@@ -57,6 +58,9 @@ the script as always (`-NoStart` defers the start). On Linux the equivalent is
 `KANADE_NATS_AUTH_MODE=users|token` for `setup.sh`, recorded so re-runs keep it,
 with a manual `systemctl restart nats-server` to apply it (see
 `deploy/linux/README.md`).
+
+For the recommended bcrypt cost 8 and broker burst measurements, see
+[Choosing the bcrypt cost](nats-user-switch.md#choosing-the-bcrypt-cost).
 
 **The switch is atomic:** a config cannot hold both a token and users, and a
 client presenting a token is rejected once users exist. Every agent, backend

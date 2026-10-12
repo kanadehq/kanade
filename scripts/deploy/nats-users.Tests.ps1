@@ -149,6 +149,9 @@ foreach ($call in 'Format-NatsUsersConf', 'Set-NatsServerUsersInclude', 'Restore
     Check "$call is only reached behind a switch" ($at -ge 0 -and ($guard -ge 0 -or $guard2 -ge 0))
 }
 
+# Keep the PowerShell hash helper covered by the existing Integration harness.
+& (Join-Path $repo 'scripts/ops/nats-password-hash.Tests.ps1')
+
 Remove-Item -Recurse -Force $tmp
 if ($fail -gt 0) { Write-Host "$fail check(s) failed"; exit 1 }
 Write-Host 'all checks passed'
