@@ -585,10 +585,10 @@ async fn supervise_connection(
                 .client_display_name
                 .clone()
                 .unwrap_or_else(|| DEFAULT_DISPLAY_NAME.to_string());
-            if let Some(win) = handle.get_webview_window("main") {
-                if let Err(e) = win.set_title(&title) {
-                    warn!(error = %e, "set window title from client_display_name failed");
-                }
+            if let Some(win) = handle.get_webview_window("main")
+                && let Err(e) = win.set_title(&title)
+            {
+                warn!(error = %e, "set window title from client_display_name failed");
             }
         }
         // Subscribe BEFORE publishing the client so no push between
