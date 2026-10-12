@@ -3,16 +3,21 @@ $seq = 0
 $code = 0
 $tmp = $null
 $script:uploadFailed = $false
+$script:errorKind = 'command_failed'
 function Report-Install([string]$outcome, [int]$exitCode) {
     $script:seq++
-    $body = @{seq=$script:seq; stage=$script:stage; outcome=$outcome; exit_code=$exitCode} | ConvertTo-Json -Compress
+    $event = @{seq=$script:seq; stage=$script:stage; outcome=$outcome; exit_code=$exitCode}
+    if ($outcome -eq 'failed') { $event.error_kind = $script:errorKind }
+    $body = $event | ConvertTo-Json -Compress
     try {
         if ($tmp -and (Test-Path $tmp)) { Add-Content -LiteralPath (Join-Path $tmp 'progress.jsonl') -Value $body -ErrorAction Stop }
     } catch { }
+    if ('@@KEY@@' -eq '') { $script:uploadFailed = $true; return }
     try {
         Invoke-WebRequest -UseBasicParsing -Uri @@URL@@ -Method Post -Headers @{'X-Install-Key'='@@KEY@@'} -ContentType 'application/json' -Body $body -TimeoutSec 3 | Out-Null
     } catch { $script:uploadFailed = $true }
 }
+if ('@@KEY@@' -eq '') { Write-Host 'Backend installation logging unavailable; diagnostics remain local.' }
 Write-Host 'Installation attempt @@ID@@'
 Report-Install progress 0
 $script:phaseLines = 0
@@ -38,4 +43,13 @@ function Wait-Install($process) {
     }
     $process.WaitForExit()
     Read-InstallStage
+}
+
+function Read-InstallErrorKind {
+    try {
+        $kind = Get-Content -LiteralPath (Join-Path $tmp 'install-error-kind') -Tail 1 -ErrorAction Stop
+        if ($kind -in @('permission_denied','file_not_found','invalid_archive','io_error','service_error','elevation_cancelled','http_error','command_failed')) {
+            $script:errorKind = $kind
+        }
+    } catch { }
 }

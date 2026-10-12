@@ -229,8 +229,7 @@ pub async fn installer(
 ) -> Result<Response, (StatusCode, String)> {
     let arch = params.resolve_arch()?;
     if let Some(id) = &params.attempt {
-        super::install_attempts::check_download(&state.pool, id, &caller, params.os.as_str())
-            .await?;
+        super::install_attempts::check_download(&state.pool, id, &caller).await?;
         audit::record(
             &state.nats,
             "operator",
@@ -425,6 +424,11 @@ pub async fn installer(
         }
     };
 
+    if let Some(id) = &params.attempt {
+        super::install_attempts::claim_download(&state.pool, id, &caller, params.os.as_str())
+            .await?;
+    }
+
     info!(%key, os = params.os.as_str(), nats_url = %nats_url, "installer: archive generated");
 
     audit::record(
@@ -476,13 +480,13 @@ pub async fn installer_ps1(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (base, token) = script_context(&state, &headers)?;
-    let (id, key) = super::install_attempts::issue(&state.pool, &caller, "windows").await?;
+
     Ok((
         [
             (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        track_installer_ps1(&base, &id, &key, render_installer_ps1(&base, &token)),
+        one_liner(&state.pool, &caller, &base, &token, true).await,
     )
         .into_response())
 }
@@ -499,15 +503,51 @@ pub async fn installer_sh(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (base, token) = script_context(&state, &headers)?;
-    let (id, key) = super::install_attempts::issue(&state.pool, &caller, "unix").await?;
+
     Ok((
         [
             (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        track_installer_sh(&base, &id, &key, render_installer_sh(&base, &token)),
+        one_liner(&state.pool, &caller, &base, &token, false).await,
     )
         .into_response())
+}
+
+async fn one_liner(
+    pool: &sqlx::SqlitePool,
+    caller: &Caller,
+    base: &str,
+    token: &str,
+    windows: bool,
+) -> String {
+    let (id, key) = match super::install_attempts::issue(
+        pool,
+        caller,
+        if windows { "windows" } else { "unix" },
+    )
+    .await
+    {
+        Ok(attempt) => attempt,
+        Err(_) => {
+            warn!(
+                "installation telemetry unavailable; serving installer with local diagnostics only"
+            );
+            (uuid::Uuid::new_v4().to_string(), String::new())
+        }
+    };
+    let script = if windows {
+        track_installer_ps1(base, &id, &key, render_installer_ps1(base, token))
+    } else {
+        track_installer_sh(base, &id, &key, render_installer_sh(base, token))
+    };
+    if key.is_empty() {
+        script
+            .replace(&format!("?attempt={id}"), "")
+            .replace(&format!("&attempt={id}"), "")
+    } else {
+        script
+    }
 }
 
 /// The two values baked into a one-liner script: this backend's absolute
@@ -688,14 +728,18 @@ fn track_installer_sh(base: &str, id: &str, key: &str, script: String) -> String
 }
 
 fn track_installer_ps1(base: &str, id: &str, key: &str, script: String) -> String {
-    let prelude = include_str!("../../assets/install-report.ps1")
-        .replace(
-            "@@URL@@",
-            &ps_quote(&format!("{base}/api/install-reports/{id}")),
-        )
-        .replace("@@KEY@@", key)
-        .replace("@@ID@@", id)
-        .replace("\n", "\r\n");
+    let prelude = format!(
+        "{}\n{}",
+        include_str!("../../assets/install-diagnostics.ps1"),
+        include_str!("../../assets/install-report.ps1")
+    )
+    .replace(
+        "@@URL@@",
+        &ps_quote(&format!("{base}/api/install-reports/{id}")),
+    )
+    .replace("@@KEY@@", key)
+    .replace("@@ID@@", id)
+    .replace("\n", "\r\n");
     script.replace("$tmp = Join-Path", &format!("{prelude}\r\ntry {{\r\n$stage = 'temporary_directory'\r\n$tmp = Join-Path"))
         .replace("try {\r\n    Invoke-WebRequest", "$stage = 'download'\r\nReport-Install progress 0\r\n    Invoke-WebRequest")
         .replace("/api/agents/installer'", &format!("/api/agents/installer?attempt={id}'"))
@@ -703,7 +747,7 @@ fn track_installer_ps1(base: &str, id: &str, key: &str, script: String) -> Strin
         .replace("    $isAdmin =", "    $stage = 'elevate'\r\n    Report-Install progress 0\r\n    $isAdmin =")
         .replace("        & $installScript", "        $stage = 'install'\r\n        Report-Install progress 0\r\n        & $installScript")
         .replace("    Write-Host \"kanade-agent installed.\"", "    $stage = 'complete'\r\n    Report-Install succeeded 0\r\n    Write-Host \"kanade-agent installed.\"")
-        .replace("} catch {\r\n    # Covers", "} catch {\r\n    if (!$code -or $code -eq 0) { $code = 1 }\r\n    Report-Install failed $code\r\n    Write-Host \"Installation attempt @@ID@@\"\r\n    # Covers".replace("@@ID@@", id).as_str())
+        .replace("} catch {\r\n    # Covers", "} catch {\r\n    $script:errorKind = Get-InstallErrorKind $_ $stage\r\n    Read-InstallErrorKind\r\n    if (!$code -or $code -eq 0) { $code = 1 }\r\n    Report-Install failed $code\r\n    Write-Host \"Installation attempt @@ID@@\"\r\n    # Covers".replace("@@ID@@", id).as_str())
         .replace("    throw \"$($_.Exception.Message)$hint\"", "    Write-Host $hint\r\n    exit $code")
         .replace("        & $installScript\r\n        $code = $LASTEXITCODE", "        $proc = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',\"`\"$installScript`\"\" -PassThru\r\n        Wait-Install $proc\r\n        $code = $proc.ExitCode")
         .replace(" -Wait -PassThru\r\n        $code = $proc.ExitCode", " -PassThru\r\n        $stage = 'install'\r\n        Report-Install progress 0\r\n        Wait-Install $proc\r\n        $code = $proc.ExitCode")
@@ -945,16 +989,23 @@ fn render_install_ps1(
     if require_signed_commands {
         args.push_str(" -RequireSignedCommands");
     }
+    let diagnostics = include_str!("../../assets/install-diagnostics.ps1").replace('\n', "\r\n");
     format!(
         "# Generated by kanade-backend — do not edit.\r\n\
          # Installs kanade-agent {version} as a Windows service. Run as Administrator.\r\n\
          $ErrorActionPreference = 'Stop'\r\n\
+         {diagnostics}\r\n\
          Set-Content -LiteralPath (Join-Path $PSScriptRoot 'install.log') -Value 'install started'\r\n\
          try {{\r\n\
          \x20   & (Join-Path $PSScriptRoot 'deploy-agent.ps1'){args}\r\n\
          \x20   exit $LASTEXITCODE\r\n\
          }} catch {{\r\n\
-         \x20   try {{ Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install.log') -Value 'install failed' }} catch {{ }}\r\n\
+         \x20   $failure = $_\r\n\
+         \x20   $phase = 'install'\r\n\
+         \x20   try {{ $lastPhase = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-stage') -Tail 1 -ErrorAction Stop; if ($lastPhase -in @('placement','service_start')) {{ $phase = $lastPhase }} }} catch {{ }}\r\n\
+         \x20   $kind = Get-InstallErrorKind $failure $phase\r\n\
+         \x20   try {{ Set-Content -LiteralPath (Join-Path $PSScriptRoot 'install-error-kind') -Value $kind; Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install.log') -Value (\"install failed: \" + $kind) }} catch {{ }}\r\n\
+         \x20   Write-Host (\"Installation failed: \" + $kind)\r\n\
          \x20   exit 1\r\n\
          }}\r\n"
     )
@@ -1348,6 +1399,10 @@ mod tests {
     #[test]
     fn install_report_assets_match_originals() {
         assert_eq!(
+            include_str!("../../assets/install-diagnostics.ps1"),
+            include_str!("../../../../scripts/install/install-diagnostics.ps1")
+        );
+        assert_eq!(
             include_str!("../../assets/install-report.sh"),
             include_str!("../../../../scripts/install/install-report.sh")
         );
@@ -1435,7 +1490,10 @@ mod tests {
                 let json: String = serde_json::from_str(data).unwrap();
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 assert!(parsed["stage"].is_string());
-                assert_eq!(parsed.as_object().unwrap().len(), 4);
+                assert_eq!(
+                    parsed.as_object().unwrap().len(),
+                    if parsed["outcome"] == "failed" { 5 } else { 4 }
+                );
             }
 
             if stage == "platform" || stage == "temporary_directory" {
@@ -1451,6 +1509,102 @@ mod tests {
                 );
                 assert!(!local.contains("secret"));
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn installer_storage_failure_degrades_to_local_diagnostics() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for windows in [false, true] {
+            let script = one_liner(
+                &pool,
+                &Caller::default(),
+                "https://backend.invalid",
+                "session-token",
+                windows,
+            )
+            .await;
+            assert!(script.contains("session-token"));
+            assert!(script.contains("Backend installation logging unavailable"));
+            assert!(script.contains("progress.jsonl"));
+            assert!(!script.contains("?attempt="));
+            assert!(!script.contains("&attempt="));
+            assert!(!script.contains("@@"));
+            if windows {
+                assert!(script.contains("if ('' -eq '')"));
+            } else {
+                assert!(script.contains("if [ -z '' ]"));
+            }
+        }
+    }
+
+    #[test]
+    fn installer_child_preserves_distinct_safe_exception_causes() {
+        use std::{fs, process::Command};
+        let shell = if cfg!(windows) {
+            "powershell.exe"
+        } else {
+            "pwsh"
+        };
+        if Command::new(shell).arg("-Version").output().is_err() {
+            return;
+        }
+        for (exception, phase, expected) in [
+            (
+                "[System.IO.FileNotFoundException]::new('credential-secret')",
+                "placement",
+                "file_not_found",
+            ),
+            (
+                "[System.UnauthorizedAccessException]::new('credential-secret')",
+                "placement",
+                "permission_denied",
+            ),
+            (
+                "[System.IO.IOException]::new('credential-secret')",
+                "placement",
+                "io_error",
+            ),
+            (
+                "[System.InvalidOperationException]::new('credential-secret')",
+                "service_start",
+                "service_error",
+            ),
+            (
+                "[System.ComponentModel.Win32Exception]::new(1223,'credential-secret')",
+                "install",
+                "elevation_cancelled",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("install-agent.ps1");
+            fs::write(
+                &path,
+                render_install_ps1("1.0.0", Some("provisioning-secret"), None, None, false),
+            )
+            .unwrap();
+            fs::write(dir.path().join("deploy-agent.ps1"),format!("Set-Content -LiteralPath (Join-Path $PSScriptRoot 'install-stage') -Value '{phase}'\nthrow {exception}\n")).unwrap();
+            let out = Command::new(shell)
+                .args(["-NoProfile", "-File"])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert_eq!(
+                out.status.code(),
+                Some(1),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("install-error-kind"))
+                    .unwrap()
+                    .trim(),
+                expected
+            );
+            let log = fs::read_to_string(dir.path().join("install.log")).unwrap();
+            assert!(log.contains(expected), "{log}");
+            assert!(!log.contains("secret"));
+            assert!(!String::from_utf8_lossy(&out.stderr).contains("secret"));
         }
     }
 
@@ -1497,6 +1651,7 @@ function Start-Process {
     param($FilePath,$ArgumentList,$Verb,[switch]$PassThru)
     if ($env:TEST_MODE -eq 'uac') { throw 'uac-secret' }
     Set-Content -LiteralPath (Join-Path $tmp 'install-stage') -Value @('placement','service_start')
+    Set-Content -LiteralPath (Join-Path $tmp 'install-error-kind') -Value 'permission_denied'
     $p=[pscustomobject]@{HasExited=$true; ExitCode=$(if ($env:TEST_MODE -eq 'success') {0} else {37})}
     $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {}
     return $p
@@ -1528,6 +1683,12 @@ function Start-Process {
                 last["outcome"],
                 if expected == 0 { "succeeded" } else { "failed" }
             );
+            if matches!(mode, "child" | "upload") {
+                assert_eq!(last["error_kind"], "permission_denied");
+            }
+            if mode == "extract" {
+                assert_eq!(last["error_kind"], "invalid_archive");
+            }
             if matches!(mode, "child" | "success" | "upload") {
                 assert!(events.iter().any(|event| event["stage"] == "placement"));
                 assert!(events.iter().any(|event| event["stage"] == "service_start"));
@@ -2624,7 +2785,7 @@ function Start-Process {
         let out = render_install_ps1("0.43.99", Some("tok"), None, Some("[1]"), true);
         assert!(!out.contains("Transcript"));
         assert!(out.contains(" -NatsToken 'tok' -CommandKeys '[1]' -RequireSignedCommands"));
-        assert!(out.contains("'install failed'"));
+        assert!(out.contains("install failed: "));
     }
 
     #[test]

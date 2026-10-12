@@ -96,7 +96,7 @@ export function AgentInstall() {
   });
   const events = useQuery({
     queryKey: ['install-events', attemptId],
-    queryFn: () => apiFetch<{seq: number; stage: string; outcome: string; exit_code: number; received_at: number}[]>(`/api/agents/install-attempts/${attemptId}`),
+    queryFn: () => apiFetch<{seq: number; stage: string; outcome: string; exit_code: number; error_kind?: string | null; received_at: number}[]>(`/api/agents/install-attempts/${attemptId}`),
     enabled: hasRole('operator') && !!attemptId,
     refetchInterval: 5000,
   });
@@ -196,7 +196,7 @@ export function AgentInstall() {
               {attempts.data?.map((a) => <option key={a.id} value={a.id}>{a.id} — {a.issuer ?? '—'} — {a.os} — {t(`logs.status.${a.status}`)}</option>)}
             </Select>
             {events.error && <ErrorCard title={t('logs.title')} error={events.error} />}
-            {attemptId && <pre className="overflow-x-auto text-xs">{events.data?.map((e) => `${new Date(e.received_at * 1000).toISOString()} #${e.seq} ${e.stage}: ${e.outcome} (${e.exit_code})`).join('\n')}</pre>}
+            {attemptId && <pre className="overflow-x-auto text-xs">{events.data?.map((e) => `${new Date(e.received_at * 1000).toISOString()} #${e.seq} ${e.stage}: ${e.outcome} (${e.exit_code})${e.error_kind ? ` — ${e.error_kind}` : ''}`).join('\n')}</pre>}
           </CardContent>
         </Card>
       )}

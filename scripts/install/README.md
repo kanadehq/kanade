@@ -5,8 +5,9 @@ Each authenticated fetch of `/api/agents/installer.sh` or
 one-hour, write-only reporting capability. The generated script reports
 straight to HTTP, independently of NATS, agent registration and the issuing
 user's session lifetime. The archive download still requires that user's
-valid session. Each attempt permits one archive download; obtain a **fresh
-one-liner** for every retry. Manually downloaded archives do not create
+valid session. Each attempt permits one successfully generated archive download.
+Unavailable releases or archive generation errors do not consume that download.
+After a terminal installer outcome, obtain a **fresh one-liner** for every retry. Manually downloaded archives do not create
 backend installation attempts.
 
 Operators with the **Agent Install** page permission can select an attempt
@@ -33,8 +34,14 @@ exit code; PowerShell exceptions (including UAC cancellation) use exit 1.
 Placement and service-start stages are collected from a safe child-process
 file; only complete lines are collected during polling and after exit.
 
-Only enumerated stages/outcomes, bounded sequence numbers and integer exit
-codes are accepted. No command output, exception text, transcript, config,
+Only enumerated stages/outcomes/error causes, bounded sequence numbers and
+integer exit codes are accepted. `error_kind` distinguishes permission denial,
+missing files, invalid archives, I/O failures, service failures, UAC cancellation,
+HTTP failures and generic command failure. Windows classifies exception types,
+fixed categories and numeric native codes; neither the message nor source text
+is retained. The elevated child leaves the same safe classification in
+`install-error-kind` and `install.log`, including manual ZIP installs.
+No command output, exception text, transcript, config,
 environment or source lines are uploaded. Invalid/extra fields are rejected
 instead of storing and attempting to mask potentially secret content.
 Reports are limited to 1 KiB per request and 128 sequence positions per
@@ -57,6 +64,12 @@ the generated script or its embedded credentials.
 
 Attempts/events are retained for 30 days. Expired data is removed on script
 issuance and log listing; detail reads exclude events older than 30 days.
+If attempt creation fails (including telemetry retention/storage errors), the
+backend still serves a local-only installer. It prints that backend installation
+logging is unavailable, records safe events locally, and does not add an attempt
+parameter to the authenticated archive URL. Its printed local attempt ID has no
+backend record. This fallback retains local diagnostics even on success.
+
 Data is local SQLite state, not re-projectable from NATS: a database wipe
 also removes these diagnostics. HTTP ingress/access logs must not record
 `X-Install-Key` or Authorization headers. The report capability cannot read

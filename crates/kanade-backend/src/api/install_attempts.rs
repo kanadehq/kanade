@@ -84,12 +84,26 @@ pub enum Outcome {
     Failed,
 }
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    PermissionDenied,
+    FileNotFound,
+    InvalidArchive,
+    IoError,
+    ServiceError,
+    ElevationCancelled,
+    HttpError,
+    CommandFailed,
+}
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
     seq: i64,
     stage: Stage,
     outcome: Outcome,
     exit_code: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_kind: Option<ErrorKind>,
 }
 fn label<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
@@ -100,7 +114,8 @@ fn label<T: Serialize>(value: &T) -> String {
 }
 
 async fn append(pool: &SqlitePool, id: &str, key: &str, event: &Event) -> Result<(), Error> {
-    if !(1..=MAX_EVENTS).contains(&event.seq)
+    if (event.outcome != Outcome::Failed && event.error_kind.is_some())
+        || !(1..=MAX_EVENTS).contains(&event.seq)
         || (event.outcome == Outcome::Succeeded
             && (event.stage != Stage::Complete || event.exit_code != 0))
         || (event.outcome == Outcome::Failed && event.exit_code == 0)
@@ -125,13 +140,14 @@ async fn append(pool: &SqlitePool, id: &str, key: &str, event: &Event) -> Result
     ))?;
     let stage = label(&event.stage);
     let outcome = label(&event.outcome);
+    let error_kind = event.error_kind.as_ref().map(label);
     let status: String = row.get("status");
     let seq: i64 = row.get("seq");
     if matches!(status.as_str(), "succeeded" | "failed") && event.outcome == Outcome::Progress {
         return Err((StatusCode::CONFLICT, "attempt is terminal".into()));
     }
     if let Some(old) = sqlx::query(
-        "SELECT stage,outcome,exit_code FROM install_events WHERE attempt_id=? AND seq=?",
+        "SELECT stage,outcome,exit_code,error_kind FROM install_events WHERE attempt_id=? AND seq=?",
     )
     .bind(id)
     .bind(event.seq)
@@ -142,6 +158,7 @@ async fn append(pool: &SqlitePool, id: &str, key: &str, event: &Event) -> Result
         if old.get::<String, _>("stage") == stage
             && old.get::<String, _>("outcome") == outcome
             && old.get::<i32, _>("exit_code") == event.exit_code
+            && old.get::<Option<String>, _>("error_kind") == error_kind
         {
             return Ok(());
         }
@@ -165,13 +182,14 @@ async fn append(pool: &SqlitePool, id: &str, key: &str, event: &Event) -> Result
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    sqlx::query("INSERT INTO install_events VALUES(?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO install_events(attempt_id,seq,stage,outcome,exit_code,received_at,error_kind) VALUES(?,?,?,?,?,?,?)")
         .bind(id)
         .bind(event.seq)
         .bind(stage)
         .bind(outcome)
         .bind(event.exit_code)
         .bind(now)
+        .bind(error_kind)
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
@@ -209,13 +227,24 @@ pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, Error> {
-    let rows = sqlx::query("SELECT seq,stage,outcome,exit_code,received_at FROM install_events WHERE attempt_id=? AND received_at>=? ORDER BY seq")
+    let rows = sqlx::query("SELECT seq,stage,outcome,exit_code,received_at,error_kind FROM install_events WHERE attempt_id=? AND received_at>=? ORDER BY seq")
         .bind(id).bind(chrono::Utc::now().timestamp()-RETENTION).fetch_all(&state.pool).await.map_err(db_error)?;
-    Ok(Json(rows.into_iter().map(|r| serde_json::json!({"seq":r.get::<i64,_>("seq"),"stage":r.get::<String,_>("stage"),"outcome":r.get::<String,_>("outcome"),"exit_code":r.get::<i32,_>("exit_code"),"received_at":r.get::<i64,_>("received_at")})).collect::<Vec<_>>().into()))
+    Ok(Json(rows.into_iter().map(|r| serde_json::json!({"seq":r.get::<i64,_>("seq"),"stage":r.get::<String,_>("stage"),"outcome":r.get::<String,_>("outcome"),"exit_code":r.get::<i32,_>("exit_code"),"received_at":r.get::<i64,_>("received_at"),"error_kind":r.get::<Option<String>,_>("error_kind")})).collect::<Vec<_>>().into()))
 }
 
 /// Bind archive reachability to the authenticated issuer, never a supplied identity.
-pub async fn check_download(
+pub async fn check_download(pool: &SqlitePool, id: &str, caller: &Caller) -> Result<(), Error> {
+    let available: i64 = sqlx::query_scalar("SELECT count(*) FROM install_attempts WHERE id=? AND issuer IS ? AND expires_at>? AND download_claimed=0 AND status NOT IN ('succeeded','failed')")
+        .bind(id).bind(&caller.sub).bind(chrono::Utc::now().timestamp()).fetch_one(pool).await.map_err(db_error)?;
+    if available == 0 {
+        return Err((StatusCode::FORBIDDEN, "attempt does not belong to caller, expired, or already downloaded; obtain a fresh one-liner".into()));
+    }
+    // Validation does not consume the capability. The caller commits the claim
+    // only after the complete response payload has been built successfully.
+    Ok(())
+}
+
+pub async fn claim_download(
     pool: &SqlitePool,
     id: &str,
     caller: &Caller,
@@ -224,9 +253,11 @@ pub async fn check_download(
     let changed = sqlx::query("UPDATE install_attempts SET download_claimed=1,os=? WHERE id=? AND issuer IS ? AND expires_at>? AND download_claimed=0 AND status NOT IN ('succeeded','failed')")
         .bind(os).bind(id).bind(&caller.sub).bind(chrono::Utc::now().timestamp()).execute(pool).await.map_err(db_error)?.rows_affected();
     if changed == 0 {
-        return Err((StatusCode::FORBIDDEN, "attempt does not belong to caller, expired, or already downloaded; obtain a fresh one-liner".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "attempt already consumed, terminal, or expired".into(),
+        ));
     }
-
     Ok(())
 }
 
@@ -237,6 +268,12 @@ mod tests {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::raw_sql(include_str!(
             "../../migrations/20261012000000_install_attempts.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261012010000_install_error_kinds.sql"
         ))
         .execute(&pool)
         .await
@@ -253,6 +290,7 @@ mod tests {
             },
             exit_code: if outcome == Outcome::Failed { 22 } else { 0 },
             outcome,
+            error_kind: None,
         }
     }
     #[tokio::test]
@@ -276,7 +314,7 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            check_download(&p, &id, &Caller::default(), "linux")
+            check_download(&p, &id, &Caller::default())
                 .await
                 .unwrap_err()
                 .0,
@@ -293,16 +331,16 @@ mod tests {
                 .0,
             StatusCode::UNAUTHORIZED
         );
-        check_download(&p, &id, &caller, "linux").await.unwrap();
+        check_download(&p, &id, &caller).await.unwrap();
+        // A failed archive build leaves the same attempt available for retry.
+        check_download(&p, &id, &caller).await.unwrap();
+        claim_download(&p, &id, &caller, "linux").await.unwrap();
         assert_eq!(
-            check_download(&p, &id, &caller, "linux")
-                .await
-                .unwrap_err()
-                .0,
+            check_download(&p, &id, &caller).await.unwrap_err().0,
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            check_download(&p, &id, &Caller::default(), "windows")
+            check_download(&p, &id, &Caller::default())
                 .await
                 .unwrap_err()
                 .0,
@@ -386,6 +424,32 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<Event>(body).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn install_diagnostic_causes_are_stored_and_checked_for_duplicate_conflicts() {
+        let p = pool().await;
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::FileNotFound] {
+            let (id, key) = issue(&p, &Caller::default(), "windows").await.unwrap();
+            let mut failure = event(1, Outcome::Failed);
+            failure.stage = Stage::Placement;
+            failure.error_kind = Some(kind);
+            append(&p, &id, &key, &failure).await.unwrap();
+            append(&p, &id, &key, &failure).await.unwrap();
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT error_kind FROM install_events WHERE attempt_id=?")
+                    .bind(&id)
+                    .fetch_one(&p)
+                    .await
+                    .unwrap();
+            assert_eq!(stored, failure.error_kind.as_ref().map(label));
+            failure.error_kind = Some(ErrorKind::IoError);
+            assert_eq!(
+                append(&p, &id, &key, &failure).await.unwrap_err().0,
+                StatusCode::CONFLICT
+            );
+        }
+        assert!(serde_json::from_str::<Event>(r#"{"seq":1,"stage":"install","outcome":"failed","exit_code":1,"error_kind":"token-secret"}"#).is_err());
     }
 
     #[tokio::test]

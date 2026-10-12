@@ -308,10 +308,10 @@ $exeDst     = Join-Path $binDir    $exeName
 $configDst  = Join-Path $configDir $configName
 
 if (-not (Test-Path $exeSrc)) {
-    throw "Missing '$exeName' in '$SourceDir'. Place the release binary next to this script or pass -SourceDir."
+    throw [System.IO.FileNotFoundException]::new("Required agent binary is missing")
 }
 if (-not (Test-Path $configSrc)) {
-    throw "Missing '$configName' in '$SourceDir'. Place the sample config next to this script or pass -SourceDir."
+    throw [System.IO.FileNotFoundException]::new("Required agent config is missing")
 }
 
 # Stop the existing service first so the on-disk exe isn't locked.
