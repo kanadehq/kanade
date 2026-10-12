@@ -200,6 +200,7 @@ pub struct InstallerParams {
     os: InstallerOs,
     #[serde(default)]
     arch: Option<InstallerArch>,
+    attempt: Option<String>,
 }
 
 impl InstallerParams {
@@ -227,6 +228,19 @@ pub async fn installer(
     Query(params): Query<InstallerParams>,
 ) -> Result<Response, (StatusCode, String)> {
     let arch = params.resolve_arch()?;
+    if let Some(id) = &params.attempt {
+        super::install_attempts::check_download(&state.pool, id, &caller, params.os.as_str())
+            .await?;
+        audit::record(
+            &state.nats,
+            "operator",
+            "agent_installer_download_started",
+            Some(id),
+            Some(&caller),
+            serde_json::json!({"attempt_id": id, "os": params.os.as_str()}),
+        )
+        .await;
+    }
     let store = state
         .jetstream
         .get_object_store(OBJECT_AGENT_RELEASES)
@@ -423,6 +437,7 @@ pub async fn installer(
         // were embedded.
         serde_json::json!({
             "version": key,
+            "attempt_id": params.attempt,
             "os": params.os.as_str(),
             "arch": arch.as_str(),
             "nats_url": nats_url,
@@ -436,6 +451,7 @@ pub async fn installer(
     Ok((
         [
             (header::CONTENT_TYPE, content_type.to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
             (
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"{filename}\""),
@@ -452,18 +468,21 @@ pub async fn installer(
 /// installer: download the Windows ZIP (authenticated as the caller) into
 /// a temp dir, extract, run `install-agent.ps1` — elevated via UAC for
 /// just the install step when the caller isn't already admin. On failure
-/// the temp dir is kept (only success deletes it) and the error names
-/// `install.log` inside it: the elevated UAC console closes the instant
-/// `install-agent.ps1` exits, so that transcript is the only place a
-/// failure's real error text survives to be read.
+/// the temp dir is kept and safe progress events identify the failing stage.
+/// The reporting capability stays in the unelevated parent.
 pub async fn installer_ps1(
     State(state): State<AppState>,
+    caller: Caller,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (base, token) = script_context(&state, &headers)?;
+    let (id, key) = super::install_attempts::issue(&state.pool, &caller, "windows").await?;
     Ok((
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        render_installer_ps1(&base, &token),
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        track_installer_ps1(&base, &id, &key, render_installer_ps1(&base, &token)),
     )
         .into_response())
 }
@@ -476,12 +495,17 @@ pub async fn installer_ps1(
 /// (`curl … | sudo bash`).
 pub async fn installer_sh(
     State(state): State<AppState>,
+    caller: Caller,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (base, token) = script_context(&state, &headers)?;
+    let (id, key) = super::install_attempts::issue(&state.pool, &caller, "unix").await?;
     Ok((
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        render_installer_sh(&base, &token),
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        track_installer_sh(&base, &id, &key, render_installer_sh(&base, &token)),
     )
         .into_response())
 }
@@ -644,6 +668,48 @@ fn render_installer_sh(base: &str, token: &str) -> String {
     s.push_str("sh \"$TMP/install.sh\"\n");
     s.push_str("echo \"kanade-agent installed.\"\n");
     s
+}
+
+fn track_installer_sh(base: &str, id: &str, key: &str, script: String) -> String {
+    let prelude = include_str!("../../assets/install-report.sh")
+        .replace(
+            "@@URL@@",
+            &sh_quote(&format!("{base}/api/install-reports/{id}")),
+        )
+        .replace("@@KEY@@", key)
+        .replace("@@ID@@", id);
+    script.replace("set -eu\n", &format!("set -eu\n{prelude}\n"))
+        .replace("TMP=\"$(mktemp -d)\"", "stage=temporary_directory\nTMP=\"$(mktemp -d)\"\nlocal_log=\"$TMP/progress.jsonl\"\nreport progress 0\n")
+        .replace("trap 'rm -rf \"$TMP\"' EXIT", "stage=download\nreport progress 0")
+        .replace("'&arch='\"$ARCH\"", &format!("'&arch='\"$ARCH\"'&attempt={id}'"))
+        .replace("tar xzf", "stage=extract\nreport progress 0\ntar xzf")
+        .replace("sh \"$TMP/install.sh\"", "stage=install\nreport progress 0\nbash \"$TMP/install.sh\" &\nchild=$!\nwhile kill -0 \"$child\" 2>/dev/null; do collect_stage; sleep 1; done\nrc=0\nwait \"$child\" || rc=$?\ncollect_stage\n[ \"$rc\" -eq 0 ] || exit \"$rc\"")
+        .replace("echo \"kanade-agent installed.\"", "stage=complete\nreport succeeded 0\ntrap - EXIT\nif [ \"$upload_failed\" -eq 0 ]; then rm -rf \"$TMP\"; else echo \"Safe local events: $local_log\"; fi\necho \"kanade-agent installed.\"")
+}
+
+fn track_installer_ps1(base: &str, id: &str, key: &str, script: String) -> String {
+    let prelude = include_str!("../../assets/install-report.ps1")
+        .replace(
+            "@@URL@@",
+            &ps_quote(&format!("{base}/api/install-reports/{id}")),
+        )
+        .replace("@@KEY@@", key)
+        .replace("@@ID@@", id)
+        .replace("\n", "\r\n");
+    script.replace("$tmp = Join-Path", &format!("{prelude}\r\ntry {{\r\n$stage = 'temporary_directory'\r\n$tmp = Join-Path"))
+        .replace("try {\r\n    Invoke-WebRequest", "$stage = 'download'\r\nReport-Install progress 0\r\n    Invoke-WebRequest")
+        .replace("/api/agents/installer'", &format!("/api/agents/installer?attempt={id}'"))
+        .replace("    Expand-Archive", "    $stage = 'extract'\r\n    Report-Install progress 0\r\n    Expand-Archive")
+        .replace("    $isAdmin =", "    $stage = 'elevate'\r\n    Report-Install progress 0\r\n    $isAdmin =")
+        .replace("        & $installScript", "        $stage = 'install'\r\n        Report-Install progress 0\r\n        & $installScript")
+        .replace("    Write-Host \"kanade-agent installed.\"", "    $stage = 'complete'\r\n    Report-Install succeeded 0\r\n    Write-Host \"kanade-agent installed.\"")
+        .replace("} catch {\r\n    # Covers", "} catch {\r\n    if (!$code -or $code -eq 0) { $code = 1 }\r\n    Report-Install failed $code\r\n    Write-Host \"Installation attempt @@ID@@\"\r\n    # Covers".replace("@@ID@@", id).as_str())
+        .replace("    throw \"$($_.Exception.Message)$hint\"", "    Write-Host $hint\r\n    exit $code")
+        .replace("        & $installScript\r\n        $code = $LASTEXITCODE", "        $proc = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',\"`\"$installScript`\"\" -PassThru\r\n        Wait-Install $proc\r\n        $code = $proc.ExitCode")
+        .replace(" -Wait -PassThru\r\n        $code = $proc.ExitCode", " -PassThru\r\n        $stage = 'install'\r\n        Report-Install progress 0\r\n        Wait-Install $proc\r\n        $code = $proc.ExitCode")
+        .replace("    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue", "    if (!$script:uploadFailed) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue } else { Write-Host \"Safe local events: $tmp/progress.jsonl\" }")
+        .replace("$log = Join-Path $tmp 'install.log'", "$log = if ($tmp) { Join-Path $tmp 'progress.jsonl' } else { $null }")
+        .replace("if (Test-Path $log)", "if ($log -and (Test-Path $log))")
 }
 
 /// The latest key (by `modified`, desc) belonging to the requested
@@ -852,12 +918,9 @@ fn resolve_enforcement(requested: bool, key_present: bool) -> EnforcementPlan {
 /// `deploy-agent.ps1`; this only pins the version banner, the provisioned
 /// knobs (`-NatsToken`, `-CommandKeys`, `-RequireSignedCommands`, each
 /// omitted from the invocation entirely when not provided/requested), and a
-/// transcript to `install.log` next to the script. The transcript exists
-/// because the one-liner's UAC-elevated console (see
-/// [`render_installer_ps1`]) closes the instant this script exits, taking
-/// any on-screen error with it — `install.log` is what's left to read
-/// afterward. CRLF line endings like every other Windows-facing file in the
-/// ZIP.
+/// safe outcome labels in `install.log` next to the script. Raw transcripts
+/// can include credential-bearing source lines and are deliberately disabled.
+/// CRLF line endings like every other Windows-facing file in the ZIP.
 fn render_install_ps1(
     version: &str,
     nats_token: Option<&str>,
@@ -886,12 +949,13 @@ fn render_install_ps1(
         "# Generated by kanade-backend — do not edit.\r\n\
          # Installs kanade-agent {version} as a Windows service. Run as Administrator.\r\n\
          $ErrorActionPreference = 'Stop'\r\n\
-         Start-Transcript -Path (Join-Path $PSScriptRoot 'install.log') -Force | Out-Null\r\n\
+         Set-Content -LiteralPath (Join-Path $PSScriptRoot 'install.log') -Value 'install started'\r\n\
          try {{\r\n\
          \x20   & (Join-Path $PSScriptRoot 'deploy-agent.ps1'){args}\r\n\
          \x20   exit $LASTEXITCODE\r\n\
-         }} finally {{\r\n\
-         \x20   Stop-Transcript | Out-Null\r\n\
+         }} catch {{\r\n\
+         \x20   try {{ Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install.log') -Value 'install failed' }} catch {{ }}\r\n\
+         \x20   exit 1\r\n\
          }}\r\n"
     )
 }
@@ -1281,6 +1345,242 @@ fn render_readme_macos(key: &str, signing: bool, enforcement: EnforcementPlan) -
 mod tests {
     use super::*;
 
+    #[test]
+    fn install_report_assets_match_originals() {
+        assert_eq!(
+            include_str!("../../assets/install-report.sh"),
+            include_str!("../../../../scripts/install/install-report.sh")
+        );
+        assert_eq!(
+            include_str!("../../assets/install-report.ps1"),
+            include_str!("../../../../scripts/install/install-report.ps1")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tracked_unix_install_reports_success_and_failures_without_secrets() {
+        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+        for (download, extract, install, upload, expected, stage) in [
+            (0, 0, 0, 0, 0, "complete"),
+            (0, 0, 0, 7, 0, "complete"),
+            (22, 0, 0, 0, 22, "download"),
+            (0, 2, 0, 0, 2, "extract"),
+            (0, 0, 37, 0, 37, "install"),
+            (0, 0, 37, 7, 37, "install"),
+            (22, 0, 0, 7, 22, "download"),
+            (99, 0, 0, 7, 1, "platform"),
+            (98, 0, 0, 7, 31, "temporary_directory"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            let tmp = dir.path().join("work");
+            fs::create_dir(&tmp).unwrap();
+            let reports = dir.path().join("reports");
+            for (name, body) in [
+                (
+                    "uname",
+                    "#!/bin/sh\ncase \"$1\" in -s) if [ \"$DOWNLOAD_RC\" -eq 99 ]; then echo Unsupported; else echo Linux; fi;; -m) echo x86_64;; esac\n",
+                ),
+                (
+                    "mktemp",
+                    "#!/bin/sh\n[ \"$DOWNLOAD_RC\" -ne 98 ] || exit 31\necho \"$TEST_TMP\"\n",
+                ),
+                (
+                    "curl",
+                    "#!/bin/sh\ncase \" $* \" in *' -o '*) cat >/dev/null; exit \"$DOWNLOAD_RC\";; *) cat >>\"$REPORTS\"; exit \"$UPLOAD_RC\";; esac\n",
+                ),
+                (
+                    "tar",
+                    "#!/bin/sh\n[ \"$EXTRACT_RC\" -eq 0 ] || exit \"$EXTRACT_RC\"\nprintf 'exit %s\\n' \"$INSTALL_RC\" > \"$TEST_TMP/install.sh\"\n",
+                ),
+            ] {
+                let p = bin.join(name);
+                fs::write(&p, body).unwrap();
+                fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let script = track_installer_sh(
+                "https://backend.invalid",
+                "test-attempt",
+                "report-secret",
+                render_installer_sh("https://backend.invalid", "session-secret"),
+            );
+            let p = dir.path().join("script.sh");
+            fs::write(&p, script).unwrap();
+            let output = Command::new("bash")
+                .arg(&p)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("TEST_TMP", &tmp)
+                .env("REPORTS", &reports)
+                .env("DOWNLOAD_RC", download.to_string())
+                .env("EXTRACT_RC", extract.to_string())
+                .env("INSTALL_RC", install.to_string())
+                .env("UPLOAD_RC", upload.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(expected),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let sent = fs::read_to_string(reports).unwrap();
+            assert!(
+                sent.contains(&format!("\\\"stage\\\":\\\"{stage}\\\"")),
+                "{sent}"
+            );
+            assert!(!sent.contains("session-secret"));
+            for data in sent.lines().filter_map(|line| line.strip_prefix("data = ")) {
+                let json: String = serde_json::from_str(data).unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                assert!(parsed["stage"].is_string());
+                assert_eq!(parsed.as_object().unwrap().len(), 4);
+            }
+
+            if stage == "platform" || stage == "temporary_directory" {
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(error.contains("Installation attempt test-attempt"));
+                assert!(error.contains(&format!("\"exit_code\":{expected}")));
+                assert!(!error.contains("secret"));
+            } else if expected != 0 || upload != 0 {
+                let local = fs::read_to_string(tmp.join("progress.jsonl")).unwrap();
+                assert!(
+                    local.contains(&format!("\"exit_code\":{expected}")),
+                    "{local}"
+                );
+                assert!(!local.contains("secret"));
+            }
+        }
+    }
+
+    #[test]
+    fn tracked_powershell_reports_download_extract_uac_and_child_failures() {
+        use std::process::Command;
+        let shell = if cfg!(windows) {
+            "powershell.exe"
+        } else {
+            "pwsh"
+        };
+        if Command::new(shell).arg("-Version").output().is_err() {
+            return;
+        }
+        for (mode, expected, stage) in [
+            ("download", 1, "download"),
+            ("extract", 1, "extract"),
+            ("uac", 1, "elevate"),
+            ("child", 37, "service_start"),
+            ("success", 0, "complete"),
+            ("upload", 37, "service_start"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let script = track_installer_ps1(
+                "https://backend.invalid",
+                "attempt",
+                "report-secret",
+                render_installer_ps1("https://backend.invalid", "session-secret"),
+            );
+            // The process stub exposes the same polling/exit surface without starting
+            // services. Both elevated and already-admin branches are exercised.
+            let script=script.replace("([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)", if mode=="success" {"$true"} else {"$false"});
+            let prefix = r#"
+$env:TEMP=$PSScriptRoot
+function Invoke-WebRequest {
+    param($Uri,$Method,$Headers,$Body,$OutFile,$ContentType,$TimeoutSec,[switch]$UseBasicParsing)
+    if ($Method -eq 'Post') {
+        Add-Content -LiteralPath (Join-Path $PSScriptRoot 'sent.jsonl') -Value $Body
+        if ($env:TEST_MODE -eq 'upload') { throw 'report-token-secret' }
+    } elseif ($env:TEST_MODE -eq 'download') { throw 'session-token-secret' }
+}
+function Expand-Archive { if ($env:TEST_MODE -eq 'extract') { throw 'extract-secret' } }
+function Start-Process {
+    param($FilePath,$ArgumentList,$Verb,[switch]$PassThru)
+    if ($env:TEST_MODE -eq 'uac') { throw 'uac-secret' }
+    Set-Content -LiteralPath (Join-Path $tmp 'install-stage') -Value @('placement','service_start')
+    $p=[pscustomobject]@{HasExited=$true; ExitCode=$(if ($env:TEST_MODE -eq 'success') {0} else {37})}
+    $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {}
+    return $p
+}
+"#;
+            let path = dir.path().join("script.ps1");
+            std::fs::write(&path, format!("{prefix}\n{script}")).unwrap();
+            let out = Command::new(shell)
+                .args(["-NoProfile", "-File"])
+                .arg(path)
+                .env("TEST_MODE", mode)
+                .output()
+                .unwrap();
+            assert_eq!(
+                out.status.code(),
+                Some(expected),
+                "{mode}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let sent = std::fs::read_to_string(dir.path().join("sent.jsonl")).unwrap();
+            let events = sent
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            let last = events.last().unwrap();
+            assert_eq!(last["stage"], stage, "{sent}");
+            assert_eq!(last["exit_code"], expected, "{sent}");
+            assert_eq!(
+                last["outcome"],
+                if expected == 0 { "succeeded" } else { "failed" }
+            );
+            if matches!(mode, "child" | "success" | "upload") {
+                assert!(events.iter().any(|event| event["stage"] == "placement"));
+                assert!(events.iter().any(|event| event["stage"] == "service_start"));
+            }
+            assert!(!sent.contains("secret"));
+            assert!(!String::from_utf8_lossy(&out.stderr).contains("secret"));
+        }
+    }
+
+    #[test]
+    fn tracked_powershell_parses_and_handles_failure_before_temp_creation() {
+        use std::process::Command;
+        let shell = if cfg!(windows) {
+            "powershell.exe"
+        } else {
+            "pwsh"
+        };
+        if Command::new(shell).arg("-Version").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = track_installer_ps1(
+            "https://backend.invalid",
+            "attempt",
+            "report-secret",
+            render_installer_ps1("https://backend.invalid", "session-secret"),
+        );
+        // Force an early failure and stub only the transport, with no network or UAC.
+        let script = format!(
+            "function Invoke-WebRequest {{ throw 'upload-secret' }}\nfunction New-Item {{ throw 'temporary-secret' }}\n$env:TEMP='.'\n{script}"
+        );
+        let path = dir.path().join("script.ps1");
+        std::fs::write(&path, script).unwrap();
+        let out = Command::new(shell)
+            .args(["-NoProfile", "-File"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("Installation attempt attempt"), "{text}");
+        assert!(!text.contains("secret"), "{text}");
+    }
+
     /// The six `assets/` files are copies; this is what keeps them honest.
     ///
     /// Editing `configs/agent.toml` or one of the install scripts and not the
@@ -1532,8 +1832,8 @@ mod tests {
         ));
         assert!(!out.contains("-RequireSignedCommands"));
         assert!(out.contains("exit $LASTEXITCODE"));
-        assert!(out.contains("Start-Transcript -Path (Join-Path $PSScriptRoot 'install.log')"));
-        assert!(out.contains("Stop-Transcript"));
+        assert!(out.contains("Set-Content -LiteralPath (Join-Path $PSScriptRoot 'install.log')"));
+        assert!(!out.contains("Start-Transcript"));
     }
 
     #[test]
@@ -1592,12 +1892,9 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "windows")]
-    fn install_agent_ps1_writes_install_log_when_deploy_agent_throws() {
-        // Runtime regression for the diagnosability fix: actually spawn the
-        // generated install-agent.ps1 (per CodeRabbit review on #1428)
-        // against a stub deploy-agent.ps1 that throws, and confirm the
-        // real error text lands in install.log -- the only thing that
-        // survives once the one-liner's elevated UAC console closes.
+    fn install_agent_ps1_logs_safe_outcome_when_deploy_agent_throws() {
+        // A child exception must leave a safe outcome label, never its source
+        // or potentially credential-bearing exception text.
         use std::process::Command;
 
         let dir = std::env::temp_dir().join(format!(
@@ -1633,8 +1930,8 @@ mod tests {
         let log = std::fs::read_to_string(dir.join("install.log"))
             .expect("install.log should exist even though the script failed");
         assert!(
-            log.contains("simulated deploy failure: file in use"),
-            "install.log is missing the real error text: {log}"
+            log.contains("install failed") && !log.contains("simulated deploy failure"),
+            "install.log should contain only the safe failure label: {log}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2323,21 +2620,11 @@ mod tests {
     }
 
     #[test]
-    fn install_ps1_without_a_pair_is_byte_for_byte_the_old_output() {
+    fn install_ps1_without_a_pair_uses_safe_logging() {
         let out = render_install_ps1("0.43.99", Some("tok"), None, Some("[1]"), true);
-        assert_eq!(
-            out,
-            "# Generated by kanade-backend — do not edit.\r\n\
-             # Installs kanade-agent 0.43.99 as a Windows service. Run as Administrator.\r\n\
-             $ErrorActionPreference = 'Stop'\r\n\
-             Start-Transcript -Path (Join-Path $PSScriptRoot 'install.log') -Force | Out-Null\r\n\
-             try {\r\n\
-             \x20   & (Join-Path $PSScriptRoot 'deploy-agent.ps1') -NatsToken 'tok' -CommandKeys '[1]' -RequireSignedCommands\r\n\
-             \x20   exit $LASTEXITCODE\r\n\
-             } finally {\r\n\
-             \x20   Stop-Transcript | Out-Null\r\n\
-             }\r\n"
-        );
+        assert!(!out.contains("Transcript"));
+        assert!(out.contains(" -NatsToken 'tok' -CommandKeys '[1]' -RequireSignedCommands"));
+        assert!(out.contains("'install failed'"));
     }
 
     #[test]

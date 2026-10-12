@@ -1,4 +1,16 @@
 {
+  "logs": {
+    "title": "Installation logs",
+    "description": "One-liner attempts (latest 100, retained 30 days). Success means installer completion, not agent registration. Missing reports can mean a network interruption or process termination.",
+    "select": "Select an attempt",
+    "status": {
+      "unreported": "Unreported",
+      "running": "Running",
+      "succeeded": "Installer completed",
+      "failed": "Failed",
+      "unknown": "Outcome unknown (expired)"
+    }
+  },
   "title": "Agent Install",
   "intro": "Install the kanade agent on this machine.",
   "os": {

@@ -215,6 +215,7 @@ done
 echo "==> Creating directories"
 # No `kanade` service account on macOS: the agent runs as root, so
 # everything it reads or writes is root:wheel.
+printf 'placement\n' >> "$bundle/install-stage" 2>/dev/null || true
 install -d -o root -g wheel -m 0755 /etc/kanade /var/log/kanade /usr/local/bin
 # Root-only data dir (0700), same as Linux: agent state is not for other
 # local accounts to read or tamper with.
@@ -306,6 +307,7 @@ install -o root -g wheel -m 0644 "$bundle/launchd/${label}.plist" "$plist_dst"
 echo "==> Enabling + (re)starting the agent"
 # enable BEFORE bootstrap: a label left disabled (e.g. by a manual
 # `launchctl disable`) fails to bootstrap with "Service is disabled".
+printf 'service_start\n' >> "$bundle/install-stage" 2>/dev/null || true
 launchctl enable "system/${label}"
 launchctl bootstrap system "$plist_dst"
 # RunAtLoad already started it; kickstart -k guarantees the process now

@@ -348,6 +348,7 @@ foreach ($d in @($binDir, $configDir, $dataDir, $logsDir)) {
 }
 
 Write-Host "Installing $exeName -> $exeDst"
+try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install-stage') -Value 'placement' -ErrorAction Stop } catch { }
 Copy-Item -Path $exeSrc -Destination $exeDst -Force
 
 if ($ForceConfig -or -not (Test-Path $configDst)) {
@@ -582,6 +583,7 @@ if ($LASTEXITCODE -ne 0) { throw "sc.exe failureflag failed (exit $LASTEXITCODE)
 
 if (-not $NoStart) {
     Write-Host "Starting $ServiceName"
+    try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install-stage') -Value 'service_start' -ErrorAction Stop } catch { }
     Start-Service -Name $ServiceName
     (Get-Service -Name $ServiceName).WaitForStatus('Running', '00:00:30')
 }
