@@ -23,6 +23,14 @@ bind = '0.0.0.0:8080'
 # Keep this backend behind a trusted proxy that appends the real client IP
 # to X-Forwarded-For; direct public access can spoof the rate-limit bucket.
 # WebAuthn support requires Rust 1.88 when building the backend.
+#   rp_id      bare lowercase host name the credentials are bound to (no
+#              scheme/port/path/wildcard/IP). Changing it later invalidates
+#              every registered passkey — pick the one you will keep.
+#   rp_origins exact public browser origins; https only (http://localhost for
+#              local development). Each host must be rp_id or a subdomain.
+# Passkey sign-in counts as two factors and does not ask for a TOTP code;
+# adding/removing a passkey needs the password (+ TOTP code if enabled). See
+# book/src/operations/passkeys.md.
 # [server.webauthn]
 # rp_id = 'kanade.example.com'
 # rp_origins = ['https://kanade.example.com']

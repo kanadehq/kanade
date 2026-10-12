@@ -365,4 +365,33 @@ mod tests {
             "template should render, not leak"
         );
     }
+
+    /// Empty configuration disables WebAuthn; explicit fields are preserved
+    /// verbatim for startup validation, never inferred from bind/public_url.
+    #[test]
+    fn the_webauthn_section_is_optional_and_parsed_verbatim() {
+        let off: ServerSection = toml::from_str("bind = \"0.0.0.0:8080\"").unwrap();
+        assert!(off.webauthn.rp_id.is_empty());
+        assert!(off.webauthn.rp_origins.is_empty());
+        let on: ServerSection = toml::from_str(
+            r#"
+            bind = "127.0.0.1:8080"
+            public_url = "https://kanade.example.com"
+            [webauthn]
+            rp_id = "kanade.example.com"
+            rp_origins = ["https://kanade.example.com"]
+            rp_name = "Kanade"
+            "#,
+        ).unwrap();
+        assert_eq!(on.webauthn.rp_id, "kanade.example.com");
+        assert_eq!(on.webauthn.rp_origins, ["https://kanade.example.com"]);
+        assert_eq!(on.webauthn.rp_name.as_deref(), Some("Kanade"));
+        // Partial configuration must remain partial, so startup can reject it.
+        let partial: ServerSection = toml::from_str(
+            "bind = \"x\"\n[webauthn]\nrp_id = \"a.b\"",
+        ).unwrap();
+        assert_eq!(partial.webauthn.rp_id, "a.b");
+        assert!(partial.webauthn.rp_origins.is_empty());
+    }
+
 }
