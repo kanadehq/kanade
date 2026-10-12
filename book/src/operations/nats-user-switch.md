@@ -580,11 +580,12 @@ abandoned or refused handshake; use the recorded auth errors to distinguish
 refusals. A connection closed before CONNECT may be the outer connection whose
 callback never completed. INFO delay includes broker scheduling and is not by
 itself proof of accept-queue saturation; the no-proxy control is necessary.
-`baseline`、`probe`、`connect`、`both` などの比較条件は、旧実装の
-中断動作も維持します。外側のタイムアウト後も、spawnされたprobeは
-自身の期限まで動作します。`probe-cancel` は `probe` と同じタイマーを
-使い、親futureの破棄時にworkerを中断する点だけを変えます。
-この2条件の比較で、中断処理とタイマー変更の効果を分離できます。 The generous file
+All comparison variants derived from `baseline` (`probe`, `connect`, `both`,
+`jitter`, `before`, ...) keep the old cancellation behavior: after an outer
+timeout the spawned probe keeps running until its own budget ends.
+`probe-cancel` uses the `probe` budgets and only adds aborting the worker when
+its parent future is dropped, so comparing the two separates cancellation from
+the budget change. The generous file
 limit allows those overlapping probes at the default experimental budget;
 raise it further if increasing that budget or the fleet size. Raising only the
 probe budget can consequently increase outstanding work.
@@ -595,4 +596,69 @@ when anyone fails to converge within the 120-second deadline. Always publish
 the not-converged count with the timings. After any evidence-driven fix, rerun
 cost 8 at N=50 and cost 9 at N=200 for both startup and restart on the target
 host. Measurement-only budgets are not production recovery guarantees; the
-existing resume/exit bounds and watchdog behavior remain unchanged.
+production resume/exit bounds are the ones derived above.
+
+### 中断処理を分離した探索測定（2026-10-12）
+
+環境は macOS / arm64、利用可能8コア、nats-server 2.14.3。
+GOMAXPROCS は未指定（ホストの全コア）、authorization timeout は30秒、
+各条件1回、期限120秒、releaseビルド、測定用の長い期限は60秒。
+この実行中に別のburst測定とビルドも動いていたため、CPU負荷を統制した
+因果比較ではありません。以下は探索結果であり、指定の2-vCPUホストの
+受け入れ結果や本番30秒上限の根拠には使えません。
+
+表の時刻はp95秒、台数は120秒時点の未収束数です。`NaN` は全台の
+p95を算出できない状態、`—` は起動未収束のため再起動測定を省略した状態です。
+接続数は起動時のプロキシ計数で、プロキシなし条件の0は未計測を意味します。
+
+| cost | N | 条件 | 起動 p95秒 / 未収束台数 | 再起動 p95秒 / 未収束台数 | 起動接続数 |
+|---|---|---|---|---|---|
+| 9 | 50 | baseline | 4.093 / 0 | 2.025 / 0 | 132 |
+| 9 | 50 | probe | 2.244 / 0 | 2.096 / 0 | 100 |
+| 9 | 50 | probe-cancel | 2.843 / 0 | 2.633 / 0 | 100 |
+| 9 | 50 | connect | 5.166 / 0 | 2.524 / 0 | 124 |
+| 9 | 50 | both | 3.688 / 0 | 2.740 / 0 | 100 |
+| 9 | 50 | jitter | 5.386 / 0 | 1.969 / 0 | 144 |
+| 9 | 50 | direct | 0.863 / 0 | 0.794 / 0 | 50 |
+| 9 | 50 | baseline-no-proxy | 4.983 / 0 | 2.714 / 0 | 0 |
+| 9 | 50 | direct-no-proxy | 1.948 / 0 | 1.523 / 0 | 0 |
+| 9 | 200 | baseline | 54.901 / 0 | 19.109 / 0 | 2418 |
+| 9 | 200 | probe | 25.536 / 0 | 15.007 / 0 | 1527 |
+| 9 | 200 | probe-cancel | 6.836 / 0 | 6.464 / 0 | 502 |
+| 9 | 200 | connect | 7.587 / 0 | 15.998 / 0 | 634 |
+| 9 | 200 | both | 8.671 / 0 | 13.043 / 0 | 444 |
+| 9 | 200 | jitter | 14.132 / 0 | 14.321 / 0 | 1046 |
+| 9 | 200 | direct | 3.543 / 0 | 3.915 / 0 | 200 |
+| 9 | 200 | baseline-no-proxy | 9.798 / 0 | 8.627 / 0 | 0 |
+| 9 | 200 | direct-no-proxy | 4.325 / 0 | 4.764 / 0 | 0 |
+| 10 | 50 | baseline | 5.247 / 0 | 3.450 / 0 | 136 |
+| 10 | 50 | probe | 8.410 / 0 | 6.750 / 0 | 202 |
+| 10 | 50 | probe-cancel | 4.176 / 0 | 4.070 / 0 | 100 |
+| 10 | 50 | connect | 4.051 / 0 | 5.141 / 0 | 110 |
+| 10 | 50 | both | 3.142 / 0 | 3.479 / 0 | 100 |
+| 10 | 50 | jitter | 3.079 / 0 | 3.200 / 0 | 100 |
+| 10 | 50 | direct | 1.730 / 0 | 1.597 / 0 | 50 |
+| 10 | 50 | baseline-no-proxy | 3.958 / 0 | 4.485 / 0 | 0 |
+| 10 | 50 | direct-no-proxy | 1.629 / 0 | 1.899 / 0 | 0 |
+| 10 | 200 | baseline | 91.131 / 0 | NaN / 104 | 5154 |
+| 10 | 200 | probe | NaN / 199 | — | 5233 |
+| 10 | 200 | probe-cancel | NaN / 199 | — | 6762 |
+| 10 | 200 | connect | NaN / 155 | — | 4853 |
+| 10 | 200 | both | 21.558 / 0 | 21.655 / 0 | 568 |
+| 10 | 200 | jitter | NaN / 139 | — | 6767 |
+| 10 | 200 | direct | 12.037 / 0 | 7.590 / 0 | 200 |
+| 10 | 200 | baseline-no-proxy | 52.151 / 0 | 34.544 / 0 | 0 |
+| 10 | 200 | direct-no-proxy | 5.792 / 0 | 8.592 / 0 | 0 |
+
+cost 10・N=200では、旧設定の起動接続数5,154に対して両タイマー延長は568、
+p95は91.131秒から21.558秒でした。probe単独、connect単独、jitter単独、
+probe単独にworker中断を加えた条件はいずれも未収束を残しました。
+短いクライアント期限が再試行を増幅するという仮説と整合します。
+二重認証を外した条件は200接続・p95 12.037秒で、二重認証にも負担が
+あります。ただしこの条件はtoken切り替え保証を持ちません。
+
+旧設定でもプロキシを外すとp95が52.151秒まで短くなりました。
+INFO遅延はスケジューリングも含むため、accept queueが支配的とも、
+影響しないとも断定できません。同時負荷と反復不足があるので、
+支配要因の確定、30秒上限、probe移動の採否には統制した再測定が必要です。
+この探索結果を理由に本番動作を追加変更していません。
