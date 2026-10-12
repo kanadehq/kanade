@@ -12,14 +12,7 @@ authors.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
 
-# The Client App targets Windows endpoints (SPEC §2.1's
-# "ログオン時自動起動 (HKCU…Run)" + the Named Pipe transport in
-# SPEC §2.12.1). Tauri's runtime and the KLP Named Pipe client
-# are both Windows-bound here, so we cfg-gate every Tauri-stack
-# dependency to `target_os = "windows"`. Linux/macOS CI builds
-# kanade-client as an empty shim that prints + exits (see
-# src/main.rs). Linux UDS support lands in a follow-up PR and
-# will widen the gate.
+# The GUI remains Windows-only; the KLP library is cross-platform.
 
 # `custom-protocol` is a DEFAULT feature rather than pinned directly on
 # the `tauri` dependency, so it can be turned off on purpose.
@@ -52,6 +45,11 @@ anyhow = { workspace = true }
 # platform (the Tauri wiring that uses it is Windows-only).
 serde      = { workspace = true }
 serde_json = { workspace = true }
+
+# Tokio, tracing, and UUID are shared by the cross-platform KLP library.
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Tauri 2.x runtime.
@@ -91,13 +89,7 @@ windows = { version = "0.62.2", features = [
     "UI_Notifications",
     "Data_Xml_Dom",
 ] }
-# Tokio runtime for the KLP pipe I/O. Reuse the workspace's
-# pin so the wire types stay in lockstep with the agent side.
-tokio    = { workspace = true }
-tracing  = { workspace = true }
 tracing-subscriber = { workspace = true }
-# UUID v7 for KLP request ids (SPEC §2.12.3 "UUID v7 推奨").
-uuid    = { workspace = true }
 chrono  = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]

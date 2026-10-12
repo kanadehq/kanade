@@ -1825,7 +1825,7 @@ Client App ⇄ Agent の IPC プロトコル。OS の認証機構をそのまま
 
 **OS 間の共通性**: Framing (§2.12.2)、JSON-RPC (§2.12.3)、Method 名前空間 (§2.12.5)、Handshake (§2.12.6)、Error Model (§2.12.9) は **OS 非依存で Windows / Linux / macOS 共通**。OS ごとに異なるのは Transport の実体 (§2.12.1) と、接続元 identity の取得方法 (§2.12.4) のみ。
 
-**実装状況**: Agent 側は Windows (Named Pipe)・Linux・macOS (UDS) とも実装済み (`crates/kanade-agent/src/klp`)。Unix のソケットパスは環境変数 `KANADE_KLP_SOCKET_PATH` で上書きできる (テスト・開発用)。Client App 側の Linux / macOS 対応は後続。
+**実装状況**: Agent 側は Windows (Named Pipe)・Linux・macOS (UDS) とも実装済み (`crates/kanade-agent/src/klp`)。Unix のソケットパスは環境変数 `KANADE_KLP_SOCKET_PATH` で上書きできる (テスト・開発用)。Client の KLP ライブラリも 3 OS 対応済み (`crates/kanade-client/src/klp_client.rs`)。Tauri GUI の Linux / macOS 対応は後続。
 
 ### 2.12.1 Transport
 

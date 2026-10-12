@@ -533,7 +533,7 @@ fn spawn_notification_forwarder(client: &KlpClient, handle: tauri::AppHandle) {
 
 /// Keep a live KLP connection in `slot`, reconnecting whenever the
 /// agent's pipe goes away (#468 — the agent self-updates, so service
-/// restarts are routine). Loops forever:
+/// restarts are routine). Stops only on permanent admission rejection:
 ///   connect (retrying while the agent is down) → publish the client +
 ///   a `klp-connected` event → forward notifications → block on
 ///   `wait_closed` → on close, clear the slot + emit `klp-disconnected`
@@ -544,13 +544,14 @@ async fn supervise_connection(slot: Arc<Mutex<Option<KlpClient>>>, handle: tauri
         // agent service is up, or it may be mid-restart. A one-shot
         // attempt would leave the slot `None` forever (the WebView's
         // `get_handshake` retry only reads the cache).
-        let client = loop {
-            match KlpClient::connect().await {
-                Ok(c) => break c,
-                Err(e) => {
-                    warn!(error = %e, "KLP connect failed; retrying in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let client = match KlpClient::connect_with_retry().await {
+            Ok(client) => client,
+            Err(error) => {
+                warn!(%error, "KLP authorization rejected; reconnect stopped");
+                if let Err(e) = handle.emit("klp-rejected", error.to_string()) {
+                    warn!(error = %e, "klp-rejected emit failed");
                 }
+                return;
             }
         };
         info!(
