@@ -141,6 +141,8 @@ const PROTOCOL_SCHEME_PREFIX: &str = "kanade-client://";
 /// while the `invoke` commands hold theirs.
 pub struct AppState {
     klp: Arc<Mutex<Option<KlpClient>>>,
+    /// Retained so a WebView loaded after admission failure can read the reason.
+    rejection: Arc<Mutex<Option<String>>>,
     /// `Some(id)` when the app was launched by the agent's emergency
     /// fallback (`--show-notification <id>`): the WebView reads it on
     /// load to toast that notification and start hidden, instead of the
@@ -173,6 +175,12 @@ async fn get_handshake(state: State<'_, AppState>) -> Result<HandshakeResult, St
         Some(client) => Ok((*client.handshake()).clone()),
         None => Err("agent not connected (pipe unavailable on startup)".into()),
     }
+}
+
+/// Permanent admission failure, including one emitted before the WebView loaded.
+#[tauri::command]
+async fn get_connection_rejection(state: State<'_, AppState>) -> Option<String> {
+    state.rejection.lock().await.clone()
 }
 
 #[tauri::command]
@@ -538,7 +546,11 @@ fn spawn_notification_forwarder(client: &KlpClient, handle: tauri::AppHandle) {
 ///   a `klp-connected` event → forward notifications → block on
 ///   `wait_closed` → on close, clear the slot + emit `klp-disconnected`
 ///   → reconnect.
-async fn supervise_connection(slot: Arc<Mutex<Option<KlpClient>>>, handle: tauri::AppHandle) {
+async fn supervise_connection(
+    slot: Arc<Mutex<Option<KlpClient>>>,
+    rejection: Arc<Mutex<Option<String>>>,
+    handle: tauri::AppHandle,
+) {
     loop {
         // Connect, retrying — the user may launch the client before the
         // agent service is up, or it may be mid-restart. A one-shot
@@ -547,8 +559,10 @@ async fn supervise_connection(slot: Arc<Mutex<Option<KlpClient>>>, handle: tauri
         let client = match KlpClient::connect_with_retry().await {
             Ok(client) => client,
             Err(error) => {
+                let reason = error.to_string();
+                *rejection.lock().await = Some(reason.clone());
                 warn!(%error, "KLP authorization rejected; reconnect stopped");
-                if let Err(e) = handle.emit("klp-rejected", error.to_string()) {
+                if let Err(e) = handle.emit("klp-rejected", reason) {
                     warn!(error = %e, "klp-rejected emit failed");
                 }
                 return;
@@ -856,10 +870,12 @@ pub fn run() {
         launch_notification.is_some() || has_resurface_flag(std::env::args());
     let state = AppState {
         klp: Arc::new(Mutex::new(None)),
+        rejection: Arc::new(Mutex::new(None)),
         launch_notification,
         launch_focus,
     };
     let klp_slot = state.klp.clone();
+    let rejection = state.rejection.clone();
 
     tauri::Builder::default()
         // Single-instance guard (#624) — MUST be the first plugin. A
@@ -877,6 +893,7 @@ pub fn run() {
         .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             get_handshake,
+            get_connection_rejection,
             ping_agent,
             state_snapshot,
             jobs_list,
@@ -904,6 +921,7 @@ pub fn run() {
             // (the agent self-updates, so restarts are routine) — #468.
             tauri::async_runtime::spawn(supervise_connection(
                 klp_slot.clone(),
+                rejection.clone(),
                 app.handle().clone(),
             ));
             // The window starts hidden (tauri.conf `visible: false`). On a

@@ -1755,22 +1755,25 @@ const $ = (id: string): HTMLElement => {
 
 // ---- Connection status dot --------------------------------------------
 
-type ConnState = "connected" | "connecting" | "disconnected";
+type ConnState = "connected" | "connecting" | "disconnected" | "rejected";
 
-function setConn(state: ConnState): void {
+function setConn(state: ConnState, reason?: string): void {
   const el = $("conn");
   el.classList.remove(
     "conn-connected",
     "conn-connecting",
     "conn-disconnected",
+    "conn-rejected",
   );
   el.classList.add(`conn-${state}`);
   const label =
-    state === "connected"
-      ? "接続中"
-      : state === "disconnected"
-        ? "再接続中…"
-        : "接続待ち";
+    state === "rejected"
+      ? `接続が拒否されました: ${reason ?? "認可されていません"}`
+      : state === "connected"
+        ? "接続中"
+        : state === "disconnected"
+          ? "再接続中…"
+          : "接続待ち";
   const labelEl = el.querySelector(".conn-label");
   if (labelEl) labelEl.textContent = label;
 }
@@ -1989,6 +1992,19 @@ function renderCheck(c: Check): string {
 // second concurrent retry loop (Gemini #636).
 let connectTimeout: number | undefined;
 
+// Cancel UI polling as well as displaying the retained admission failure.
+function onRejected(reason: string): void {
+  if (connectTimeout !== undefined) {
+    window.clearTimeout(connectTimeout);
+    connectTimeout = undefined;
+  }
+  if (healthTimer !== undefined) {
+    window.clearInterval(healthTimer);
+    healthTimer = undefined;
+  }
+  setConn("rejected", reason);
+}
+
 // Built-in fallback product name shown until (and when) the agent
 // reports no operator-configured `client_display_name`. The Rust source
 // of truth is `kanade_shared::DEFAULT_CLIENT_DISPLAY_NAME` (aliased by
@@ -2026,6 +2042,14 @@ async function onConnected() {
     const hs = await invoke<Handshake>("get_handshake");
     applyDisplayName(hs?.client_display_name ?? null);
   } catch {
+    // Events sent before WebView startup are lost; consult the retained state.
+    const reason = await invoke<string | null>("get_connection_rejection").catch(
+      () => null,
+    );
+    if (reason !== null) {
+      onRejected(reason);
+      return;
+    }
     // Pipe not ready yet — the supervisor retries; show "connecting".
     setConn("connecting");
     connectTimeout = window.setTimeout(onConnected, 2000);
@@ -2336,6 +2360,9 @@ window.addEventListener("DOMContentLoaded", () => {
     jobsLoaded = false;
     notifSubscribed = false;
     void onConnected();
+  });
+  void listen<string>("klp-rejected", (event) => {
+    onRejected(event.payload);
   });
   void listen("klp-disconnected", () => {
     if (healthTimer !== undefined) {

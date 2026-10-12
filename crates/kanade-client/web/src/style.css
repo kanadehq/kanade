@@ -172,6 +172,11 @@ body {
   box-shadow: 0 0 0 3px rgba(201, 162, 39, 0.18);
 }
 
+.conn-rejected .conn-dot {
+  background: #c64141;
+  box-shadow: 0 0 0 3px rgba(198, 65, 65, 0.18);
+}
+
 .conn-disconnected .conn-dot {
   background: #c64141;
   box-shadow: 0 0 0 3px rgba(198, 65, 65, 0.18);
