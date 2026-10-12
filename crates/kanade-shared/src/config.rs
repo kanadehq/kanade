@@ -388,7 +388,9 @@ mod tests {
         assert_eq!(on.webauthn.rp_name.as_deref(), Some("Kanade"));
         // Partial configuration must remain partial, so startup can reject it.
         let partial: ServerSection = toml::from_str(
-            "bind = \"x\"\n[webauthn]\nrp_id = \"a.b\"",
+            r#"bind = "x"
+            [webauthn]
+            rp_id = "a.b""#,
         ).unwrap();
         assert_eq!(partial.webauthn.rp_id, "a.b");
         assert!(partial.webauthn.rp_origins.is_empty());

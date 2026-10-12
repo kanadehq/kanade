@@ -163,6 +163,11 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   https://kanade.example.com/api/accounts/alice/passkeys
 ```
 
+Clearing all passkeys also invalidates every pending enrollment for the account,
+including enrollment completions racing the reset. A new enrollment must start
+after the reset and pass the usual password/TOTP checks. Enrollment completion
+rechecks disabled and forced-password-change restrictions when storing the key.
+
 An admin password reset (reset link or `must_change_pw`) does **not** remove
 passkeys — if the reset follows a suspected compromise, clear the passkeys too.
 Deleting an account deletes its passkeys with it, so a later account created
