@@ -1609,6 +1609,64 @@ mod tests {
     }
 
     #[test]
+    fn install_error_kinds_do_not_retain_powershell_file_metadata() {
+        use std::{fs, process::Command};
+        let shell = if cfg!(windows) {
+            "powershell.exe"
+        } else {
+            "pwsh"
+        };
+        if Command::new(shell).arg("-Version").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let reporter = include_str!("../../assets/install-report.ps1")
+            .replace("@@KEY@@", "")
+            .replace("@@URL@@", "'https://backend.invalid'")
+            .replace("@@ID@@", "local-test");
+        let verify = r#"
+$tmp = $PSScriptRoot
+foreach ($expected in @('permission_denied','file_not_found','invalid_archive','io_error','service_error','elevation_cancelled','http_error','command_failed')) {
+    Set-Content -LiteralPath (Join-Path $tmp 'install-error-kind') -Value $expected
+    Read-InstallErrorKind
+    if ($script:errorKind -ne $expected) { throw 'Diagnostic classification changed' }
+    if ($script:errorKind.PSObject.Properties['PSPath'] -or $script:errorKind.PSObject.Properties['ReadCount']) {
+        throw 'Diagnostic classification retained file metadata'
+    }
+    Report-Install failed 1
+}
+$script:errorKind = 'command_failed'
+Set-Content -LiteralPath (Join-Path $tmp 'install-error-kind') -Value 'credential-secret'
+Read-InstallErrorKind
+if ($script:errorKind -ne 'command_failed') { throw 'Unexpected classification accepted' }
+"#;
+        let path = dir.path().join("verify.ps1");
+        fs::write(
+            &path,
+            format!("$ErrorActionPreference = 'Stop'\n{reporter}\n{verify}"),
+        )
+        .unwrap();
+        let out = Command::new(shell)
+            .args(["-NoProfile", "-File"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let records = fs::read_to_string(dir.path().join("progress.jsonl")).unwrap();
+        for line in records.lines() {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(event["error_kind"].is_string());
+        }
+        assert!(!records.contains("PSPath"));
+        assert!(!records.contains("ReadCount"));
+        assert!(!records.contains("secret"));
+    }
+
+    #[test]
     fn tracked_powershell_reports_download_extract_uac_and_child_failures() {
         use std::process::Command;
         let shell = if cfg!(windows) {

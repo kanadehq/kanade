@@ -48,8 +48,13 @@ function Wait-Install($process) {
 function Read-InstallErrorKind {
     try {
         $kind = Get-Content -LiteralPath (Join-Path $tmp 'install-error-kind') -Tail 1 -ErrorAction Stop
-        if ($kind -in @('permission_denied','file_not_found','invalid_archive','io_error','service_error','elevation_cancelled','http_error','command_failed')) {
-            $script:errorKind = $kind
+        foreach ($allowedKind in @('permission_denied','file_not_found','invalid_archive','io_error','service_error','elevation_cancelled','http_error','command_failed')) {
+            if ($kind -eq $allowedKind) {
+                # Get-Content strings carry provider metadata. Windows PowerShell
+                # serializes it, so retain only the matching literal from this list.
+                $script:errorKind = $allowedKind
+                break
+            }
         }
     } catch { }
 }
