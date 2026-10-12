@@ -82,22 +82,62 @@ impl std::fmt::Display for ConnectionRejected {
 
 impl std::error::Error for ConnectionRejected {}
 
+/// Why opening a KLP connection or completing its handshake failed.
+#[derive(Debug)]
+pub enum ConnectError {
+    Rejected(ConnectionRejected),
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(rejection) => rejection.fmt(f),
+            Self::Failed(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Rejected(rejection) => rejection,
+            Self::Failed(error) => error.as_ref(),
+        })
+    }
+}
+
+impl From<anyhow::Error> for ConnectError {
+    fn from(error: anyhow::Error) -> Self {
+        match error.downcast::<ConnectionRejected>() {
+            Ok(rejection) => Self::Rejected(rejection),
+            Err(error) => Self::Failed(error),
+        }
+    }
+}
+
+impl From<ConnectionRejected> for ConnectError {
+    fn from(rejection: ConnectionRejected) -> Self {
+        Self::Rejected(rejection)
+    }
+}
+
 /// Retry transient connect errors with the SPEC §2.12.10 backoff.
 /// Returns permanent rejection to the supervisor instead of looping forever.
-async fn retry_connect<F, Fut>(mut connect: F, initial: std::time::Duration) -> Result<KlpClient>
+async fn retry_connect<F, Fut>(
+    mut connect: F,
+    initial: std::time::Duration,
+) -> std::result::Result<KlpClient, ConnectError>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<KlpClient>>,
+    Fut: std::future::Future<Output = std::result::Result<KlpClient, ConnectError>>,
 {
     let mut delay = initial;
     loop {
         match connect().await {
             Ok(client) => return Ok(client),
             Err(error) => {
-                if error
-                    .downcast_ref::<ConnectionRejected>()
-                    .is_some_and(|r| !r.retryable)
-                {
+                if matches!(&error, ConnectError::Rejected(r) if !r.retryable) {
                     return Err(error);
                 }
                 warn!(%error, ?delay, "KLP connect failed; backing off");
@@ -187,7 +227,7 @@ impl KlpClient {
     /// and spawn the reader task. Bubbles up the underlying error so
     /// the Tauri `setup` callback can surface a clear "agent not
     /// running" banner if the pipe isn't there yet.
-    pub async fn connect() -> Result<Self> {
+    pub async fn connect() -> std::result::Result<Self, ConnectError> {
         #[cfg(target_os = "windows")]
         {
             use kanade_shared::ipc::transport::PIPE_NAME;
@@ -203,23 +243,27 @@ impl KlpClient {
 
     /// Connect to an explicit socket endpoint (tests / development).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub async fn connect_to(path: impl AsRef<std::path::Path>) -> Result<Self> {
+    pub async fn connect_to(
+        path: impl AsRef<std::path::Path>,
+    ) -> std::result::Result<Self, ConnectError> {
         let pipe = KlpStream::connect(path.as_ref())
             .await
             .context("open KLP socket")?;
         Self::from_stream(pipe).await
     }
 
-    pub async fn connect_with_retry() -> Result<Self> {
+    pub async fn connect_with_retry() -> std::result::Result<Self, ConnectError> {
         retry_connect(Self::connect, std::time::Duration::from_secs(1)).await
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub async fn connect_to_with_retry(path: &std::path::Path) -> Result<Self> {
+    pub async fn connect_to_with_retry(
+        path: &std::path::Path,
+    ) -> std::result::Result<Self, ConnectError> {
         retry_connect(|| Self::connect_to(path), std::time::Duration::from_secs(1)).await
     }
 
-    async fn from_stream(mut pipe: KlpStream) -> Result<Self> {
+    async fn from_stream(mut pipe: KlpStream) -> std::result::Result<Self, ConnectError> {
         // Handshake inline on the un-split pipe — it's the one
         // strictly-ordered request/response exchange (must complete
         // before any push can arrive), so the reader task only takes
@@ -778,7 +822,9 @@ mod tests {
                         }
                         .into())
                     } else {
-                        bail!("temporarily unavailable")
+                        Err(ConnectError::Failed(anyhow::anyhow!(
+                            "temporarily unavailable"
+                        )))
                     }
                 }
             },
@@ -1015,14 +1061,26 @@ mod unix_tests {
         let response = async {
             let req = request(&mut server).await;
             assert_eq!(req["method"], "test.echo");
+            // Interleave a push while this request is still awaiting its reply.
+            send(&mut server, serde_json::json!({"jsonrpc":"2.0", "method":"jobs.progress", "params":{"run_id":"in-flight", "status":"running"}})).await;
             send(
                 &mut server,
                 serde_json::json!({"jsonrpc":"2.0", "id":req["id"], "result":42}),
             )
             .await;
         };
-        let (result, ()) = tokio::join!(client.request::<_, u32>("test.echo", &()), response);
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(client.request::<_, u32>("test.echo", &()), response)
+        })
+        .await
+        .expect("interleaved notification must not stall the response");
         assert_eq!(result.unwrap(), 42);
+        let push = tokio::time::timeout(Duration::from_secs(2), pushes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(push.method, "jobs.progress");
+        assert_eq!(push.params["run_id"], "in-flight");
         // A regular Unauthorized response does not change connect policy.
         let response = async {
             let req = request(&mut server).await;
@@ -1088,10 +1146,25 @@ mod unix_tests {
             );
             let error = result.err().expect("must stop");
             assert!(error.to_string().contains("test admission rejected"));
-            let rejected = error.downcast_ref::<ConnectionRejected>().unwrap();
+            let ConnectError::Rejected(rejected) = error else {
+                panic!("expected an authorization rejection");
+            };
             assert!(!rejected.retryable);
             assert_eq!(rejected.detail, "test admission rejected");
         }
+    }
+
+    #[tokio::test]
+    async fn missing_socket_is_a_connection_failure() {
+        let dir = SocketDir::new();
+        let error = KlpClient::connect_to(dir.socket()).await.err().unwrap();
+        let ConnectError::Failed(error) = error else {
+            panic!("missing socket must be a connection failure");
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[tokio::test]
