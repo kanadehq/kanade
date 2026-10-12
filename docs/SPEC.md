@@ -1787,7 +1787,7 @@ C:\ProgramData\Mgmt\logs\
 
 ### 2.11.6 Client App 配置 (Windows)
 
-本節の配置・配布・自己アップデートは **Windows 専用**。Linux / macOS は §2.11.7 を参照 (未設計)。
+本節の配置・配布・自己アップデートは **Windows 専用**。Linux / macOS は §2.11.7 の設計 proposal を参照 (未実装)。
 
 ```
 C:\Program Files\Kanade\
@@ -1810,14 +1810,175 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 **自己アップデート**: Tauri の updater は使わず、**Agent の self-update と同じ Object Store 経路** (`client_releases` bucket) で配布する。Client は KLP で「自分のバージョン更新が必要か」 を Agent に問い合わせ、Agent (`LocalSystem`) が新バイナリを Object Store からダウンロード → 起動中の `kanade-client.exe` を停止 → `C:\Program Files\Kanade\` 配下を swap → 再起動。Swap 自体は `Program Files` への書き込みで特権が必要だが、これは **Agent が自身の権限で実施するため、エンドユーザーへの UAC 昇格要求は発生しない**。
 
-### 2.11.7 Client App 配置 (Linux / macOS) — 後続段階で決定
+### 2.11.7 Client App 配置 (Linux / macOS) — 設計決定記録
 
-KLP の仕様 (§2.12) は 3 OS 分を先に定める。一方で Client App 自体の Linux / macOS 配置は**後続段階**であり、本節では決めるべき項目を列挙するだけで設計はしない。
+本節は実装前に owner が確認する **proposal（提案）** の決定記録。以下の配置・GUI 起動・通知・更新は未実装であり、承認済みの決定とは扱わない。owner は各 proposal の採否、特に対応 OS、全ユーザーへのログイン起動、署名費用、Linux のパッケージ管理との責任分担を確認する。実装タスクは採用した案と受入条件を引き継ぐ。KLP transport / identity の確定事項 (§2.12、§2.12.4.4) は変更しない。
 
-- インストール先 (バイナリ・アプリバンドルの配置、権限、署名 / notarization の要否)
-- ユーザーごとの config / log / cache のパス (XDG Base Directory / `~/Library/...` のどちらに置くか)
-- 自動起動 (macOS: LaunchAgent、Linux: XDG autostart) と、ユーザー初回ログイン時の展開方法 (Windows の ActiveSetup 相当)
-- 自己アップデートの swap 手順 (Agent は root で動くため特権昇格は不要の見込みだが、起動中バイナリの停止・差し替え・再起動の手順は未定)
+#### 2.11.7.1 現状と Windows 仕様との差
+
+指定実装を基準にした現状は以下。§2.10.4 / §2.11.6 の MSI / ActiveSetup / 更新経路は設計であり、Unix へそのまま移植できる完成品ではない。
+
+- `crates/kanade-client/src/main.rs` / `Cargo.toml` / `build.rs` は GUI、Tauri、notification / single-instance plugin、build helper を Windows に限定。Unix の executable はメッセージを出して exit(1) する shim。KLP ライブラリと `window_size.rs` の純粋ロジックは OS 共通である。
+- `src/app.rs` は通常起動でウィンドウ表示、`--show-notification <id>` / `--resurface` で非表示起動、protocol クリックで表示・通知へ focus。single-instance が二回目の argv を転送する。tray 作成、`--tray` 判定、HKCU Run 登録はまだ無い。サイズは Tauri `app_local_data_dir()/window-size.json` に保存し、close は保存するだけで hide-to-tray にしていない。
+- 通常通知は Tauri notification plugin、緊急通知は WinRT の `scenario=reminder` と protocol activation。AppUserModelID は Tauri identifier と Agent の Start Menu shortcut の `System.AppUserModel.ID` に一致させる。これは Windows 固有である。
+- 現行の `configs/jobs/installers/scripts/install-kanade-client.ps1` は app-packages HTTP 経由で exe を取得し、operator 指定 SHA-256 を検証して Program Files に配置、HKLM に `kanade-client://` を登録する。Start Menu shortcut / 表示名の同期は `client_shortcut.rs` が担当する。MSI / ActiveSetup と §2.11.6 の HKCU Run 展開を実装済みとはしない。
+- §2.11.6 のユーザー別 log は仕様上の配置。現行 `main.rs` は `C:\ProgramData\Kanade\logs\client.log` に書く。以下の表は **Windows 仕様との対応** であって、現行の log / Tauri path をそのまま写した表ではない。
+- `session_supervisor.rs` は WTS の active console に idle 計測用 `--session-agent` を維持する Windows 専用機構。緊急通知 fallback は別の `klp/emergency_notify.rs` が WTS 経由で Client を起動し、10 秒 cooldown と logon / unlock 時の `--resurface` を持つ。Unix の通知配送に idle 計測まで同時移植する必要はない。
+- `self_update.rs` が実装するのは `agent_releases` の Agent バイナリ検証・swap・exit(64)。`client_releases` は本 SPEC の予定契約で、現行 crates に bucket 定義・publish / watch / Client 更新処理は無い。既存の app-packages 配布を同 bucket の実装と混同しない。
+- macOS の `deploy/macos/README.md` / `setup-agent.sh` は Apple Silicon の Agent を `/usr/local/bin/kanade-agent`、root LaunchDaemon を `/Library/LaunchDaemons/com.kanade.agent.plist` に配置する。現行 Agent の self-signed identity / quarantine 除去は GUI 配布の信頼モデルに流用しない。Linux の `setup-agent.sh` / systemd unit も root Agent を `/usr/local/bin` に配置する tarball 配布であり、Client package は無い。Linux README の旧 arch 記述より現行 release matrix を基準にする。
+
+#### 2.11.7.2 配布・インストールの所有者
+
+**proposal（提案）**: Client は任意導入の **per-machine、Agent と別成果物**。初回は管理者 / 端末管理システムが導入し、以後は root Agent が管理者の rollout 指示で OS installer を実行する。Client はユーザー権限で動き、NATS credentials を持たない。Agent-only / headless 端末に GUI dependency を追加しない。Client package は Agent の存在を確認するが、Agent 自体の tarball 配布・self-update を package に取り込まない。
+
+| OS | proposal の配布・配置 | ファイルの所有者 |
+|---|---|---|
+| macOS | 署名済み `Kanade Client.app` を署名済み `.pkg` で `/Applications/Kanade Client.app` に配置。固定 bundle identifier は現行 Tauri identifier を維持。Client の LaunchAgent は `/Library/LaunchAgents/com.kanade.client.plist` (通知用 session helper は別 plist) | root:wheel の bundle / plist、installer receipt。ユーザーによる bundle 内変更は不可 |
+| Linux | distro / arch 別 `.deb` / `.rpm`。executable は `/usr/bin/kanade-client`、asset は `/usr/share/kanade-client/`、application entry は `/usr/share/applications/kanade-client.desktop`。user unit と XDG autostart entry も package 所有 | dpkg / RPM database。Agent は更新実行者であって `/usr/bin` を直接 swap しない |
+
+**代替案と却下理由**: Agent 同梱の単一 bundle は headless 導入に WebView / desktop 依存を持ち込むため採らない。`~/Applications` / `~/.local/bin` の per-user install はユーザー単位の重複更新と root Agent の管理対象識別が増えるため初期対象外。`/opt` の tarball / 生ファイル swap は運用が軽いが、署名 bundle、依存解決、package database、アンインストールの一貫性を優先して採らない。AppImage は試用には便利でも FUSE / desktop 統合 / 更新所有者が別になるため初期の管理対象外。Flatpak / Snap は sandbox と KLP socket / Agent 特権更新の契約を増やすため別検討。
+
+**受入条件**: Agent-only install では GUI library を要求しない。新規・既存ユーザーがアプリ一覧から起動でき、uninstall は管理対象 bundle / package と起動登録だけを除去する。ユーザーデータは保持し、削除は別の明示操作とする。
+
+#### 2.11.7.3 ユーザー別 config / log / cache
+
+**proposal（提案）**: Agent の `/etc/kanade` / `/var/lib/kanade-agent` / `/var/log/kanade` と Client データを分離する。Linux は絶対パスの XDG 変数を尊重し、未設定・空・相対パスは表の既定値へ戻す。home は対象ユーザーの account 情報から解決し、root Agent の HOME を継承しない。
+
+| 用途 | Windows 仕様 (§2.11.6) | Linux proposal (XDG 既定値) | macOS proposal |
+|---|---|---|---|
+| 設定 | `%APPDATA%/Kanade/client.toml` | `$XDG_CONFIG_HOME/kanade-client/client.toml` (`~/.config/...`) | `~/Library/Application Support/Kanade/Client/client.toml` |
+| log | `%LOCALAPPDATA%/Kanade/logs/client.log` | `$XDG_STATE_HOME/kanade-client/logs/client.log` (`~/.local/state/...`) | `~/Library/Logs/Kanade/Client/client.log` |
+| cache / WebView data | `%LOCALAPPDATA%/Kanade/cache/` | `$XDG_CACHE_HOME/kanade-client/` (`~/.cache/...`) | `~/Library/Caches/Kanade/Client/` |
+| 永続 UI state | 現行は Tauri app-local data の `window-size.json` | `$XDG_STATE_HOME/kanade-client/window-size.json` | `~/Library/Application Support/Kanade/Client/window-size.json` |
+
+Client が自身の UID で directory 0700 / file 0600 を作る。log は日次 rotation、7 日保持を proposal とし、他ユーザーの通知本文を共有 log に混ぜない。cache 消失は許容し、既読状態は Agent 側を source of truth として `notifications.list` から復元する。window-size は cache clear で消さない。WebView の実保存先もこの policy に合わせる (Tauri の path resolver 任せで別の場所へ散在させない)。
+
+**代替案と却下理由**: Agent と同じ共有 log はアクセス権とユーザー分離が合わない。全データを Tauri identifier 配下に任せる案は簡単だが、config / state / cache を分ける運用要件を満たさない。サイズを cache に置く案は清掃のたびに UX が変わるため採らない。Windows 既存パスの是正は別タスクであり、本節は移行済みとはしない。
+
+**受入条件**: XDG override・非 ASCII home・書込不能・壊れた state・cache 削除でも起動できる。二 UID の設定・log・既読表示が混ざらない。保存失敗は log に記録し GUI を停止しない。
+
+#### 2.11.7.4 ログイン起動と GUI session 境界
+
+**proposal（提案）**: default は GUI login 時に `--tray` で非表示起動。通常の手動起動と deep link は表示する。既存 / 新規ユーザーに machine-wide 登録が効くようにし、各 home を root で巡回・改変する ActiveSetup 風処理は作らない。ユーザーが OS のログイン項目を無効化した状態を更新で上書きしない。明示 Quit はその session で常駐を止めるが、緊急通知の fallback 起動は許可する。
+
+- **macOS proposal**: package 所有の LaunchAgent に `LimitLoadToSessionType=Aqua`、`RunAtLoad=true`、固定 `Contents/MacOS/kanade-client --tray` を設定。LaunchDaemon から GUI を起動しない。`KeepAlive` は付けず、Quit 後の即再起動を避ける。既存 login session は管理対象 plist を `gui/<uid>` に bootstrap、未ログイン user は次回 Aqua login でロードする。通知用の軽量 session helper は別の `/Library/LaunchAgents/com.kanade.client-session.plist` から Aqua 内で起動し、Client の Quit と独立して login / lock 状態を監視する。helper の再起動は backoff 付きで、UI を起動する根拠にはしない。アンインストール時はこの二つの管理対象 job のみ bootout。
+- **Linux proposal**: `/etc/xdg/autostart/kanade-client.desktop` を GUI からの入口とし、root 所有の session launcher が確認した環境で systemd user の `kanade-client.service` (`ExecStart=/usr/bin/kanade-client --tray`) を start。unit は `PartOf=graphical-session.target`、`Restart=no` とし、default.target に enable しない。session launcher は GUI target を管理する対応 desktop でのみ使い、session launcher は軽量 helper として GUI session 内に留まり、Client が Quit しても session 状態を登録・監視する。logout で helper / Client と登録環境を破棄する。systemd の XDG generator を使う desktop でも二つの Client service を作らず入口を一本化する。[systemd の desktop 統合](https://github.com/systemd/systemd/blob/main/docs/DESKTOP_ENVIRONMENTS.md) に従って対象 desktop ごとに検証する。
+
+**代替案と却下理由**: macOS Login Items / SMAppService は OS の統合 UI に利点があるが、初期案では machine-wide package と Agent の session 起動を同じ plist で管理する。Linux の XDG entry から Client を直接常駐させる案は単純だが、停止・更新・GUI 環境の寿命を unit に揃えるため採らない。systemd user manager の存在、lingering、SSH login、`DISPLAY=:0` の推測は GUI 在席の証拠にならない。systemd / logind の無い desktop は初期対応外 (手動起動と履歴閲覧は可能)。
+
+**受入条件**: login ではウィンドウが割り込まず、Quit 後に再起動 loop が無い。GUI logout / SSH-only / lingering では Client を起動しない。自動起動を無効化してもアプリ一覧から起動できる。
+
+#### 2.11.7.5 緊急通知を正しいユーザーへ配送する
+
+**proposal（提案）**: 通知用の `GuiSessionResolver` / launcher を idle sampler、KLP peer identity とは別に設ける。KLP の UID 認可は §2.12.4.4 のまま。GUI session 情報は表示可否にのみ使う。root Agent 自身から OS toast を送らない。既存 KLP の session fan-out / 履歴取得は維持し、OS toast と自動起動だけに表示可否を適用する。SSH から起動した Client の購読者がいるだけで fallback を抑制しない。session helper の登録・presence 配送は新しい内部契約として後続タスクで定義し、peer credentials / OS process 所属を検証する。KLP の認可用 session を追加する契約ではない。
+
+共通契約は以下を proposal とする。
+
+1. 現行通知の宛先は all / PC / group であり user_key 宛てではない (既読が user_key 単位)。自動 fallback は現在の console / seat0 の **local / active / unlocked GUI** の UID に限定し、起動直前に再確認する。本文取得・既読状態はその UID の KLP 契約に従う。裏 session へ自動起動せず、別 UID の既読や session 情報を渡さない。
+2. 起動中なら既存 instance に通知 id を配送、終了していれば固定 executable をそのユーザーとして `--show-notification <id>` で非表示起動。単一起動の単位は UID + 適格 GUI session。argv は shell 展開せず、本文・command・任意 executable を受け取らない。
+3. launch cooldown は Windows と同じ **10 秒** を UID / session ごとに持つ。抑制分は pending として残し、cooldown 終了時に適格 session を再確認して `--resurface` する。live push と fallback の同じ id は重複表示を抑える。
+4. lock / logout / session 不明なら表示・起動を控え、次の確認済み login / unlock で `--resurface`。Client は `notifications.list` で未読・未失効・toast 対象を再取得する。pending はヒントであり Agent restart 後も履歴から回復する。toast click は表示・focus のみ、`notifications.ack` は明示的な確認操作だけ。
+5. headless / SSH / 失敗時は通知データを失わず履歴へ劣化する (§2.12.4.4)。launch 失敗は非致命的な理由付き log、無限 retry / GUI 強制切替はしない。
+
+**macOS proposal**: SCDynamicStore console user (loginwindow / root を除外) と `gui/<uid>` bootstrap domain の存在を両方確認する。Aqua の独立 session helper が NSWorkspace の session active / inactive と、distributed notification の `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked` を監視する案とする。後者は公開された安定 API 契約ではないため対応 OS ごとの互換性試験を必須とし、通知欠落・helper restart・初期状態不明では unlocked を推測しない (確認済み unlock まで自動 toast を控え、手動の履歴閲覧へ落とす)。定期的に console / bootstrap / helper の生存を照合し、情報の鮮度が不明なら表示しない。console UID の一致だけで SSH / fast user switching の裏 session を適格にしない。Agent は `launchctl asuser <uid>` の bootstrap context に入り、さらに supplementary groups / GID / UID を対象ユーザーへ落として固定 bundle executable を実行する。`asuser` 単独は資格情報の降格ではない (`man launchctl` を実装時にも確認)。HOME / USER / TMPDIR は対象ユーザー用に設定し root の環境は渡さない。LaunchAgent job が管理中ならその job を起動し、追加 argv は同じ session の単一起動配送へ繋ぐ。
+
+**Linux proposal**: system bus の logind で `Type=x11|wayland`、`Class=user`、`Remote=false`、active seat0、対象 UID を確認する。[logind の属性](https://github.com/systemd/systemd/blob/main/man/org.freedesktop.login1.xml) の `LockedHint` は desktop が設定する hint なので、未対応 desktop / lock 状態不明を unlocked と決めつけない。XDG session launcher の登録した session id / pid / UID と OS の session 所属を照合し、その session の `XDG_RUNTIME_DIR`、user bus、DISPLAY / XAUTHORITY または WAYLAND_DISPLAY を使用する。登録は KLP UID と OS の pid 情報で検証し、ユーザー入力の shell / 任意環境変数を root 実行へ渡さない。Agent は対象 UID に降格して user unit を start し、固定 executable への二回目の launch で id を転送する。同じ UID の複数 GUI は user bus / manager を共有し得るため初期は自動配送を控え、複数 seat / remote GUI も履歴へ落とす。古い user manager 環境は流用しない。GNOME / KDE の helper は desktop の ScreenSaver D-Bus 状態 / 変化も照合し、logind の LockedHint と矛盾・取得不能なら unknown とする。
+
+**代替案と却下理由**: macOS の `open -a ... --args` だけでは稼働 instance への引数配送を保証できないため Agent fallback の主経路にはしない (OS deep link 起動は別経路)。Linux の `/proc` 環境の無差別コピー、`sudo -u` 単独、root の D-Bus 通知は session / bus の取り違えを招く。全 GUI に fallback executable を起動する案は多重表示を増やすため採らない (KLP の既存 fan-out は維持)。macOS の private な session dictionary key を読み unlocked と断定する案は互換性と初期状態の保証が弱いため採らない。helper を Client UI 内だけに置く案は Quit 中の lock / unlock を観測できない。Windows と同様に lock 中も toast を送る案は Unix のロック画面への露出を制御しにくいため初期案では控える。
+
+**受入条件**: Client 終了中の緊急通知、同じ通知の連続送信、10 秒以内の unlock、Agent restart、fast user switching、二 UID、同一 UID の複数 GUI、SSH / headless で誤配送しない。session helper の停止・古い環境・lock 判定不能でも履歴から回復する。macOS の lock helper は通知責務だけを持ち、KLP `session=None` を変更しない。
+
+#### 2.11.7.6 OS 通知と persistent の劣化
+
+**proposal（提案）**: `NotificationAdapter` に表示、capability、クリックの id 配送を集約する。WebView から WinRT に直接依存する現行経路を OS adapter に分け、Windows の reminder / AppUserModelID の挙動は維持する。通知許可拒否、DND / Focus、server 不在も成功した ack とは扱わない。
+
+| OS | proposal の API / crate 候補 | click と persistent |
+|---|---|---|
+| macOS | `UNUserNotificationCenter` + response delegate。Rust bridge は `objc2-user-notifications` / `objc2-foundation` 等を候補にする (依存採用は後続タスク) | notification identifier / userInfo に id、通常 click / 確認 action を共通 focus 処理へ。冷起動時も delegate を早期登録して初期応答を保持。許可は初回の可視起動で説明して要求し、背景起動から要求 dialog を出さない |
+| Linux | user session bus の `org.freedesktop.Notifications`、`zbus` / `notify-rust` を候補にする。action / signal の寿命を制御できる adapter を選ぶ | `GetCapabilities` を確認、default / 確認 action と `ActionInvoked` を id に対応付ける。persistent は `expire_timeout=0` と対応 server の resident hint を要求するが保証しない |
+
+macOS の応答は [UNUserNotificationCenterDelegate](https://developer.apple.com/documentation/usernotifications/unusernotificationcenterdelegate) を使う。persistent は Notification Center への通常通知に劣化し、banner / alert の選択、消去、Focus は OS / ユーザーに従う。timeSensitive / critical alert、全画面 dialog、繰返し音を永続表示の代用品にはしない。Linux の無期限要求・resident は [freedesktop 仕様](https://specifications.freedesktop.org/notification/latest-single/) の capability / server policy に従う。action 不在なら click-to-open を保証せずアプリ一覧から履歴を開く。Wayland の focus は action の activation token が取得できれば使用し、compositor が拒否すれば表示して注意表示に留める。
+
+close-to-hide では Client が生存するので Linux action signal を処理できる。明示 Quit / crash 後は D-Bus sender の action 対応が消える可能性があり、既存 toast click による冷起動は保証しない。履歴と次の緊急 fallback が回復経路となる。macOS は OS が bundle を再起動する通知応答を受入試験で確認し、GUI 不適格時は本文を表示せず復帰を待つ。
+
+**代替案と却下理由**: Tauri notification plugin を全 OS の唯一の API にする案は通常 info / warn には便利だが、緊急通知の action・冷起動・persistent の制御を必要とするため主経路には採らない。plugin の将来版で同じ契約を満たすと実証できれば adapter 内で置換可能。Linux `notify-send` subprocess は action の受信寿命を管理しにくい。persistent を「必ず消えない」とする案は OS に保証できないため採らない。
+
+**受入条件**: 許可あり / 拒否 / 未決定、DND、actions 非対応、server restart、cold / warm click、Quit 後の劣化を確認する。click / dismiss / 自然消去では ack が変わらず、履歴表示を失わない。
+
+#### 2.11.7.7 Deep link・単一起動・tray・サイズ
+
+**proposal（提案）**: 共通 URI は現行の `kanade-client://show?id=<id>` (`show/?id=` も互換) を維持し、起動時 argv、macOS URL-open event、稼働時 single-instance、OS notification response を一つの `focus_notification(id)` に接続する。macOS の URL event は argv だけでは届かないため Tauri deep-link plugin を候補とする ([Tauri deep linking](https://v2.tauri.app/plugin/deep-linking/))。plugin の採用・single-instance 連携は後続実装であり現行設定には追加されていない。
+
+- **macOS proposal**: 署名前の `Info.plist` に `CFBundleURLTypes` / `CFBundleURLSchemes=kanade-client` を記述し LaunchServices 登録へ。bundle id / executable / URL scheme は更新で維持し、実行時に plist を書換えない。
+- **Linux proposal**: application `.desktop` に `MimeType=x-scheme-handler/kanade-client;`、固定 `Exec=/usr/bin/kanade-client %u` を登録し desktop database を更新。autostart entry は別ファイル。既存のユーザー default handler は root から上書きせず、未設定の登録と競合時の案内を受入対象にする。
+- **共通 proposal**: scheme / route / query を厳密検証、id は `[A-Za-z0-9_.-]` の全体一致、1–128 byte、URI 全体は 2048 byte 以下、重複 id / 未知 query / 不正 escape は拒否する。現行 Windows parser の「許可文字まで切り出す」挙動より厳しくする案であり実装済みとはしない。URI から job / ack / file / command を実行しない。id は KLP で対象 UID の履歴を再取得して確認、存在しない・アクセス不可なら通知一覧に戻す。初期 WebView ready / KLP reconnect まで focus 要求を保持する。
+
+**proposal（提案）**: tray menu は「開く」「通知」「終了」。macOS は template icon の menu bar item とし、通常可視起動は Dock / アプリ一覧からも復帰できる。Linux は Tauri tray / StatusNotifierItem (AppIndicator) を使うが、GNOME の extension が無い環境は tray 不在を正常な劣化とする。`--tray` の非表示契約は維持し、tray が無いだけでウィンドウを自動表示しない。アプリ一覧、deep link、次の緊急通知が復帰経路になる。
+
+close はサイズ保存後に hide、明示 Quit は終了。起動時は **サイズだけ** を logical pixel で復元し min / work area に clamp、不正ファイルは既定値とする。位置・最大化・最小化・前回 visibility は保存せず、`--tray` / `--show-notification` / `--resurface` が visibility に優先する。二回目の `--tray` は既存 window を表示しない。ユーザー起動 / click だけが show / unminimize / focus を要求する。
+
+**代替案と却下理由**: GNOME extension の必須導入は管理対象外の desktop 設定を増やす。tray 不在で自動表示する案はログイン / 緊急通知で画面を奪わない契約に反する。window-state plugin で位置や visibility を丸ごと復元する案は monitor / DPI / Wayland の差と非表示起動の衝突を増やす。launcher / 通知 sender の名称を Agent が bundle / package 内で動的変更する案は署名・package 所有に反するため採らず、OS 側は固定製品名、KLP の `client_display_name` は Client window / UI 内で反映する。
+
+**受入条件**: URL の冷起動・稼働中・二 UID・不正入力、tray 有無、Dock 再表示、close / Quit、monitor / DPI 変更、resize 直後の終了でも多重 instance や意図しない表示が起きない。
+
+#### 2.11.7.8 WebView と対応 OS / build matrix
+
+**proposal（提案）**: 初期 macOS は **Apple Silicon (aarch64)、macOS 14 以降**。WKWebView は OS の framework を使用し、別 runtime installer を持たない。これは製品の検証下限であって Tauri の理論上の下限とは別。Intel / universal bundle は既存 Agent の arch 契約と揃わず初期対象外、古い OS の広範な対応は CI / 署名 / WebView の試験負担から採らない。
+
+**proposal（提案）**: Linux は **Debian 12 / Ubuntu 24.04 LTS の deb、Fedora 44 の rpm**、x86_64 / aarch64、systemd + logind + GNOME / KDE の local X11 / Wayland を初期検証対象とする。各 distro の後継は自動で対応済みとはせず追加試験する。musl ではなく distro / arch 別 **GNU (glibc)** Client をビルドする。既存 Linux musl Agent / Backend の target は維持し、GUI build を workspace の musl 一括 build に混ぜない。Alpine / 非 systemd / 他 desktop の自動配送は初期対象外。
+
+Tauri 2 の Linux 要件は **WebKit2GTK API / ABI 4.1** ([Tauri prerequisites](https://v2.tauri.app/start/prerequisites/))。`4.1` は WebKit engine の実体バージョンではない。engine **2.40 以上**を proposal の下限とし、実装時に採用する wry / webkit2gtk の symbol 要件が上なら引き上げる。OS の security update は適用し、2.40 に固定しない。runtime は deb の `libwebkit2gtk-4.1-0`、rpm の `webkit2gtk4.1`、build は対応する `-dev` / `-devel` と GTK3 / libsoup3 / compiler / pkg-config 等を用意する。GTK / tray library / fonts も package dependency に含め、実際の linkage から distro 別の依存を検証する。対象 package の存在は [Debian 12](https://packages.debian.org/bookworm/libwebkit2gtk-4.1-0)、[Ubuntu 24.04](https://packages.ubuntu.com/noble/libwebkit2gtk-4.1-0)、[Fedora 44](https://packages.fedoraproject.org/pkgs/webkitgtk/webkit2gtk4.1/index.html) で確認できるが、package の存在だけで GUI 動作を保証しない。
+
+**proposal（提案）**: 後続 CI は Windows 回帰、macOS aarch64 の GUI build / bundle、Linux 各 distro / arch の GNU GUI build / install smoke を別 job にする。Linux は対応 distro の build root で作り glibc 下限を固定、Ubuntu 最新 runner の生成物をそのまま Debian 下限用にしない。Tauri runtime / build-helper の cfg を拡張し、WinRT / ShellExecute は Windows adapter に残す。SPA embed と既定 `custom-protocol`、bundle version 同期も Unix build で確認し、Vite server の無い production package を起動する。
+
+**代替案と却下理由**: WebView を同梱する案は security patch の責任と容量を増やす。AppImage / musl で全 distro を一つにする案は GTK / glibc / WebKit の ABI 問題を解決しない。対応 OS を Tauri の下限へ無条件に広げる案は製品として検証できない。現在の release matrix は Linux musl 2 arch / Windows / macOS aarch64 のバイナリ archive であり、Unix GUI package を提供しているとはしない。本変更では CI / Cargo / Tauri 設定を編集しない。
+
+**受入条件**: 最低 OS / arch の clean image に package dependency だけで導入・起動可能。WebKit 不足は installer 段階で検出し、headless Agent install は引き続き成功。実際の artifact が shim でないことと SPA embed を検証する。
+
+#### 2.11.7.9 Agent 経由の Client 更新・復旧
+
+**proposal（提案）**: §2.11.6 と同じ将来の `client_releases` Object Store を配布元とするが、**Unix は OS installer transaction** とし exe swap はしない。Tauri updater は使わない。Client は KLP で状態を表示するだけ、root Agent が取得・検証・停止・install・復旧を担当し、ユーザーの昇格要求は無い。初回管理者 install と同じ package を再利用する。
+
+予定契約は次の通り (bucket provisioning、publish command、Client target policy、更新状態の KLP schema は後続タスクで追加する)。
+
+1. operator が OS / distro / arch / format / version ごとの immutable package を publish。key は `<version>/<os>/<distro-or-macos>/<arch>/<format>` を proposal とする。release metadata に size、SHA-256、package / bundle id、最低 OS / WebView、KLP compatibility、署名者を含める。NATS の管理権限と別に、Agent の pinned release public key で検証する署名済み manifest を要求する。SHA-256 だけでは publisher の信頼にはならない。
+2. Agent が独立した Client target version / scope / jitter を解決し、Agent target と混ぜない。未導入端末への自動 install は default 無効。root-only staging / journal は Agent data dir の `client-update/` に置き、新旧 package を保持、容量・format・OS / arch・署名・互換性・依存を **停止前** に検査する。最新通知本文・user home は staging に入れない。
+3. machine 単位の更新 lock を取り、package manager lock 競合は待機上限後に延期する。管理対象の root 所有 install path / bundle id と OS process identity で照合した Client だけを停止する。名前一致の `pkill` は使わない。新規 launch を一時抑制し、全管理対象 instance に終了要求、保存猶予後も残る対象だけを停止する。確認不能なら install を延期する。
+4. macOS は検証済み `.pkg` を `installer -pkg ... -target /` で install、Linux は `apt` / `dnf` の local package transaction で依存解決・database 更新。閉域では承認済み mirror / 事前配布 dependency を必要とし、外部 repo が利用可能とは仮定しない。OS package manager を迂回して file を上書きしない。
+5. journal に `verified → stopping → installing → validating → committed` と旧 / 新 version、対象 process / session、失敗理由を記録する。package database / receipt、署名、disk version と GUI があれば再接続 handshake / 実稼働 version を検証。GUI 不在は install 成功と GUI 検証未実施を分けて記録する。Agent crash / reboot 後は journal と OS database を照合し、未完了 transaction を安全に修復してから再試行する。
+6. install / health check 失敗は同じ検証済み旧 package を OS installer で復旧する (Linux は明示 downgrade、macOS は旧 pkg 再 install)。生ファイル rollback はしない。復旧失敗は停止・要修復状態を報告し、同一 target の retry loop を遮断する。旧 package を保持できない場合は更新開始しない。package manager transaction は全体 atomic swap ではないので途中失敗試験が必須。
+7. 再起動は **更新前に稼働していた、現在も適格な GUI session だけ**。UID / session を再確認して `--tray` で戻し、前回 visibility や通知 click を勝手に復元しない。logout したユーザー、SSH、headless、更新前に Quit していた Client を起動しない。更新中に届いた通知は履歴から回復する。
+
+**macOS proposal**: `.app` と nested executable を Developer ID Application + hardened runtime で署名、`.pkg` は Developer ID Installer、notarization 完了後に app / pkg に ticket を staple して配布する ([Apple notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution?changes=_9))。Agent は期待 Team ID / bundle id と `codesign` / `pkgutil --check-signature` / Gatekeeper assessment を検証する。署名・notarization の成功した artifact だけを Object Store に publish。端末で再署名、bundle 内 plist の変更、quarantine 除去を信頼の代用にしない。既存 Agent の self-signed 配布とは独立した署名資格情報と CI release stage が必要。
+
+**Linux proposal**: 初回導入時に管理者が「Agent 管理」または「外部 apt / dnf 管理」を登録する。前者だけが `client_releases` から local package install を行い、後者は更新候補の報告のみ。package / signed manifest の鍵は初回の管理者設定で pin し、取得した blob 内の鍵をそのまま信用しない。外部管理への切替は自動更新停止を伴う。管理者が選んだ一つの更新経路を維持し、同時 rollout は manager lock だけに頼らず policy で避ける。
+
+**代替案と却下理由**: Windows の LocalSystem swap を Unix に写す案は macOS の signed bundle と Linux package 所有を壊す。ユーザー権限 Tauri updater は per-machine install の権限・運用経路が分裂する。Linux で全端末に version hold / repo の pin を強制する案は外部管理者の方針を上書きする。macOS の ad-hoc / 現行 Agent と同じ self-signed の GUI 配布は Gatekeeper / 通知 identity の運用を別途負担するため初期案に採らない。
+
+**受入条件**: 不正署名 / hash、違う arch、bucket 不在、依存不足、disk full、package lock、Client 停止失敗、install 中の Agent crash / 電源断、health failure、rollback failure を注入できる。更新の開始・延期・成功・復旧は operator に報告され、管理対象外のアプリや user data に触れない。閉域の notarization ticket 検証と旧 package 復旧を実機で確認する。
+
+#### 2.11.7.10 承認後の実装順と CI / 実機受入
+
+**proposal（提案）**: KLP transport は既存実装を利用し再実装しない。以下を小さな独立タスクに切り、各 adapter / OS の失敗が他 OS を止めない境界を先に作る。番号は推奨順、依存番号を満たした OS の作業は別々に進められる。CI は計画であって現在の workflow を変更済みとはしない。
+
+| # | タスク / 依存 | CI で検証する範囲 | 実機 / VM の受入条件 |
+|---|---|---|---|
+| 1 | Client paths / 起動 mode / GUI eligibility の純粋 policy と adapter 境界 | XDG fallback、UID 分離、lock / stale / ambiguous session、引数、size の単体試験 | config / log / cache の権限と非 ASCII home |
+| 2 | macOS GUI build / WKWebView と bundle version (1) | aarch64 GUI compile、SPA embed、plist / version 検査 | 最低 macOS で shim ではない GUI 起動 |
+| 3 | Linux GNU GUI build / WebKit dependency (1) | 各 distro / arch build root、Xvfb smoke、headless Agent 回帰 | GNOME / KDE の X11 / Wayland 表示と font |
+| 4 | URI parser / focus queue / UID-session 単一起動、OS 登録 (2 / 3、OS 別) | malformed URI、cold / warm event、二 instance、plist / desktop 検査 | LaunchServices / default handler、二 UID、Wayland focus |
+| 5 | tray / --tray / close / Quit と size 配線 (4) | mode とサイズの回帰、GUI smoke | macOS menu bar / Dock、GNOME tray 不在、DPI / monitor 切替 |
+| 6 | macOS notification adapter (4) | fake notification center / delegate、id / ack 分離 | 許可 dialog、拒否、Focus、終了後の実 click |
+| 7 | Linux notification adapter (4) | private D-Bus fake server、capability / action / timeout / server loss | GNOME / KDE の実 click、persistent 劣化、Wayland token |
+| 8 | macOS LaunchAgent / session resolver / emergency fallback (5 / 6) | fake console / launchctl runner、UID 降格引数、cooldown / resurface | Aqua login、lock / unlock、fast user switching、SSH-only |
+| 9 | Linux XDG / user unit / logind session 配送 (5 / 7) | fake logind + user bus、環境 whitelist、session race、cooldown | logout、lingering、SSH-only、二 UID / 同一 UID 複数 GUI |
+| 10 | macOS pkg と署名 / notarization release (8) | unsigned package 構造試験、保護された署名 CI で codesign / notarization / staple | clean Mac、閉域 Gatekeeper、既存 / 新規 login、uninstall |
+| 11 | Linux deb / rpm、install / uninstall と ownership (9) | clean distro VM / container の dependency・package database 検査 | desktop 登録、閉域依存、既存 / 新規 login |
+| 12 | client_releases の provisioning / publish / signed metadata、独立 target / KLP 更新状態の契約 (1、10 / 11 の成果物で検証) | fake store、key 選択、不正 hash / 署名、scope / jitter、互換性 | operator の canary rollout と管理方式切替 |
+| 13 | macOS Client update journal / pkg 復旧 (10 / 12) | fake installer / launchctl runner の crash・再開、旧 pkg 復旧 | 実 installer transaction、電源断、署名済み rollback、適格 session だけ再起動 |
+| 14 | Linux Client update journal / deb / rpm 復旧 (11 / 12) | fake package runner の lock・crash・再開、VM の旧 package 復旧 | 実 apt / dnf transaction、閉域依存、外部管理との競合、適格 session だけ再起動 |
+
+**代替案と却下理由**: 全 OS の通知・配布・更新を一つの大型タスクにすると session 配送や署名の未検証を transport 完了に紛れ込ませる。署名 secrets のある release CI を通常 PR の必須試験にする案は credential 境界が合わないため、構造 / fake の PR CI と保護された release 検証を分ける。hosted CI の green だけでは通知許可・実 click・ロック解除・desktop extension 不在・Wayland foreground を保証できず、表の実機試験完了まで対応済みとはしない。
 
 ## 2.12 KLP (Kanade Local Protocol)
 
@@ -2340,8 +2501,8 @@ pub struct JobProgress {
 - [ ] Client App: 通知タブ / 状態タブ (コンプライアンスチェック) / アップデートタブ / トラブルシュートタブ
 - [ ] Client App: サポート問い合わせ (`support.upload_diagnostics`) + メンテ予約延期 (`maintenance.defer`)
 - [ ] MSI パッケージング (WiX) + ActiveSetup によるユーザー初回ログオン時の自動展開 (Windows)
-- [ ] (後続段階) Linux / macOS の Client 配置・自動起動 (LaunchAgent / XDG autostart)・自己アップデート swap (§2.11.7)
-- [ ] Client App 自己アップデート (`client_releases` Object Store bucket) (Windows。Unix の swap は §2.11.7)
+- [ ] (承認後の後続段階) Linux / macOS の Client GUI・配置・自動起動・通知配送・package 更新 / 復旧 (§2.11.7)
+- [ ] Client App 自己アップデート (`client_releases` Object Store bucket) (Windows。Unix の package 更新 proposal は §2.11.7)
 
 ### Sprint 8.5: Client App 拡張機能 (順次)
 
