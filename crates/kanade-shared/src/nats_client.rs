@@ -193,6 +193,7 @@ pub struct ConnectTiming {
     pub direct_user: bool,
     pub probe_before_connect: bool,
     pub adaptive_probe_max: Option<Duration>,
+    pub cancel_probe: bool,
 }
 
 impl ConnectTiming {
@@ -203,6 +204,7 @@ impl ConnectTiming {
         direct_user: false,
         probe_before_connect: true,
         adaptive_probe_max: Some(USER_RECONNECT.maximum_probe),
+        cancel_probe: true,
     };
 
     /// Frozen pre-fix settings for factor comparisons.
@@ -214,6 +216,7 @@ impl ConnectTiming {
         direct_user: false,
         probe_before_connect: false,
         adaptive_probe_max: None,
+        cancel_probe: false,
     };
 }
 
@@ -781,25 +784,31 @@ fn select(
 /// Runs on a spawned task because the auth callback's future must be `Sync`
 /// and async-nats' connect future is not; a join handle is.
 async fn probe_user(url: &str, user: &UserCredential) -> ProbeOutcome {
-    probe_user_with_timeout(url, user, PROBE_TIMEOUT).await
+    probe_user_with_timeout(url, user, PROBE_TIMEOUT, true).await
 }
 
 async fn probe_user_with_timeout(
     url: &str,
     user: &UserCredential,
     timeout: Duration,
+    cancel_probe: bool,
 ) -> ProbeOutcome {
     let Ok(url) = url.parse::<async_nats::ServerAddr>() else {
         return ProbeOutcome::Unreachable;
     };
-    probe_user_at(url, user, timeout).await
+    probe_user_at(url, user, timeout, cancel_probe).await
 }
 
-struct ProbeTask(tokio::task::JoinHandle<ProbeOutcome>);
+struct ProbeTask {
+    worker: tokio::task::JoinHandle<ProbeOutcome>,
+    cancel_on_drop: bool,
+}
 
 impl Drop for ProbeTask {
     fn drop(&mut self) {
-        self.0.abort();
+        if self.cancel_on_drop {
+            self.worker.abort();
+        }
     }
 }
 
@@ -807,23 +816,29 @@ async fn probe_user_at(
     url: async_nats::ServerAddr,
     user: &UserCredential,
     timeout: Duration,
+    cancel_probe: bool,
 ) -> ProbeOutcome {
     let (name, password) = (user.name.clone(), user.password.clone());
-    let mut probe = ProbeTask(tokio::spawn(async move {
-        let attempt = async_nats::ConnectOptions::new()
-            .name(PROBE_NAME)
-            .connection_timeout(timeout)
-            .user_and_password(name, password)
-            .connect(url);
-        match tokio::time::timeout(timeout + USER_RECONNECT.probe_guard, attempt).await {
-            Ok(Ok(_client)) => ProbeOutcome::Accepted,
-            Ok(Err(e)) if e.kind() == async_nats::ConnectErrorKind::AuthorizationViolation => {
-                ProbeOutcome::Rejected
+    let mut probe = ProbeTask {
+        cancel_on_drop: cancel_probe,
+        worker: tokio::spawn(async move {
+            let attempt = async_nats::ConnectOptions::new()
+                .name(PROBE_NAME)
+                .connection_timeout(timeout)
+                .user_and_password(name, password)
+                .connect(url);
+            match tokio::time::timeout(timeout + USER_RECONNECT.probe_guard, attempt).await {
+                Ok(Ok(_client)) => ProbeOutcome::Accepted,
+                Ok(Err(e)) if e.kind() == async_nats::ConnectErrorKind::AuthorizationViolation => {
+                    ProbeOutcome::Rejected
+                }
+                Ok(Err(_)) | Err(_) => ProbeOutcome::Unreachable,
             }
-            Ok(Err(_)) | Err(_) => ProbeOutcome::Unreachable,
-        }
-    }));
-    (&mut probe.0).await.unwrap_or(ProbeOutcome::Unreachable)
+        }),
+    };
+    (&mut probe.worker)
+        .await
+        .unwrap_or(ProbeOutcome::Unreachable)
 }
 
 /// Probe, decide, record. `probe` is injected so the unit tests can drive
@@ -1330,7 +1345,12 @@ where
                                 .unwrap_or(Err("no fresh NATS credential probe"))
                         } else {
                             choose(role, token.is_some(), &live, || {
-                                probe_user_with_timeout(&url, &user, timing.probe_timeout)
+                                probe_user_with_timeout(
+                                    &url,
+                                    &user,
+                                    timing.probe_timeout,
+                                    timing.cancel_probe,
+                                )
                             })
                             .await
                         }
@@ -1367,7 +1387,13 @@ where
                                             deferred.load(Ordering::Relaxed),
                                         )
                                     });
-                            let outcome = probe_user_at(server.addr.clone(), &user, timeout).await;
+                            let outcome = probe_user_at(
+                                server.addr.clone(),
+                                &user,
+                                timeout,
+                                timing.cancel_probe,
+                            )
+                            .await;
                             if outcome == ProbeOutcome::Unreachable {
                                 let _ = deferred.fetch_update(
                                     Ordering::Relaxed,
@@ -1623,16 +1649,39 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let finished = Arc::new(tokio::sync::Notify::new());
         let (task_started, task_finished) = (started.clone(), finished.clone());
-        let task = ProbeTask(tokio::spawn(async move {
-            let _finished = Finished(task_finished);
-            task_started.notify_one();
-            std::future::pending::<ProbeOutcome>().await
-        }));
+        let task = ProbeTask {
+            cancel_on_drop: true,
+            worker: tokio::spawn(async move {
+                let _finished = Finished(task_finished);
+                task_started.notify_one();
+                std::future::pending::<ProbeOutcome>().await
+            }),
+        };
         started.notified().await;
         drop(task);
         tokio::time::timeout(secs(1), finished.notified())
             .await
             .expect("cancelled probe worker stops");
+    }
+
+    #[tokio::test]
+    async fn baseline_cancellation_keeps_the_bounded_worker_alive() {
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let task = ProbeTask {
+            cancel_on_drop: false,
+            worker: tokio::spawn(async move {
+                let _ = tokio::time::timeout(secs(1), wait).await;
+                let _ = finished.send(());
+                ProbeOutcome::Unreachable
+            }),
+        };
+        drop(task);
+        release.send(()).expect("baseline worker remains alive");
+        tokio::time::timeout(secs(2), done)
+            .await
+            .expect("bounded worker finishes")
+            .expect("baseline drop does not abort the worker");
     }
 
     /// Drive `judge` on the local check cadence until `until`, with receive

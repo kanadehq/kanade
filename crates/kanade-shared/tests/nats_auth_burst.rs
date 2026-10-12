@@ -33,8 +33,9 @@
 //!
 //! * `KANADE_AUTH_BURST_SIZES`          comma list of fleet sizes (overrides N)
 //! * `KANADE_AUTH_BURST_REPEATS`        repetitions per condition (default 3)
-//! * `KANADE_AUTH_BURST_VARIANTS`       production,no-proxy,probe,connect,both,
-//!   jitter,both-jitter,direct,direct-no-proxy (default production); experimental
+//! * `KANADE_AUTH_BURST_VARIANTS`       production,no-proxy,baseline,baseline-no-proxy,
+//!   probe,probe-cancel,connect,both,before,before-both,jitter,both-jitter,
+//!   direct,direct-no-proxy (default production); experimental
 //!   variants require `--features nats-auth-measurement`
 //! * `KANADE_AUTH_BURST_LONG_TIMEOUT_SECS` experimental budget (default 60)
 //! * `KANADE_AUTH_BURST_FRAMES_JSONL`   handshake timestamps per socket,
@@ -806,6 +807,10 @@ where
         match variant {
             "baseline" | "baseline-no-proxy" => {}
             "probe" => timing.probe_timeout = long,
+            "probe-cancel" => {
+                timing.probe_timeout = long;
+                timing.cancel_probe = true;
+            }
             "connect" => timing.connect_timeout = long,
             "both" => {
                 timing.probe_timeout = long;
