@@ -415,11 +415,11 @@ impl SidResolver {
         if let Some(name) = self.cache.get(sid) {
             return name.clone();
         }
-        if should_translate(sid, ctx) {
-            if let Some(name) = translate_sid(sid) {
-                self.cache.insert(sid.to_string(), name.clone());
-                return name;
-            }
+        if should_translate(sid, ctx)
+            && let Some(name) = translate_sid(sid)
+        {
+            self.cache.insert(sid.to_string(), name.clone());
+            return name;
         }
         sid.to_string()
     }
@@ -684,10 +684,10 @@ fn poll_once(
             }
             max_seen = Some(max_seen.map_or(ev.record_id, |m| m.max(ev.record_id)));
         }
-        if let Some(m) = max_seen {
-            if Some(m) != cutoff {
-                watermarks.insert(key, m);
-            }
+        if let Some(m) = max_seen
+            && Some(m) != cutoff
+        {
+            watermarks.insert(key, m);
         }
     }
     (watermarks, resolver)

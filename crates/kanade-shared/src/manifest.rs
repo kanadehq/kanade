@@ -1224,10 +1224,10 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
         validate_placement(&w.placement, &at)?;
         // A present-but-blank `description` renders an empty muted line —
         // reject it so the subtitle only shows when it says something.
-        if let Some(description) = &w.description {
-            if description.trim().is_empty() {
-                return Err(format!("{at}.description must not be empty when set"));
-            }
+        if let Some(description) = &w.description
+            && description.trim().is_empty()
+        {
+            return Err(format!("{at}.description must not be empty when set"));
         }
         // Reject values that fell through to the #492 `Unknown` catch-all:
         // at create time on the current version that's an operator typo. (A
@@ -1264,10 +1264,10 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
         };
         // A present-but-blank `source` is a no-op filter — reject like the
         // other blank-when-set guards.
-        if let Some(source) = &w.source {
-            if source.trim().is_empty() {
-                return Err(format!("{at}.source must not be empty when set"));
-            }
+        if let Some(source) = &w.source
+            && source.trim().is_empty()
+        {
+            return Err(format!("{at}.source must not be empty when set"));
         }
         if w.transform == Some(AggregateTransform::Unknown) {
             return Err(format!("{at}.transform is not a known value (host)"));
@@ -1280,12 +1280,12 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
             ("bool_path", &w.bool_path),
             ("value_path", &w.value_path),
         ] {
-            if let Some(p) = path {
-                if !is_valid_json_path(p) {
-                    return Err(format!(
-                        "{at}.{label} '{p}' must be a dotted JSON path of [A-Za-z0-9_] segments"
-                    ));
-                }
+            if let Some(p) = path
+                && !is_valid_json_path(p)
+            {
+                return Err(format!(
+                    "{at}.{label} '{p}' must be a dotted JSON path of [A-Za-z0-9_] segments"
+                ));
             }
         }
         // Each agg uses exactly one value path; reject a mis-paired path so
@@ -1700,12 +1700,12 @@ pub fn validate_placement(p: &Placement, at: &str) -> Result<(), String> {
             "{at}.placement must set `analytics` and/or pin to `dashboard` (else the widget renders nowhere)"
         ));
     }
-    if let Some(a) = &p.analytics {
-        if a.tab.trim().is_empty() {
-            return Err(format!(
-                "{at}.placement.analytics must not be empty when set"
-            ));
-        }
+    if let Some(a) = &p.analytics
+        && a.tab.trim().is_empty()
+    {
+        return Err(format!(
+            "{at}.placement.analytics must not be empty when set"
+        ));
     }
     Ok(())
 }
@@ -1726,10 +1726,10 @@ pub fn validate_sql_widgets(widgets: &[SqlWidget], field: &str) -> Result<(), St
         if w.query.trim().is_empty() {
             return Err(format!("{at}.query must not be empty"));
         }
-        if let Some(description) = &w.description {
-            if description.trim().is_empty() {
-                return Err(format!("{at}.description must not be empty when set"));
-            }
+        if let Some(description) = &w.description
+            && description.trim().is_empty()
+        {
+            return Err(format!("{at}.description must not be empty when set"));
         }
         if let Some(refresh) = &w.refresh {
             humantime::parse_duration(refresh)
@@ -1857,10 +1857,10 @@ fn validate_render_spec(r: &RenderSpec, at: &str) -> Result<(), String> {
         }
         RenderKind::Table => {
             // `columns` optional; if given, each name must be non-blank.
-            if let Some(cols) = &r.columns {
-                if cols.iter().any(|c| c.trim().is_empty()) {
-                    return Err(format!("{at}.render.columns must not contain blank names"));
-                }
+            if let Some(cols) = &r.columns
+                && cols.iter().any(|c| c.trim().is_empty())
+            {
+                return Err(format!("{at}.render.columns must not contain blank names"));
             }
             if let Some(labels) = &r.labels {
                 for (k, v) in labels {
@@ -2751,18 +2751,18 @@ impl Manifest {
             // A present-but-blank `troubleshoot` is a broken
             // remediation job id (the "修復する" button would target
             // an empty manifest id) — reject it too.
-            if let Some(troubleshoot) = &check.troubleshoot {
-                if troubleshoot.trim().is_empty() {
-                    return Err("check.troubleshoot must not be empty when set".to_string());
-                }
+            if let Some(troubleshoot) = &check.troubleshoot
+                && troubleshoot.trim().is_empty()
+            {
+                return Err("check.troubleshoot must not be empty when set".to_string());
             }
             // A present-but-blank `label` would render an empty row
             // title on the Health tab / Compliance page — reject it so
             // the slug fallback only ever kicks in when label is absent.
-            if let Some(label) = &check.label {
-                if label.trim().is_empty() {
-                    return Err("check.label must not be empty when set".to_string());
-                }
+            if let Some(label) = &check.label
+                && label.trim().is_empty()
+            {
+                return Err("check.label must not be empty when set".to_string());
             }
             if let Some(alert) = &check.alert {
                 // An alert that names no recipient is a silent no-op.
@@ -2823,23 +2823,23 @@ impl Manifest {
                 ("client.category_label", &client.category_label),
                 ("client.category_icon", &client.category_icon),
             ] {
-                if let Some(v) = value {
-                    if v.trim().is_empty() {
-                        return Err(format!("{label} must not be empty when set"));
-                    }
+                if let Some(v) = value
+                    && v.trim().is_empty()
+                {
+                    return Err(format!("{label} must not be empty when set"));
                 }
             }
             // #816: a present-but-empty `visible_to` (no all/groups/pcs)
             // would hide the job from everyone in the Client App — almost
             // certainly a mistake. Require at least one selector; omit the
             // whole block to mean "visible to all".
-            if let Some(t) = &client.visible_to {
-                if !t.is_specified() {
-                    return Err(
+            if let Some(t) = &client.visible_to
+                && !t.is_specified()
+            {
+                return Err(
                         "client.visible_to must set at least one of all / groups / pcs (omit it for all PCs)"
                             .to_string(),
                     );
-                }
             }
             // show_when: a dynamic display gate keyed on a check result. A
             // malformed check slug matches nothing and an empty status list
@@ -2870,12 +2870,11 @@ impl Manifest {
             // empty dialog title — reject it like the other display fields.
             // (A `confirm: false` / `enabled: false` with no message is fine:
             // the dialog is suppressed, so there's nothing to render.)
-            if let Some(c) = &client.confirm {
-                if let Some(msg) = &c.message {
-                    if msg.trim().is_empty() {
-                        return Err("client.confirm.message must not be empty when set".to_string());
-                    }
-                }
+            if let Some(c) = &client.confirm
+                && let Some(msg) = &c.message
+                && msg.trim().is_empty()
+            {
+                return Err("client.confirm.message must not be empty when set".to_string());
             }
             // unlock: the scope slug is matched byte-for-byte against the
             // operator's configured `support_codes[].scope`, so a slug with
@@ -2894,14 +2893,14 @@ impl Manifest {
             // was stored raw would pass this check and then never match a
             // code — precisely the silent-forever-hidden failure this guard
             // exists to prevent.
-            if let Some(scope) = &client.unlock {
-                if !is_valid_resource_id(scope) {
-                    return Err(
-                        "client.unlock must be a non-empty unlock scope slug ([A-Za-z0-9._-]) \
+            if let Some(scope) = &client.unlock
+                && !is_valid_resource_id(scope)
+            {
+                return Err(
+                    "client.unlock must be a non-empty unlock scope slug ([A-Za-z0-9._-]) \
                          with no surrounding whitespace"
-                            .to_string(),
-                    );
-                }
+                        .to_string(),
+                );
             }
         }
         // #219: a `collect:` job's `name` heads the bundle on the SPA
@@ -2917,10 +2916,10 @@ impl Manifest {
             if collect.files_field.trim().is_empty() {
                 return Err("collect.files_field must not be empty".to_string());
             }
-            if let Some(description) = &collect.description {
-                if description.trim().is_empty() {
-                    return Err("collect.description must not be empty when set".to_string());
-                }
+            if let Some(description) = &collect.description
+                && description.trim().is_empty()
+            {
+                return Err("collect.description must not be empty when set".to_string());
             }
             if let Some(max_size) = &collect.max_size {
                 parse_size_bytes(max_size).map_err(|e| format!("collect.max_size: {e}"))?;
@@ -9083,14 +9082,14 @@ impl Freeze {
             .map(|s| Active::parse_bound(s, self.tz))
             .transpose()
             .map_err(|e| e.replace("active:", "freeze:"))?;
-        if let (Some(f), Some(u)) = (from, until) {
-            if f >= u {
-                return Err(format!(
-                    "freeze.from ({}) must be strictly before freeze.until ({})",
-                    self.from.as_deref().unwrap_or_default(),
-                    self.until.as_deref().unwrap_or_default(),
-                ));
-            }
+        if let (Some(f), Some(u)) = (from, until)
+            && f >= u
+        {
+            return Err(format!(
+                "freeze.from ({}) must be strictly before freeze.until ({})",
+                self.from.as_deref().unwrap_or_default(),
+                self.until.as_deref().unwrap_or_default(),
+            ));
         }
         Ok(())
     }
@@ -9558,14 +9557,14 @@ impl Schedule {
             .as_deref()
             .map(|s| Active::parse_bound(s, self.tz))
             .transpose()?;
-        if let (Some(f), Some(u)) = (from, until) {
-            if f >= u {
-                return Err(format!(
-                    "active.from ({}) must be strictly before active.until ({})",
-                    self.active.from.as_deref().unwrap_or_default(),
-                    self.active.until.as_deref().unwrap_or_default(),
-                ));
-            }
+        if let (Some(f), Some(u)) = (from, until)
+            && f >= u
+        {
+            return Err(format!(
+                "active.from ({}) must be strictly before active.until ({})",
+                self.active.from.as_deref().unwrap_or_default(),
+                self.active.until.as_deref().unwrap_or_default(),
+            ));
         }
         // #418 Phase 3: a bad maintenance window is rejected at create
         // time (parse_window also catches equal bounds).
