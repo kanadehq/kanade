@@ -9,6 +9,7 @@ mod http_error;
 mod login_throttle;
 mod mail;
 mod mfa;
+mod passkey;
 mod projector;
 mod scheduler;
 mod shutdown;
@@ -1662,7 +1663,25 @@ async fn run_backend_inner(
         });
     }
 
+    let passkeys =
+        if cfg.server.webauthn.rp_id.is_empty() && cfg.server.webauthn.rp_origins.is_empty() {
+            None
+        } else {
+            let rp = passkey::validate_config(&cfg.server.webauthn).map_err(anyhow::Error::msg)?;
+            if cfg
+                .server
+                .public_url
+                .as_deref()
+                .is_some_and(|url| passkey::public_url_outside_origins(url, &rp))
+            {
+                tracing::warn!("public_url differs from configured WebAuthn origins");
+            }
+            Some(std::sync::Arc::new(
+                passkey::PasskeyService::new(&cfg.server.webauthn).map_err(anyhow::Error::msg)?,
+            ))
+        };
     let app_state = api::AppState {
+        passkeys,
         pool: pool.clone(),
         // #1165 stage 2: every command the backend puts on the wire goes
         // through this, signed when the host holds a key. Built before the

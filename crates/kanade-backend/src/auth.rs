@@ -408,6 +408,9 @@ pub async fn verify(
             .strip_prefix("/api/install-reports/")
             .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()))
         || path == "/api/auth/login"
+        || path == "/api/auth/passkey/config"
+        || path == "/api/auth/passkey/login/start"
+        || path == "/api/auth/passkey/login/finish"
         || path == "/api/version"
         || path == "/api/auth/forgot-password"
         || path.starts_with("/api/auth/password-setup/")
@@ -543,7 +546,7 @@ pub async fn require_features(req: Request, next: Next) -> Result<Response, ApiE
 /// though they map to commons: the infrastructure every logged-in session
 /// needs. Kept deliberately tiny — everything else commons carries fleet
 /// data, which is exactly what a page restriction is supposed to withhold.
-const RESTRICTED_COMMONS: [&str; 7] = [
+const RESTRICTED_COMMONS: [&str; 11] = [
     // Backend build version (the SPA shows it on every page).
     "/api/version",
     // Public-key info only; the AgentInstall page reads it to show whether
@@ -557,6 +560,10 @@ const RESTRICTED_COMMONS: [&str; 7] = [
     "/api/auth/mfa/init",
     "/api/auth/mfa/verify",
     "/api/auth/mfa/disable",
+    "/api/auth/passkeys",
+    "/api/auth/passkeys/register/start",
+    "/api/auth/passkeys/register/finish",
+    "/api/auth/passkeys/{id}/remove",
 ];
 
 /// The `require_features` decision, pure for testability: `Some(message)`

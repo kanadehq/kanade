@@ -96,6 +96,7 @@ const SCRIPT_OBJECT_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub passkeys: Option<std::sync::Arc<crate::passkey::PasskeyService>>,
     pub pool: SqlitePool,
     /// Dedicated **read-only** pool over the same SQLite file, opened with
     /// `SQLITE_OPEN_READONLY`. Only the admin ad-hoc `POST /api/query`
@@ -187,13 +188,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/mfa/verify", post(accounts::mfa_verify))
         .route("/api/auth/mfa/disable", post(accounts::mfa_disable))
         // Passkey (WebAuthn) self-service enrolment/management (authed).
-        .route("/api/auth/passkeys/register/start", post(passkeys::register_start))
-        .route("/api/auth/passkeys/register/finish", post(passkeys::register_finish))
+        .route(
+            "/api/auth/passkeys/register/start",
+            post(passkeys::register_start),
+        )
+        .route(
+            "/api/auth/passkeys/register/finish",
+            post(passkeys::register_finish),
+        )
         .route("/api/auth/passkeys", get(passkeys::list))
         .route("/api/auth/passkeys/{id}/remove", post(passkeys::remove))
         // Passkey sign-in (public, no session).
         .route("/api/auth/passkey/login/start", post(passkeys::login_start))
-        .route("/api/auth/passkey/login/finish", post(passkeys::login_finish))
+        .route(
+            "/api/auth/passkey/login/finish",
+            post(passkeys::login_finish),
+        )
         // #770: PUBLIC one-time password setup/reset links + self-service
         // forgot-password (allow-listed in crate::auth::verify, like login).
         .route(

@@ -47,6 +47,11 @@ pub fn verify(secret_base32: &str, account: &str, code: &str) -> Result<bool, St
 }
 
 #[cfg(test)]
+pub(crate) fn current_code(secret: &str, account: &str) -> String {
+    totp(secret, account).unwrap().generate_current().unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

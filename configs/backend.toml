@@ -20,6 +20,9 @@ bind = '0.0.0.0:8080'
 # WebAuthn (passkey) relying party configuration. When present and valid,
 # passkey sign-in, enrolment and management are enabled for the Web UI.
 # Optional: omit or leave empty to disable the feature.
+# Keep this backend behind a trusted proxy that appends the real client IP
+# to X-Forwarded-For; direct public access can spoof the rate-limit bucket.
+# WebAuthn support requires Rust 1.88 when building the backend.
 # [server.webauthn]
 # rp_id = 'kanade.example.com'
 # rp_origins = ['https://kanade.example.com']

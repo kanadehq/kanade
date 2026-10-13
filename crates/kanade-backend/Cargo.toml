@@ -4,7 +4,8 @@ description = "axum + SQLite projection backend for the kanade endpoint-manageme
 readme = "../../README.md"
 version.workspace      = true
 edition.workspace      = true
-rust-version.workspace = true
+# WebAuthn 0.6 requires Rust 1.88; other workspace members keep their MSRV.
+rust-version = "1.88"
 license.workspace      = true
 repository.workspace   = true
 homepage.workspace     = true
@@ -72,7 +73,6 @@ tokio      = { workspace = true }
 totp-rs    = { workspace = true }
 # WebAuthn / passkey support
 webauthn-rs = { workspace = true }
-webauthn-authenticator-rs = { workspace = true, default-features = false, features = ["softpasskey"] }
 # `ReaderStream` wraps the NATS Object Store's `AsyncRead` for
 # axum's `Body::from_stream` — keeps `/api/app-packages/.../get`
 # from buffering 100-200 MB MSIs into RAM.
@@ -92,6 +92,7 @@ tar        = "0.4.46"
 flate2     = "1.1.9"
 
 [dev-dependencies]
+webauthn-authenticator-rs = { workspace = true }
 # The #1270 live test spawns a throwaway token-auth `nats-server` on a
 # random port, like kanade-shared's kv_cas_live harness.
 portpicker = "0.1.1"
