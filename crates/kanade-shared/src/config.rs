@@ -370,7 +370,7 @@ mod tests {
     /// verbatim for startup validation, never inferred from bind/public_url.
     #[test]
     fn the_webauthn_section_is_optional_and_parsed_verbatim() {
-        let off: ServerSection = toml::from_str("bind = \"0.0.0.0:8080\"").unwrap();
+        let off: ServerSection = toml::from_str(r#"bind = "0.0.0.0:8080""#).unwrap();
         assert!(off.webauthn.rp_id.is_empty());
         assert!(off.webauthn.rp_origins.is_empty());
         let on: ServerSection = toml::from_str(
@@ -382,7 +382,8 @@ mod tests {
             rp_origins = ["https://kanade.example.com"]
             rp_name = "Kanade"
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(on.webauthn.rp_id, "kanade.example.com");
         assert_eq!(on.webauthn.rp_origins, ["https://kanade.example.com"]);
         assert_eq!(on.webauthn.rp_name.as_deref(), Some("Kanade"));
@@ -391,9 +392,9 @@ mod tests {
             r#"bind = "x"
             [webauthn]
             rp_id = "a.b""#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(partial.webauthn.rp_id, "a.b");
         assert!(partial.webauthn.rp_origins.is_empty());
     }
-
 }

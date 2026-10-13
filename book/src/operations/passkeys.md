@@ -2,9 +2,11 @@
 
 The web console can sign operators in with a **passkey** — a fingerprint,
 face, device PIN or security key — instead of a password. It is opt-in: with
-no `[server.webauthn]` section in `backend.toml` the feature is off, the
-`/api/auth/passkey*` routes answer `404` and the console shows no passkey
-controls. Nothing else about authentication changes either way.
+no `[server.webauthn]` section (or an empty section) in `backend.toml` the
+feature is off and the console shows no passkey controls. The public
+`/api/auth/passkey/config` probe returns `enabled: false`; passkey ceremonies
+and management routes answer `404`. Nothing else about authentication changes
+either way.
 
 Passkeys are **additional** credentials. The password is never removed, the
 `kanade` CLI keeps signing in with username + password (it has no browser),

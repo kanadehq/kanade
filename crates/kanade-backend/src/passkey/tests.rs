@@ -329,19 +329,16 @@ async fn one_account_can_hold_several_passkeys_sharing_one_user_handle() {
 async fn enrollment_epoch_migration_backfills_legacy_users_and_generates_new_incarnations() {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
     sqlx::raw_sql(
-        "CREATE TABLE users (username TEXT PRIMARY KEY, passkey_enrollment_epoch TEXT NOT NULL DEFAULT '');
-         INSERT INTO users (username) VALUES ('alice'), ('bob');
-         INSERT INTO users VALUES ('reset-user', 'already-rotated');",
+        "CREATE TABLE users (username TEXT PRIMARY KEY);
+         INSERT INTO users (username) VALUES ('alice'), ('bob');",
     )
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::raw_sql(include_str!(
-        "../../migrations/20261013020000_unique_passkey_enrollment_epoch.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::raw_sql(include_str!("../../migrations/20261013000000_passkeys.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let epochs: Vec<String> = sqlx::query_scalar(
         "SELECT passkey_enrollment_epoch FROM users WHERE username IN ('alice', 'bob') ORDER BY username",
     )
@@ -350,13 +347,6 @@ async fn enrollment_epoch_migration_backfills_legacy_users_and_generates_new_inc
     .unwrap();
     assert!(epochs.iter().all(|epoch| epoch.len() == 64));
     assert_ne!(epochs[0], epochs[1]);
-    let rotated: String = sqlx::query_scalar(
-        "SELECT passkey_enrollment_epoch FROM users WHERE username = 'reset-user'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(rotated, "already-rotated");
     sqlx::raw_sql("DELETE FROM users WHERE username = 'alice'; INSERT INTO users (username) VALUES ('alice');")
         .execute(&pool)
         .await
