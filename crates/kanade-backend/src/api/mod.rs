@@ -1700,10 +1700,10 @@ mod spa_route_tests {
                 continue;
             };
             for found in imported.captures_iter(&src) {
-                if let Some(dependency) = resolve_import(&file, &found[1], web) {
-                    if !seen.contains(&dependency) {
-                        pending.push(dependency);
-                    }
+                if let Some(dependency) = resolve_import(&file, &found[1], web)
+                    && !seen.contains(&dependency)
+                {
+                    pending.push(dependency);
                 }
             }
             out.push(file);

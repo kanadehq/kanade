@@ -1011,3 +1011,33 @@ async fn migration_assigns_unique_generations_to_legacy_and_recreated_accounts()
     assert_eq!(after.len(), 64);
     assert!(!before.contains(&after));
 }
+
+#[tokio::test]
+async fn factor_change_rotates_epoch_atomically_and_rollback_preserves_proof() {
+    let pool = pool().await;
+    let original = proof(&pool, "alice").await.enrollment_epoch;
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE users SET password_hash = 'replacement', totp_secret = 'new secret' WHERE username = 'alice'")
+        .execute(&mut *tx).await.unwrap();
+    let changed: String =
+        sqlx::query_scalar("SELECT passkey_enrollment_epoch FROM users WHERE username = 'alice'")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_ne!(
+        original, changed,
+        "factor and epoch changes share a transaction"
+    );
+    tx.rollback().await.unwrap();
+    assert_eq!(original, proof(&pool, "alice").await.enrollment_epoch);
+    let factors: (String, Option<String>) =
+        sqlx::query_as("SELECT password_hash, totp_secret FROM users WHERE username = 'alice'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(factors, ("x".into(), None));
+    // An unchanged assignment should not revoke a still-valid snapshot.
+    sqlx::query("UPDATE users SET password_hash = password_hash, totp_secret = totp_secret WHERE username = 'alice'")
+        .execute(&pool).await.unwrap();
+    assert_eq!(original, proof(&pool, "alice").await.enrollment_epoch);
+}

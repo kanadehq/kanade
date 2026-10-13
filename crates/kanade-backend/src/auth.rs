@@ -596,14 +596,14 @@ pub(crate) fn feature_denial(
     // exec-only account *create* a job — the one thing a multi-owner entry
     // must never widen. A write therefore falls through to the owning page's
     // arm below (or to commons-and-closed), which is the safe direction.
-    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
-        if let Some(features) = crate::api::shared_owner_features(path) {
-            return if features.iter().any(|f| allowed.contains(f)) {
-                None
-            } else {
-                Some("account not permitted to access this route".to_string())
-            };
-        }
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        && let Some(features) = crate::api::shared_owner_features(path)
+    {
+        return if features.iter().any(|f| allowed.contains(f)) {
+            None
+        } else {
+            Some("account not permitted to access this route".to_string())
+        };
     }
     match crate::api::feature_for_path(path) {
         Some(feature) if allowed.contains(&feature) => None,

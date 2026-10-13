@@ -98,14 +98,14 @@ pub async fn replace_feed_rows(
             .fetch_optional(pool)
             .await
             .map_err(|e| anyhow!("read feed_meta watermark for {feed_id}: {e}"))?;
-    if let Some(prior_at) = prior_at {
-        if recorded_at <= prior_at {
-            debug!(
-                feed_id,
-                "stale feed replay rejected by recency guard; skipping"
-            );
-            return Ok(0);
-        }
+    if let Some(prior_at) = prior_at
+        && recorded_at <= prior_at
+    {
+        debug!(
+            feed_id,
+            "stale feed replay rejected by recency guard; skipping"
+        );
+        return Ok(0);
     }
 
     // Defence in depth: a non-object payload (`[...]`, a bare string) makes

@@ -331,6 +331,7 @@ fn print_resolved_db_path(config: Option<&Path>) -> Result<()> {
 /// One row of the durable `users` table, captured verbatim so a wipe can
 /// restore accounts (incl. their original timestamps) byte-for-byte.
 /// Timestamps are read as TEXT to round-trip them unchanged.
+#[derive(sqlx::FromRow)]
 struct UserRow {
     username: String,
     password_hash: String,
@@ -354,6 +355,8 @@ struct UserRow {
     /// from a pre-`totp_secret` DB — preserved across the wipe so a
     /// migration-driven wipe doesn't silently disable MFA for everyone.
     totp_secret: Option<String>,
+    /// Enrollment generation belongs to this account incarnation, not the projector.
+    passkey_enrollment_epoch: String,
     created_at: String,
     updated_at: String,
 }
@@ -367,6 +370,26 @@ struct PermGroupRow {
     features: String,
     created_at: String,
     updated_at: String,
+}
+
+/// Credentials are durable account state, including counters and user handles.
+#[derive(sqlx::FromRow)]
+struct PasskeyRow {
+    id: i64,
+    username: String,
+    user_uuid: String,
+    credential_id: String,
+    passkey: String,
+    name: String,
+    created_at: String,
+    last_used_at: Option<String>,
+}
+
+#[derive(Default)]
+struct DurableSnapshot {
+    users: Vec<UserRow>,
+    groups: Vec<PermGroupRow>,
+    passkeys: Vec<PasskeyRow>,
 }
 
 /// Decide the `kid` for a generate run, and refuse the two ways it can wreck
@@ -762,11 +785,15 @@ fn wipe_projector(config: Option<&Path>) -> Result<()> {
 }
 
 /// Core of `wipe-projector`, split out so it can be unit-tested against a
-/// throwaway DB path: snapshot durable tables (`users` + `permission_groups`)
+/// throwaway DB path: snapshot durable tables (`users`, `permission_groups`, `user_passkeys`)
 /// → delete the DB + sidecars → re-create the schema via migrations → restore
 /// them. Returns `(accounts, groups)` restored.
 async fn wipe_projector_at(db_path: &str) -> Result<(usize, usize)> {
-    let (users, groups) = snapshot_durable(db_path)
+    let DurableSnapshot {
+        users,
+        groups,
+        passkeys,
+    } = snapshot_durable(db_path)
         .await
         .context("snapshot durable tables")?;
     remove_db_files(db_path).context("remove projector DB files")?;
@@ -792,18 +819,21 @@ async fn wipe_projector_at(db_path: &str) -> Result<(usize, usize)> {
     let users_restored = restore_users(&pool, &users)
         .await
         .context("restore users")?;
+    restore_passkeys(&pool, &passkeys)
+        .await
+        .context("restore passkeys")?;
     pool.close().await;
     Ok((users_restored, groups_restored))
 }
 
 /// Read every durable (SQLite-only, not projector-derived) row worth
 /// preserving across a wipe: `users` **and** `permission_groups` (#1008
-/// Phase 3), from a single read-only open of the DB. Tolerates a missing DB
+/// Phase 3), and passkeys, from a single read-only open of the DB. Tolerates a missing DB
 /// file (fresh box) and missing tables (older / partially-migrated DB) by
 /// returning an empty snapshot — both mean "nothing to preserve", not an error.
-async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupRow>)> {
+async fn snapshot_durable(db_path: &str) -> Result<DurableSnapshot> {
     if !Path::new(db_path).exists() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(DurableSnapshot::default());
     }
     // Open read-only — we only read here, and the file is about to be
     // deleted; no need to create or migrate it.
@@ -838,7 +868,7 @@ async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupR
             .context("probe for users table")?;
     if has_users.is_none() {
         pool.close().await;
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(DurableSnapshot::default());
     }
 
     // The `email` (#770) and `allowed_features` (#1008) columns may be
@@ -862,6 +892,7 @@ async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupR
     let has_allowed = column_exists("allowed_features").await?;
     let has_group = column_exists("permission_group").await?;
     let has_totp = column_exists("totp_secret").await?;
+    let has_epoch = column_exists("passkey_enrollment_epoch").await?;
     let email_expr = if has_email {
         "email"
     } else {
@@ -882,70 +913,58 @@ async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupR
     } else {
         "CAST(NULL AS TEXT) AS totp_secret"
     };
+    let epoch_expr = if has_epoch {
+        "passkey_enrollment_epoch"
+    } else {
+        "'' AS passkey_enrollment_epoch"
+    };
     // Composed only from hardcoded column literals above (the `*_expr`
     // branches are static strings, no user input), so it's injection-safe;
     // `AssertSqlSafe` is required because the composed string isn't `'static`.
     let select = format!(
-        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, {email_expr}, {allowed_expr}, {group_expr}, {totp_expr} FROM users"
+        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, {email_expr}, {allowed_expr}, {group_expr}, {totp_expr}, {epoch_expr} FROM users"
     );
 
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-    >(sqlx::AssertSqlSafe(select))
-    .fetch_all(&pool)
-    .await
-    .context("select users")?;
-
-    let users: Vec<UserRow> = rows
-        .into_iter()
-        .map(
-            |(
-                username,
-                password_hash,
-                role,
-                disabled,
-                must_change_pw,
-                created_at,
-                updated_at,
-                email,
-                allowed_features,
-                permission_group,
-                totp_secret,
-            )| {
-                UserRow {
-                    username,
-                    password_hash,
-                    role,
-                    disabled,
-                    must_change_pw,
-                    email,
-                    allowed_features,
-                    permission_group,
-                    totp_secret,
-                    created_at,
-                    updated_at,
-                }
-            },
-        )
-        .collect();
+    let users = sqlx::query_as::<_, UserRow>(sqlx::AssertSqlSafe(select))
+        .fetch_all(&pool)
+        .await
+        .context("select users")?;
 
     // Same read-only session captures the groups accounts reference.
     let groups = snapshot_permission_groups(&pool).await?;
+    let passkeys = snapshot_passkeys(&pool).await?;
     pool.close().await;
-    Ok((users, groups))
+    Ok(DurableSnapshot {
+        users,
+        groups,
+        passkeys,
+    })
+}
+
+/// Older databases have no passkey table. Any other read error aborts the
+/// wipe before removing the source database, rather than dropping credentials.
+async fn snapshot_passkeys(pool: &sqlx::SqlitePool) -> Result<Vec<PasskeyRow>> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_passkeys')")
+        .fetch_one(pool).await.context("probe for user_passkeys table")?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as("SELECT id, username, user_uuid, credential_id, passkey, name, created_at, last_used_at FROM user_passkeys")
+        .fetch_all(pool).await.context("select user_passkeys")
+}
+
+/// Restore after users: the insert-time account cleanup trigger must never
+/// run after keys have been restored. Preserve IDs, counters and timestamps.
+async fn restore_passkeys(pool: &sqlx::SqlitePool, passkeys: &[PasskeyRow]) -> Result<()> {
+    let mut tx = pool.begin().await.context("begin passkey restore")?;
+    for key in passkeys {
+        sqlx::query("INSERT INTO user_passkeys (id, username, user_uuid, credential_id, passkey, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(key.id).bind(&key.username).bind(&key.user_uuid)
+            .bind(&key.credential_id).bind(&key.passkey).bind(&key.name)
+            .bind(&key.created_at).bind(&key.last_used_at)
+            .execute(&mut *tx).await.context("restore user passkey")?;
+    }
+    tx.commit().await.context("commit passkey restore")
 }
 
 /// Read every `permission_groups` row (#1008 Phase 3) from an existing
@@ -1016,8 +1035,8 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
     for u in users {
         sqlx::query(
             "INSERT INTO users \
-             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features, permission_group, totp_secret) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features, permission_group, totp_secret, passkey_enrollment_epoch) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&u.username)
         .bind(&u.password_hash)
@@ -1030,6 +1049,7 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
         .bind(&u.allowed_features)
         .bind(&u.permission_group)
         .bind(&u.totp_secret)
+        .bind(&u.passkey_enrollment_epoch)
         .execute(&mut *tx)
         .await
         .with_context(|| format!("restore user {}", u.username))?;
@@ -2070,6 +2090,141 @@ mod tests {
         pool.close().await;
 
         let _ = remove_db_files(&db_path);
+    }
+
+    #[tokio::test]
+    async fn wipe_preserves_passkey_credentials_and_they_still_sign_in() {
+        use crate::passkey::{
+            ReauthProof,
+            tests::{ORIGIN, create, handle_of, sign, svc},
+        };
+        use webauthn_authenticator_rs::softpasskey::SoftPasskey;
+        let db_path = temp_db_path("passkeys");
+        let pool = open(&db_path).await;
+        sqlx::query("INSERT INTO users (username, password_hash, role) VALUES ('alice', 'hash', 'operator')")
+            .execute(&pool).await.unwrap();
+        let epoch: String = sqlx::query_scalar(
+            "SELECT passkey_enrollment_epoch FROM users WHERE username = 'alice'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let service = svc();
+        let mut authenticator = SoftPasskey::new(true);
+        let proof = ReauthProof {
+            must_change_pw: false,
+            enrollment_epoch: epoch.clone(),
+        };
+        let (id, options) = service
+            .start_register(&pool, "alice", "laptop", &proof)
+            .await
+            .unwrap();
+        let credential = create(&mut authenticator, ORIGIN, options, |_| {});
+        let info = service
+            .finish_register(&pool, "alice", &id, &credential)
+            .await
+            .unwrap();
+        let handle = handle_of(&pool, "alice").await;
+        // Advance the counter so restoring only the initial public key is
+        // insufficient; the current credential blob must survive verbatim.
+        let (id, options) = service.start_login("wipe-test").unwrap();
+        let assertion = sign(
+            &mut authenticator,
+            ORIGIN,
+            serde_json::to_value(options).unwrap(),
+            &handle,
+            |_| {},
+        );
+        service
+            .finish_login(&pool, &Default::default(), "wipe-test", &id, &assertion)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE user_passkeys SET created_at = '2026-01-02 03:04:05', last_used_at = '2026-02-03 04:05:06'")
+            .execute(&pool).await.unwrap();
+        type StoredKey = (
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        );
+        const SELECT_KEYS: &str = "SELECT id, username, user_uuid, credential_id, passkey, name, created_at, last_used_at FROM user_passkeys ORDER BY id";
+        let before: Vec<StoredKey> = sqlx::query_as(SELECT_KEYS).fetch_all(&pool).await.unwrap();
+        assert_eq!(before.len(), 1);
+        pool.close().await;
+        assert_eq!(wipe_projector_at(&db_path).await.unwrap(), (1, 0));
+        let pool = open(&db_path).await;
+        let after: Vec<StoredKey> = sqlx::query_as(SELECT_KEYS).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            before, after,
+            "all credential fields, including counters and IDs, survive"
+        );
+        let restored_epoch: String = sqlx::query_scalar(
+            "SELECT passkey_enrollment_epoch FROM users WHERE username = 'alice'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(epoch, restored_epoch);
+        assert_eq!(
+            crate::passkey::list(&pool, "alice").await.unwrap()[0].id,
+            info.id
+        );
+        // Simulate service restart: no pre-wipe in-memory state can mask a
+        // missing credential or changed discoverable user handle.
+        let service = svc();
+        let (id, options) = service.start_login("wipe-test").unwrap();
+        let assertion = sign(
+            &mut authenticator,
+            ORIGIN,
+            serde_json::to_value(options).unwrap(),
+            &handle,
+            |_| {},
+        );
+        let login = service
+            .finish_login(&pool, &Default::default(), "wipe-test", &id, &assertion)
+            .await
+            .unwrap();
+        assert_eq!(login.username, "alice");
+        assert_eq!(login.role, crate::auth::Role::Operator);
+        pool.close().await;
+        remove_db_files(&db_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wipe_upgrades_legacy_accounts_without_passkey_schema() {
+        let db_path = temp_db_path("legacy-passkeys");
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TABLE users (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT, disabled INTEGER, must_change_pw INTEGER, created_at TEXT, updated_at TEXT); INSERT INTO users VALUES ('alice', 'hash', 'operator', 0, 0, '2026-01-02 03:04:05', '2026-01-02 03:04:05');")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+        assert_eq!(wipe_projector_at(&db_path).await.unwrap(), (1, 0));
+        let pool = open(&db_path).await;
+        let epoch: String = sqlx::query_scalar(
+            "SELECT passkey_enrollment_epoch FROM users WHERE username = 'alice'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(epoch.len(), 64);
+        assert!(
+            crate::passkey::list(&pool, "alice")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        pool.close().await;
+        remove_db_files(&db_path).unwrap();
     }
 
     #[tokio::test]

@@ -242,10 +242,11 @@ async fn project_result(
     // timeout, and `executions.success_count` is an unconditional
     // `+= 1`. A reaped-placeholder overwrite (was_reaped) is also
     // skipped: the reaper already counted that row at reap time.
-    if fresh && was_reaped != Some(1) {
-        if let Some(exec_id) = r.exec_id.as_deref() {
-            bump_exec_counters(&mut *tx, exec_id, r.exit_code).await?;
-        }
+    if fresh
+        && was_reaped != Some(1)
+        && let Some(exec_id) = r.exec_id.as_deref()
+    {
+        bump_exec_counters(&mut *tx, exec_id, r.exit_code).await?;
     }
     tx.commit().await.context("commit result projection tx")?;
     Ok(fresh)
@@ -810,33 +811,33 @@ async fn upsert_inventory(
     // (`identity_json IS NULL` distinguishes the two). Reuses
     // `write_events` so the SPA History tab (#92) renders these
     // rows alongside array-element events without any UI change.
-    if let Some(scalars) = hint.history_scalars.as_ref() {
-        if !scalars.is_empty() {
-            match super::history::diff_scalars(prior_facts_json.as_deref(), &facts, scalars) {
-                Ok(events) if !events.is_empty() => {
-                    let mut tx = pool.begin().await?;
-                    if let Err(e) =
-                        super::history::write_events(&mut tx, &r.pc_id, manifest_id, &events).await
-                    {
-                        warn!(
-                            error = %e,
-                            pc_id = %r.pc_id,
-                            manifest_id,
-                            "history_scalars: write_events failed; rolling back",
-                        );
-                        let _ = tx.rollback().await;
-                    } else {
-                        tx.commit().await?;
-                    }
+    if let Some(scalars) = hint.history_scalars.as_ref()
+        && !scalars.is_empty()
+    {
+        match super::history::diff_scalars(prior_facts_json.as_deref(), &facts, scalars) {
+            Ok(events) if !events.is_empty() => {
+                let mut tx = pool.begin().await?;
+                if let Err(e) =
+                    super::history::write_events(&mut tx, &r.pc_id, manifest_id, &events).await
+                {
+                    warn!(
+                        error = %e,
+                        pc_id = %r.pc_id,
+                        manifest_id,
+                        "history_scalars: write_events failed; rolling back",
+                    );
+                    let _ = tx.rollback().await;
+                } else {
+                    tx.commit().await?;
                 }
-                Ok(_) => { /* no scalar changed — no events */ }
-                Err(e) => warn!(
-                    error = %e,
-                    pc_id = %r.pc_id,
-                    manifest_id,
-                    "history_scalars: diff failed; skipping (other projection paths continue)",
-                ),
             }
+            Ok(_) => { /* no scalar changed — no events */ }
+            Err(e) => warn!(
+                error = %e,
+                pc_id = %r.pc_id,
+                manifest_id,
+                "history_scalars: diff failed; skipping (other projection paths continue)",
+            ),
         }
     }
 

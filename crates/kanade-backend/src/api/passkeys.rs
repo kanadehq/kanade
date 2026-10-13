@@ -1129,4 +1129,199 @@ mod tests {
                 .is_empty()
         );
     }
+    async fn enrollment_proof(app: &App, password: &str, secret: Option<&str>) -> ReauthProof {
+        let claims = Claims {
+            sub: "alice".into(),
+            exp: 4_102_444_800,
+            aud: Some(crate::auth::EXPECTED_AUDIENCE.into()),
+            roles: vec![],
+            allowed_features: None,
+        };
+        reauthenticate(
+            &app.state,
+            &HeaderMap::new(),
+            &claims,
+            &Reauth {
+                password: password.into(),
+                totp_code: secret.map(|s| crate::mfa::current_code(s, "alice")),
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("reauthentication failed"))
+    }
+
+    async fn finish_started(app: &App, started: &serde_json::Value) -> StatusCode {
+        let credential = create(
+            &mut SoftPasskey::new(true),
+            ORIGIN,
+            started["options"].clone(),
+            |_| {},
+        );
+        call(app, "POST", "/api/auth/passkeys/register/finish", Some("alice"),
+            Some(serde_json::json!({ "challenge_id": started["challenge_id"], "credential": credential }))).await.0
+    }
+
+    async fn assert_old_proof_rejected(app: &App, proof: &ReauthProof) {
+        let svc = service(&app.state).unwrap_or_else(|_| panic!("passkeys disabled"));
+        let (id, options) = svc
+            .start_register(&app.pool, "alice", "old factor snapshot", proof)
+            .await
+            .unwrap();
+        let credential = create(&mut SoftPasskey::new(true), ORIGIN, options, |_| {});
+        assert!(matches!(
+            svc.finish_register(&app.pool, "alice", &id, &credential)
+                .await,
+            Err(RegisterError::Rejected)
+        ));
+        assert!(
+            crate::passkey::list(&app.pool, "alice")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn password_changes_and_resets_invalidate_pending_enrollment_and_snapshot() {
+        for change in ["self", "admin", "reset-link"] {
+            let app = app(true).await;
+            let proof = enrollment_proof(&app, PW, None).await;
+            let (status, pending) = start_register(&app, "alice", PW, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let mut password = "replacement password";
+            let status = match change {
+                "self" => {
+                    call(
+                        &app,
+                        "POST",
+                        "/api/auth/change-password",
+                        Some("alice"),
+                        Some(serde_json::json!({ "old_password": PW, "new_password": password })),
+                    )
+                    .await
+                    .0
+                }
+                "admin" => {
+                    call(
+                        &app,
+                        "PATCH",
+                        "/api/accounts/alice",
+                        Some("root"),
+                        Some(serde_json::json!({ "password": password })),
+                    )
+                    .await
+                    .0
+                }
+                "reset-link" => {
+                    let token = crate::api::password_setup::issue_token(
+                        &app.pool,
+                        "alice",
+                        crate::api::password_setup::PURPOSE_RESET,
+                    )
+                    .await
+                    .unwrap();
+                    call(
+                        &app,
+                        "POST",
+                        &format!("/api/auth/password-setup/{token}"),
+                        None,
+                        Some(serde_json::json!({ "password": password })),
+                    )
+                    .await
+                    .0
+                }
+                _ => unreachable!(),
+            };
+            assert!(status.is_success(), "{change}: {status}");
+            assert_eq!(
+                finish_started(&app, &pending).await,
+                StatusCode::BAD_REQUEST,
+                "{change}"
+            );
+            assert_old_proof_rejected(&app, &proof).await;
+            // The existing password path must also reject the old factor.
+            let (status, _) = call(
+                &app,
+                "POST",
+                "/api/auth/login",
+                None,
+                Some(serde_json::json!({ "username": "alice", "password": PW })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            if change == "admin" {
+                assert_eq!(
+                    start_register(&app, "alice", password, None).await.0,
+                    StatusCode::FORBIDDEN
+                );
+                let (status, _) = call(&app, "POST", "/api/auth/change-password", Some("alice"),
+                    Some(serde_json::json!({ "old_password": password, "new_password": "chosen password" }))).await;
+                assert!(status.is_success());
+                password = "chosen password";
+            }
+            let (status, fresh) = start_register(&app, "alice", password, None).await;
+            assert_eq!(status, StatusCode::OK, "{change}: {fresh}");
+            assert_eq!(finish_started(&app, &fresh).await, StatusCode::CREATED);
+            assert_eq!(
+                crate::passkey::list(&app.pool, "alice")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn totp_activation_rotation_and_removal_invalidate_enrollment_proofs() {
+        for change in ["activate", "rotate", "disable"] {
+            let app = app(true).await;
+            let old_secret = if change == "activate" {
+                None
+            } else {
+                Some(enable_totp(&app, "alice").await)
+            };
+            let old_code = old_secret
+                .as_deref()
+                .map(|s| crate::mfa::current_code(s, "alice"));
+            let proof = enrollment_proof(&app, PW, old_secret.as_deref()).await;
+            let (status, pending) = start_register(&app, "alice", PW, old_code.as_deref()).await;
+            assert_eq!(status, StatusCode::OK);
+            let new_secret = (change != "disable").then(crate::mfa::generate_secret_base32);
+            let status = if let Some(secret) = &new_secret {
+                call(&app, "POST", "/api/auth/mfa/verify", Some("alice"), Some(serde_json::json!({
+                    "secret": secret, "code": crate::mfa::current_code(secret, "alice"), "current_code": old_code
+                }))).await.0
+            } else {
+                call(
+                    &app,
+                    "POST",
+                    "/api/auth/mfa/disable",
+                    Some("alice"),
+                    Some(serde_json::json!({ "code": old_code })),
+                )
+                .await
+                .0
+            };
+            assert_eq!(status, StatusCode::NO_CONTENT, "{change}");
+            assert_eq!(
+                finish_started(&app, &pending).await,
+                StatusCode::BAD_REQUEST,
+                "{change}"
+            );
+            assert_old_proof_rejected(&app, &proof).await;
+            if new_secret.is_some() {
+                assert_eq!(
+                    start_register(&app, "alice", PW, None).await.0,
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            let code = new_secret
+                .as_deref()
+                .map(|s| crate::mfa::current_code(s, "alice"));
+            let (status, fresh) = start_register(&app, "alice", PW, code.as_deref()).await;
+            assert_eq!(status, StatusCode::OK, "{change}: {fresh}");
+            assert_eq!(finish_started(&app, &fresh).await, StatusCode::CREATED);
+        }
+    }
 }
