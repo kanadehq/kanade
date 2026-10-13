@@ -26,6 +26,7 @@ pub mod jetstream_status;
 pub mod jobs;
 pub mod notifications;
 pub mod obs_events;
+pub mod passkeys;
 pub mod password_setup;
 pub mod permission_groups;
 pub mod process_perf;
@@ -185,6 +186,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/mfa/init", post(accounts::mfa_init))
         .route("/api/auth/mfa/verify", post(accounts::mfa_verify))
         .route("/api/auth/mfa/disable", post(accounts::mfa_disable))
+        // Passkey (WebAuthn) self-service enrolment/management (authed).
+        .route("/api/auth/passkeys/register/start", post(passkeys::register_start))
+        .route("/api/auth/passkeys/register/finish", post(passkeys::register_finish))
+        .route("/api/auth/passkeys", get(passkeys::list))
+        .route("/api/auth/passkeys/{id}/remove", post(passkeys::remove))
+        // Passkey sign-in (public, no session).
+        .route("/api/auth/passkey/login/start", post(passkeys::login_start))
+        .route("/api/auth/passkey/login/finish", post(passkeys::login_finish))
         // #770: PUBLIC one-time password setup/reset links + self-service
         // forgot-password (allow-listed in crate::auth::verify, like login).
         .route(
@@ -195,6 +204,8 @@ pub fn router(state: AppState) -> Router {
             "/api/auth/forgot-password",
             post(password_setup::forgot_password),
         )
+        // Passkey (WebAuthn) — public feature probe; the rest are authed below.
+        .route("/api/auth/passkey/config", get(passkeys::config))
         // #1140: the operator's end of the remote-assistance relay. Sits in
         // `base` rather than the `operator` group on purpose — this route is
         // allow-listed out of `auth::verify` (its credential rides
@@ -622,6 +633,11 @@ pub fn router(state: AppState) -> Router {
             "/api/accounts/{username}/reset-link",
             post(accounts::reset_link),
         )
+        // Passkey admin reset — revokes all passkeys for an account (device-loss recovery).
+        .route(
+            "/api/accounts/{username}/passkeys",
+            delete(passkeys::admin_reset),
+        )
         // #1008 Phase 3: named permission groups (reusable page allow-lists
         // shared by many accounts). Admin-only CRUD.
         .route(
@@ -865,9 +881,18 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         "/api/accounts"
         | "/api/accounts/{username}"
         | "/api/accounts/{username}/reset-link"
+        | "/api/accounts/{username}/passkeys"
         | "/api/permission-groups"
         | "/api/permission-groups/{name}"
-        | "/api/query" => Feature::Accounts,
+        | "/api/query"
+        // Passkey self-service (part of the account security page).
+        | "/api/auth/passkey/config"
+        | "/api/auth/passkeys/register/start"
+        | "/api/auth/passkeys/register/finish"
+        | "/api/auth/passkeys"
+        | "/api/auth/passkeys/{id}/remove"
+        | "/api/auth/passkey/login/start"
+        | "/api/auth/passkey/login/finish" => Feature::Accounts,
 
         // Commons: everything else (health, version, auth/*, the fleet
         // roster + per-PC detail/perf, dashboard feeds, editor schemas,
