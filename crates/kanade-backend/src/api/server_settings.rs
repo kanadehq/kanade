@@ -1048,21 +1048,21 @@ fn validate_support_code(scope: &str, body: &SupportCodeBody) -> Result<(), (Sta
             format!("code must be at least {MIN_SUPPORT_CODE_LEN} characters"),
         ));
     }
-    if let Some(ttl) = body.ttl_minutes {
-        if ttl == 0 || ttl > MAX_SUPPORT_UNLOCK_TTL_MINUTES {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("ttl_minutes must be 1..={MAX_SUPPORT_UNLOCK_TTL_MINUTES}"),
-            ));
-        }
+    if let Some(ttl) = body.ttl_minutes
+        && (ttl == 0 || ttl > MAX_SUPPORT_UNLOCK_TTL_MINUTES)
+    {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("ttl_minutes must be 1..={MAX_SUPPORT_UNLOCK_TTL_MINUTES}"),
+        ));
     }
-    if let Some(label) = body.label.as_ref() {
-        if label.trim().is_empty() {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "label must not be blank when set; omit it instead".to_string(),
-            ));
-        }
+    if let Some(label) = body.label.as_ref()
+        && label.trim().is_empty()
+    {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "label must not be blank when set; omit it instead".to_string(),
+        ));
     }
     Ok(())
 }

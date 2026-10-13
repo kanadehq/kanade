@@ -87,6 +87,26 @@ pub enum MailEncryption {
     None,
 }
 
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct WebauthnSection {
+    /// Relying party ID — a bare host name (e.g. `kanade.example.com` or
+    /// `localhost`). No scheme, port, path or credentials. Must be
+    /// lowercase ASCII; use punycode for IDN. Must be a domain name, not
+    /// an IP address. Subdomains of this RP ID may be listed in
+    /// `rp_origins`.
+    #[serde(default)]
+    pub rp_id: String,
+    /// Allowed origin(s) for WebAuthn ceremonies. Each must be a bare
+    /// origin (`https://host[:port]`) whose host is either the RP ID or a
+    /// subdomain of it. `http` is only accepted for `localhost`. At least
+    /// one origin is required. No wildcards, paths, queries or fragments.
+    #[serde(default)]
+    pub rp_origins: Vec<String>,
+    /// Human-readable relying party name. Defaults to "Kanade".
+    #[serde(default)]
+    pub rp_name: Option<String>,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct ServerSection {
     pub bind: String,
@@ -101,6 +121,11 @@ pub struct ServerSection {
     /// carries no scheme/hostname).
     #[serde(default)]
     pub public_url: Option<String>,
+    /// WebAuthn (passkey) relying party configuration. When present and
+    /// valid, passkey sign-in, enrolment and management are enabled for
+    /// the Web UI. Optional: omit or leave empty to disable the feature.
+    #[serde(default)]
+    pub webauthn: WebauthnSection,
 }
 
 #[derive(Deserialize, Debug, Clone)]

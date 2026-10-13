@@ -63,6 +63,19 @@ impl LoginThrottle {
         self.record_failure_at(username, ip, Instant::now());
     }
 
+    /// Is this source IP over its failure budget right now? Used where no
+    /// account is known yet (an unidentified passkey assertion): the per-IP
+    /// window still applies, and no pseudo-account entry is created that a
+    /// third party could lock.
+    pub fn check_ip(&self, ip: &str) -> Result<(), u64> {
+        self.check_ip_at(ip, Instant::now())
+    }
+
+    /// Count a failure against the source IP only.
+    pub fn record_ip_failure(&self, ip: &str) {
+        self.record_ip_failure_at(ip, Instant::now());
+    }
+
     /// Clear a username's failure state after a successful login.
     pub fn record_success(&self, username: &str) {
         self.users.lock().unwrap().remove(username);
@@ -71,13 +84,16 @@ impl LoginThrottle {
     // ---- time-injected cores (testable without sleeping) ----------------
 
     fn check_at(&self, username: &str, ip: &str, now: Instant) -> Result<(), u64> {
-        if let Some(u) = self.users.lock().unwrap().get(username) {
-            if let Some(until) = u.locked_until {
-                if until > now {
-                    return Err((until - now).as_secs() + 1);
-                }
-            }
+        if let Some(u) = self.users.lock().unwrap().get(username)
+            && let Some(until) = u.locked_until
+            && until > now
+        {
+            return Err((until - now).as_secs() + 1);
         }
+        self.check_ip_at(ip, now)
+    }
+
+    fn check_ip_at(&self, ip: &str, now: Instant) -> Result<(), u64> {
         if let Some(s) = self.ips.lock().unwrap().get(ip) {
             let elapsed = now.saturating_duration_since(s.window_start);
             if elapsed < IP_WINDOW && s.count >= IP_MAX_ATTEMPTS {
@@ -105,6 +121,10 @@ impl LoginThrottle {
                 u.locked_until = Some(now + USER_LOCKOUT);
             }
         }
+        self.record_ip_failure_at(ip, now);
+    }
+
+    fn record_ip_failure_at(&self, ip: &str, now: Instant) {
         {
             let mut ips = self.ips.lock().unwrap();
             if ips.len() >= PRUNE_AT {
@@ -177,5 +197,20 @@ mod tests {
         // The window rolls over.
         let later = now + IP_WINDOW + Duration::from_secs(1);
         assert!(t.check_at("unext", "5.5.5.5", later).is_ok());
+    }
+
+    #[test]
+    fn ip_only_failures_throttle_the_address_without_creating_an_account_lock() {
+        let t = LoginThrottle::default();
+        let now = Instant::now();
+        for _ in 0..IP_MAX_ATTEMPTS {
+            assert!(t.check_ip_at("7.7.7.7", now).is_ok());
+            t.record_ip_failure_at("7.7.7.7", now);
+        }
+        assert!(t.check_ip_at("7.7.7.7", now).is_err());
+        assert!(t.check_ip_at("8.8.8.8", now).is_ok());
+        // No per-account state was created for anyone to trip over.
+        assert!(t.check_at("anyone", "8.8.8.8", now).is_ok());
+        assert!(t.users.lock().unwrap().is_empty());
     }
 }

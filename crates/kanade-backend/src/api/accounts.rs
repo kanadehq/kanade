@@ -137,7 +137,7 @@ pub(crate) async fn hash_password_async(pw: String) -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("hash task join: {e}"))?
 }
 
-async fn verify_password_async(pw: String, phc: String) -> bool {
+pub(crate) async fn verify_password_async(pw: String, phc: String) -> bool {
     // A join error means the verify closure panicked. Fail closed
     // (treat as a failed verification), but log it — otherwise a
     // panicking verifier is indistinguishable from a wrong password
@@ -157,7 +157,7 @@ async fn verify_password_async(pw: String, phc: String) -> bool {
 /// signing failure (logged) — the caller maps that to a 500. `ttl_hours`
 /// is the operator-configured session window, already clamped to a sane
 /// range by [`kanade_shared::wire::ServerSettings::effective_session_ttl_hours`].
-fn mint_jwt(sub: &str, role: Role, ttl_hours: i64) -> Option<(String, i64)> {
+pub(crate) fn mint_jwt(sub: &str, role: Role, ttl_hours: i64) -> Option<(String, i64)> {
     let exp = (Utc::now() + Duration::hours(ttl_hours)).timestamp();
     let claims = Claims {
         sub: sub.to_string(),
@@ -184,7 +184,7 @@ fn mint_jwt(sub: &str, role: Role, ttl_hours: i64) -> Option<(String, i64)> {
 
 // ---- error helper --------------------------------------------------
 
-fn err(code: StatusCode, msg: &str) -> ApiError {
+pub(crate) fn err(code: StatusCode, msg: &str) -> ApiError {
     (code, msg.to_owned()).into_response().into()
 }
 
@@ -202,10 +202,10 @@ pub struct LoginReq {
 
 #[derive(Serialize)]
 pub struct LoginResp {
-    token: String,
-    role: Role,
-    must_change_pw: bool,
-    exp: i64,
+    pub(crate) token: String,
+    pub(crate) role: Role,
+    pub(crate) must_change_pw: bool,
+    pub(crate) exp: i64,
 }
 
 /// Best-effort client IP for login throttling (#1191). Behind Caddy the
@@ -218,7 +218,7 @@ pub struct LoginResp {
 /// `deploy/linux` Caddyfile). Falls back to a shared bucket when the header is
 /// absent (a direct LAN deploy), so the per-IP limit degrades to global-ish
 /// rather than off.
-fn client_ip(headers: &HeaderMap) -> String {
+pub(crate) fn client_ip(headers: &HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -229,7 +229,7 @@ fn client_ip(headers: &HeaderMap) -> String {
 }
 
 /// `429 Too Many Requests` with a `Retry-After` (seconds) for a throttled login.
-fn too_many(retry_after_secs: u64) -> ApiError {
+pub(crate) fn too_many(retry_after_secs: u64) -> ApiError {
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(
@@ -322,18 +322,7 @@ pub async fn login(
     // All factors correct — clear the account's failure streak.
     state.login_throttle.record_success(&req.username);
 
-    // Operator-configured session window (default 24h). A broker hiccup
-    // reading the KV must not block login — fall back to the built-in
-    // default rather than 500ing an otherwise-valid sign-in. Log the error
-    // (mirroring the sqlx failure above) so a persistent KV/broker outage is
-    // observable rather than silently degrading every login to the default.
-    let ttl_hours = match super::server_settings::load(&state).await {
-        Ok(s) => s.effective_session_ttl_hours(),
-        Err(e) => {
-            warn!(error = %format!("{e:#}"), "server_settings load failed at login; using default session TTL");
-            kanade_shared::wire::DEFAULT_SESSION_TTL_HOURS
-        }
-    } as i64;
+    let ttl_hours = session_ttl_hours(&state).await;
     let (token, exp) = mint_jwt(&req.username, role, ttl_hours)
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "token mint failed"))?;
     Ok(Json(LoginOutcome::Success(LoginResp {
@@ -342,6 +331,16 @@ pub async fn login(
         must_change_pw: must_change_pw != 0,
         exp,
     })))
+}
+
+pub(crate) async fn session_ttl_hours(state: &AppState) -> i64 {
+    match super::server_settings::load(state).await {
+        Ok(s) => s.effective_session_ttl_hours() as i64,
+        Err(e) => {
+            warn!(error = %format!("{e:#}"), "server_settings load failed; using default session TTL");
+            kanade_shared::wire::DEFAULT_SESSION_TTL_HOURS as i64
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1165,7 +1164,7 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn db_err(e: sqlx::Error) -> ApiError {
+pub(crate) fn db_err(e: sqlx::Error) -> ApiError {
     warn!(error = %e, "accounts db error");
     err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }

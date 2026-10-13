@@ -95,6 +95,10 @@ jsonwebtoken       = { version = "10.4.0", default-features = false, features = 
 # secret. no default features → skips the heavy qr image dep (the SPA renders
 # the QR from the otpauth URL instead).
 totp-rs            = { version = "5.7.2", default-features = false, features = ["gen_secret", "otpauth"] }
+# WebAuthn / passkey support (backend). webauthn-rs is the maintained
+# server library with user verification support.
+webauthn-rs        = { version = "=0.6.1-dev", features = ["conditional-ui"] }
+webauthn-authenticator-rs = { version = "=0.6.1-dev", default-features = false, features = ["softpasskey"] }
 # Same CryptoProvider ambiguity as jsonwebtoken above, but for the async-nats
 # TLS (wss) path: the CLI links BOTH aws-lc-rs (via reqwest) and ring (via
 # async-nats), so rustls can't auto-pick and a wss:// connect panics inside

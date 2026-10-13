@@ -94,10 +94,11 @@ pub async fn compute_cached(
     let ttl = widget.refresh_interval();
     {
         let cache = state.sql_view_cache.lock().expect("sql_view_cache mutex");
-        if let Some(e) = cache.get(&key) {
-            if e.hash == hash && e.computed_at.elapsed() < ttl {
-                return e.result.clone();
-            }
+        if let Some(e) = cache.get(&key)
+            && e.hash == hash
+            && e.computed_at.elapsed() < ttl
+        {
+            return e.result.clone();
         }
     }
     // Recompute outside the lock (the query awaits). A concurrent duplicate

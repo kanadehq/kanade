@@ -1,4 +1,4 @@
-import { LogIn } from 'lucide-react';
+import { Fingerprint, LogIn } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -7,8 +7,10 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { apiFetch, formatError } from '@/lib/api';
+import { apiFetch, ApiError, formatError } from '@/lib/api';
 import { useAuth, type Role } from '@/lib/auth';
+import { getPasskey, isCancellation, passkeysSupported } from '@/lib/passkey';
+import { usePasskeyEnabled } from '@/lib/usePasskeyEnabled';
 
 type LocationState = { from?: { pathname?: string } };
 
@@ -47,6 +49,11 @@ export function Login() {
   const [mode, setMode] = useState<'login' | 'forgot'>('login');
   const [forgotSent, setForgotSent] = useState(false);
   const { t } = useTranslation('login');
+  const { t: tp } = useTranslation('passkey');
+  const passkeyEnabled = usePasskeyEnabled();
+  const passkeyOk = passkeysSupported();
+  // Neutral note (not an error) shown after a dismissed browser prompt.
+  const [passkeyNote, setPasskeyNote] = useState('');
 
   const from = (location.state as LocationState | null)?.from?.pathname ?? '/dashboard';
 
@@ -94,6 +101,38 @@ export function Login() {
       // knows the credentials were wrong rather than seeing a blank
       // re-render.
       setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Passkey sign-in: usernameless (discoverable credential), so no form
+  // fields are needed. The browser prompt does the user verification.
+  async function passkeySignIn() {
+    setBusy(true);
+    setError('');
+    setPasskeyNote('');
+    try {
+      const started = await apiFetch<{
+        challenge_id: string;
+        options: { publicKey: Record<string, unknown> };
+      }>('/api/auth/passkey/login/start', { method: 'POST' });
+      const credential = await getPasskey(started.options);
+      const resp = await apiFetch<LoginResp>('/api/auth/passkey/login/finish', {
+        method: 'POST',
+        body: JSON.stringify({ challenge_id: started.challenge_id, credential }),
+      });
+      setToken(resp.token);
+      navigate(resp.must_change_pw ? '/change-password' : from, { replace: true });
+    } catch (err) {
+      if (isCancellation(err)) {
+        // Declined, dismissed or timed out — not a failure to shout about.
+        setPasskeyNote(tp('loginCancelled'));
+      } else if (err instanceof ApiError && err.status === 429) {
+        setError(err.body || formatError(err));
+      } else {
+        setError(tp('loginFailed'));
+      }
     } finally {
       setBusy(false);
     }
@@ -192,6 +231,35 @@ export function Login() {
                   {busy ? t('submitting') : mfaStep ? t('mfaSubmit') : t('submit')}
                 </Button>
               </form>
+              {passkeyEnabled && !mfaStep && (
+                <div className="mt-4 space-y-2">
+                  <div className="flex items-center gap-3 text-xs text-muted">
+                    <span className="h-px flex-1 bg-border" />
+                    {tp('or')}
+                    <span className="h-px flex-1 bg-border" />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full"
+                    disabled={busy || !passkeyOk}
+                    onClick={() => void passkeySignIn()}
+                  >
+                    <Fingerprint className="size-4 mr-2" />
+                    {busy ? tp('loginWaiting') : tp('loginButton')}
+                  </Button>
+                  {!passkeyOk && (
+                    <p role="status" className="text-xs text-muted">
+                      {tp('loginUnsupported')}
+                    </p>
+                  )}
+                  {passkeyNote && (
+                    <p role="status" className="text-xs text-muted">
+                      {passkeyNote}
+                    </p>
+                  )}
+                </div>
+              )}
               <button
                 type="button"
                 className="mt-3 text-xs text-muted hover:text-fg underline"

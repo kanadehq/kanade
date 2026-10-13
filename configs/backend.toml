@@ -17,6 +17,17 @@ bind = '0.0.0.0:8080'
 # Host-header poisoning. (`bind` can't be used — 0.0.0.0 is a wildcard.)
 # public_url = 'https://kanade.example.com'
 
+# WebAuthn (passkey) relying party configuration. When present and valid,
+# passkey sign-in, enrolment and management are enabled for the Web UI.
+# Optional: omit or leave empty to disable the feature.
+# Keep this backend behind a trusted proxy that appends the real client IP
+# to X-Forwarded-For; direct public access can spoof the rate-limit bucket.
+# WebAuthn support requires Rust 1.88 when building the backend.
+# [server.webauthn]
+# rp_id = 'kanade.example.com'
+# rp_origins = ['https://kanade.example.com']
+# rp_name = 'Kanade'  # optional, defaults to "Kanade"
+
 [nats]
 url = 'nats://127.0.0.1:4222'
 # Base URL of the broker's HTTP monitoring endpoint (`http_port` in

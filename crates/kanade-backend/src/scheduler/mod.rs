@@ -441,16 +441,15 @@ async fn register(
     // year-stamped cron that never fires — surface that at register
     // time so "why didn't my one-shot run?" is diagnosable from the
     // log instead of silent (claude #432 review).
-    if let When::Calendar(c) = &schedule.when {
-        if let Some(fires_at) = c.oneshot_instant(schedule.tz) {
-            if fires_at < Utc::now() {
-                warn!(
-                    schedule_id = %schedule.id,
-                    %fires_at,
-                    "calendar one-shot date is in the past — it will never fire",
-                );
-            }
-        }
+    if let When::Calendar(c) = &schedule.when
+        && let Some(fires_at) = c.oneshot_instant(schedule.tz)
+        && fires_at < Utc::now()
+    {
+        warn!(
+            schedule_id = %schedule.id,
+            %fires_at,
+            "calendar one-shot date is in the past — it will never fire",
+        );
     }
     // A corrupt constraints.window fails closed (never fires) — warn
     // so the stuck schedule is diagnosable (gemini #452 review).
