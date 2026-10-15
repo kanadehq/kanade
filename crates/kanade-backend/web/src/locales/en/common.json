@@ -140,5 +140,7 @@
   "exitCode": {
     "skipped": "skipped ({{code}})",
     "skippedTitle": "The agent did not run the script (policy or this OS said not now); the exit code and stderr say why."
-  }
+  },
+  "viewActivity": "View in Activity",
+  "activityHint": "Results may take a moment to appear. Activity defaults to the last 24 hours and up to 50 results."
 }

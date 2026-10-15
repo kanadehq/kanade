@@ -26,6 +26,7 @@
     "exitCode": "exit_code:",
     "stdout": "stdout",
     "stderr": "stderr",
-    "empty": "(empty)"
+    "empty": "(empty)",
+    "activityPcOnly": "Without an execution ID, Activity also includes other ad-hoc runs on this PC."
   }
 }

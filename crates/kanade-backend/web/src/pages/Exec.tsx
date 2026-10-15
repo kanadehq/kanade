@@ -2,7 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { AlertTriangle, Loader2, Send } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { GroupPicker } from '@/components/GroupPicker';
@@ -14,6 +14,7 @@ import { Input } from '@/components/ui/input';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
+import { activityUrl } from '@/lib/activityUrl';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 
@@ -77,8 +78,8 @@ export function Exec() {
   const jobs = jobsQ.data ?? [];
 
   const onFire = async () => {
-    const targetGroups = mode === 'groups' ? groups : [];
-    const targetPcs = mode === 'pcs' ? pcs : [];
+    const targetGroups = mode === 'groups' ? [...groups] : [];
+    const targetPcs = mode === 'pcs' ? [...pcs] : [];
     const plan: FanoutPlan = {
       target: {
         all: mode === 'all',
@@ -230,7 +231,7 @@ export function Exec() {
       </Card>
 
       {mut.error && <ErrorCard title={t('errors.execFailed')} error={mut.error} />}
-      {mut.data && (
+      {mut.isSuccess && (
         <Card>
           <CardHeader>
             <CardTitle>{t('accepted.title')}</CardTitle>
@@ -241,7 +242,13 @@ export function Exec() {
               })}
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-3">
+            <Button asChild>
+              <Link to={activityUrl({ jobId: mut.data.job_id, execId: mut.data.exec_id })}>
+                {t('viewActivity', { ns: 'common' })}
+              </Link>
+            </Button>
+            <p className="text-xs text-muted">{t('activityHint', { ns: 'common' })}</p>
             <JsonOutput value={mut.data} />
           </CardContent>
         </Card>
