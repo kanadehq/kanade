@@ -21,9 +21,6 @@
 mod app;
 #[cfg(target_os = "windows")]
 use kanade_client::klp_client;
-// Pure logic, compiled everywhere so its tests run in non-Windows CI.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-mod window_size;
 
 #[cfg(target_os = "windows")]
 fn main() {

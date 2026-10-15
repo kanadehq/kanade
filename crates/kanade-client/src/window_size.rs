@@ -84,6 +84,21 @@ pub fn load(path: &Path, min: (f64, f64), max: Option<(f64, f64)>) -> Option<Win
     sanitize(stored.width, stored.height, min, max)
 }
 
+/// GUI persistence policy: warn on write failure and continue running.
+/// Unix callers must validate private storage ownership and permissions first;
+/// this wrapper does not replace the OS storage adapter.
+pub fn save_best_effort(
+    path: &Path,
+    width: f64,
+    height: f64,
+    min: (f64, f64),
+    max: Option<(f64, f64)>,
+) {
+    if let Err(error) = save(path, width, height, min, max) {
+        tracing::warn!(%error, "window size: save failed");
+    }
+}
+
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Sanitize and atomically write the size (unique temp file + rename).
@@ -105,14 +120,35 @@ pub fn save(
     })
     .map_err(std::io::Error::other)?;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)?;
     }
     let tmp: PathBuf = path.with_extension(format!(
         "tmp.{}.{}",
         std::process::id(),
         TMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
+    // Unix temp files must remain private too, not just the destination.
+    #[cfg(unix)]
+    let write_result = {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(&body)
+    };
+    #[cfg(not(unix))]
+    let write_result = std::fs::write(&tmp, &body);
+    if let Err(e) = write_result.and_then(|_| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -273,6 +309,38 @@ mod tests {
         let blocker = d.0.join("blocker");
         std::fs::write(&blocker, b"x").unwrap();
         assert!(save(&blocker.join(FILE_NAME), 800.0, 600.0, MIN, WA).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_unix_state_directories_and_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TempDir::new("private");
+        let path = d.0.join("state/client").join(FILE_NAME);
+        save(&path, 800.0, 600.0, MIN, WA).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        for directory in [
+            path.parent().unwrap(),
+            path.parent().unwrap().parent().unwrap(),
+        ] {
+            assert_eq!(
+                std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn gui_save_failure_is_nonfatal_and_restore_uses_default() {
+        let d = TempDir::new("nonfatal");
+        let blocker = d.0.join("file-not-directory");
+        std::fs::write(&blocker, b"x").unwrap();
+        let path = blocker.join(FILE_NAME);
+        save_best_effort(&path, 800.0, 600.0, MIN, WA);
+        assert_eq!(load(&path, MIN, WA), None);
     }
 
     #[test]

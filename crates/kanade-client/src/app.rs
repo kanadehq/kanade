@@ -42,7 +42,11 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{info, warn};
 
 use crate::klp_client::KlpClient;
-use crate::window_size;
+use kanade_client::startup::{
+    ExistingInstanceAction, StartupIntent, has_resurface_flag, parse_protocol_show,
+    parse_show_notification,
+};
+use kanade_client::window_size;
 
 /// Built-in fallback product name the client shows when no operator
 /// has configured `agent_config.client_display_name`. Aliases the
@@ -52,11 +56,6 @@ use crate::window_size;
 /// literal. The client UI is Japanese-only (no i18n), so the default is
 /// Japanese; English fleets override it via the backend config.
 const DEFAULT_DISPLAY_NAME: &str = kanade_shared::DEFAULT_CLIENT_DISPLAY_NAME;
-
-/// CLI flag the agent passes when it launches the client to surface an
-/// emergency notification (Phase E, #102): `--show-notification <id>`.
-/// Kept in sync with `kanade_agent::klp::emergency_notify`.
-const SHOW_NOTIFICATION_FLAG: &str = "--show-notification";
 
 /// The app's AppUserModelID — must match the tauri `identifier`, the
 /// AUMID the notification plugin tags toasts with, AND the
@@ -106,16 +105,6 @@ const DISCONNECTED_EVENT: &str = "klp-disconnected";
 /// instead of a new process piling up.
 const SHOW_NOTIFICATION_EVENT: &str = "klp-show-notification";
 
-/// CLI flag the agent launches the client with to **re-surface** emergencies
-/// the user couldn't see when they arrived — sent while signed out, or
-/// delivered to the Action Center while the screen was locked — now that they
-/// are present again (logon / unlock, #647). Kept in sync with
-/// `kanade_agent::klp::emergency_notify`'s `RESURFACE_ARG`. A *fresh* launch
-/// with this flag starts hidden and the WebView's `notifications.list`
-/// recovery toasts every unread emergency; a *second* launch forwards it to
-/// the running instance, which re-pops via [`RESURFACE_EVENT`].
-const RESURFACE_FLAG: &str = "--resurface";
-
 /// Emitted to the WebView when a *second* `--resurface` launch is collapsed
 /// into the already-running instance (#647). No payload; the WebView re-toasts
 /// every still-unread, unexpired emergency, deliberately bypassing its
@@ -128,14 +117,6 @@ const RESURFACE_EVENT: &str = "klp-resurface";
 /// WebView reveals the window and scrolls to / flashes that notification.
 const FOCUS_NOTIFICATION_EVENT: &str = "klp-focus-notification";
 
-/// The `kanade-client://` custom scheme the emergency toast's `launch`
-/// carries (#647). Registered to the client exe by the installer. The full
-/// launch URI is `kanade-client://show?id=<id>`, but Windows protocol
-/// activation may canonicalise it before handing it back as `%1` (notably it
-/// inserts a slash after the authority when there is no path, so
-/// `…show?id=` arrives as `…show/?id=`). [`parse_protocol_show`] therefore
-/// matches on the scheme + the `id` query param rather than a fixed prefix.
-const PROTOCOL_SCHEME_PREFIX: &str = "kanade-client://";
 /// Tauri-managed shared state. `Arc<Mutex<…>>` instead of plain
 /// `Mutex<…>` so the spawned setup task can hold its own clone
 /// while the `invoke` commands hold theirs.
@@ -611,76 +592,8 @@ async fn supervise_connection(
     }
 }
 
-/// Parse `--show-notification <id>` out of an arbitrary arg sequence.
-/// Returns the id when the flag is present with a non-empty value.
-/// Shared by the startup parse (`std::env::args`) and the single-instance
-/// handler (which gets the *second* process's argv, #624).
-fn parse_show_notification<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
-    let mut it = args.into_iter();
-    while let Some(a) = it.next() {
-        if a == SHOW_NOTIFICATION_FLAG {
-            return it.next().filter(|s| !s.is_empty());
-        }
-    }
-    None
-}
-
-/// Parse `--show-notification <id>` from this process's own args (Phase E
-/// emergency fallback). Returns the id when present and non-empty.
 fn parse_launch_notification() -> Option<String> {
     parse_show_notification(std::env::args())
-}
-
-/// Whether `--resurface` is present in an arg sequence (#647). Shared by the
-/// startup parse (`std::env::args`) and the single-instance handler.
-fn has_resurface_flag<I: IntoIterator<Item = String>>(args: I) -> bool {
-    args.into_iter().any(|a| a == RESURFACE_FLAG)
-}
-
-/// Parse the notification id out of a `kanade-client://show?id=<id>` protocol
-/// argument (#647 toast-click). The protocol handler passes the whole URI as
-/// one arg, but Windows canonicalises it first, so the exact shape is NOT
-/// guaranteed: a launch may insert a slash after the authority
-/// (`kanade-client://show/?id=<id>`) or append a trailing slash/fragment. So
-/// match on the scheme + the `id` query param wherever it lands rather than a
-/// fixed `…show?id=` prefix (the old strict prefix missed the slash-inserted
-/// form, so the window opened but never navigated to the notification). Take
-/// just the id token (`[A-Za-z0-9_.-]`, the validated notification-id
-/// charset). Shared by the startup parse and the single-instance handler.
-fn parse_protocol_show<S: AsRef<str>, I: IntoIterator<Item = S>>(args: I) -> Option<String> {
-    args.into_iter().find_map(|a| {
-        let s = a.as_ref();
-        // Only our own scheme — Windows lowercases the scheme on protocol
-        // activation, so match case-insensitively. Compare the scheme-length
-        // head in place (no `to_ascii_lowercase` allocation); guard the slice
-        // with `is_char_boundary` so a multi-byte first char can't panic.
-        let prefix_len = PROTOCOL_SCHEME_PREFIX.len();
-        if s.len() < prefix_len
-            || !s.is_char_boundary(prefix_len)
-            || !s[..prefix_len].eq_ignore_ascii_case(PROTOCOL_SCHEME_PREFIX)
-        {
-            return None;
-        }
-        // Validate the route is `show` (allowing the Windows-canonicalised
-        // `show/` trailing slash) BEFORE reading the query, so a malformed
-        // `kanade-client://?id=` or a future same-scheme route
-        // (`kanade-client://other?id=`) can't spuriously focus a notification.
-        // Splitting on '?' collapses both the `…show?id=` and the
-        // slash-inserted `…show/?id=` forms to the same `id=<id>[&…]` query.
-        let rest = &s[prefix_len..];
-        let (target, query) = rest.split_once('?')?;
-        if target.trim_end_matches('/') != "show" {
-            return None;
-        }
-        query.split('&').find_map(|pair| {
-            let v = pair.strip_prefix("id=")?;
-            let id: String = v
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-                .collect();
-            (!id.is_empty()).then_some(id)
-        })
-    })
 }
 
 /// Single-instance callback (#624): fires in the ALREADY-RUNNING instance
@@ -697,13 +610,22 @@ fn parse_protocol_show<S: AsRef<str>, I: IntoIterator<Item = S>>(args: I) -> Opt
 ///   surface the existing window.
 #[cfg(target_os = "windows")]
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
-    if has_resurface_flag(argv.iter().cloned()) {
+    let notification = parse_show_notification(argv.iter().cloned());
+    let focus = parse_protocol_show(&argv);
+    let intent = StartupIntent {
+        resurface: has_resurface_flag(argv.iter().cloned()),
+        notification: notification.is_some(),
+        deep_link: focus.is_some(),
+        // Preserve Windows argv behavior; Unix adapters will set --tray.
+        tray: false,
+    };
+    if intent.existing_instance_action() == ExistingInstanceAction::Resurface {
         // Presence-driven re-surface (#647): the already-running instance
         // re-pops every unread emergency; the window stays hidden.
         if let Err(e) = app.emit(RESURFACE_EVENT, ()) {
             warn!(error = %e, "single-instance: forward resurface failed");
         }
-    } else if let Some(id) = parse_protocol_show(&argv) {
+    } else if let Some(id) = focus {
         // Toast clicked (#647 `kanade-client://show?id=<id>` protocol launch):
         // reveal the window and tell the WebView to focus this notification.
         if let Some(win) = app.get_webview_window("main") {
@@ -714,7 +636,7 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
         if let Err(e) = app.emit(FOCUS_NOTIFICATION_EVENT, id) {
             warn!(error = %e, "single-instance: forward focus id failed");
         }
-    } else if let Some(id) = parse_show_notification(argv) {
+    } else if let Some(id) = notification {
         if let Err(e) = app.emit(SHOW_NOTIFICATION_EVENT, id) {
             warn!(error = %e, "single-instance: forward emergency id failed");
         }
@@ -799,16 +721,13 @@ pub(crate) fn persist_window_size(win: &tauri::Window) {
     let Some(path) = window_size_path(app) else {
         return;
     };
-    let res = window_size::save(
+    window_size::save_best_effort(
         &path,
         f64::from(inner.width) / scale,
         f64::from(inner.height) / scale,
         main_window_min(app),
         max_client_size(win),
     );
-    if let Err(e) = res {
-        warn!(error = %e, "window size: save failed");
-    }
 }
 
 fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
@@ -866,8 +785,14 @@ pub fn run() {
     // WebView toasts; the window only appears when the user clicks the toast),
     // so it never bursts over whatever the user is doing. A toast-click launch
     // (`launch_focus`) is NOT hidden.
-    let launched_for_emergency =
-        launch_notification.is_some() || has_resurface_flag(std::env::args());
+    let initially_visible = StartupIntent {
+        notification: launch_notification.is_some(),
+        resurface: has_resurface_flag(std::env::args()),
+        deep_link: launch_focus.is_some(),
+        // Windows tray handling is unchanged in this stage.
+        tray: false,
+    }
+    .initially_visible();
     let state = AppState {
         klp: Arc::new(Mutex::new(None)),
         rejection: Arc::new(Mutex::new(None)),
@@ -928,7 +853,7 @@ pub fn run() {
             // normal launch, reveal it immediately; on an emergency
             // launch, leave it hidden until the user clicks the toast
             // (`show_main_window`).
-            if !launched_for_emergency {
+            if initially_visible {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.show();
                     let _ = win.set_focus();
@@ -943,86 +868,4 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running kanade-client tauri application");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_protocol_show_plain_form() {
-        assert_eq!(
-            parse_protocol_show(["kanade-client://show?id=abc123"]),
-            Some("abc123".to_string()),
-        );
-    }
-
-    #[test]
-    fn parse_protocol_show_slash_inserted_form() {
-        // Windows protocol activation inserts a slash after the authority when
-        // there is no path — the regression behind "window opens but the
-        // notification screen doesn't" (#647). Must still parse.
-        assert_eq!(
-            parse_protocol_show(["kanade-client://show/?id=abc123"]),
-            Some("abc123".to_string()),
-        );
-    }
-
-    #[test]
-    fn parse_protocol_show_trailing_slash_after_id() {
-        assert_eq!(
-            parse_protocol_show(["kanade-client://show?id=abc123/"]),
-            Some("abc123".to_string()),
-        );
-    }
-
-    #[test]
-    fn parse_protocol_show_id_charset() {
-        assert_eq!(
-            parse_protocol_show(["kanade-client://show?id=n_1.2-3"]),
-            Some("n_1.2-3".to_string()),
-        );
-    }
-
-    #[test]
-    fn parse_protocol_show_finds_uri_among_other_args() {
-        assert_eq!(
-            parse_protocol_show(["C:\\path\\kanade-client.exe", "kanade-client://show?id=xyz",]),
-            Some("xyz".to_string()),
-        );
-    }
-
-    #[test]
-    fn parse_protocol_show_rejects_non_protocol_args() {
-        assert_eq!(parse_protocol_show(["--show-notification", "abc"]), None,);
-        assert_eq!(parse_protocol_show(["kanade-client.exe"]), None);
-    }
-
-    #[test]
-    fn parse_protocol_show_rejects_missing_or_empty_id() {
-        assert_eq!(parse_protocol_show(["kanade-client://show"]), None);
-        assert_eq!(parse_protocol_show(["kanade-client://show?id="]), None);
-        // A different param without `id` must not match.
-        assert_eq!(parse_protocol_show(["kanade-client://show?foo=bar"]), None);
-    }
-
-    #[test]
-    fn parse_protocol_show_does_not_match_uid_substring() {
-        // `id=` must be a query-param key, not a substring of `uid=`.
-        assert_eq!(parse_protocol_show(["kanade-client://show?uid=abc"]), None);
-    }
-
-    #[test]
-    fn parse_protocol_show_requires_show_route() {
-        // Right scheme + an `id=` param, but NOT the `show` route — must not
-        // focus a notification (malformed / future same-scheme routes).
-        assert_eq!(parse_protocol_show(["kanade-client://?id=abc"]), None);
-        assert_eq!(parse_protocol_show(["kanade-client://other?id=abc"]), None);
-        assert_eq!(parse_protocol_show(["kanade-client://other/?id=abc"]), None);
-        // The canonicalised `show/` form is still the show route.
-        assert_eq!(
-            parse_protocol_show(["kanade-client://show/?id=abc"]),
-            Some("abc".to_string()),
-        );
-    }
 }
