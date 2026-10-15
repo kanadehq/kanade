@@ -26,6 +26,7 @@
     "exitCode": "exit_code:",
     "stdout": "stdout",
     "stderr": "stderr",
-    "empty": "(空)"
+    "empty": "(空)",
+    "activityPcOnly": "実行IDがないため、このPCの他のアドホック実行も表示されます。"
   }
 }

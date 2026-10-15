@@ -40,6 +40,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { activityUrl } from '@/lib/activityUrl';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 
@@ -273,7 +274,7 @@ export function Jobs() {
           // tile uses for status=failure, scoped to job_id so one click
           // goes from "3 running" to those three rows still executing.
           <Link
-            to={`/activity?status=running&job_id=${encodeURIComponent(j.id)}`}
+            to={activityUrl({ jobId: j.id, status: 'running' })}
             title={t('live.runningTitle')}
             className="inline-flex"
             // The row's onClick opens the detail drawer — stop the chip

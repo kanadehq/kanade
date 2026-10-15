@@ -79,6 +79,7 @@ export type MetaEntry = { key: string; value: string };
 export type AgentMeta = { entries: MetaEntry[] };
 
 export type ExecResult = {
+  exec_id?: string | null;
   request_id: string;
   pc_id: string;
   exit_code: number;

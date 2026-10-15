@@ -17,6 +17,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
+import { useActivityFilters } from '@/lib/useActivityFilters';
 import { fmtIsoLocal } from '@/lib/utils';
 
 /// First N characters of a UUID-shaped identifier (result_id /
@@ -119,9 +120,7 @@ export function Activity() {
   // A change writes back so the link stays shareable / bookmarkable and
   // browser back/forward stays in sync. Mirrors Agents.tsx.
   const [searchParams, setSearchParams] = useSearchParams();
-  // Guarded so a redundant write is a no-op — this both skips a pointless
-  // re-navigation on an unchanged Select and breaks the
-  // URL→local→debounced→URL ping-pong the job_id sync below could form.
+  // Skip navigation when the selected status already matches the URL.
   const setUrlParam = useCallback(
     (key: string, next: string) => {
       if ((searchParams.get(key) ?? '') === next) return;
@@ -139,25 +138,9 @@ export function Activity() {
   );
   const status = parseStatusFilter(searchParams.get('status'));
   const setStatus = (next: StatusFilter) => setUrlParam('status', next);
-  // job_id is a free-text input *and* a deep-link target (the Jobs
-  // "running" chip). Keep the live value in local state so typing stays
-  // snappy — writing setSearchParams on every keystroke lags the input
-  // and can jump the cursor. Seed + re-sync from the URL on navigation,
-  // and mirror the *debounced* value back so the filter stays shareable.
-  const urlJobId = searchParams.get('job_id') ?? '';
-  const [jobId, setJobId] = useState(urlJobId);
-  useEffect(() => {
-    setJobId(urlJobId);
-  }, [urlJobId]);
-  // pc_id deep-link target (the Agents page row-actions menu links here
-  // as `/activity?pc_id=<id>`). Same seed + re-sync + mirror-back shape
-  // as job_id above.
-  const urlPcId = searchParams.get('pc_id') ?? '';
-  const [pcId, setPcId] = useState(urlPcId);
-  useEffect(() => {
-    setPcId(urlPcId);
-  }, [urlPcId]);
-  const [execId, setExecId] = useState('');
+  const { values, filters, setFilter } = useActivityFilters();
+  const { job_id: jobId, pc_id: pcId, exec_id: execId } = values;
+  const { job_id: dJobId, pc_id: dPcId, exec_id: dExecId } = filters;
   const [stdoutFilter, setStdoutFilter] = useState('');
   const [stderrFilter, setStderrFilter] = useState('');
   const [since, setSince] = useState('24h');
@@ -172,22 +155,8 @@ export function Activity() {
     [since],
   );
 
-  const dPcId         = useDebouncedValue(pcId,         FILTER_DEBOUNCE_MS);
-  const dJobId        = useDebouncedValue(jobId,        FILTER_DEBOUNCE_MS);
-  const dExecId       = useDebouncedValue(execId,       FILTER_DEBOUNCE_MS);
   const dStdoutFilter = useDebouncedValue(stdoutFilter, FILTER_DEBOUNCE_MS);
   const dStderrFilter = useDebouncedValue(stderrFilter, FILTER_DEBOUNCE_MS);
-
-  // Mirror the debounced job_id into the URL (not every keystroke) so
-  // the deep link stays shareable without lagging the input. setUrlParam
-  // guards against the redundant write when this matches the URL already
-  // (e.g. right after a deep-link seed), so there's no navigation churn.
-  useEffect(() => {
-    setUrlParam('job_id', dJobId);
-  }, [dJobId, setUrlParam]);
-  useEffect(() => {
-    setUrlParam('pc_id', dPcId);
-  }, [dPcId, setUrlParam]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
@@ -264,7 +233,7 @@ export function Activity() {
               id="res-pc"
               placeholder={t('filters.placeholders.pcId')}
               value={pcId}
-              onChange={setPcId}
+              onChange={(value) => setFilter('pc_id', value)}
             />
           </div>
           <div className="space-y-1">
@@ -273,7 +242,7 @@ export function Activity() {
               id="res-job"
               placeholder={t('filters.placeholders.jobId')}
               value={jobId}
-              onChange={(e) => setJobId(e.target.value)}
+              onChange={(e) => setFilter('job_id', e.target.value)}
             />
           </div>
           <div className="space-y-1">
@@ -282,7 +251,7 @@ export function Activity() {
               id="res-exec"
               placeholder={t('filters.placeholders.execId')}
               value={execId}
-              onChange={(e) => setExecId(e.target.value)}
+              onChange={(e) => setFilter('exec_id', e.target.value)}
             />
           </div>
           <div className="space-y-1">

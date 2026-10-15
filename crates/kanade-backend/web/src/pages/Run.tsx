@@ -2,6 +2,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Loader2, Play } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { ExitCodeBadge } from '@/components/ExitCodeBadge';
@@ -14,6 +15,7 @@ import { JsonOutput } from '@/components/ui/json-output';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
+import { activityUrl } from '@/lib/activityUrl';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import type { ExecResult } from '@/lib/types';
@@ -26,6 +28,7 @@ type RunBody = {
   script: string;
   timeout_secs: number;
   run_as: RunAsValue;
+  // The API accepts this legacy field as an alias for exec_id.
   job_id?: string;
 };
 
@@ -148,7 +151,7 @@ export function Run() {
       </Card>
 
       {mut.error && <ErrorCard title={t('errorTitle')} error={mut.error} />}
-      {mut.data && (
+      {mut.isSuccess && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -159,6 +162,22 @@ export function Run() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
+            {/* Mutation variables retain the submitted PC and optional exec_id,
+                even when the form changes while waiting for the result. The
+                command's manifest id is always adhoc-run, not the job_id input. */}
+            <Button asChild>
+              <Link to={activityUrl({
+                jobId: 'adhoc-run',
+                execId: mut.data.exec_id || mut.variables.job_id,
+                pcId: mut.variables.pc_id,
+              })}>
+                {t('viewActivity', { ns: 'common' })}
+              </Link>
+            </Button>
+            <p className="text-xs text-muted">{t('activityHint', { ns: 'common' })}</p>
+            {!mut.data.exec_id && !mut.variables.job_id && (
+              <p className="text-xs text-muted">{t('result.activityPcOnly')}</p>
+            )}
             <div>
               <Label>{t('result.stdout')}</Label>
               <JsonOutput value={mut.data.stdout || t('result.empty')} />
