@@ -65,7 +65,7 @@ use futures::{SinkExt, StreamExt};
 use kanade_shared::feature::Feature;
 use kanade_shared::subject;
 use kanade_shared::wire::{
-    FrameKind, FrameMeta, RemoteCtrl, RemoteCtrlReply, TileEncoding, frame_kind,
+    FrameKind, FrameMeta, Heartbeat, RemoteCtrl, RemoteCtrlReply, TileEncoding, frame_kind,
 };
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -587,6 +587,82 @@ fn capability_refusal(available: Option<bool>) -> Option<&'static str> {
     }
 }
 
+/// A live ping proves reachability, but an absent capability only means
+/// unknown: older Windows agents can already implement remote.ctrl.
+fn live_viewing_diagnostic(pc_id: &str, hb: &Heartbeat) -> String {
+    let version = &hb.agent_version;
+    match hb.remote_viewing {
+        Some(false) => format!(
+            "{pc_id} is reachable (agent v{version}) but does not support remote viewing on {}. Update the agent and check supported OS requirements (macOS 14 or later).",
+            hb.os_family.as_deref().unwrap_or("this platform/OS")
+        ),
+        Some(true) => format!(
+            "{pc_id} is reachable (agent v{version}) but no remote-viewing service is listening. Check agent configuration and service status."
+        ),
+        None => format!(
+            "{pc_id} is reachable (agent v{version}) but no remote-viewing service is listening and capability is unknown. Older agents may lack remote viewing; upgrade the agent and check platform support."
+        ),
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct LastViewingAgent {
+    last_heartbeat: Option<String>,
+    agent_version: Option<String>,
+    os_family: Option<String>,
+}
+
+/// Stored observations give context, never proof that the agent is offline.
+fn unresponsive_viewing_diagnostic(pc_id: &str, agent: Option<&LastViewingAgent>) -> String {
+    let baseline = match agent {
+        Some(agent) => format!(
+            "Last recorded heartbeat: {}; agent version: {}; OS: {}.",
+            agent.last_heartbeat.as_deref().unwrap_or("unknown"),
+            agent.agent_version.as_deref().unwrap_or("unknown"),
+            agent.os_family.as_deref().unwrap_or("unknown")
+        ),
+        None => "No recorded agent information is available.".into(),
+    };
+    format!(
+        "{pc_id} has no remote-viewing responder and did not return a valid ping reply. {baseline} The agent may be offline or disconnected, or an older agent may lack these services. Check agent status, version and platform support."
+    )
+}
+
+async fn last_viewing_diagnostic(pool: &sqlx::SqlitePool, pc_id: &str) -> String {
+    let agent = sqlx::query_as::<_, LastViewingAgent>(
+        "SELECT last_heartbeat, agent_version, os_family FROM agents WHERE pc_id = ?",
+    )
+    .bind(pc_id)
+    .fetch_optional(pool)
+    .await;
+    match agent {
+        Ok(agent) => unresponsive_viewing_diagnostic(pc_id, agent.as_ref()),
+        Err(e) => {
+            warn!(pc_id, error = %e, "remote diagnosis: cannot read last heartbeat");
+            unresponsive_viewing_diagnostic(pc_id, None)
+        }
+    }
+}
+
+/// Only used after proven non-delivery. Keep the existing indeterminate
+/// failure / Stop cleanup rules intact for timeouts and malformed replies.
+async fn diagnose_no_viewing_responder(state: &AppState, pc_id: &str) -> String {
+    if let Ok(Ok(reply)) = tokio::time::timeout(
+        Duration::from_millis(1500),
+        state
+            .nats
+            .request(subject::ping(pc_id), bytes::Bytes::new()),
+    )
+    .await
+    {
+        match serde_json::from_slice::<Heartbeat>(&reply.payload) {
+            Ok(hb) => return live_viewing_diagnostic(pc_id, &hb),
+            Err(e) => warn!(pc_id, error = %e, "remote diagnosis: invalid ping reply"),
+        }
+    }
+    last_viewing_diagnostic(&state.pool, pc_id).await
+}
+
 /// Send a control request and decode the agent's reply.
 async fn request_ctrl(
     state: &AppState,
@@ -609,9 +685,7 @@ async fn request_ctrl(
             // be shorter than ours — leaves it open whether the agent got it.
             return Err(match e.kind() {
                 async_nats::client::RequestErrorKind::NoResponders => {
-                    CtrlError::NotDelivered(format!(
-                        "{pc_id} has no remote-viewing responder. Check agent version, platform support and connection; older agents may be connected without supporting remote viewing"
-                    ))
+                    CtrlError::NotDelivered(diagnose_no_viewing_responder(state, pc_id).await)
                 }
                 _ => CtrlError::Indeterminate(format!("{pc_id} did not answer: {e}")),
             });
@@ -828,6 +902,57 @@ mod tests {
         assert!(capability_refusal(Some(false)).is_some());
         assert!(capability_refusal(Some(true)).is_none());
         assert!(capability_refusal(None).is_none());
+    }
+
+    #[test]
+    fn live_diagnosis_distinguishes_capabilities_without_declaring_legacy_unsupported() {
+        let mut hb: Heartbeat = serde_json::from_value(serde_json::json!({
+            "pc_id": "mac", "at": "2026-01-01T00:00:00Z",
+            "agent_version": "0.1.0", "os_family": "macos"
+        }))
+        .unwrap();
+        let unknown = live_viewing_diagnostic("mac", &hb);
+        assert!(unknown.contains("is reachable (agent v0.1.0)"));
+        assert!(unknown.contains("capability is unknown"));
+        assert!(!unknown.contains("does not support"));
+        hb.remote_viewing = Some(false);
+        let unsupported = live_viewing_diagnostic("mac", &hb);
+        assert!(unsupported.contains("does not support remote viewing on macos"));
+        assert!(unsupported.contains("macOS 14 or later"));
+        hb.remote_viewing = Some(true);
+        let supported = live_viewing_diagnostic("mac", &hb);
+        assert!(supported.contains("no remote-viewing service is listening"));
+        assert!(supported.contains("Check agent configuration"));
+    }
+
+    #[tokio::test]
+    async fn missing_ping_uses_only_the_requested_agents_last_observation() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE agents (pc_id TEXT, last_heartbeat TEXT, agent_version TEXT, os_family TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agents VALUES ('mac', '2026-01-01T00:00:00Z', '0.1.0', 'macos'), ('empty', NULL, NULL, NULL)")
+            .execute(&pool).await.unwrap();
+        let known = last_viewing_diagnostic(&pool, "mac").await;
+        for detail in ["2026-01-01T00:00:00Z", "0.1.0", "macos", "may be offline"] {
+            assert!(known.contains(detail), "{known}");
+        }
+        assert!(!known.contains("is offline"));
+        let empty = last_viewing_diagnostic(&pool, "empty").await;
+        assert!(empty.contains("Last recorded heartbeat: unknown"));
+        let missing = last_viewing_diagnostic(&pool, "missing").await;
+        assert!(missing.contains("No recorded agent information"));
+        assert!(!missing.contains("0.1.0"));
+        sqlx::query("DROP TABLE agents")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let unavailable = last_viewing_diagnostic(&pool, "mac").await;
+        assert!(unavailable.contains("No recorded agent information"));
+        assert!(unavailable.contains("older agent may lack these services"));
     }
 
     #[test]
