@@ -1,0 +1,93 @@
+// ScreenCaptureKit bridge. All returned pixels are owned; no framework buffer
+// crosses the FFI boundary. Called only inside the console user's child.
+#import <Foundation/Foundation.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
+#import <CoreGraphics/CoreGraphics.h>
+
+bool kanade_capture_supported(void) {
+    if (@available(macOS 14.0, *)) return true;
+    return false;
+}
+
+// Codes: 1 unsupported OS, 2 permission, 3 no display, 4 unavailable/error.
+int kanade_capture(uint8_t **pixels, uint32_t *width, uint32_t *height,
+                   char *reason, size_t reason_len) {
+    @autoreleasepool {
+        if (@available(macOS 14.0, *)) {
+            if (!CGPreflightScreenCaptureAccess()) return 2;
+            dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+            __block SCShareableContent *content = nil;
+            __block NSError *failure = nil;
+            [SCShareableContent getShareableContentExcludingDesktopWindows:NO
+                onScreenWindowsOnly:YES completionHandler:^(SCShareableContent *c, NSError *e) {
+                    content = c;
+                    failure = e;
+                    dispatch_semaphore_signal(ready);
+                }];
+            if (dispatch_semaphore_wait(ready, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC))) {
+                snprintf(reason, reason_len, "display enumeration timed out");
+                return 4;
+            }
+            if (failure || !content) {
+                snprintf(reason, reason_len, "%s", failure.localizedDescription.UTF8String ?: "display enumeration failed");
+                return (failure.code == SCStreamErrorUserDeclined || !CGPreflightScreenCaptureAccess()) ? 2 : 4;
+            }
+            SCDisplay *display = nil;
+            for (SCDisplay *candidate in content.displays) {
+                if (candidate.displayID == CGMainDisplayID()) { display = candidate; break; }
+            }
+            if (!display) return 3;
+            SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display
+                excludingApplications:@[] exceptingWindows:@[]];
+            SCStreamConfiguration *config = [SCStreamConfiguration new];
+            config.width = display.width;
+            config.height = display.height;
+            config.showsCursor = YES;
+            config.capturesAudio = NO;
+            dispatch_semaphore_t captured = dispatch_semaphore_create(0);
+            // ARC owns the retained image even if completion arrives after timeout.
+            __block id ownedImage = nil;
+            __block NSError *captureError = nil;
+            [SCScreenshotManager captureImageWithFilter:filter configuration:config
+                completionHandler:^(CGImageRef image, NSError *error) {
+                    if (image) ownedImage = CFBridgingRelease(CGImageRetain(image));
+                    captureError = error;
+                    dispatch_semaphore_signal(captured);
+                }];
+            if (dispatch_semaphore_wait(captured, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC))) {
+                snprintf(reason, reason_len, "screenshot timed out");
+                return 4;
+            }
+            if (captureError || !ownedImage) {
+                snprintf(reason, reason_len, "%s", captureError.localizedDescription.UTF8String ?: "screenshot unavailable");
+                return (captureError.code == SCStreamErrorUserDeclined || !CGPreflightScreenCaptureAccess()) ? 2 : 4;
+            }
+            CGImageRef image = (__bridge CGImageRef)ownedImage;
+            size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+            if (!w || !h || w > 16384 || h > 16384 || w * h > 64 * 1024 * 1024) {
+                snprintf(reason, reason_len, "invalid or unsupported screen dimensions");
+                return 4;
+            }
+            size_t stride = w * 4;
+            uint8_t *buffer = calloc(h, stride);
+            CGColorSpaceRef color = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            CGContextRef ctx = CGBitmapContextCreate(buffer, w, h, 8, stride, color,
+                kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+            CGColorSpaceRelease(color);
+            if (!buffer || !ctx) {
+                free(buffer);
+                if (ctx) CGContextRelease(ctx);
+                snprintf(reason, reason_len, "cannot allocate screen pixels");
+                return 4;
+            }
+            // CGBitmapContextDrawImage normalizes source format and row padding.
+            CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), image);
+            CGContextRelease(ctx);
+            *pixels = buffer;
+            *width = (uint32_t)w;
+            *height = (uint32_t)h;
+            return 0;
+        }
+        return 1;
+    }
+}

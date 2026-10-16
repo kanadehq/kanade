@@ -342,6 +342,27 @@ async fn run_session(
 ) -> (Outcome, Option<String>) {
     let session_id = session_id.to_owned();
 
+    // This runs only after the websocket's existing authentication, feature,
+    // consent and PC access checks. A missing field/reply is unknown: older
+    // agents may still implement remote.ctrl, so attempt Start in that case.
+    let available = match tokio::time::timeout(
+        Duration::from_secs(2),
+        state
+            .nats
+            .request(subject::ping(pc_id), bytes::Bytes::new()),
+    )
+    .await
+    {
+        Ok(Ok(msg)) => serde_json::from_slice::<kanade_shared::wire::Heartbeat>(&msg.payload)
+            .ok()
+            .and_then(|hb| hb.remote_viewing),
+        _ => None,
+    };
+    if let Some(reason) = capability_refusal(available) {
+        end(socket, reason.into()).await;
+        return (Outcome::Refused, Some(reason.into()));
+    }
+
     // Subscribe BEFORE asking the agent to start. Core NATS has no replay:
     // anything published between the agent accepting and this subscription
     // becoming active is gone, and what the agent publishes first is the
@@ -557,6 +578,15 @@ impl CtrlError {
     }
 }
 
+fn capability_refusal(available: Option<bool>) -> Option<&'static str> {
+    match available {
+        Some(false) => Some(
+            "This agent does not support remote viewing on this platform/OS. Update the agent and check the supported OS requirements (macOS 14 or later).",
+        ),
+        Some(true) | None => None,
+    }
+}
+
 /// Send a control request and decode the agent's reply.
 async fn request_ctrl(
     state: &AppState,
@@ -579,7 +609,9 @@ async fn request_ctrl(
             // be shorter than ours — leaves it open whether the agent got it.
             return Err(match e.kind() {
                 async_nats::client::RequestErrorKind::NoResponders => {
-                    CtrlError::NotDelivered(format!("{pc_id} is not reachable: no agent listening"))
+                    CtrlError::NotDelivered(format!(
+                        "{pc_id} has no remote-viewing responder. Check agent version, platform support and connection; older agents may be connected without supporting remote viewing"
+                    ))
                 }
                 _ => CtrlError::Indeterminate(format!("{pc_id} did not answer: {e}")),
             });
@@ -789,6 +821,13 @@ mod tests {
         // `verify_bearer` would then report "invalid token" for what is
         // really a missing one.
         assert!(bearer_from_protocols(&protocols("bearer.")).is_none());
+    }
+
+    #[test]
+    fn capability_distinguishes_unsupported_from_legacy_unknown() {
+        assert!(capability_refusal(Some(false)).is_some());
+        assert!(capability_refusal(Some(true)).is_none());
+        assert!(capability_refusal(None).is_none());
     }
 
     #[test]

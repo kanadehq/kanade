@@ -46,5 +46,57 @@ fn main() {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn main() {
+    use std::{env, path::PathBuf, process::Command};
+    println!("cargo:rerun-if-changed=src/capture_macos.m");
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let target = env::var("TARGET").expect("TARGET");
+    let arch = if target.starts_with("aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    let object = out.join("capture_macos.o");
+    assert!(
+        Command::new("xcrun")
+            .args([
+                "clang",
+                "-arch",
+                arch,
+                "-mmacosx-version-min=11.0",
+                "-fobjc-arc",
+                "-fblocks",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-c",
+                "src/capture_macos.m",
+                "-o",
+            ])
+            .arg(&object)
+            .status()
+            .expect("compile ScreenCaptureKit bridge")
+            .success()
+    );
+    assert!(
+        Command::new("xcrun")
+            .args(["ar", "crs"])
+            .arg(out.join("libkanade_capture.a"))
+            .arg(object)
+            .status()
+            .expect("archive ScreenCaptureKit bridge")
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=kanade_capture");
+    for framework in ["Foundation", "CoreGraphics"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    // Keep startup usable on older macOS; availability is checked before use.
+    println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+    println!("cargo:rustc-link-lib=objc");
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn main() {}

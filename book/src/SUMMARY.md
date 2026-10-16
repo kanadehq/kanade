@@ -20,6 +20,7 @@
     - [Updating kanade-agent itself](./operations/agent-mediated-updates/agent-self.md)
 - [Removing kanade (undeploy)](./operations/undeploy.md)
 - [macOS code signing](./operations/macos-code-signing.md)
+- [macOS remote viewing](./operations/remote-viewing-macos.md)
 - [Broker sizing & scaling](./operations/broker-sizing.md)
 
 # 3. Developer Guide

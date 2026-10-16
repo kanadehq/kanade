@@ -687,3 +687,16 @@ Widening either allow list is a licensing decision, not a build fix.
 - Schedule status/coverage cadence is an observation of per-PC job starts,
   separate from historical rollout success. `OVERDUE` means no observed start
   for three intervals; offline hosts, windows and freezes can also explain it.
+
+## macOS remote viewing
+
+- `crates/kanade-agent/src/remote_macos.rs` accepts capture only after a valid
+  first JPEG tile. Its 8-second initialization timeout must stay below NATS's
+  10-second request default and `START_TIMEOUT` (15 seconds) in
+  `crates/kanade-backend/src/api/remote.rs`. Both 3-second native waits in
+  `crates/kanade-agent/src/capture_macos.m` must fit inside that budget.
+- Capture children must run as the console user in that user's GUI bootstrap,
+  through the existing `RunAs::User` launch chain. Keep the stdin lifetime pipe:
+  it stops capture after abrupt daemon death even when no screen pixels change.
+  Screen Recording permission must be verified through the installed launch
+  route; a development Terminal grant does not establish daemon authorization.

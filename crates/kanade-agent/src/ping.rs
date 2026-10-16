@@ -57,6 +57,7 @@ pub async fn serve(
                 continue;
             };
             let hb = Heartbeat {
+                remote_viewing: Some(crate::remote_viewing_available()),
                 pc_id: pc_id.clone(),
                 at: Utc::now(),
                 agent_version: agent_version.clone(),
