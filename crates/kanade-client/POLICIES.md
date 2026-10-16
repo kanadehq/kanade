@@ -1,9 +1,10 @@
 # Client policies and adapter boundaries
 
-Stage 1 of SPEC §2.11.7 provides host-independent library policies. It does
-not enable a Linux/macOS GUI: the non-Windows executable still exits as a
-shim. No session discovery, private Unix storage implementation, launch helper,
-notification implementation, installer or updater is provided here.
+Stage 1 of SPEC §2.11.7 provides host-independent library policies. Stage 2
+wires the real GUI on Apple Silicon macOS 14+ alongside Windows. Linux and Intel
+macOS retain the exit-fast shim. See [MACOS.md](MACOS.md) for building and manual
+acceptance. No Unix session discovery, notification adapter, launch helper,
+installer or updater is provided here.
 
 - `paths::ClientPaths::resolve` takes an explicit account UID/home and target-user
   XDG values. Linux accepts only Unix absolute nonempty overrides; unset, empty,
@@ -19,15 +20,15 @@ notification implementation, installer or updater is provided here.
   on foreign ownership, identity, permissions or incomplete checks. Facts must
   cover all private components, not just the final file. Shared absolute XDG
   overrides cannot grant another UID access. Race-safe filesystem operations
-  remain the responsibility of that unimplemented adapter; callers must not
-  use legacy `window_size::save` directly on unverified Unix paths.
+  are implemented for macOS in `macos_storage` using directory descriptors and
+  no-follow opens; callers must not use legacy `window_size::save` directly on unverified Unix paths.
 - `startup::StartupIntent` separates initial visibility from warm activation.
   Manual launches and deep links show the UI; tray, emergency and resurface
   launches stay hidden. A repeated tray launch leaves existing visibility unchanged. Mixed arguments
   retain the existing Windows precedence: cold emergency/resurface overrides
   focus; warm resurface precedes focus, then emergency. Windows uses the shared
   decision with tray=false to preserve its existing argument handling. Unix
-  argv and URL-open adapters must supply tray/deep-link facts later. URI parsers
+  argv supplies tray facts on macOS; OS URL-open adapters remain deferred. URI parsers
   retain Windows compatibility; the proposed stricter Unix URI parser is not
   implemented by this stage.
 - `session::automatic_delivery` requires matching UID/session, an explicitly
@@ -57,6 +58,6 @@ opt-out storage/detection mechanism is still an OS integration decision.
 
 Later deployment uses existing Kanade jobs and app-packages, with initially
 ad-hoc signing on managed Macs. This stage adds no client_releases bucket,
-autonomous updater, paid signing or notarization. OS storage/session acquisition,
-launcher lifecycle, opt-out persistence and native notification acceptance still
-require implementation and real-machine validation before claiming GUI support.
+autonomous updater, paid signing or notarization. Session acquisition, launcher
+lifecycle, opt-out persistence and native notification acceptance remain later tasks. The macOS GUI build alone does not
+establish deployment or notification support.

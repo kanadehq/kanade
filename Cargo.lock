@@ -3436,6 +3436,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "kanade-shared",
+ "libc",
  "serde",
  "serde_json",
  "tauri",

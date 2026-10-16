@@ -425,7 +425,7 @@ The generic flow above bumps `[workspace.package].version` +
 
 - `crates/kanade-client/tauri.conf.json` — its `version` field is
   rewritten from `CARGO_PKG_VERSION` by `kanade-client/build.rs`
-  (#260), but **only when a build actually runs on Windows**.
+  (#260), on supported native GUI hosts (Windows and Apple Silicon macOS).
   `cargo update --workspace` alone does NOT touch it, which is how
   v0.43.28 shipped with the file still at 0.43.27.
 
@@ -434,14 +434,18 @@ So a release PR should contain exactly three files:
 ```sh
 # in the release worktree, after editing Cargo.toml:
 cargo update --workspace        # Cargo.lock follows
-cargo build -p kanade-client    # build.rs syncs tauri.conf.json (Windows host only)
+cargo build -p kanade-client    # build.rs syncs tauri.conf.json on GUI hosts
 git add Cargo.toml Cargo.lock crates/kanade-client/tauri.conf.json
 ```
 
-The build.rs sync is `#[cfg(target_os = "windows")]`-gated — on a
-macOS/Linux host `cargo build -p kanade-client` compiles the
-exit-fast shim and does NOT touch the file; edit the `version`
-field in `tauri.conf.json` by hand there instead.
+The build.rs helper checks both the native host and application target.
+Windows and Apple Silicon macOS GUI builds sync the version; Linux and Intel
+macOS keep the exit-fast shim and do not sync it. Edit the `version` field
+in `tauri.conf.json` by hand on those hosts. See
+`crates/kanade-client/MACOS.md` for the local ad-hoc signed macOS bundle.
+Its minimum OS is duplicated in `tauri.macos.conf.json` and
+`scripts/build-client-macos.sh`; `scripts/ci/validate-client-macos.py`
+asserts the same contract. Keep all three at macOS 14.0.
 
 **Every bump needs a FOURTH edit** — the internal `kanade-shared`
 version pin. `Cargo.toml`'s `[workspace.dependencies]` declares

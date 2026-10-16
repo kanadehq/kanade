@@ -129,6 +129,7 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
   await new Promise((r) => setTimeout(r, 60));
 
   switch (cmd) {
+    case 'automatic_notifications_available': return true as T;
     case 'get_handshake':
       return { client_display_name: DISPLAY_NAME } as T;
 

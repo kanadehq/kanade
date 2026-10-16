@@ -63,16 +63,19 @@ const DEFAULT_DISPLAY_NAME: &str = kanade_shared::DEFAULT_CLIENT_DISPLAY_NAME;
 /// registers. All three aligned is what lets a non-MSIX desktop app's
 /// WinRT toasts actually render (#102); a mismatch makes Windows silently
 /// drop them. A compile-time `w!` PCWSTR — no runtime encode/alloc.
+#[cfg(target_os = "windows")]
 const APP_USER_MODEL_ID: windows::core::PCWSTR = windows::core::w!("com.yukimemi.kanade-client");
 
 /// Same AUMID as [`APP_USER_MODEL_ID`], as a `&str` — `tauri-winrt-notification`
 /// (the emergency-toast path) takes the app id as a string. Kept in lockstep
 /// with the `w!` constant above and the tauri `identifier`.
+#[cfg(target_os = "windows")]
 const APP_USER_MODEL_ID_STR: &str = "com.yukimemi.kanade-client";
 
 /// Pin this process's explicit AUMID to [`APP_USER_MODEL_ID`] at startup
 /// so its toasts are associated with the registered shortcut. Best-effort
 /// — a failure only means toasts may not render, not a crash.
+#[cfg(target_os = "windows")]
 fn set_app_user_model_id() {
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
@@ -103,18 +106,21 @@ const DISCONNECTED_EVENT: &str = "klp-disconnected";
 /// (the single-instance guard, #624). Payload is the notification id;
 /// the WebView toasts that emergency from the already-running instance
 /// instead of a new process piling up.
+#[cfg(target_os = "windows")]
 const SHOW_NOTIFICATION_EVENT: &str = "klp-show-notification";
 
 /// Emitted to the WebView when a *second* `--resurface` launch is collapsed
 /// into the already-running instance (#647). No payload; the WebView re-toasts
 /// every still-unread, unexpired emergency, deliberately bypassing its
 /// duplicate-suppression (the user couldn't see them the first time).
+#[cfg(target_os = "windows")]
 const RESURFACE_EVENT: &str = "klp-resurface";
 
 /// Emitted when a toast was **clicked** (#647): the user activated a
 /// `kanade-client://show?id=<id>` toast (body or 確認 button), which the
 /// single-instance guard forwarded here. Payload is the notification id; the
 /// WebView reveals the window and scrolls to / flashes that notification.
+#[cfg(target_os = "windows")]
 const FOCUS_NOTIFICATION_EVENT: &str = "klp-focus-notification";
 
 /// Tauri-managed shared state. `Arc<Mutex<…>>` instead of plain
@@ -370,6 +376,7 @@ fn show_main_window(app: tauri::AppHandle) {
 /// `async` so Tauri runs it off the UI (main) thread: a synchronous command
 /// runs on the main thread, and `ShellExecuteW` can block briefly (DDE
 /// timeout, cold browser start) which would freeze the WebView for that window.
+#[cfg(target_os = "windows")]
 #[tauri::command]
 async fn open_external_url(url: String) {
     let lower = url.to_ascii_lowercase();
@@ -377,13 +384,32 @@ async fn open_external_url(url: String) {
         warn!(%url, "open_external_url: refusing non-http(s) scheme");
         return;
     }
+    open_windows_url(&url);
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn open_external_url(url: String) {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        match std::process::Command::new("/usr/bin/open")
+            .arg(&url)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            result => warn!(?result, "browser open failed"),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_windows_url(url: &str) {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::{HSTRING, PCWSTR, w};
     // ShellExecuteW with the "open" verb hands the URL straight to the
     // registered protocol handler (the default browser) — no shell, so no
     // command-injection surface even before the scheme gate above.
-    let url_h = HSTRING::from(&url);
+    let url_h = HSTRING::from(url);
     // SAFETY: all pointers are valid for the call; we ignore the returned
     // pseudo-HINSTANCE (only meaningful as a >32 success sentinel here).
     let result = unsafe {
@@ -406,6 +432,7 @@ async fn open_external_url(url: String) {
 
 /// Escape the five XML metacharacters so a title/body/URI is safe inside the
 /// toast XML (both element text and double-quoted attributes).
+#[cfg(target_os = "windows")]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -433,6 +460,7 @@ fn xml_escape(s: &str) -> String {
 /// Tagged with [`APP_USER_MODEL_ID_STR`] (the AUMID the process pins + the
 /// shortcut carries) so a non-MSIX desktop toast renders at all. Returns `Err`
 /// (so the WebView can fall back to the plugin path) if the toast can't show.
+#[cfg(target_os = "windows")]
 #[tauri::command]
 async fn show_emergency_toast(title: String, body: String, id: String) -> Result<(), String> {
     info!(title = %title, %id, "show_emergency_toast: invoked");
@@ -490,6 +518,38 @@ async fn show_emergency_toast(title: String, body: String, id: String) -> Result
             warn!(error = %e, "show_emergency_toast: toast task did not complete");
             Err(format!("toast task did not complete: {e}"))
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn show_emergency_toast(title: String, body: String, id: String) -> Result<(), String> {
+    let _ = (title, body, id);
+    Err("Native notifications are unavailable in this macOS stage; use history".into())
+}
+
+/// The missing macOS session adapter supplies no verified identity or lock facts.
+/// Manual UI/history commands never consult automatic delivery eligibility.
+#[tauri::command]
+fn automatic_notifications_available() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use kanade_client::session::{
+            AutomaticDelivery, GuiSessionFacts, GuiTarget, automatic_delivery,
+        };
+        let facts = GuiSessionFacts::default();
+        let target = GuiTarget {
+            uid: unsafe { libc::geteuid() },
+            session_id: String::new(),
+        };
+        matches!(
+            automatic_delivery(&target, &facts),
+            AutomaticDelivery::Eligible
+        )
     }
 }
 
@@ -650,11 +710,23 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
+    // Full URL-open/focus queues and session-scoped instance identity are later stages.
+    if StartupIntent::from_args(&argv).existing_instance_action() == ExistingInstanceAction::Show {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
+}
+
 /// Debounce generation for resize-driven saves; a newer resize supersedes
 /// any pending save so a stale task never overwrites a newer size.
 static RESIZE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 
+#[cfg(target_os = "windows")]
 fn window_size_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     app.path()
         .app_local_data_dir()
@@ -718,16 +790,25 @@ pub(crate) fn persist_window_size(win: &tauri::Window) {
         return;
     }
     let app = win.app_handle();
-    let Some(path) = window_size_path(app) else {
-        return;
-    };
-    window_size::save_best_effort(
-        &path,
+    #[cfg(target_os = "windows")]
+    if let Some(path) = window_size_path(app) {
+        window_size::save_best_effort(
+            &path,
+            f64::from(inner.width) / scale,
+            f64::from(inner.height) / scale,
+            main_window_min(app),
+            max_client_size(win),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(error) = kanade_client::macos_storage::save_size(
         f64::from(inner.width) / scale,
         f64::from(inner.height) / scale,
         main_window_min(app),
         max_client_size(win),
-    );
+    ) {
+        warn!(%error, "window size: save failed");
+    }
 }
 
 fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
@@ -760,10 +841,16 @@ fn restore_window_size(app: &tauri::AppHandle) {
         return;
     };
     let win = AsRef::<tauri::Webview>::as_ref(&webview_window).window();
-    let Some(path) = window_size_path(app) else {
-        return;
-    };
-    let Some(size) = window_size::load(&path, main_window_min(app), max_client_size(&win)) else {
+    #[cfg(target_os = "windows")]
+    let size = window_size_path(app)
+        .and_then(|path| window_size::load(&path, main_window_min(app), max_client_size(&win)));
+    #[cfg(target_os = "macos")]
+    let size = kanade_client::macos_storage::load_size(main_window_min(app), max_client_size(&win))
+        .unwrap_or_else(|error| {
+            warn!(%error, "window size: restore failed");
+            None
+        });
+    let Some(size) = size else {
         return;
     };
     let _ = win.set_size(tauri::LogicalSize::new(
@@ -774,6 +861,7 @@ fn restore_window_size(app: &tauri::AppHandle) {
 
 pub fn run() {
     // Pin the process AUMID before anything else so toasts render (#102).
+    #[cfg(target_os = "windows")]
     set_app_user_model_id();
     let launch_notification = parse_launch_notification();
     // Launched by a toast click (`kanade-client://show?id=<id>`, #647) → the
@@ -790,7 +878,7 @@ pub fn run() {
         resurface: has_resurface_flag(std::env::args()),
         deep_link: launch_focus.is_some(),
         // Windows tray handling is unchanged in this stage.
-        tray: false,
+        tray: cfg!(target_os = "macos") && std::env::args().any(|arg| arg == "--tray"),
     }
     .initially_visible();
     let state = AppState {
@@ -802,7 +890,7 @@ pub fn run() {
     let klp_slot = state.klp.clone();
     let rejection = state.rejection.clone();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Single-instance guard (#624) — MUST be the first plugin. A
         // second launch (the agent's per-emergency fallback, or a user
         // double-click) forwards its argv to this callback and exits, so
@@ -810,13 +898,14 @@ pub fn run() {
         // toasts the forwarded emergency instead.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             on_second_instance(app, argv);
-        }))
-        // Native OS toasts for the emergency fallback (shown from the
-        // WebView via @tauri-apps/plugin-notification).
-        .plugin(tauri_plugin_notification::init())
+        }));
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    builder
         .manage(state)
         .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
+            automatic_notifications_available,
             get_handshake,
             get_connection_rejection,
             ping_agent,
@@ -839,6 +928,21 @@ pub fn run() {
             open_external_url
         ])
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            {
+                // WKWebView uses a nonpersistent datastore: no unmanaged WebKit
+                // state outside the shared Library policy. History lives in KLP.
+                let config = app
+                    .config()
+                    .app
+                    .windows
+                    .iter()
+                    .find(|w| w.label == "main")
+                    .unwrap();
+                tauri::WebviewWindowBuilder::from_config(app, config)?
+                    .incognito(true)
+                    .build()?;
+            }
             // Size first, while the window is still hidden.
             restore_window_size(app.handle());
             // Supervise the KLP connection for the app's lifetime:
@@ -868,4 +972,17 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running kanade-client tauri application");
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::*;
+
+    #[test]
+    fn native_notification_capability_stays_windows_only() {
+        assert_eq!(
+            automatic_notifications_available(),
+            cfg!(target_os = "windows")
+        );
+    }
 }

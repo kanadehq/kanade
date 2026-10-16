@@ -1,0 +1,7 @@
+{
+  "identifier": "windows-notifications",
+  "description": "Windows native notification adapter permissions.",
+  "platforms": ["windows"],
+  "windows": ["main"],
+  "permissions": ["notification:default"]
+}

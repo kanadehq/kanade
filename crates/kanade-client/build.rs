@@ -1,11 +1,8 @@
-// Tauri 2.x build helper: reads `tauri.conf.json` and emits the
-// generated code consumed by `tauri::generate_context!()` in
-// `src/app.rs`. cfg-gated to Windows hosts to match the
-// build-dependency gate in `Cargo.toml` — on non-Windows CI
-// runners we compile the crate as the exit-fast shim in
-// `src/main.rs` and `tauri-build` is never pulled in.
+// Native GUI build helper. cfg below describes the build-script HOST, while
+// CARGO_CFG_TARGET_* describes the application TARGET. Both must support GUI
+// before invoking tauri-build; Linux and Intel macOS keep the exit-fast shim.
 fn main() {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         // #260: keep `tauri.conf.json` version in lockstep with the
         // workspace (CARGO_PKG_VERSION). Tauri 2.x's CLI does this
@@ -20,12 +17,18 @@ fn main() {
         // PE VERSIONINFO resource. The write is idempotent (compare
         // first, only rewrite when different), so day-to-day
         // `cargo build` doesn't dirty the working tree.
+        let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+        if target != "windows"
+            && !(target == "macos" && std::env::var("CARGO_CFG_TARGET_ARCH").unwrap() == "aarch64")
+        {
+            return;
+        }
         sync_tauri_version();
         tauri_build::build();
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn sync_tauri_version() {
     use std::fs;
     use std::path::PathBuf;
