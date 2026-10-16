@@ -345,19 +345,14 @@ async fn run_session(
     // This runs only after the websocket's existing authentication, feature,
     // consent and PC access checks. A missing field/reply is unknown: older
     // agents may still implement remote.ctrl, so attempt Start in that case.
-    let available = match tokio::time::timeout(
-        Duration::from_secs(2),
+    let available = viewing_ping(
         state
             .nats
             .request(subject::ping(pc_id), bytes::Bytes::new()),
+        Duration::from_secs(2),
     )
     .await
-    {
-        Ok(Ok(msg)) => serde_json::from_slice::<kanade_shared::wire::Heartbeat>(&msg.payload)
-            .ok()
-            .and_then(|hb| hb.remote_viewing),
-        _ => None,
-    };
+    .and_then(|hb| hb.remote_viewing);
     if let Some(reason) = capability_refusal(available) {
         end(socket, reason.into()).await;
         return (Outcome::Refused, Some(reason.into()));
@@ -647,20 +642,43 @@ async fn last_viewing_diagnostic(pool: &sqlx::SqlitePool, pc_id: &str) -> String
 /// Only used after proven non-delivery. Keep the existing indeterminate
 /// failure / Stop cleanup rules intact for timeouts and malformed replies.
 async fn diagnose_no_viewing_responder(state: &AppState, pc_id: &str) -> String {
-    if let Ok(Ok(reply)) = tokio::time::timeout(
-        Duration::from_millis(1500),
+    let ping = viewing_ping(
         state
             .nats
             .request(subject::ping(pc_id), bytes::Bytes::new()),
+        Duration::from_millis(1500),
     )
-    .await
-    {
-        match serde_json::from_slice::<Heartbeat>(&reply.payload) {
-            Ok(hb) => return live_viewing_diagnostic(pc_id, &hb),
-            Err(e) => warn!(pc_id, error = %e, "remote diagnosis: invalid ping reply"),
+    .await;
+    viewing_diagnostic(&state.pool, pc_id, ping).await
+}
+
+/// Keep timeout and decoding behavior shared between capability discovery and
+/// no-responder diagnosis. Neither a failed ping nor legacy JSON proves offline.
+async fn viewing_ping(
+    request: impl std::future::Future<
+        Output = Result<async_nats::Message, async_nats::client::RequestError>,
+    >,
+    timeout: Duration,
+) -> Option<Heartbeat> {
+    let reply = tokio::time::timeout(timeout, request).await.ok()?.ok()?;
+    match serde_json::from_slice(&reply.payload) {
+        Ok(hb) => Some(hb),
+        Err(e) => {
+            warn!(error = %e, "remote diagnosis: invalid ping reply");
+            None
         }
     }
-    last_viewing_diagnostic(&state.pool, pc_id).await
+}
+
+async fn viewing_diagnostic(
+    pool: &sqlx::SqlitePool,
+    pc_id: &str,
+    ping: Option<Heartbeat>,
+) -> String {
+    match ping {
+        Some(hb) => live_viewing_diagnostic(pc_id, &hb),
+        None => last_viewing_diagnostic(pool, pc_id).await,
+    }
 }
 
 /// Send a control request and decode the agent's reply.
@@ -936,7 +954,7 @@ mod tests {
         .unwrap();
         sqlx::query("INSERT INTO agents VALUES ('mac', '2026-01-01T00:00:00Z', '0.1.0', 'macos'), ('empty', NULL, NULL, NULL)")
             .execute(&pool).await.unwrap();
-        let known = last_viewing_diagnostic(&pool, "mac").await;
+        let known = viewing_diagnostic(&pool, "mac", None).await;
         for detail in ["2026-01-01T00:00:00Z", "0.1.0", "macos", "may be offline"] {
             assert!(known.contains(detail), "{known}");
         }
@@ -953,6 +971,63 @@ mod tests {
         let unavailable = last_viewing_diagnostic(&pool, "mac").await;
         assert!(unavailable.contains("No recorded agent information"));
         assert!(unavailable.contains("older agent may lack these services"));
+    }
+
+    #[tokio::test]
+    async fn ping_discovery_preserves_legacy_unknown_and_explicit_capabilities() {
+        for capability in [None, Some(false), Some(true)] {
+            let mut payload = serde_json::json!({
+                "pc_id": "test", "at": "2026-01-01T00:00:00Z", "agent_version": "0.1.0"
+            });
+            if let Some(value) = capability {
+                payload["remote_viewing"] = value.into();
+            }
+            let reply = message(NatsHeaders::new(), serde_json::to_vec(&payload).unwrap());
+            let hb = viewing_ping(std::future::ready(Ok(reply)), Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(hb.remote_viewing, capability);
+            assert_eq!(
+                capability_refusal(hb.remote_viewing).is_some(),
+                capability == Some(false)
+            );
+            // A live reply must not fall back to stale inventory, even if the
+            // inventory database is unavailable.
+            let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+            pool.close().await;
+            let diagnostic = viewing_diagnostic(&pool, "test", Some(hb)).await;
+            assert!(diagnostic.contains("is reachable (agent v0.1.0)"));
+            assert!(!diagnostic.contains("Last recorded heartbeat"));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_malformed_and_timed_out_pings_remain_unknown() {
+        let invalid = message(NatsHeaders::new(), b"not JSON".to_vec());
+        assert!(
+            viewing_ping(std::future::ready(Ok(invalid)), Duration::from_secs(1))
+                .await
+                .is_none()
+        );
+        let incomplete = message(NatsHeaders::new(), b"{}".to_vec());
+        assert!(
+            viewing_ping(std::future::ready(Ok(incomplete)), Duration::from_secs(1))
+                .await
+                .is_none()
+        );
+        let absent = async_nats::client::RequestError::new(
+            async_nats::client::RequestErrorKind::NoResponders,
+        );
+        assert!(
+            viewing_ping(std::future::ready(Err(absent)), Duration::from_secs(1))
+                .await
+                .is_none()
+        );
+        assert!(
+            viewing_ping(std::future::pending(), Duration::ZERO)
+                .await
+                .is_none()
+        );
     }
 
     #[test]

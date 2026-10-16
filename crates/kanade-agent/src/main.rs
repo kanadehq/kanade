@@ -1207,3 +1207,25 @@ fn cleanup_stale_upgrade_artifacts() {
         }
     }
 }
+
+#[cfg(test)]
+mod remote_viewing_tests {
+    #[test]
+    fn capability_matches_platform_support() {
+        #[cfg(target_os = "macos")]
+        {
+            let version = std::process::Command::new("/usr/bin/sw_vers")
+                .arg("-productVersion")
+                .output()
+                .unwrap();
+            assert!(version.status.success());
+            let version = std::str::from_utf8(&version.stdout).unwrap();
+            let major: u32 = version.trim().split('.').next().unwrap().parse().unwrap();
+            assert_eq!(super::remote_viewing_available(), major >= 14);
+        }
+        #[cfg(target_os = "windows")]
+        assert!(super::remote_viewing_available());
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        assert!(!super::remote_viewing_available());
+    }
+}
