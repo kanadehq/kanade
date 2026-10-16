@@ -161,6 +161,7 @@ pub async fn heartbeat_loop(
                 let (last_logon_user, last_logon_display_name) = last_logon();
                 let (command_keys, enforcing) = verifier.refresh_and_report();
                 let hb = Heartbeat {
+                    remote_viewing: Some(crate::remote_viewing_available()),
                     pc_id: pc_id.clone(),
                     at: chrono::Utc::now(),
                     agent_version: agent_version.clone(),

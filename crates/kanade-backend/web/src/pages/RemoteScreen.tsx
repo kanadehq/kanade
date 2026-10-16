@@ -67,6 +67,8 @@ export function RemoteScreen() {
     // decoded.
     ws.binaryType = 'arraybuffer';
     socketRef.current = ws;
+    // A decode already in flight must not clear a later unavailable/ended state.
+    let statusEpoch = 0;
 
     ws.onopen = () => {
       // The server must select our protocol and never echo the credential
@@ -81,7 +83,11 @@ export function RemoteScreen() {
     // are serialised; the `socketRef` checks drop work belonging to a session
     // the operator already left, keeping a previous machine's pixels off the
     // new canvas.
-    const paintTile = async (meta: TileMeta, payload: Uint8Array<ArrayBuffer>) => {
+    const paintTile = async (
+      meta: TileMeta,
+      payload: Uint8Array<ArrayBuffer>,
+      epoch: number,
+    ) => {
       if (socketRef.current !== ws) return;
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -96,7 +102,7 @@ export function RemoteScreen() {
       if (socketRef.current === ws && canvasRef.current) {
         canvasRef.current.getContext('2d')?.drawImage(bitmap, meta.x, meta.y);
         setTiles((n) => n + 1);
-        setPhase((p) => (p.s === 'live' ? p : { s: 'live' }));
+        if (epoch === statusEpoch) setPhase((p) => (p.s === 'live' ? p : { s: 'live' }));
       }
       bitmap.close();
     };
@@ -122,19 +128,23 @@ export function RemoteScreen() {
           setPhase({ s: 'live' });
           break;
 
-        case 'tile':
+        case 'tile': {
           // `.catch` keeps one undecodable JPEG from leaving the chain in a
           // rejected state, which would silently stop every later tile.
+          const epoch = statusEpoch;
           drawChain.current = drawChain.current
-            .then(() => paintTile(meta, payload))
+            .then(() => paintTile(meta, payload, epoch))
             .catch((e) => console.warn('[remote] tile draw failed', e));
           break;
+        }
 
         case 'gap':
+          statusEpoch += 1;
           setPhase({ s: 'unavailable', reason: meta.reason });
           break;
 
         case 'resumed':
+          statusEpoch += 1;
           // Needed because a recovered desktop nobody is touching produces no
           // tiles at all — without this the operator would keep reading
           // "unavailable" long after capture came back.
@@ -142,12 +152,14 @@ export function RemoteScreen() {
           break;
 
         case 'ended':
+          statusEpoch += 1;
           setPhase({ s: 'ended', reason: meta.reason });
           break;
       }
     };
 
     ws.onerror = () => {
+      statusEpoch += 1;
       // The handshake failure reason (401/403) is not exposed to script by
       // design, so say what we can rather than inventing a cause.
       setPhase((p) => (p.s === 'ended' ? p : { s: 'ended', reason: t('errors.socket') }));

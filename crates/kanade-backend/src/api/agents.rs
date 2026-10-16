@@ -1300,6 +1300,7 @@ mod tests {
 
         let pool = seeded_pool().await;
         let beat = |pc: &str, protocols: Option<Vec<String>>| Heartbeat {
+            remote_viewing: None,
             pc_id: pc.into(),
             at: chrono::Utc::now(),
             agent_version: "0.0.0".into(),

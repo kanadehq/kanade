@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 /// agents that don't send them still deserialize cleanly.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Heartbeat {
+    /// Remote viewing implementation is available; permission and login are
+    /// checked on Start. None means an older agent, not unsupported/offline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_viewing: Option<bool>,
     pub pc_id: String,
     pub at: chrono::DateTime<chrono::Utc>,
     pub agent_version: String,
@@ -178,8 +182,31 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
+    fn remote_viewing_capability_preserves_legacy_unknown_and_explicit_false() {
+        let legacy = serde_json::json!({
+            "pc_id": "test", "at": "2026-01-01T00:00:00Z", "agent_version": "0.1.0"
+        });
+        let hb: Heartbeat = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(hb.remote_viewing, None);
+        assert!(
+            serde_json::to_value(hb)
+                .unwrap()
+                .get("remote_viewing")
+                .is_none()
+        );
+        for value in [true, false] {
+            let mut payload = legacy.clone();
+            payload["remote_viewing"] = value.into();
+            let hb: Heartbeat = serde_json::from_value(payload).unwrap();
+            assert_eq!(hb.remote_viewing, Some(value));
+            assert_eq!(serde_json::to_value(hb).unwrap()["remote_viewing"], value);
+        }
+    }
+
+    #[test]
     fn heartbeat_round_trips_through_json() {
         let hb = Heartbeat {
+            remote_viewing: None,
             pc_id: "pc-01".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
             agent_version: "0.12.0".into(),
@@ -217,6 +244,7 @@ mod tests {
     #[test]
     fn heartbeat_empty_quarantine_is_omitted_on_the_wire() {
         let hb = Heartbeat {
+            remote_viewing: None,
             pc_id: "x".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
             agent_version: "0.43.50".into(),
@@ -252,6 +280,7 @@ mod tests {
         // exactly like an agent too old to report at all, and the two need
         // opposite responses (provision it / upgrade it first).
         let hb = Heartbeat {
+            remote_viewing: None,
             pc_id: "x".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
             agent_version: "0.44.36".into(),
@@ -290,6 +319,7 @@ mod tests {
         // is too old to say" on the wire as the same absence — and stage 3's
         // remaining work is exactly the first set.
         let hb = Heartbeat {
+            remote_viewing: None,
             pc_id: "x".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
             agent_version: "0.45.1".into(),

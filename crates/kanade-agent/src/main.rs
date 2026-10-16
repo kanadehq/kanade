@@ -60,20 +60,18 @@ mod service;
 // the user session and feeds its in-session idle into env_gate's cache.
 #[cfg(target_os = "windows")]
 mod session_supervisor;
-// #1140 PR2: DXGI Desktop Duplication plus the probe that measures it.
-// Windows-only at the module declaration for the same reason `klp` is — the
-// capture path is entirely Win32/D3D11, and the probe's only caller is the
-// Windows runner, so compiling either elsewhere is all dead code.
-// #1140 PR3a: framing for tiles crossing the in-session IPC pipe. Windows-
-// only for the same reason capture_probe is — its only producer and consumer
-// are the Windows capture path, so off-Windows every function is dead code
-// and the build fails on it (learned the hard way in #1142).
-#[cfg(target_os = "windows")]
+// Capture pixels, encoding and pipe framing are shared; acquisition and
+// user-session process lifetimes remain platform-specific.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod capture_encode;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod capture_frame_io;
 #[cfg(target_os = "windows")]
 mod capture_probe;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod capture_types;
+#[cfg(target_os = "macos")]
+mod remote_macos;
 #[cfg(target_os = "windows")]
 mod remote_session;
 #[cfg(target_os = "windows")]
@@ -88,6 +86,17 @@ use kanade_shared::{default_paths, subject};
 use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+fn remote_viewing_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        remote_macos::supported()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        cfg!(target_os = "windows")
+    }
+}
 
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -268,6 +277,10 @@ fn main() -> Result<()> {
 /// since a killed parent leaves no other signal an unprivileged process in
 /// the user session can observe.
 fn run_session_capture(cli: &Cli) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        remote_macos::capture(cli)
+    }
     #[cfg(target_os = "windows")]
     {
         use std::io::Write;
@@ -389,10 +402,10 @@ fn run_session_capture(cli: &Cli) -> Result<()> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = cli;
-        anyhow::bail!("--session-capture is Windows-only")
+        anyhow::bail!("--session-capture requires Windows or macOS")
     }
 }
 
@@ -404,7 +417,7 @@ fn run_session_capture(cli: &Cli) -> Result<()> {
 /// a file, and prove the bytes round-trip is what makes the framing
 /// testable without a deployment.
 fn run_capture_decode(cli: &Cli) -> Result<()> {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         use std::collections::BTreeSet;
         use std::io::BufReader;
@@ -511,10 +524,10 @@ fn run_capture_decode(cli: &Cli) -> Result<()> {
         );
         Ok(())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = cli;
-        anyhow::bail!("--capture-decode is Windows-only")
+        anyhow::bail!("--capture-decode requires Windows or macOS")
     }
 }
 
@@ -1024,6 +1037,8 @@ pub(crate) async fn run_agent() -> Result<()> {
             self_exe,
         ));
     }
+    #[cfg(target_os = "macos")]
+    tokio::spawn(remote_macos::serve(client.clone(), pc_id.clone()));
     // #841 PR2: native Windows Event Log reader — power/session/sleep lanes
     // straight from the log via EvtQuery, replacing the collect-winlog-events
     // PowerShell job. Enqueues to the same outbox; the drain publishes them.
@@ -1190,5 +1205,27 @@ fn cleanup_stale_upgrade_artifacts() {
                 tracing::warn!(?path, suffix, error = %e, "couldn't remove stale upgrade artifact")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_viewing_tests {
+    #[test]
+    fn capability_matches_platform_support() {
+        #[cfg(target_os = "macos")]
+        {
+            let version = std::process::Command::new("/usr/bin/sw_vers")
+                .arg("-productVersion")
+                .output()
+                .unwrap();
+            assert!(version.status.success());
+            let version = std::str::from_utf8(&version.stdout).unwrap();
+            let major: u32 = version.trim().split('.').next().unwrap().parse().unwrap();
+            assert_eq!(super::remote_viewing_available(), major >= 14);
+        }
+        #[cfg(target_os = "windows")]
+        assert!(super::remote_viewing_available());
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        assert!(!super::remote_viewing_available());
     }
 }

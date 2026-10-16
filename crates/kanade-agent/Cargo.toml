@@ -78,6 +78,10 @@ which = "8.0.5"
 # `system_gui` (`process_as_user_macos.rs`). Already in the tree via tokio.
 libc = "0.2.189"
 
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+# Shared capture encoder: JPEG only, with no other codecs or rayon.
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # wmi crate dropped in v0.12.0 — inventory now shells out to
 # powershell.exe to get past WBEM_E_INVALID_CLASS under LocalSystem.
@@ -88,13 +92,6 @@ libc = "0.2.189"
 # scaffolding plus the typed status struct (Running / Stopped + accepted
 # control codes) that SCM expects.
 windows-service = "0.8.1"
-# #1140 PR2: JPEG encode of captured frames, so the probe measures the
-# on-the-wire size a relay would actually push — a raw BGRA frame is
-# ~8 MB at 1080p and tells us nothing about bandwidth. Windows-only
-# because the only consumer is the (Windows-only) capture path.
-# `default-features = false` + `jpeg` keeps every other codec (and the
-# rayon/tiff/png dependency fan-out) out of the tree.
-image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 # v0.21: CreateProcessAsUserW + WTSQueryUserToken for run_as: user /
 # system_gui. Feature flags scope the binding to just what we need.
 windows = { version = "0.62.2", features = [

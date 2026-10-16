@@ -13,12 +13,10 @@
 //! frame-rate ceiling from 5.8 to 24.2 fps. That is the measurement that
 //! made this a tile encoder rather than a frame encoder.
 
-#![cfg(target_os = "windows")]
-
 use anyhow::{Context, Result};
 use kanade_shared::wire::MAX_TILE_BYTES;
 
-use crate::screen_capture::Frame;
+use crate::capture_types::Frame;
 
 /// Convert tightly-packed BGRA to tightly-packed RGB.
 ///
@@ -26,6 +24,7 @@ use crate::screen_capture::Frame;
 /// the buffer the encoder walks by a quarter. A trailing partial pixel
 /// (only possible from a malformed buffer) is ignored rather than
 /// panicking — a bad frame should be reported, not fatal.
+#[cfg(any(target_os = "windows", test))]
 pub fn bgra_to_rgb(bgra: &[u8], out: &mut Vec<u8>) {
     out.clear();
     out.reserve(bgra.len() / 4 * 3);
@@ -163,7 +162,7 @@ pub fn encode_tiles(frame: &Frame, quality: u8, scratch: &mut Vec<u8>) -> Result
 /// half-defensive now that these coordinates decide what gets shipped
 /// rather than only feeding a benchmark statistic.
 fn clamp_rect(
-    r: &crate::screen_capture::DirtyRect,
+    r: &crate::capture_types::DirtyRect,
     width: u32,
     height: u32,
 ) -> (u32, u32, u32, u32) {
@@ -222,7 +221,7 @@ fn push_split(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen_capture::DirtyRect;
+    use crate::capture_types::DirtyRect;
 
     /// 2x2 BGRA image, one distinct colour per pixel.
     fn tiny_bgra() -> Vec<u8> {
@@ -240,6 +239,7 @@ mod tests {
             height: 2,
             bgra: tiny_bgra(),
             dirty_rects: rects,
+            #[cfg(target_os = "windows")]
             accumulated_frames: 1,
         }
     }
@@ -483,6 +483,7 @@ mod tests {
             height,
             bgra,
             dirty_rects: Vec::new(),
+            #[cfg(target_os = "windows")]
             accumulated_frames: 1,
         }
     }

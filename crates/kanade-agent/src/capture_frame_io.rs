@@ -25,8 +25,6 @@
 //! the wire — for data that is about to be forwarded verbatim would be
 //! pure waste.
 
-#![cfg(target_os = "windows")]
-
 use std::io::{self, Read};
 
 use kanade_shared::wire::{FrameMeta, TileEncoding};
