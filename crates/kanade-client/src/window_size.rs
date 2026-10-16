@@ -298,6 +298,18 @@ mod tests {
     }
 
     #[test]
+    fn decode_enforces_size_limit_for_descriptor_readers() {
+        // A valid document padded to the limit must still decode. File-based
+        // load rejects oversized metadata first, so exercise the decoder used
+        // by descriptor-based storage directly.
+        let mut bytes = encode(800.0, 600.0, MIN, WA).unwrap().unwrap();
+        bytes.resize(MAX_FILE_BYTES as usize, b' ');
+        assert_eq!(decode(&bytes, MIN, WA), sz(800, 600));
+        bytes.push(b' ');
+        assert_eq!(decode(&bytes, MIN, WA), None);
+    }
+
+    #[test]
     fn load_directory_is_none() {
         let d = TempDir::new("dir");
         assert_eq!(load(&d.0, MIN, WA), None);
