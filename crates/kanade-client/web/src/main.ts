@@ -1197,11 +1197,15 @@ async function loadNotifications(): Promise<void> {
       }
     }
 
+    await automaticNotificationsReady;
     await ensureLaunchId();
     const target = pendingNotificationId
       ? notifications.get(pendingNotificationId)
       : null;
-    if (pendingNotificationId && target) {
+    if (!automaticNotificationsAvailable) {
+      // History remains usable without native notifications or session evidence.
+      pendingNotificationId = null;
+    } else if (pendingNotificationId && target) {
       // Agent-launched for a specific emergency (#102): surface it as a
       // native OS toast (the window stays hidden so it never bursts over
       // a meeting) — clicking the toast opens the window onto it.
@@ -1278,8 +1282,14 @@ async function ensureLaunchId(): Promise<void> {
 // notification in the panel (where its 確認 button lives). Falls back to
 // revealing the window if toast permission is denied or the OS-toast call
 // fails — so a toast notification is never silently lost.
+let automaticNotificationsAvailable = false;
+const automaticNotificationsReady = invoke<boolean>("automatic_notifications_available")
+  .then((available) => { automaticNotificationsAvailable = available; })
+  .catch(() => {});
+
 async function surfaceOsToast(n: AppNotification): Promise<void> {
-  if (!n.toast) return;
+  await automaticNotificationsReady;
+  if (!automaticNotificationsAvailable || !n.toast) return;
   const icon = PRIORITY_ICON[n.priority] ?? PRIORITY_ICON.unknown;
   // Mark as toasted up front so the reconnect-recovery loop won't
   // re-toast it (and a concurrent live push for the same id is a no-op).
@@ -1351,6 +1361,7 @@ async function surfaceOsToast(n: AppNotification): Promise<void> {
 // non-toast info/warn would defeat the non-intrusive goal (it's still in
 // the panel).
 function revealForToast(n: AppNotification): void {
+  if (!automaticNotificationsAvailable) return;
   if (!n.toast) return;
   void invoke("show_main_window").catch(() => {});
   focusNotificationInPanel(n.id);
@@ -1469,6 +1480,8 @@ function handleAmendNotification(a: NotificationAmend): void {
 // retry; failing that, reveal the window so the forward isn't a silent
 // no-op.
 async function surfaceForwardedToast(id: string): Promise<void> {
+  await automaticNotificationsReady;
+  if (!automaticNotificationsAvailable) return;
   if (toastedIds.has(id)) return; // already surfaced by the live push
   const tryToast = (): boolean => {
     const n = notifications.get(id);
@@ -1502,6 +1515,8 @@ async function surfaceForwardedToast(id: string): Promise<void> {
 // toastedIds dedup (the whole point is to re-pop ones already silently
 // delivered). `toast:false` ones stay passive.
 async function resurfaceAllToasts(): Promise<void> {
+  await automaticNotificationsReady;
+  if (!automaticNotificationsAvailable) return;
   try {
     const res = await invoke<NotificationsListResult>("notifications_list", {
       filter: "all",
@@ -2397,5 +2412,5 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // Initial connect attempt (the supervisor may already be connected
   // before this WebView loaded; klp-connected also drives reconnects).
-  void onConnected();
+  void automaticNotificationsReady.then(() => { void onConnected(); });
 });

@@ -1,0 +1,28 @@
+{
+  "productName": "Kanade Client",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "端末管理支援ツール",
+        "create": false,
+        "width": 880,
+        "height": 560,
+        "minWidth": 640,
+        "minHeight": 420,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.icns"],
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-"
+    }
+  }
+}

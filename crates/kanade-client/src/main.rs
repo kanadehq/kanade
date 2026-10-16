@@ -11,15 +11,18 @@
 
 //! Entry point for the Kanade Client App.
 //!
-//! Sprint 8 ships only the Windows skeleton (Tauri 2.x + KLP
-//! Named Pipe client + handshake + ping). On non-Windows targets
-//! (CI cross-checks, dev curiosity) the binary is a stub that
-//! prints + exits — the GUI remains Windows-only. The KLP library
-//! supports all three OSes.
+//! Windows and Apple Silicon macOS 14+ run the production Tauri UI.
+//! Other targets retain an exit-fast shim; KLP remains cross-platform.
 
-#[cfg(target_os = "windows")]
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 mod app;
-#[cfg(target_os = "windows")]
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 use kanade_client::klp_client;
 
 #[cfg(target_os = "windows")]
@@ -53,8 +56,29 @@ fn main() {
     app::run();
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(
+    target_os = "windows",
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
 fn main() {
-    eprintln!("kanade-client GUI is Windows-only in this build.");
+    eprintln!("kanade-client GUI requires Windows or Apple Silicon macOS 14+ in this build.");
     std::process::exit(1);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn main() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "kanade_client=info".into());
+    match kanade_client::macos_storage::open_log() {
+        Ok(file) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init(),
+        Err(error) => {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+            tracing::warn!(%error, "private log unavailable; using stderr");
+        }
+    }
+    app::run();
 }

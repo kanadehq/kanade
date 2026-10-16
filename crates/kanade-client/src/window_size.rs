@@ -77,11 +77,37 @@ pub fn load(path: &Path, min: (f64, f64), max: Option<(f64, f64)>) -> Option<Win
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    let stored: Stored = serde_json::from_slice(&bytes).ok()?;
+    decode(&bytes, min, max)
+}
+
+/// Shared format for descriptor-based Unix storage and legacy Windows files.
+pub fn decode(bytes: &[u8], min: (f64, f64), max: Option<(f64, f64)>) -> Option<WindowSize> {
+    if bytes.len() > MAX_FILE_BYTES as usize {
+        return None;
+    }
+    let stored: Stored = serde_json::from_slice(bytes).ok()?;
     if stored.version != VERSION {
         return None;
     }
     sanitize(stored.width, stored.height, min, max)
+}
+
+pub fn encode(
+    width: f64,
+    height: f64,
+    min: (f64, f64),
+    max: Option<(f64, f64)>,
+) -> std::io::Result<Option<Vec<u8>>> {
+    sanitize(width, height, min, max)
+        .map(|size| {
+            serde_json::to_vec(&Stored {
+                version: VERSION,
+                width: f64::from(size.width),
+                height: f64::from(size.height),
+            })
+            .map_err(std::io::Error::other)
+        })
+        .transpose()
 }
 
 /// GUI persistence policy: warn on write failure and continue running.
@@ -110,15 +136,9 @@ pub fn save(
     min: (f64, f64),
     max: Option<(f64, f64)>,
 ) -> std::io::Result<bool> {
-    let Some(size) = sanitize(width, height, min, max) else {
+    let Some(body) = encode(width, height, min, max)? else {
         return Ok(false);
     };
-    let body = serde_json::to_vec(&Stored {
-        version: VERSION,
-        width: f64::from(size.width),
-        height: f64::from(size.height),
-    })
-    .map_err(std::io::Error::other)?;
     if let Some(dir) = path.parent() {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);

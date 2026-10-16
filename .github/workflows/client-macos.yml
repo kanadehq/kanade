@@ -1,0 +1,27 @@
+# Repo-owned: keep GUI bundle checks outside kata-managed ci.yml.
+name: Client desktop
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos-bundle:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Build and validate production app (Apple Silicon, macOS 14 target)
+        run: sh scripts/build-client-macos.sh
+      - name: Unix KLP, shared policy and private storage regressions
+        run: cargo test --locked -p kanade-client --all-targets
+
+  windows-regression:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.2
+      - run: cargo check --locked -p kanade-client --all-targets
+      - run: cargo test --locked -p kanade-client --all-targets

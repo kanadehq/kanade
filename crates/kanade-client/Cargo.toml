@@ -1,6 +1,6 @@
 [package]
 name = "kanade-client"
-description = "End-user-facing Tauri Client App for the kanade endpoint-management system. Talks to the LocalSystem agent over the KLP Named Pipe (SPEC §2.12); presents a tray + window UI for notifications / health / self-service jobs."
+description = "End-user-facing Tauri Client App for the kanade endpoint-management system. Talks to the local agent over KLP (SPEC §2.12); presents notifications, health and self-service jobs through a desktop UI."
 readme = "../../README.md"
 version.workspace      = true
 edition.workspace      = true
@@ -12,7 +12,7 @@ authors.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
 
-# The GUI remains Windows-only; the KLP library is cross-platform.
+# The GUI supports Windows and Apple Silicon macOS; Linux keeps the shim.
 
 # `custom-protocol` is a DEFAULT feature rather than pinned directly on
 # the `tauri` dependency, so it can be turned off on purpose.
@@ -39,10 +39,10 @@ custom-protocol = ["tauri/custom-protocol"]
 [dependencies]
 kanade-shared = { workspace = true }
 
-# Cross-platform bits used by the non-Windows shim path too.
+# Cross-platform policy and KLP dependencies.
 anyhow = { workspace = true }
 # Needed by `window_size`, whose pure logic is built + tested on every
-# platform (the Tauri wiring that uses it is Windows-only).
+# platform.
 serde      = { workspace = true }
 serde_json = { workspace = true }
 
@@ -51,7 +51,9 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(any(target_os = "windows", all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
 # Tauri 2.x runtime.
 #
 # `custom-protocol` is REQUIRED for a working production binary. Without
@@ -64,10 +66,6 @@ uuid = { workspace = true }
 # be on by default — see `[features]` below, which keeps it on for every
 # existing build path while making it possible to turn OFF deliberately.
 tauri = { version = "2.11.5", features = [] }
-# Native OS toast notifications — used for info/warn toasts. Emergencies are
-# built as raw WinRT toasts in `app.rs` (the plugin can't persist a toast nor
-# carry the click-to-open `launch`).
-tauri-plugin-notification = "2.3.3"
 # Single-instance guard (#624): the agent launches a fresh client per
 # emergency (#102 fallback), so without this a second emergency >10s after
 # the first piles up another hidden process. This forwards the second
@@ -75,6 +73,15 @@ tauri-plugin-notification = "2.3.3"
 # `kanade-client://` toast-click protocol launch takes back to the running
 # instance (#647 reveal-on-click).
 tauri-plugin-single-instance = "2.4.3"
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+libc = "0.2.189"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Native OS toast notifications — used for info/warn toasts. Emergencies are
+# built as raw WinRT toasts in `app.rs` (the plugin can't persist a toast nor
+# carry the click-to-open `launch`).
+tauri-plugin-notification = "2.3.3"
 # WinRT/Win32: `SetCurrentProcessExplicitAppUserModelID` (AUMID pin so toasts
 # render at all, #102) plus `UI_Notifications` + `Data_Xml_Dom` to build the
 # emergency toast directly — `scenario=Reminder` (persists until dismissed) and
@@ -89,15 +96,12 @@ windows = { version = "0.62.2", features = [
     "UI_Notifications",
     "Data_Xml_Dom",
 ] }
-tracing-subscriber = { workspace = true }
-chrono  = { workspace = true }
 
-[target.'cfg(target_os = "windows")'.build-dependencies]
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.build-dependencies]
 # `tauri-build` reads `tauri.conf.json` at build time and
 # generates the context macro consumed in `app::run`. Gated to
-# Windows targets so non-Windows CI doesn't have to compile
-# Tauri's build helper (which transitively pulls in heavy
-# platform-specific deps).
+# native GUI hosts. build.rs also checks the actual target OS/architecture
+# before invoking the helper; Linux retains the shim.
 #
 # #260: `build.rs` syncs `version` in tauri.conf.json with the
 # workspace's CARGO_PKG_VERSION before tauri-build runs, so the
