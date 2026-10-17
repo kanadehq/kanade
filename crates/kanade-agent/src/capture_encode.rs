@@ -28,7 +28,7 @@ use crate::capture_types::Frame;
 pub fn bgra_to_rgb(bgra: &[u8], out: &mut Vec<u8>) {
     out.clear();
     out.reserve(bgra.len() / 4 * 3);
-    for px in bgra.chunks_exact(4) {
+    for px in bgra.as_chunks::<4>().0 {
         out.push(px[2]);
         out.push(px[1]);
         out.push(px[0]);
@@ -67,7 +67,7 @@ pub fn crop_bgra_to_rgb(
     for row in 0..h as usize {
         let start = (y as usize + row) * stride + x as usize * 4;
         let line = &bgra[start..start + w as usize * 4];
-        for px in line.chunks_exact(4) {
+        for px in line.as_chunks::<4>().0 {
             out.push(px[2]);
             out.push(px[1]);
             out.push(px[0]);

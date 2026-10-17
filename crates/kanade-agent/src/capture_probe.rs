@@ -360,13 +360,11 @@ pub fn run(secs: u64, quality: u8, save: Option<std::path::PathBuf>) -> anyhow::
                 let (tile_bytes, tile_count) = encode_dirty_tiles(&frame, quality, &mut tile_rgb)?;
                 let tile_encode_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
-                if !saved {
-                    if let Some(path) = save.as_ref() {
-                        std::fs::write(path, &jpeg)
-                            .with_context(|| format!("write probe frame to {}", path.display()))?;
-                        println!("wrote first frame to {}\n", path.display());
-                        saved = true;
-                    }
+                if !saved && let Some(path) = save.as_ref() {
+                    std::fs::write(path, &jpeg)
+                        .with_context(|| format!("write probe frame to {}", path.display()))?;
+                    println!("wrote first frame to {}\n", path.display());
+                    saved = true;
                 }
 
                 stats.record(FrameSample {

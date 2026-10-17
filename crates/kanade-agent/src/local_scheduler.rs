@@ -1266,16 +1266,15 @@ async fn reconcile_schedule(
     // A past-dated calendar one-shot never fires — warn so it's
     // diagnosable from the agent log (claude #432 review). Mirrors
     // the backend scheduler's register() check.
-    if let When::Calendar(c) = &schedule.when {
-        if let Some(fires_at) = c.oneshot_instant(schedule.tz) {
-            if fires_at < Utc::now() {
-                warn!(
-                    schedule_id = %schedule_id,
-                    %fires_at,
-                    "local_scheduler: calendar one-shot date is in the past — it will never fire",
-                );
-            }
-        }
+    if let When::Calendar(c) = &schedule.when
+        && let Some(fires_at) = c.oneshot_instant(schedule.tz)
+        && fires_at < Utc::now()
+    {
+        warn!(
+            schedule_id = %schedule_id,
+            %fires_at,
+            "local_scheduler: calendar one-shot date is in the past — it will never fire",
+        );
     }
     // A corrupt constraints.window fails closed — warn so the stuck
     // schedule is diagnosable (gemini #452 review).

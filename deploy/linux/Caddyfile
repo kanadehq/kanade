@@ -9,6 +9,9 @@
 __KANADE_DOMAIN__ {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8080
+	# Passkey sign-in: this host name is the WebAuthn RP ID / origin to set in
+	# backend.toml [server.webauthn] (book: operations/passkeys.md). Caddy
+	# forwards Host/proto and appends X-Forwarded-For as the backend expects.
 
 	# Basic edge brute-force dampening for the public login (floor item
 	# in #1172). Coarse per-remote-IP throttle; per-account lockout still

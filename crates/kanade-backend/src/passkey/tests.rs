@@ -326,6 +326,41 @@ async fn one_account_can_hold_several_passkeys_sharing_one_user_handle() {
 }
 
 #[tokio::test]
+async fn enrollment_epoch_migration_backfills_legacy_users_and_generates_new_incarnations() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE users (username TEXT PRIMARY KEY);
+         INSERT INTO users (username) VALUES ('alice'), ('bob');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!("../../migrations/20261013000000_passkeys.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let epochs: Vec<String> = sqlx::query_scalar(
+        "SELECT passkey_enrollment_epoch FROM users WHERE username IN ('alice', 'bob') ORDER BY username",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(epochs.iter().all(|epoch| epoch.len() == 64));
+    assert_ne!(epochs[0], epochs[1]);
+    sqlx::raw_sql("DELETE FROM users WHERE username = 'alice'; INSERT INTO users (username) VALUES ('alice');")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let recreated: String =
+        sqlx::query_scalar("SELECT passkey_enrollment_epoch FROM users WHERE username = 'alice'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(recreated.len(), 64);
+    assert!(!epochs.contains(&recreated));
+}
+
+#[tokio::test]
 async fn enrollment_finish_rechecks_current_account_restrictions() {
     for (must_change_pw, disabled) in [(1, 0), (0, 1)] {
         let (svc, pool) = (svc(), pool().await);
