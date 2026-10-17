@@ -123,7 +123,12 @@ fn main() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=kanade_capture");
-    for framework in ["Foundation", "CoreGraphics"] {
+    for framework in [
+        "Foundation",
+        "CoreGraphics",
+        "SystemConfiguration",
+        "Security",
+    ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     // Keep startup usable on older macOS; availability is checked before use.

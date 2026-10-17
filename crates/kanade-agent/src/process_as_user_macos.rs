@@ -84,6 +84,20 @@ pub(crate) fn session_command(
              run_as: user / system_gui needs a logged-in user"
         );
     };
+    session_command_for_uid(run_as, console_uid, program, args, cwd)
+}
+
+/// Pin the target discovered by the caller; never retarget to a newly switched user.
+pub(crate) fn session_command_for_uid(
+    run_as: RunAs,
+    console_uid: u32,
+    program: &str,
+    args: &[&str],
+    cwd: Option<&str>,
+) -> Result<ProcessCommand> {
+    if crate::screen_permission_macos::console_uid() != Some(console_uid) {
+        bail!("console user changed before session launch");
+    }
     // `system_gui` keeps the agent's own identity (root) — only the
     // bootstrap namespace moves to the user's GUI session.
     let target_uid = match run_as {

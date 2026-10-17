@@ -77,6 +77,8 @@ mod remote_macos;
 mod remote_session;
 #[cfg(target_os = "windows")]
 mod screen_capture;
+#[cfg(target_os = "macos")]
+mod screen_permission_macos;
 
 use std::path::{Path, PathBuf};
 
@@ -147,6 +149,11 @@ struct Cli {
     #[arg(long, hide = true)]
     session_capture: bool,
 
+    /// Internal pixel-free Screen Recording onboarding; expected console UID.
+    #[cfg(target_os = "macos")]
+    #[arg(long, hide = true)]
+    screen_permission_check: Option<u32>,
+
     /// JPEG quality for `--session-capture`, 1-100.
     #[arg(long, hide = true, default_value_t = 75)]
     session_capture_quality: u8,
@@ -197,6 +204,10 @@ fn main() -> Result<()> {
     // rollback attempt counter in the shared data dir) and must NOT attach to
     // the SCM — so branch out before either. It reads its own argv only.
     let cli = Cli::parse();
+    #[cfg(target_os = "macos")]
+    if let Some(uid) = cli.screen_permission_check {
+        return screen_permission_macos::helper(uid);
+    }
     // Before config, tracing or the boot sentinel: a pure file check run by the
     // installer, which must not touch agent state.
     if let Some(path) = &cli.check_command_keys {
@@ -627,6 +638,9 @@ pub(crate) async fn run_agent() -> Result<()> {
     // writes asynchronously, so the worker thread flushes on its Drop.
     let _log_guard = init_tracing(&cfg.log)
         .with_context(|| format!("init tracing from [log] in {cfg_path:?}"))?;
+
+    #[cfg(target_os = "macos")]
+    let _screen_permission = screen_permission_macos::start();
 
     kanade_shared::subject::validate_pc_id(&cfg.agent.id)
         .map_err(|e| anyhow::anyhow!("invalid [agent] id in {cfg_path:?}: {e}"))?;

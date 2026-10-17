@@ -3,6 +3,8 @@
 #import <Foundation/Foundation.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <SystemConfiguration/SystemConfiguration.h>
+#import <Security/Security.h>
 
 bool kanade_capture_supported(void) {
     if (@available(macOS 14.0, *)) return true;
@@ -89,5 +91,42 @@ int kanade_capture(uint8_t **pixels, uint32_t *width, uint32_t *height,
             return 0;
         }
         return 1;
+    }
+}
+
+// These entry points never enumerate displays or acquire pixels.
+int64_t kanade_console_user(char *buffer, size_t length) {
+    uid_t uid = 0;
+    CFStringRef name = SCDynamicStoreCopyConsoleUser(NULL, &uid, NULL);
+    if (!name) return -1;
+    bool copied = CFStringGetCString(name, buffer, length, kCFStringEncodingUTF8);
+    CFRelease(name);
+    return copied ? (int64_t)uid : -1;
+}
+
+bool kanade_screen_permission_present(void) {
+    return CGPreflightScreenCaptureAccess();
+}
+
+bool kanade_screen_permission_request(void) {
+    return CGRequestScreenCaptureAccess();
+}
+
+// Stable signed identity, deliberately excluding version and cdhash. Unsigned /
+// ad-hoc binaries fall back to the installed path in the durable history key.
+bool kanade_signing_identity(char *buffer, size_t length) {
+    @autoreleasepool {
+        SecCodeRef code = NULL;
+        CFDictionaryRef info = NULL;
+        if (SecCodeCopySelf(kSecCSDefaultFlags, &code) != errSecSuccess) return false;
+        OSStatus status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info);
+        CFRelease(code);
+        if (status != errSecSuccess || !info) return false;
+        NSDictionary *fields = CFBridgingRelease(info);
+        NSString *team = fields[(__bridge NSString *)kSecCodeInfoTeamIdentifier];
+        NSString *identifier = fields[(__bridge NSString *)kSecCodeInfoIdentifier];
+        if (!team.length || !identifier.length) return false;
+        NSString *identity = [NSString stringWithFormat:@"%@:%@", team, identifier];
+        return [identity getCString:buffer maxLength:length encoding:NSUTF8StringEncoding];
     }
 }
