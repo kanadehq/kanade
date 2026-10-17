@@ -183,6 +183,21 @@ pub fn admit_agent_binary(
     let file = object::File::parse(bytes).map_err(|e| {
         AdmissionError::UnsupportedBinary(format!("cannot parse the executable structure: {e}"))
     })?;
+    // ELF PIEs use ET_DYN, just like shared libraries; require an entry
+    // point for that case. PE DLLs and Mach-O dylibs are never agents.
+    let executable = file.kind() == object::ObjectKind::Executable
+        || (file.format() == object::BinaryFormat::Elf
+            && file.kind() == object::ObjectKind::Dynamic
+            && file.entry() != 0);
+    if !executable {
+        return Err(AdmissionError::UnsupportedBinary(format!(
+            "unsupported executable kind {:?} in {:?}; publish a linked kanade-agent executable \
+             (ELF ET_EXEC or ET_DYN with an entry point, PE executable, or Mach-O MH_EXECUTE), \
+             not an intermediate object, shared library, or core dump",
+            file.kind(),
+            file.format(),
+        )));
+    }
     let section_name = if file.format() == object::BinaryFormat::MachO {
         "__DATA,__kanade"
     } else {
@@ -251,9 +266,29 @@ pub mod fixtures {
         })
     }
 
-    /// An ELF / Mach-O object-file executable stand-in with `sections`
-    /// (segment, name, data). The container structure is real; the code is not.
+    /// Minimal synthetic executable container with `sections` (segment,
+    /// name, data). It has no runnable code; tests only parse its structure.
     pub fn image(
+        format: BinaryFormat,
+        arch: Architecture,
+        sections: &[(&str, &str, &[u8])],
+    ) -> Vec<u8> {
+        let mut bytes = relocatable(format, arch, sections);
+        match format {
+            BinaryFormat::Elf => {
+                bytes[16..18].copy_from_slice(&object::elf::ET_EXEC.to_le_bytes());
+                bytes[24..32].copy_from_slice(&0x1000u64.to_le_bytes());
+            }
+            BinaryFormat::MachO => {
+                bytes[12..16].copy_from_slice(&object::macho::MH_EXECUTE.to_le_bytes());
+            }
+            _ => panic!("unsupported fixture format"),
+        }
+        bytes
+    }
+
+    /// Genuine intermediate object, including otherwise valid metadata.
+    pub fn relocatable(
         format: BinaryFormat,
         arch: Architecture,
         sections: &[(&str, &str, &[u8])],
@@ -481,6 +516,97 @@ mod tests {
         let e = admit_agent_binary(&elf(&meta("kanade-agent", "0.8 1\n", "linux-x86_64")), None)
             .unwrap_err();
         assert!(matches!(e, AdmissionError::InvalidVersion(_)));
+    }
+
+    #[test]
+    fn rejects_intermediate_objects_with_valid_agent_metadata() {
+        for (format, arch, platform, segment, section) in [
+            (
+                object::BinaryFormat::Elf,
+                object::Architecture::X86_64,
+                "linux-x86_64",
+                "",
+                K,
+            ),
+            (
+                object::BinaryFormat::Elf,
+                object::Architecture::Aarch64,
+                "linux-aarch64",
+                "",
+                K,
+            ),
+            (
+                object::BinaryFormat::MachO,
+                object::Architecture::Aarch64,
+                "macos-aarch64",
+                "__DATA",
+                "__kanade",
+            ),
+        ] {
+            let bytes = relocatable(
+                format,
+                arch,
+                &[(segment, section, &meta("kanade-agent", "0.81.0", platform))],
+            );
+            assert_eq!(
+                object::File::parse(bytes.as_slice()).unwrap().kind(),
+                object::ObjectKind::Relocatable
+            );
+            let error = admit_agent_binary(&bytes, Some("0.81.0")).unwrap_err();
+            assert!(
+                matches!(error, AdmissionError::UnsupportedBinary(_)),
+                "{platform}: {error}"
+            );
+            assert!(error.to_string().contains("linked kanade-agent executable"));
+        }
+    }
+
+    #[test]
+    fn accepts_elf_pie_but_rejects_libraries_and_core_dumps() {
+        for (arch, platform) in [
+            (object::Architecture::X86_64, "linux-x86_64"),
+            (object::Architecture::Aarch64, "linux-aarch64"),
+        ] {
+            let mut bin = image(
+                object::BinaryFormat::Elf,
+                arch,
+                &[("", K, &meta("kanade-agent", "0.81.0", platform))],
+            );
+            bin[16..18].copy_from_slice(&object::elf::ET_DYN.to_le_bytes());
+            assert!(admit_agent_binary(&bin, None).is_ok());
+            bin[24..32].fill(0); // ET_DYN without an entry point is a library.
+            assert!(matches!(
+                admit_agent_binary(&bin, None),
+                Err(AdmissionError::UnsupportedBinary(_))
+            ));
+            bin[16..18].copy_from_slice(&object::elf::ET_CORE.to_le_bytes());
+            assert!(matches!(
+                admit_agent_binary(&bin, None),
+                Err(AdmissionError::UnsupportedBinary(_))
+            ));
+        }
+        let mut mac = macho_arm64(&[(
+            "__DATA",
+            "__kanade",
+            &meta("kanade-agent", "0.81.0", "macos-aarch64"),
+        )]);
+        for kind in [
+            object::macho::MH_DYLIB,
+            object::macho::MH_CORE,
+            object::macho::MH_BUNDLE,
+        ] {
+            mac[12..16].copy_from_slice(&kind.to_le_bytes());
+            assert!(matches!(
+                admit_agent_binary(&mac, None),
+                Err(AdmissionError::UnsupportedBinary(_))
+            ));
+        }
+        let mut pe = pe_x86_64(K, &meta("kanade-agent", "0.81.0", "windows-x86_64"));
+        pe[0x96..0x98].copy_from_slice(&0x2022u16.to_le_bytes()); // IMAGE_FILE_DLL
+        assert!(matches!(
+            admit_agent_binary(&pe, None),
+            Err(AdmissionError::UnsupportedBinary(_))
+        ));
     }
 
     #[test]

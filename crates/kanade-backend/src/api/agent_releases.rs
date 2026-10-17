@@ -734,8 +734,28 @@ mod tests {
         )]);
         let malformed =
             elf_x86_64(&[("", ".kanade", b"KNAGMETA\x01\x00\x00\x00\xff\x00\x00\x00{")]);
+        let mut elf_object = good.clone();
+        elf_object[16..18].copy_from_slice(&1u16.to_le_bytes()); // ET_REL
+        let mut mac_object = macho_arm64(&[(
+            "__DATA",
+            "__kanade",
+            &meta(AGENT, "0.81.0", "macos-aarch64"),
+        )]);
+        mac_object[12..16].copy_from_slice(&1u32.to_le_bytes()); // MH_OBJECT
         let cases: Vec<(&str, Vec<u8>, Option<&str>, &str)> = vec![
             // Same key as the live release: an overwrite attempt per rejection kind.
+            (
+                "ELF intermediate object",
+                elf_object,
+                Some("0.81.0"),
+                "linked kanade-agent executable",
+            ),
+            (
+                "Mach-O intermediate object",
+                mac_object,
+                Some("0.81.0"),
+                "linked kanade-agent executable",
+            ),
             (
                 "wrong product",
                 elf_x86_64(&[("", ".kanade", &meta("kanade", "0.81.0", "linux-x86_64"))]),

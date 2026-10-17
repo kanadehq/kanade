@@ -14,7 +14,11 @@ upload (it is never executed, so foreign-platform files are safe):
 
 1. **OS / CPU from the executable itself**: Windows PE x86_64 / aarch64,
    Linux ELF x86_64 / aarch64, thin arm64 macOS Mach-O. File names are
-   ignored.
+   ignored. The container must be a linked executable: PE executable (no
+   DLL), Mach-O `MH_EXECUTE`, or ELF `ET_EXEC` / `ET_DYN` with a nonzero
+   entry point for `ET_DYN` (PIE). Intermediate objects (`ET_REL`,
+   `MH_OBJECT`), shared libraries and core dumps are rejected even if they
+   carry valid agent metadata.
 2. **A release-metadata section**, found through the container's section
    table: `.kanade` (PE, ELF) or `__DATA,__kanade` (Mach-O). Missing,
    duplicated, truncated, wrongly framed, unknown-schema or non-JSON
