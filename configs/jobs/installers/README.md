@@ -2,12 +2,13 @@
 
 This directory holds the `kanade Job` manifests that install /
 update the kanade components themselves (backend, client, CLI). They
-sit under `configs/jobs/` alongside the example operational
-manifests but in a dedicated `installers/` subdir so the two
-intents read separately at a glance: the sibling `inventory-*`,
-`collect-winlog-events`, `kitting-setup`, `urgent-patch` are
-**examples**; the manifests here are **first-class infrastructure**
-that the project itself depends on for upgrades.
+sit under `configs/jobs/` in a dedicated `installers/` subdir so the
+intent reads unambiguously at a glance: everything here is
+**first-class infrastructure** the project itself depends on for
+upgrades. Operator-authored example manifests (health checks,
+inventory, patching, troubleshooting, …) live in a separate showcase
+repo, [`kanadehq/kanade-manifests`](https://github.com/kanadehq/kanade-manifests),
+not here.
 
 Operators register them via `kanade job create <yaml>` (SPEC §2.4.1).
 
