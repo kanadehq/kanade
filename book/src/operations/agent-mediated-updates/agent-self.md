@@ -46,13 +46,15 @@ Output: `target/release/kanade-agent.exe`.
 kanade agent publish target/release/kanade-agent.exe
 ```
 
-The CLI extracts the version from the PE VERSIONINFO resource — no
-`--version` flag, no chance of a label / binary mismatch. It then streams
+The version comes from the release metadata embedded in the binary — no
+`--version` flag is needed, and if you pass one it must match. The backend
+refuses anything that is not an official `kanade-agent` carrying that
+metadata (see [Agent release admission](../agent-release-admission.md)). It then streams
 the file to the backend API, so `KANADE_AUTH_TOKEN` (see `kanade login`)
 for an account with the operator role is required; no NATS broker token
 is involved, and the backend records the publish against that account.
-The backend caps the whole upload at 64 MB. A Linux ELF or macOS Mach-O
-carries no VERSIONINFO, so pass `--version` for those.
+The backend caps the whole upload at 64 MB. Linux ELF and macOS Mach-O
+agents are published the same way.
 
 ### 3. Roll out
 

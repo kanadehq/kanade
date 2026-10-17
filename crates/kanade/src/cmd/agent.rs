@@ -114,46 +114,22 @@ pub async fn execute(backend_url: &str, args: AgentArgs) -> Result<()> {
     }
 }
 
-/// Decide the publish label from the explicit `--version` (if any) and the
-/// version extracted from the binary's PE VERSIONINFO (if any). `Ok(None)`
-/// means neither was available — the caller falls back to an interactive
-/// prompt. Comparison ignores a leading `v` and surrounding whitespace so
-/// `v1.2.3`, `1.2.3 ` and `1.2.3` are the same label.
-#[cfg(test)]
-fn resolve_publish_version(
-    version_override: Option<String>,
-    extracted: Option<String>,
-) -> Result<Option<String>> {
-    let strip = |s: &str| s.trim().trim_start_matches('v').to_string();
-    match (version_override, extracted) {
-        (Some(v), Some(pe)) if strip(&v) != strip(&pe) => bail!(
-            "--version {v} disagrees with the binary's embedded version {pe}; \
-             omit --version to use the embedded one, or pass the matching label"
-        ),
-        (Some(v), _) => Ok(Some(v)),
-        (None, Some(pe)) => Ok(Some(pe)),
-        (None, None) => Ok(None),
-    }
-}
-
 async fn publish(base: &str, binary: PathBuf, version_override: Option<String>) -> Result<()> {
     let bytes = fs::read(&binary)
         .await
         .with_context(|| format!("read {binary:?}"))?;
 
-    // Authoritative admission check: validate container, metadata section,
-    // product ("kanade-agent"), and version before uploading.
-    let admitted = kanade_shared::agent_metadata::admit_agent_binary(
-        &bytes,
-        version_override.as_deref(),
-    )
-    .map_err(|e| anyhow!("admission validation failed: {e}"))?;
-
-    let version = admitted.metadata.version.clone();
+    // Same admission the backend enforces (kanade_shared::agent_metadata),
+    // run here only to fail fast before the upload starts: the file must be
+    // an official kanade-agent whose embedded version matches `--version`.
+    // The backend repeats it and is the authority for every caller.
+    let admitted =
+        kanade_shared::agent_metadata::admit_agent_binary(&bytes, version_override.as_deref())
+            .map_err(|e| anyhow!("{binary:?} cannot be published as an agent release: {e}"))?;
+    let version = admitted.version;
     validate_segment("version", &version)?;
-
     let platform = admitted.platform;
-    let _key = admitted.key;
+    // The parse needed the whole file in memory; the upload does not.
     let size = bytes.len() as u64;
     drop(bytes);
 
@@ -391,61 +367,16 @@ async fn current(base: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_http::{TEST_TOKEN, export_test_token, fake_backend, seen};
-    use kanade_shared::agent_metadata::{
-        AGENT_PRODUCT_NAME, AgentBinaryMetadata, AgentPlatform as SharedPlatform,
-        encode_metadata_bytes,
-    };
-    use kanade_shared::object;
-    use object::write::Object;
-    use object::{Architecture, BinaryFormat, Endianness};
+    use kanade_shared::agent_metadata::fixtures::{elf_x86_64, macho_arm64, meta, pe_x86_64};
 
-    #[test]
-    fn version_override_only_is_used() {
-        // ELF case: no embedded version, explicit --version wins.
-        let v = resolve_publish_version(Some("1.2.3".into()), None).unwrap();
-        assert_eq!(v.as_deref(), Some("1.2.3"));
-    }
-
-    #[test]
-    fn embedded_only_is_used() {
-        let v = resolve_publish_version(None, Some("0.44.35".into())).unwrap();
-        assert_eq!(v.as_deref(), Some("0.44.35"));
-    }
-
-    #[test]
-    fn neither_yields_none_for_prompt_fallback() {
-        assert_eq!(resolve_publish_version(None, None).unwrap(), None);
-    }
-
-    #[test]
-    fn agreeing_override_and_embedded_ok_ignoring_v_prefix() {
-        // `v1.2.3` (flag) vs `1.2.3` (PE) must be treated as equal.
-        let v = resolve_publish_version(Some("v1.2.3".into()), Some("1.2.3".into())).unwrap();
-        assert_eq!(v.as_deref(), Some("v1.2.3"));
-    }
-
-    #[test]
-    fn disagreeing_override_and_embedded_errors() {
-        let e = resolve_publish_version(Some("9.9.9".into()), Some("1.2.3".into()));
-        assert!(e.is_err(), "a real mismatch must be rejected");
-    }
-
-    /// Construct a valid test ELF carrying .kanade embedded metadata for version 1.2.3
+    /// A valid kanade-agent 1.2.3 (Linux x86_64) image with non-UTF-8 filler
+    /// larger than one read chunk, so a mangled or truncated stream cannot
+    /// pass unnoticed.
     fn elf_payload() -> Vec<u8> {
-        let meta = AgentBinaryMetadata {
-            product: AGENT_PRODUCT_NAME.to_string(),
-            version: "1.2.3".to_string(),
-            platform: SharedPlatform::LinuxX86_64,
-        };
-        let encoded = encode_metadata_bytes(&meta);
-        let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
-        let sec_id = obj.add_section(
-            Vec::new(),
-            b".kanade".to_vec(),
-            object::SectionKind::ReadOnlyData,
-        );
-        obj.append_section_data(sec_id, &encoded, 1);
-        obj.write().expect("writing test ELF")
+        let m = meta("kanade-agent", "1.2.3", "linux-x86_64");
+        let mut b = elf_x86_64(&[("", ".kanade", &m)]);
+        b.extend((0..=255u8).rev().cycle().take(200_000));
+        b
     }
 
     fn file_with(bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
@@ -539,9 +470,11 @@ mod tests {
         let (_dir, path) = file_with(&elf_payload());
         let err = format!(
             "{:#}",
-            execute(&base, publish_sub(&path, Some("9.9.9"))).await.unwrap_err()
+            execute(&base, publish_sub(&path, Some("9.9.9")))
+                .await
+                .unwrap_err()
         );
-        assert!(err.contains("disagrees") || err.contains("mismatch") || err.contains("admission validation failed"), "{err}");
+        assert!(err.contains("version mismatch"), "{err}");
         assert!(seen(&log).is_empty());
     }
 
@@ -791,66 +724,42 @@ mod tests {
         );
     }
 
-    fn make_test_pe(section_data: &[u8]) -> Vec<u8> {
-        let mut pe = vec![0u8; 0x80];
-        pe[0] = b'M';
-        pe[1] = b'Z';
-        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-        pe.extend_from_slice(b"PE\0\0");
-        pe.extend_from_slice(&0x8664u16.to_le_bytes()); // AMD64
-        pe.extend_from_slice(&1u16.to_le_bytes()); // 1 section
-        pe.extend_from_slice(&0u32.to_le_bytes());
-        pe.extend_from_slice(&0u32.to_le_bytes());
-        pe.extend_from_slice(&0u32.to_le_bytes());
-        pe.extend_from_slice(&0xF0u16.to_le_bytes()); // SizeOfOptionalHeader
-        pe.extend_from_slice(&0x0022u16.to_le_bytes());
-        let opt_hdr_start = pe.len();
-        pe.extend_from_slice(&0x020Bu16.to_le_bytes()); // PE32+
-        pe.resize(opt_hdr_start + 0xF0, 0);
-
-        let mut sec_hdr = [0u8; 40];
-        sec_hdr[..7].copy_from_slice(b".kanade");
-        sec_hdr[8..12].copy_from_slice(&(section_data.len() as u32).to_le_bytes());
-        sec_hdr[12..16].copy_from_slice(&0x1000u32.to_le_bytes());
-        sec_hdr[16..20].copy_from_slice(&(section_data.len() as u32).to_le_bytes());
-        sec_hdr[20..24].copy_from_slice(&0x200u32.to_le_bytes());
-        sec_hdr[36..40].copy_from_slice(&0x40000040u32.to_le_bytes());
-        pe.extend_from_slice(&sec_hdr);
-        if pe.len() < 0x200 {
-            pe.resize(0x200, 0);
-        }
-        pe.extend_from_slice(section_data);
-        pe
-    }
-
+    /// The CLI fails fast, with no request, for anything the backend would
+    /// refuse: a non-agent product, a legacy build without the metadata
+    /// section, and a PE lacking it.
     #[tokio::test]
-    async fn publish_of_a_pe_without_metadata_is_refused() {
-        let mut pe = vec![0u8; 0x90];
-        pe[..2].copy_from_slice(b"MZ");
-        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
-        pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+    async fn publish_refuses_non_agent_and_legacy_binaries_before_any_request() {
         let (base, log) = fake_backend(vec![]).await;
-        let (_dir, path) = file_with(&pe);
-        assert!(execute(&base, publish_sub(&path, Some("0.1.0"))).await.is_err());
+        let cli = macho_arm64(&[(
+            "__DATA",
+            "__kanade",
+            &meta("kanade", "0.79.0", "macos-aarch64"),
+        )]);
+        let legacy = elf_x86_64(&[("", ".rodata", b"kanade-agent 1.2.3")]);
+        let bare_pe = pe_x86_64(".text", b"code");
+        for (what, bytes) in [("cli", cli), ("legacy", legacy), ("pe", bare_pe)] {
+            let (_dir, path) = file_with(&bytes);
+            let err = format!(
+                "{:#}",
+                execute(&base, publish_sub(&path, Some("1.2.3")))
+                    .await
+                    .unwrap_err()
+            );
+            assert!(
+                err.contains("cannot be published as an agent release"),
+                "{what}: {err}"
+            );
+        }
         assert!(seen(&log).is_empty());
     }
 
     #[tokio::test]
     async fn publish_of_a_pe_with_metadata_succeeds() {
         export_test_token();
-        let meta = AgentBinaryMetadata {
-            product: AGENT_PRODUCT_NAME.to_string(),
-            version: "0.1.0".to_string(),
-            platform: SharedPlatform::WindowsX86_64,
-        };
-        let encoded = encode_metadata_bytes(&meta);
-        let pe = make_test_pe(&encoded);
-
-        let pe_len = pe.len();
+        let pe = pe_x86_64(".kanade", &meta("kanade-agent", "0.1.0", "windows-x86_64"));
         let reply = format!(
             r#"{{"version":"0.1.0","key":"0.1.0","platform":"windows-x86_64","size":{},"digest":null}}"#,
-            pe_len
+            pe.len()
         );
         let (base, log) = fake_backend(vec![(200, Box::leak(reply.into_boxed_str()))]).await;
         let (_dir, path) = file_with(&pe);

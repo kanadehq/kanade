@@ -18,6 +18,7 @@
     - [Updating kanade-client](./operations/agent-mediated-updates/client.md)
     - [Updating NATS server](./operations/agent-mediated-updates/nats.md)
     - [Updating kanade-agent itself](./operations/agent-mediated-updates/agent-self.md)
+- [Agent release admission](./operations/agent-release-admission.md)
 - [Removing kanade (undeploy)](./operations/undeploy.md)
 - [macOS code signing](./operations/macos-code-signing.md)
 - [macOS remote viewing](./operations/remote-viewing-macos.md)

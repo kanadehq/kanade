@@ -107,6 +107,9 @@ jobs:
       - name: Offline-boot integration tests
         run: cargo test -p kanade-agent --test offline_boot -- --ignored
 
+      - name: Agent publish admission (backend HTTP, real Object Stores)
+        run: cargo test -p kanade-backend api::agent_releases -- --ignored
+
       - name: NATS auth (user / token fallback) integration tests
         run: cargo test -p kanade-shared --test nats_auth_live -- --ignored
 

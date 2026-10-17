@@ -37,17 +37,17 @@ rather than papered over.
 
 | Licence | Crates |
 | --- | ---: |
-| MIT License (`MIT`) | 624 |
+| MIT License (`MIT`) | 626 |
 | ISC License (`ISC`) | 20 |
 | Unicode License v3 (`Unicode-3.0`) | 19 |
 | Apache License 2.0 (`Apache-2.0`) | 18 |
 | BSD 3-Clause "New" or "Revised" License (`BSD-3-Clause`) | 11 |
 | Mozilla Public License 2.0 (`MPL-2.0`) | 10 |
+| zlib License (`Zlib`) | 3 |
 | Community Data License Agreement Permissive 2.0 (`CDLA-Permissive-2.0`) | 2 |
 | MIT No Attribution (`MIT-0`) | 2 |
-| zlib License (`Zlib`) | 2 |
 | BSD Zero Clause License (`0BSD`) | 1 |
-| **Total** | **709** |
+| **Total** | **712** |
 
 ### Notices
 
@@ -4640,6 +4640,43 @@ DEALINGS IN THE SOFTWARE.
 
 #### MIT License (`MIT`)
 
+- **object** 0.36.7 — https://github.com/gimli-rs/object
+
+<details><summary>Licence text</summary>
+
+````text
+Copyright (c) 2015 The Gimli Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+````
+
+</details>
+
+#### MIT License (`MIT`)
+
 - **fs2** 0.4.3 — https://github.com/danburkert/fs2-rs
 - **heck** 0.4.1 — https://github.com/withoutboats/heck
 - **heck** 0.5.0 — https://github.com/withoutboats/heck
@@ -4955,6 +4992,7 @@ DEALINGS IN THE SOFTWARE.
 #### MIT License (`MIT`)
 
 - **hashbrown** 0.12.3 — https://github.com/rust-lang/hashbrown
+- **hashbrown** 0.15.5 — https://github.com/rust-lang/hashbrown
 - **hashbrown** 0.16.1 — https://github.com/rust-lang/hashbrown
 - **hashbrown** 0.17.1 — https://github.com/rust-lang/hashbrown
 
@@ -13868,6 +13906,7 @@ freely, subject to the following restrictions:
 
 #### zlib License (`Zlib`)
 
+- **foldhash** 0.1.5 — https://github.com/orlp/foldhash
 - **foldhash** 0.2.0 — https://github.com/orlp/foldhash
 
 <details><summary>Licence text</summary>

@@ -48,7 +48,12 @@ uuid       = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 winreg = { workspace = true }
 
+[features]
+# Fixture builders for fake agent binaries (`agent_metadata::fixtures`).
+test-util = ["object/write"]
+
 [dev-dependencies]
+object = { workspace = true, features = ["write"] }
 futures = { workspace = true }
 # kv_cas_live.rs spawns a throwaway `nats-server -js` like the
 # agent's offline_boot harness does.

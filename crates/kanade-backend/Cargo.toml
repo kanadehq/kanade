@@ -92,6 +92,7 @@ tar        = "0.4.46"
 flate2     = "1.1.9"
 
 [dev-dependencies]
+kanade-shared = { workspace = true, features = ["test-util"] }
 webauthn-authenticator-rs = { workspace = true }
 # The #1270 live test spawns a throwaway token-auth `nats-server` on a
 # random port, like kanade-shared's kv_cas_live harness.

@@ -12,7 +12,7 @@
   otherwise type out by hand every release:
 
     backend / client / cli (job-install pattern)
-      1. kanade app publish kanade-<role> <exe>      (version auto-from-PE)
+      1. kanade app publish kanade-<role> <exe>      (version from the embedded release metadata)
       2. inject the agent-mode download knobs into a temp copy of the
          role's deploy script (SourceUrl / Version / Sha256 / AuthToken,
          plus backend-only -WipeDb / -JwtSecret / -StaticToken /
@@ -25,7 +25,7 @@
       7. verify (poll the locally-installed exe's version)
 
     agent (self-update pattern — NOT a job)
-      1. kanade agent publish <exe>                  (version auto-from-PE)
+      1. kanade agent publish <exe>                  (version from the embedded release metadata)
       2. kanade agent rollout <version> --pc/--group/--global
                                                      (flips target_version)
       3. verify (kanade agent current == version)

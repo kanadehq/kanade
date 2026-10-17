@@ -19,9 +19,7 @@ use axum::Json;
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
-use kanade_shared::bin_platform::{
-    base_version_of_key, candidate_keys, platform_of_key,
-};
+use kanade_shared::bin_platform::{base_version_of_key, candidate_keys, platform_of_key};
 use kanade_shared::kv::{
     BUCKET_AGENT_CONFIG, KEY_AGENT_CONFIG_GLOBAL, OBJECT_AGENT_RELEASES, agent_config_group_key,
     agent_config_pc_key, parse_agent_config_group_key, parse_agent_config_pc_key,
@@ -48,55 +46,16 @@ pub struct PublishResponse {
     pub digest: Option<String>,
 }
 
-/// Label for a Windows PE: the embedded VERSIONINFO wins and an explicit
-/// field must agree with it; without VERSIONINFO the field is the label.
-#[cfg(test)]
-fn windows_label(pe: Option<String>, field: Option<&str>) -> Result<String, (StatusCode, String)> {
-    Ok(match (pe, field) {
-        // The CLI's "must agree" rule (resolve_publish_version):
-        // a form field that contradicts the embedded version is
-        // rejected rather than silently ignored. Comparison ignores
-        // a leading `v` and surrounding whitespace, like the CLI.
-        (Some(pe), Some(v))
-            if v.trim().trim_start_matches('v') != pe.trim().trim_start_matches('v') =>
-        {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "version field '{v}' disagrees with the binary's embedded version '{pe}'; \
-                     omit the field to use the embedded one, or pass the matching label"
-                ),
-            ));
-        }
-        (Some(pe), _) => pe,
-        // A PE without a VERSIONINFO resource (a build older than
-        // v0.13.1) can still be published under an explicit label,
-        // as the CLI always allowed.
-        (None, Some(v)) => v.to_owned(),
-        (None, None) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "couldn't extract VERSIONINFO from the uploaded binary — \
-                 is it a Windows PE built with `winres`? Kanade ≥ v0.13.1 \
-                 embeds the resource automatically; for an older binary \
-                 include a 'version' form field with the label to use."
-                    .to_owned(),
-            ));
-        }
-    })
-}
-
 pub async fn publish(
     State(state): State<AppState>,
     caller: Caller,
     mut multipart: Multipart,
 ) -> Result<Json<PublishResponse>, (StatusCode, String)> {
-    // The Object Store key depends on the binary's platform
-    // (kanade_shared::bin_platform): a Windows PE is keyed by its embedded
-    // VERSIONINFO (making a "label vs binary version" disagreement
-    // physically impossible — the failure mode that caused the v0.13.0
-    // "1.0.0"-loop incident), a Linux ELF / macOS Mach-O has no such
-    // resource and takes its label from the `version` form field.
+    // Admission (`kanade_shared::agent_metadata`): the upload must be an
+    // official kanade-agent whose embedded product / platform / version
+    // agree with the container and the optional `version` field. The key
+    // comes from the embedded version, never the filename, and nothing
+    // touches the Object Store until every check has passed.
     let mut bytes: Option<Vec<u8>> = None;
     let mut version_field: Option<String> = None;
 
@@ -143,13 +102,16 @@ pub async fn publish(
         return Err((StatusCode::BAD_REQUEST, "'file' field is empty".into()));
     }
 
-    // Authoritative admission check: validate container format, architecture,
-    // embedded .kanade / __DATA,__kanade metadata, product ("kanade-agent"),
-    // platform consistency, and version agreement BEFORE touching the Object Store.
-    let admitted = kanade_shared::agent_metadata::admit_agent_binary(&bytes, version_field.as_deref())
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("admission validation failed: {e}")))?;
-
-    let version = admitted.metadata.version.clone();
+    let admitted =
+        kanade_shared::agent_metadata::admit_agent_binary(&bytes, version_field.as_deref())
+            .map_err(|e| {
+                warn!(error = %e, "publish: agent binary refused at admission");
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("agent publish refused: {e}"),
+                )
+            })?;
+    let version = admitted.version;
     let platform = admitted.platform;
     let key = admitted.key;
 
@@ -513,9 +475,10 @@ pub async fn rollout(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn a_rollout_pinned_to_a_pc_id_with_too_many_labels_is_refused() {
-        use super::*;
         assert!(check_rollout_scope(&RolloutScope::Pc("a.b.c.d".into())).is_ok());
         assert!(check_rollout_scope(&RolloutScope::Global).is_ok());
         let (st, msg) = check_rollout_scope(&RolloutScope::Pc("a.b.c.d.e".into())).unwrap_err();
@@ -523,109 +486,375 @@ mod tests {
         assert!(msg.contains("at most 4"), "{msg}");
     }
 
-    use super::*;
+    // ---- through the real router ----
+    //
+    // `POST /api/agents/publish` is the shared choke point for the CLI, the
+    // fleet-deploy scripts and direct HTTP callers, so these drive the real
+    // router (auth layered on as in `main.rs`) against a throwaway
+    // `nats-server -js` and assert on the Object Stores themselves.
+    //
+    //   cargo test -p kanade-backend agent_releases -- --ignored
 
-    #[test]
-    fn pe_without_versioninfo_takes_the_explicit_label() {
-        assert_eq!(windows_label(None, Some("1.2.3")).unwrap(), "1.2.3");
-        let (code, msg) = windows_label(None, None).unwrap_err();
-        assert_eq!(code, StatusCode::BAD_REQUEST);
-        assert!(msg.contains("'version' form field"), "{msg}");
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use kanade_shared::agent_metadata::fixtures::{elf_x86_64, macho_arm64, meta, pe_x86_64};
+    use kanade_shared::kv::OBJECT_APP_PACKAGES;
+    use std::process::Stdio;
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    use tower::ServiceExt;
+
+    struct App {
+        router: Router,
+        js: async_nats::jetstream::Context,
+        _server: tokio::process::Child,
+        _storage: tempfile::TempDir,
     }
 
-    #[test]
-    fn embedded_version_wins_and_a_contradicting_field_is_rejected() {
-        assert_eq!(windows_label(Some("1.2.3".into()), None).unwrap(), "1.2.3");
-        assert_eq!(
-            windows_label(Some("1.2.3".into()), Some("v1.2.3")).unwrap(),
-            "1.2.3"
-        );
-        let (code, _) = windows_label(Some("1.2.3".into()), Some("9.9.9")).unwrap_err();
-        assert_eq!(code, StatusCode::BAD_REQUEST);
+    fn mint(sub: &str) -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+        let claims = crate::auth::Claims {
+            sub: sub.into(),
+            exp: 4_102_444_800,
+            aud: Some(crate::auth::EXPECTED_AUDIENCE.to_string()),
+            roles: Vec::new(),
+            allowed_features: None,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(crate::auth::signing_secret().as_bytes()),
+        )
+        .expect("mint")
+    }
+
+    async fn app() -> App {
+        let port = portpicker::pick_unused_port().expect("pick port");
+        let storage = tempfile::TempDir::new().expect("storage tempdir");
+        let server = tokio::process::Command::new("nats-server")
+            .args(["-js", "-p", &port.to_string(), "-sd"])
+            .arg(storage.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn nats-server (is it in PATH?)");
+        let url = format!("nats://127.0.0.1:{port}");
+        let mut client = None;
+        for _ in 0..50 {
+            match async_nats::connect(&url).await {
+                Ok(c) => {
+                    client = Some(c);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        let nats = client.expect("nats-server did not come up in 5s");
+        let js = async_nats::jetstream::new(nats.clone());
+        for bucket in [OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES] {
+            js.create_object_store(async_nats::jetstream::object_store::Config {
+                bucket: bucket.to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create object store");
+        }
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, role, allowed_features) VALUES ('op', 'x', 'operator', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = AppState {
+            passkeys: None,
+            pool: pool.clone(),
+            query_pool: pool.clone(),
+            commands: std::sync::Arc::new(crate::command_publisher::CommandPublisher::new(
+                nats.clone(),
+                None,
+            )),
+            nats,
+            jetstream: js.clone(),
+            explode_spec_cache: Default::default(),
+            sql_view_cache: crate::api::view_sql::new_cache(),
+            group_cache: crate::api::group_sql::new_cache(),
+            mailer: None,
+            public_url: None,
+            nats_url: String::new(),
+            login_throttle: Default::default(),
+        };
+        let router = crate::api::router(state).layer(axum::middleware::from_fn_with_state(
+            pool,
+            crate::auth::verify,
+        ));
+        App {
+            router,
+            js,
+            _server: server,
+            _storage: storage,
+        }
+    }
+
+    fn multipart(parts: &[(&str, Option<&str>, &[u8])]) -> (String, Vec<u8>) {
+        let boundary = "kanadetestboundary";
+        let mut body = Vec::new();
+        for (name, filename, data) in parts {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            match filename {
+                Some(f) => body.extend_from_slice(
+                    format!(
+                        "Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                    )
+                    .as_bytes(),
+                ),
+                None => body.extend_from_slice(
+                    format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+                ),
+            }
+            body.extend_from_slice(data);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    async fn post(
+        app: &App,
+        uri: &str,
+        filename: &str,
+        file: &[u8],
+        version: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut parts: Vec<(&str, Option<&str>, &[u8])> = Vec::new();
+        if let Some(v) = version {
+            parts.push(("version", None, v.as_bytes()));
+        }
+        parts.push(("file", Some(filename), file));
+        let (ct, body) = multipart(&parts);
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", mint("op")))
+            .header("x-kanade-source", "cli")
+            .header("content-type", ct)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn publish_agent(
+        app: &App,
+        filename: &str,
+        file: &[u8],
+        version: Option<&str>,
+    ) -> (StatusCode, String) {
+        post(app, "/api/agents/publish", filename, file, version).await
+    }
+
+    /// `(key, size, digest, nuid)` of every object in `bucket`, sorted.
+    async fn snapshot(app: &App, bucket: &str) -> Vec<(String, usize, Option<String>, String)> {
+        let store = app.js.get_object_store(bucket).await.unwrap();
+        let mut list = store.list().await.unwrap();
+        let mut out = Vec::new();
+        while let Some(info) = list.next().await {
+            let i = info.unwrap();
+            if !i.deleted {
+                out.push((i.name, i.size, i.digest, i.nuid));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    async fn read(app: &App, bucket: &str, key: &str) -> Vec<u8> {
+        let store = app.js.get_object_store(bucket).await.unwrap();
+        let mut obj = store.get(key).await.unwrap();
+        let mut buf = Vec::new();
+        obj.read_to_end(&mut buf).await.unwrap();
+        buf
+    }
+
+    const AGENT: &str = "kanade-agent";
+
+    fn linux_agent(version: &str) -> Vec<u8> {
+        elf_x86_64(&[("", ".kanade", &meta(AGENT, version, "linux-x86_64"))])
     }
 
     #[tokio::test]
-    async fn test_agent_publish_admission_and_isolation() {
-        use kanade_shared::agent_metadata::{
-            AGENT_PRODUCT_NAME, AgentBinaryMetadata, AgentPlatform as SharedPlatform,
-            encode_metadata_bytes,
-        };
-        use kanade_shared::object::write::Object;
-        use kanade_shared::object::{Architecture, BinaryFormat, Endianness, SectionKind};
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn official_agents_are_admitted_on_every_supported_platform() {
+        let app = app().await;
+        let mac = macho_arm64(&[(
+            "__DATA",
+            "__kanade",
+            &meta(AGENT, "0.81.0", "macos-aarch64"),
+        )]);
+        let win = pe_x86_64(".kanade", &meta(AGENT, "0.81.0", "windows-x86_64"));
+        let lin = linux_agent("0.81.0");
 
-        // Helper to construct test ELF bytes with given metadata
-        fn build_test_elf(meta: Option<&AgentBinaryMetadata>) -> Vec<u8> {
-            let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
-            if let Some(m) = meta {
-                let encoded = encode_metadata_bytes(m);
-                let sec_id = obj.add_section(
-                    Vec::new(),
-                    b".kanade".to_vec(),
-                    SectionKind::ReadOnlyData,
-                );
-                obj.append_section_data(sec_id, &encoded, 1);
-            } else {
-                let sec_id = obj.add_section(
-                    Vec::new(),
-                    b".rodata".to_vec(),
-                    SectionKind::ReadOnlyData,
-                );
-                obj.append_section_data(sec_id, b"plain-binary", 1);
-            }
-            obj.write().expect("writing test ELF")
+        // The file name is irrelevant; the version field is optional and may carry a `v`.
+        for (name, bytes, version, key) in [
+            ("whatever.bin", &lin, None, "0.81.0-linux-x86_64"),
+            ("kanade-agent.exe", &win, Some("0.81.0"), "0.81.0"),
+            ("kanade", &mac, Some("v0.81.0"), "0.81.0-macos-aarch64"),
+        ] {
+            let (st, body) = publish_agent(&app, name, bytes, version).await;
+            assert_eq!(st, StatusCode::OK, "{key}: {body}");
+            assert!(body.contains(&format!("\"key\":\"{key}\"")), "{body}");
+            assert_eq!(&read(&app, OBJECT_AGENT_RELEASES, key).await, bytes);
         }
+        assert!(snapshot(&app, OBJECT_APP_PACKAGES).await.is_empty());
+    }
 
-        // Build valid and invalid test binaries
-        let valid_meta = AgentBinaryMetadata {
-            product: AGENT_PRODUCT_NAME.to_string(),
-            version: "0.80.0".to_string(),
-            platform: SharedPlatform::LinuxX86_64,
-        };
-        let valid_elf = build_test_elf(Some(&valid_meta));
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn rejected_uploads_leave_the_object_store_and_existing_release_untouched() {
+        let app = app().await;
+        let good = linux_agent("0.81.0");
+        let (st, body) = publish_agent(&app, "kanade-agent", &good, Some("0.81.0")).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let before = snapshot(&app, OBJECT_AGENT_RELEASES).await;
+        assert_eq!(before.len(), 1);
 
-        // Incident reproduction: CLI binary published as agent
-        let incident_cli_meta = AgentBinaryMetadata {
-            product: "kanade-cli".to_string(),
-            version: "0.80.0".to_string(),
-            platform: SharedPlatform::LinuxX86_64,
-        };
-        let incident_cli_elf = build_test_elf(Some(&incident_cli_meta));
+        let mac_cli = macho_arm64(&[(
+            "__DATA",
+            "__kanade",
+            &meta("kanade", "0.81.0", "macos-aarch64"),
+        )]);
+        let malformed =
+            elf_x86_64(&[("", ".kanade", b"KNAGMETA\x01\x00\x00\x00\xff\x00\x00\x00{")]);
+        let cases: Vec<(&str, Vec<u8>, Option<&str>, &str)> = vec![
+            // Same key as the live release: an overwrite attempt per rejection kind.
+            (
+                "wrong product",
+                elf_x86_64(&[("", ".kanade", &meta("kanade", "0.81.0", "linux-x86_64"))]),
+                Some("0.81.0"),
+                "'kanade', not 'kanade-agent'",
+            ),
+            (
+                "backend",
+                elf_x86_64(&[(
+                    "",
+                    ".kanade",
+                    &meta("kanade-backend", "0.81.0", "linux-x86_64"),
+                )]),
+                None,
+                "kanade-backend",
+            ),
+            ("renamed macOS CLI", mac_cli, Some("0.79.0"), "kanade-agent"),
+            (
+                "version mismatch",
+                good.clone(),
+                Some("0.80.0"),
+                "version mismatch",
+            ),
+            (
+                "platform mismatch",
+                elf_x86_64(&[("", ".kanade", &meta(AGENT, "0.81.0", "macos-aarch64"))]),
+                Some("0.81.0"),
+                "platform",
+            ),
+            (
+                "legacy, no metadata",
+                elf_x86_64(&[("", ".rodata", b"kanade-agent 0.81.0")]),
+                Some("0.81.0"),
+                "no kanade-agent release metadata",
+            ),
+            ("malformed", malformed, Some("0.81.0"), "malformed"),
+            (
+                "not an executable",
+                b"#!/bin/sh\n".to_vec(),
+                Some("0.81.0"),
+                "unrecognized",
+            ),
+        ];
+        for (what, bytes, version, needle) in cases {
+            let (st, body) = publish_agent(&app, "kanade-agent-0.81.0", &bytes, version).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{what}: {body}");
+            assert!(body.contains(needle), "{what}: {body}");
+            assert_eq!(
+                snapshot(&app, OBJECT_AGENT_RELEASES).await,
+                before,
+                "{what}"
+            );
+        }
+        assert_eq!(
+            read(&app, OBJECT_AGENT_RELEASES, "0.81.0-linux-x86_64").await,
+            good
+        );
 
-        // Version mismatch
-        let wrong_ver_meta = AgentBinaryMetadata {
-            product: AGENT_PRODUCT_NAME.to_string(),
-            version: "0.79.0".to_string(),
-            platform: SharedPlatform::LinuxX86_64,
-        };
-        let wrong_ver_elf = build_test_elf(Some(&wrong_ver_meta));
+        // Identifying bytes appended to a legacy file do not make it an agent.
+        let mut appended = elf_x86_64(&[("", ".rodata", b"x")]);
+        appended.extend_from_slice(&meta(AGENT, "0.81.0", "linux-x86_64"));
+        let (st, _) = publish_agent(&app, "a", &appended, Some("0.81.0")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(snapshot(&app, OBJECT_AGENT_RELEASES).await, before);
+    }
 
-        // Legacy binary lacking .kanade section
-        let legacy_elf = build_test_elf(None);
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn duplicate_form_fields_are_rejected_before_any_write() {
+        let app = app().await;
+        let good = linux_agent("0.81.0");
+        for parts in [
+            vec![
+                ("file", Some("a"), &good[..]),
+                ("file", Some("b"), &good[..]),
+            ],
+            vec![
+                ("version", None, &b"0.81.0"[..]),
+                ("version", None, &b"0.81.0"[..]),
+                ("file", Some("a"), &good[..]),
+            ],
+        ] {
+            let (ct, body) = multipart(&parts);
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/agents/publish")
+                .header("authorization", format!("Bearer {}", mint("op")))
+                .header("x-kanade-source", "cli")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(snapshot(&app, OBJECT_AGENT_RELEASES).await.is_empty());
+    }
 
-        // Verify direct admission checks match backend enforcement:
-        // 1. Valid agent binary is admitted
-        let admitted = kanade_shared::agent_metadata::admit_agent_binary(&valid_elf, Some("0.80.0"))
-            .expect("valid agent binary must be admitted");
-        assert_eq!(admitted.platform, SharedPlatform::LinuxX86_64);
-        assert_eq!(admitted.metadata.version, "0.80.0");
-        assert_eq!(admitted.key, "0.80.0-linux-x86_64.exe");
-
-        // Leading 'v' prefix in declared version is normalized
-        assert!(kanade_shared::agent_metadata::admit_agent_binary(&valid_elf, Some("v0.80.0")).is_ok());
-
-        // 2. Incident reproduction: CLI binary published as agent is rejected (ProductMismatch)
-        let err = kanade_shared::agent_metadata::admit_agent_binary(&incident_cli_elf, Some("0.80.0"))
-            .unwrap_err();
-        assert!(matches!(err, kanade_shared::agent_metadata::MetadataError::ProductMismatch(p) if p == "kanade-cli"));
-
-        // 3. Version mismatch is rejected
-        let err = kanade_shared::agent_metadata::admit_agent_binary(&wrong_ver_elf, Some("0.80.0"))
-            .unwrap_err();
-        assert!(matches!(err, kanade_shared::agent_metadata::MetadataError::VersionMismatch { .. }));
-
-        // 4. Legacy binary lacking metadata is explicitly rejected
-        let err = kanade_shared::agent_metadata::admit_agent_binary(&legacy_elf, Some("0.80.0"))
-            .unwrap_err();
-        assert!(matches!(err, kanade_shared::agent_metadata::MetadataError::MissingMetadata));
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn normal_app_publishing_still_accepts_any_file_and_never_touches_agent_releases() {
+        let app = app().await;
+        let mac_cli = macho_arm64(&[(
+            "__DATA",
+            "__kanade",
+            &meta("kanade", "0.79.0", "macos-aarch64"),
+        )]);
+        let (st, body) = post(
+            &app,
+            "/api/app-packages/tool/1.0.0",
+            "tool.bin",
+            &mac_cli,
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(read(&app, OBJECT_APP_PACKAGES, "tool/1.0.0").await, mac_cli);
+        // An arbitrary non-executable is fine as an app package too.
+        let (st, body) = post(&app, "/api/app-packages/doc/2", "doc.txt", b"hello", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(snapshot(&app, OBJECT_AGENT_RELEASES).await.is_empty());
     }
 }

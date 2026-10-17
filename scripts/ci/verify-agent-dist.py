@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Verify that built/packaged kanade-agent binaries retain embedded release metadata.
+"""Read-only check that a shipped kanade-agent still carries its release metadata.
 
-Survives strip, optimization, and packaging without modifying the artifact.
-Validates:
-  - Container OS/CPU detection
-  - Dedicated .kanade / __DATA,__kanade section presence
-  - Metadata magic (KNAGMETA) and schema version (1)
-  - Product ("kanade-agent"), version, and platform alignment
+    verify-agent-dist.py <binary|.tar.gz|.zip> <expected-version> <expected-platform>
+
+Locates the dedicated section (`.kanade` in PE / ELF, `__DATA,__kanade` in
+Mach-O) by walking the container's section table -- the same rule as
+`kanade_shared::agent_metadata`, which the backend applies at publish time --
+and checks the envelope, product, version and platform. Nothing is executed
+or modified, so it is safe after optimisation, strip, macOS signing and
+packaging. Exit 0 = ok, 1 = verification failed, 2 = usage.
 """
 
 import json
-import os
 import struct
 import sys
 import tarfile
@@ -18,191 +19,101 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-MAGIC = b"KNAGMETA"
-EXPECTED_PRODUCT = "kanade-agent"
 
-
-def extract_pe_section(data: bytes, section_name: bytes) -> bytes | None:
-    if not data.startswith(b"MZ") or len(data) < 0x40:
-        return None
-    pe_off = struct.unpack_from("<I", data, 0x3C)[0]
-    if pe_off + 24 > len(data) or data[pe_off : pe_off + 4] != b"PE\0\0":
-        return None
-    num_sections = struct.unpack_from("<H", data, pe_off + 6)[0]
-    opt_hdr_size = struct.unpack_from("<H", data, pe_off + 20)[0]
-    sec_table_off = pe_off + 24 + opt_hdr_size
-
-    for i in range(num_sections):
-        hdr_off = sec_table_off + i * 40
-        if hdr_off + 40 > len(data):
-            break
-        name = data[hdr_off : hdr_off + 8].rstrip(b"\0")
-        if name == section_name:
-            vsize = struct.unpack_from("<I", data, hdr_off + 8)[0]
-            raw_size = struct.unpack_from("<I", data, hdr_off + 16)[0]
-            raw_ptr = struct.unpack_from("<I", data, hdr_off + 20)[0]
-            sz = min(vsize, raw_size) if vsize > 0 else raw_size
-            return data[raw_ptr : raw_ptr + sz]
-    return None
-
-
-def extract_elf_section(data: bytes, section_name: bytes) -> bytes | None:
-    if not data.startswith(b"\x7fELF") or len(data) < 64:
-        return None
-    ei_class = data[4]
-    endian = "<" if data[5] == 1 else ">"
-    if ei_class == 2:  # 64-bit
-        shoff = struct.unpack_from(f"{endian}Q", data, 40)[0]
-        shentsize = struct.unpack_from(f"{endian}H", data, 58)[0]
-        shnum = struct.unpack_from(f"{endian}H", data, 60)[0]
-        shstrndx = struct.unpack_from(f"{endian}H", data, 62)[0]
-    else:  # 32-bit
-        shoff = struct.unpack_from(f"{endian}I", data, 32)[0]
-        shentsize = struct.unpack_from(f"{endian}H", data, 46)[0]
-        shnum = struct.unpack_from(f"{endian}H", data, 48)[0]
-        shstrndx = struct.unpack_from(f"{endian}H", data, 50)[0]
-
-    if shstrndx >= shnum:
-        return None
-    str_hdr = shoff + shstrndx * shentsize
-    str_offset = struct.unpack_from(
-        f"{endian}{'Q' if ei_class == 2 else 'I'}",
-        data,
-        str_hdr + (24 if ei_class == 2 else 16),
-    )[0]
-
-    for i in range(shnum):
-        hdr = shoff + i * shentsize
-        name_idx = struct.unpack_from(f"{endian}I", data, hdr)[0]
-        name_end = data.find(b"\0", str_offset + name_idx)
-        name = data[str_offset + name_idx : name_end]
-        if name == section_name:
-            offset = struct.unpack_from(
-                f"{endian}{'Q' if ei_class == 2 else 'I'}",
-                data,
-                hdr + (24 if ei_class == 2 else 16),
-            )[0]
-            size = struct.unpack_from(
-                f"{endian}{'Q' if ei_class == 2 else 'I'}",
-                data,
-                hdr + (32 if ei_class == 2 else 20),
-            )[0]
-            return data[offset : offset + size]
-    return None
-
-
-def extract_macho_section(data: bytes, section_name: bytes) -> bytes | None:
-    if len(data) < 32:
-        return None
-    magic = data[:4]
-    if magic in (b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe"):  # 64-bit
-        endian = "<" if magic == b"\xcf\xfa\xed\xfe" else ">"
-        ncmds = struct.unpack_from(f"{endian}I", data, 16)[0]
-        cmd_off = 32
+def sections(data):
+    """Yield (segment, name, bytes) for every section of a PE / ELF / Mach-O."""
+    if data[:2] == b"MZ":
+        pe = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe:pe + 4] != b"PE\0\0":
+            raise ValueError("MZ file without a PE signature")
+        nsec, = struct.unpack_from("<H", data, pe + 6)
+        opt, = struct.unpack_from("<H", data, pe + 20)
+        for i in range(nsec):
+            h = pe + 24 + opt + i * 40
+            name = data[h:h + 8].rstrip(b"\0").decode("latin-1")
+            vsize, _, rawsize, rawptr = struct.unpack_from("<IIII", data, h + 8)
+            yield "", name, data[rawptr:rawptr + (min(vsize, rawsize) if vsize else rawsize)]
+    elif data[:4] == b"\x7fELF":
+        if data[4] != 2 or data[5] != 1:
+            raise ValueError("only little-endian ELF64 is shipped")
+        shoff, = struct.unpack_from("<Q", data, 40)
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 58)
+        hdr = lambda i: struct.unpack_from("<IIQQQQ", data, shoff + i * shentsize)
+        stroff = hdr(shstrndx)[4]
+        for i in range(shnum):
+            name_idx, _, _, _, off, size = hdr(i)
+            end = data.index(b"\0", stroff + name_idx)
+            yield "", data[stroff + name_idx:end].decode("latin-1"), data[off:off + size]
+    elif data[:4] == b"\xcf\xfa\xed\xfe":
+        ncmds, = struct.unpack_from("<I", data, 16)
+        off = 32
         for _ in range(ncmds):
-            if cmd_off + 8 > len(data):
-                break
-            cmd, cmdsize = struct.unpack_from(f"{endian}II", data, cmd_off)
+            cmd, size = struct.unpack_from("<II", data, off)
             if cmd == 0x19:  # LC_SEGMENT_64
-                nsects = struct.unpack_from(f"{endian}I", data, cmd_off + 64)[0]
-                sect_off = cmd_off + 72
-                for _ in range(nsects):
-                    if sect_off + 80 > len(data):
-                        break
-                    sect_name = data[sect_off : sect_off + 16].rstrip(b"\0")
-                    if sect_name == section_name:
-                        offset = struct.unpack_from(f"{endian}I", data, sect_off + 48)[0]
-                        size = struct.unpack_from(f"{endian}Q", data, sect_off + 40)[0]
-                        return data[offset : offset + size]
-                    sect_off += 80
-            cmd_off += cmdsize
-    return None
+                nsects, = struct.unpack_from("<I", data, off + 64)
+                for j in range(nsects):
+                    s = off + 72 + j * 80
+                    name = data[s:s + 16].rstrip(b"\0").decode("latin-1")
+                    seg = data[s + 16:s + 32].rstrip(b"\0").decode("latin-1")
+                    sz, = struct.unpack_from("<Q", data, s + 40)
+                    fo, = struct.unpack_from("<I", data, s + 48)
+                    yield seg, name, data[fo:fo + sz]
+            off += size
+    else:
+        raise ValueError("not a PE, ELF64 or thin 64-bit Mach-O executable")
 
 
-def extract_section(data: bytes) -> bytes | None:
-    if data.startswith(b"MZ"):
-        return extract_pe_section(data, b".kanade")
-    if data.startswith(b"\x7fELF"):
-        return extract_elf_section(data, b".kanade")
-    return extract_macho_section(data, b"__kanade")
-
-
-def verify_metadata_payload(sec_data: bytes, expected_version: str | None = None) -> dict:
-    if len(sec_data) < 16:
-        raise ValueError(f"section length {len(sec_data)} smaller than header size 16")
-    magic = sec_data[:8]
-    if magic != MAGIC:
-        raise ValueError(f"bad magic: {magic!r}")
-    schema_ver = struct.unpack_from("<H", sec_data, 8)[0]
-    if schema_ver != 1:
-        raise ValueError(f"unsupported schema version: {schema_ver}")
-    payload_len = struct.unpack_from("<I", sec_data, 12)[0]
-    if len(sec_data) < 16 + payload_len:
-        raise ValueError(f"payload truncated: {len(sec_data)} < {16 + payload_len}")
-    payload_raw = sec_data[16 : 16 + payload_len]
-    payload = json.loads(payload_raw.decode("utf-8"))
-
-    if payload.get("product") != EXPECTED_PRODUCT:
-        raise ValueError(f"expected product {EXPECTED_PRODUCT}, got {payload.get('product')}")
-    if expected_version:
-        ver = payload.get("version", "").lstrip("v").strip()
-        exp = expected_version.lstrip("v").strip()
-        if ver != exp:
-            raise ValueError(f"version mismatch: expected {exp}, got {ver}")
-    return payload
-
-
-def verify_binary_file(path: Path, expected_version: str | None = None) -> dict:
-    data = path.read_bytes()
-    sec = extract_section(data)
-    if sec is None:
-        raise ValueError(f"{path}: missing agent release metadata section (.kanade / __kanade)")
-    meta = verify_metadata_payload(sec, expected_version)
-    print(f"verified {path.name}: product={meta['product']}, version={meta['version']}, platform={meta['platform']}")
+def verify(data, version, platform):
+    macho = data[:4] == b"\xcf\xfa\xed\xfe"
+    want = ("__DATA", "__kanade") if macho else ("", ".kanade")
+    found = [d for seg, name, d in sections(data) if (seg, name) == want]
+    if len(found) != 1:
+        raise ValueError(f"expected exactly one {want[0]},{want[1]} section, found {len(found)}")
+    raw = found[0]
+    if len(raw) < 16 or raw[:8] != b"KNAGMETA":
+        raise ValueError("bad metadata envelope")
+    schema, flags, length = struct.unpack_from("<HHI", raw, 8)
+    if schema != 1 or flags != 0 or 16 + length > len(raw) or any(raw[16 + length:]):
+        raise ValueError("unsupported or corrupt metadata envelope")
+    meta = json.loads(raw[16:16 + length])
+    expected = {"product": "kanade-agent", "version": version, "platform": platform}
+    if meta != expected:
+        raise ValueError(f"metadata {meta} != expected {expected}")
     return meta
 
 
-def verify_archive(archive_path: Path, expected_version: str | None = None) -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        if archive_path.name.endswith(".tar.gz") or archive_path.name.endswith(".tgz"):
-            with tarfile.open(archive_path, "r:gz") as tar:
-                tar.extractall(tmp_path)
-        elif archive_path.name.endswith(".zip"):
-            with zipfile.ZipFile(archive_path, "r") as z:
-                z.extractall(tmp_path)
-        else:
-            verify_binary_file(archive_path, expected_version)
-            return
-
-        found = False
-        for p in tmp_path.rglob("*"):
-            if p.is_file() and p.name.startswith("kanade-agent"):
-                verify_binary_file(p, expected_version)
-                found = True
-        if not found:
-            raise ValueError(f"{archive_path}: no kanade-agent binary found inside archive")
+def binaries(path, tmp):
+    name = path.name
+    if name.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(path) as t:
+            for m in t.getmembers():
+                if m.isfile() and not Path(m.name).name.startswith("._"):
+                    yield m.name, t.extractfile(m).read()
+    elif name.endswith(".zip"):
+        with zipfile.ZipFile(path) as z:
+            for n in z.namelist():
+                yield n, z.read(n)
+    else:
+        yield name, path.read_bytes()
 
 
-def main() -> int:
-    if len(sys.argv) < 2:
-        print("usage: verify-agent-dist.py <binary-or-archive-path> [expected_version]", file=sys.stderr)
+def main():
+    if len(sys.argv) != 4:
+        print(__doc__, file=sys.stderr)
         return 2
-
-    target_path = Path(sys.argv[1])
-    expected_ver = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("CARGO_PKG_VERSION")
-
-    if not target_path.exists():
-        print(f"error: {target_path} not found", file=sys.stderr)
-        return 1
-
+    path, version, platform = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
     try:
-        verify_archive(target_path, expected_ver)
-        print("metadata verification succeeded")
-        return 0
-    except Exception as e:
-        print(f"error: {e}", file=sys.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            items = list(binaries(path, tmp))
+            if len(items) != 1:
+                raise ValueError(f"{path}: expected exactly one file, found {len(items)}")
+            member, data = items[0]
+            meta = verify(data, version, platform)
+    except Exception as e:  # noqa: BLE001 - report any failure as a verification error
+        print(f"::error::{path}: agent release metadata check failed: {e}", file=sys.stderr)
         return 1
+    print(f"{path} ({member}): {meta['product']} {meta['version']} {meta['platform']} ok")
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,11 +1,16 @@
-//! Release metadata embedded into the agent binary.
+//! Release metadata embedded in the agent binary.
 //!
-//! This section is compiled into a dedicated section (`.kanade` for Windows PE
-//! and Linux ELF, `__DATA,__kanade` for macOS Mach-O). It contains the canonical
-//! product identifier ("kanade-agent"), release version, and target platform.
+//! The build script renders `{"product":"kanade-agent","version":…,
+//! "platform":…}` in the envelope defined by
+//! `kanade_shared::agent_metadata`; this module links it into a dedicated
+//! section (`.kanade` in PE / ELF, `__DATA,__kanade` in Mach-O) that the
+//! backend's agent-publish admission reads. Only this crate embeds it, so
+//! no other kanade binary can identify itself as the agent.
 //!
-//! The static array is marked `#[used]` to prevent removal by dead-code elimination,
-//! strip, optimization, and macOS codesigning.
+//! `main` reads the static through [`ensure_embedded`] so neither LTO nor
+//! the linker's section GC (`--gc-sections`, `-dead_strip`) can drop it;
+//! `strip` leaves allocated sections alone, and the macOS code signature
+//! is applied afterwards without touching section contents.
 
 const METADATA_LEN: usize = include_bytes!(concat!(env!("OUT_DIR"), "/agent_metadata.bin")).len();
 
@@ -14,14 +19,11 @@ const METADATA_LEN: usize = include_bytes!(concat!(env!("OUT_DIR"), "/agent_meta
     any(target_os = "windows", target_os = "linux"),
     unsafe(link_section = ".kanade")
 )]
-#[cfg_attr(
-    target_os = "macos",
-    unsafe(link_section = "__DATA,__kanade")
-)]
-pub static AGENT_RELEASE_METADATA: [u8; METADATA_LEN] =
+#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__kanade"))]
+static AGENT_RELEASE_METADATA: [u8; METADATA_LEN] =
     *include_bytes!(concat!(env!("OUT_DIR"), "/agent_metadata.bin"));
 
-/// Ensures the release metadata symbol is not dropped by whole-program optimization / LTO.
+/// Opaque read of the metadata so the section stays reachable.
 #[inline(never)]
 pub fn ensure_embedded() -> &'static [u8] {
     &AGENT_RELEASE_METADATA
@@ -30,13 +32,24 @@ pub fn ensure_embedded() -> &'static [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanade_shared::agent_metadata::parse_metadata_bytes;
+    use kanade_shared::agent_metadata::{
+        AGENT_PRODUCT_NAME, admit_agent_binary, parse_metadata_bytes,
+    };
 
     #[test]
-    fn embedded_metadata_parses_cleanly() {
-        let meta = parse_metadata_bytes(&AGENT_RELEASE_METADATA)
-            .expect("embedded agent metadata must parse");
-        assert_eq!(meta.product, "kanade-agent");
-        assert!(!meta.version.is_empty());
+    fn embedded_metadata_matches_the_crate() {
+        let meta = parse_metadata_bytes(ensure_embedded()).expect("embedded metadata parses");
+        assert_eq!(meta.product, AGENT_PRODUCT_NAME);
+        assert_eq!(meta.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// The linked executable (this test binary) is admitted by the same check
+    /// the backend runs, so the section name / format survive the real linker.
+    #[test]
+    fn embedded_metadata_is_admitted() {
+        let exe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let admitted = admit_agent_binary(&exe, Some(env!("CARGO_PKG_VERSION")))
+            .expect("linked binary must pass backend admission");
+        assert_eq!(admitted.version, env!("CARGO_PKG_VERSION"));
     }
 }
