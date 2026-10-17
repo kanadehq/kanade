@@ -74,12 +74,16 @@ struct History {
 
 impl History {
     fn eligible(&self, now: u64) -> bool {
-        !self.requested && self.attempts < 3 && now >= self.retry_after
+        !self.requested && now >= self.retry_after
     }
 
     fn launching(&mut self, now: u64) {
-        self.attempts += 1;
-        self.retry_after = now.saturating_add(60 * 10u64.pow(u32::from(self.attempts - 1)));
+        // Failed launches must remain recoverable after the GUI session is ready.
+        // Cap the delay, not the lifetime number of pre-request attempts.
+        const DELAYS: [u64; 4] = [60, 600, 3600, 21_600];
+        let delay = DELAYS[usize::from(self.attempts).min(DELAYS.len() - 1)];
+        self.attempts = self.attempts.saturating_add(1);
+        self.retry_after = now.saturating_add(delay);
     }
 }
 
@@ -186,7 +190,7 @@ async fn attempt(session: Session) -> Result<bool> {
         return Ok(false);
     }
     let mut history = load(&path)?;
-    if history.requested || history.attempts >= 3 {
+    if history.requested {
         info!(
             uid = session.uid,
             "Screen Recording onboarding already attempted; if viewing lacks permission, enable the installed agent in System Settings > Privacy & Security > Screen Recording, then reconnect (restart the agent if necessary)"
@@ -273,7 +277,7 @@ async fn attempt(session: Session) -> Result<bool> {
     };
     drop(group);
     let _ = child.wait().await;
-    // Before GO all failures are retryable, with the persisted finite budget.
+    // Before GO all failures are retryable, with the persisted capped backoff.
     match result {
         Ok(done) => Ok(done),
         Err(e) => {
@@ -472,12 +476,15 @@ mod tests {
     }
 
     #[test]
-    fn finite_failure_backoff_survives_service_restart() {
+    fn capped_failure_backoff_survives_service_restart_without_exhaustion() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         let mut history = load(&path).unwrap();
         let mut now = 100;
-        for delay in [60, 600, 6000] {
+        for delay in [60, 600, 3600]
+            .into_iter()
+            .chain(std::iter::repeat_n(21_600, 260))
+        {
             assert!(history.eligible(now));
             history.launching(now);
             save(&path, &history).unwrap();
@@ -486,7 +493,46 @@ mod tests {
             assert!(!history.eligible(now + delay - 1));
             now += delay;
         }
-        assert!(!history.eligible(now + 100_000));
+        assert_eq!(history.attempts, u8::MAX);
+        assert!(history.eligible(now));
+    }
+
+    #[tokio::test]
+    async fn previously_exhausted_history_recovers_but_request_intent_still_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // A record persisted by the old three-attempt policy must recover, too.
+        save(
+            &path,
+            &History {
+                attempts: 3,
+                retry_after: 100,
+                requested: false,
+            },
+        )
+        .unwrap();
+        let mut history = load(&path).unwrap();
+        assert!(!history.eligible(99));
+        assert!(history.eligible(100));
+        history.launching(100);
+        save(&path, &history).unwrap();
+        let mut history = load(&path).unwrap();
+        let mut input = Vec::new();
+        assert!(
+            authorize(
+                &mut &b"READY\n"[..],
+                &mut input,
+                || true,
+                || {
+                    history.requested = true;
+                    save(&path, &history)
+                }
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(input, b"GO\n");
+        assert!(!load(&path).unwrap().eligible(u64::MAX));
     }
 
     #[tokio::test]

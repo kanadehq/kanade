@@ -26,9 +26,12 @@ Unsigned/ad-hoc binaries use the path alone. Versions and cdhash are excluded so
 routine updates retain history. A signature identity or installation path change
 creates a separate history; preserve the release signing identity and path.
 A nonblocking per-record lock excludes overlapping daemon instances. Before each
-launch a finite retry budget is persisted: at most three launch attempts, with 60-second
-then 600-second delays. Pre-request launch/protocol/timeouts may retry; an intent
-already saved, including a crash before delivery, never retries the request.
+launch a retry deadline is persisted: delays start at 60 seconds, then 10 minutes,
+then one hour, and cap at six hours for subsequent failures. Pre-request launch,
+protocol and timeout failures remain retryable after that deadline, including
+across logins and service restarts; they never permanently exhaust onboarding.
+An intent already saved, including a crash before delivery, never retries the
+request.
 Corrupt or unwritable history suppresses onboarding for that observed session.
 Do not delete history as a routine troubleshooting step: it cannot reset OS
 consent and could produce unwanted attempts.
@@ -93,7 +96,8 @@ database. Record OS version, agent version and signature team/identifier private
    user. Revisit a previously attempted user: no new request. With permission
    already granted, confirm the helper preflights and exits without a dialog.
 7. Exercise an unavailable GUI bootstrap or launch failure in a controlled test
-   installation. Verify finite persisted retries and continued normal startup.
+   installation. Verify persisted backoff, eventual retry after session recovery
+   and continued normal startup.
    Capture-only viewing at LoginWindow, remote input and other capture expansion
    are outside this acceptance scope.
 
