@@ -2633,6 +2633,7 @@ pub struct JobProgress {
   - `-Pc`, `-Groups`, `-All`: ターゲット指定。`-Pc` はケースセンシティブで NATS subject に直結。`-All` は cli ロールで拒否。
   - `-Jitter`: agent rollout 時のダウンロードばらけ時間。
   - `-Version`: `latest` (GitHub Release 問い合わせ), 空白 (PE から抽出), SemVer。
+  - `-ExePath`, `-GitHubRepo`: ローカル成果物指定と Release 解決先（既定 `kanadehq/kanade`）。
   - `-Stage`: `build-release.ps1` を呼んでローカルにバイナリを事前ステージ。
   - `-Server`, `-BackendUrl`, `-SourceUrl`, `-AuthToken`, `-NatsToken`: 通信・認証パラメータ。
   - `-WipeDb`: backend の SQLite DB wipe フラグ。
@@ -2646,6 +2647,9 @@ pub struct JobProgress {
   - `--arch`: `x86_64` | `aarch64`。
   - `--pc`, `--group`, `--all`, `--jitter`: update モードのスコープ。
   - `--nats-url`, `--nats-token`: NATS 接続設定。
+  - `--version`: update は明示版、未指定は workspace 版。install は bundle の版指定。
+  - `--agent-bin`, `--backend-bin`: ローカル成果物。`--agent-bin` は enrolled-agent update でも使用。
+  - `--github-repo`: Release ダウンロード元。`--out`: install 用 bundle 出力先。
 
 #### 2.13.2.2 3分類移行対応表
 上記インベントリの全入力・挙動を「型付きジョブへ移行」「bootstrap 手順として存続」「危険な既定値や設定注入として廃止」に分類する。
@@ -2664,12 +2668,30 @@ pub struct JobProgress {
 | `fleet-deploy.ps1` | `-JwtSecret`, `-StaticToken`, `-BootstrapAdminPassword`, `-MailPassword` | **危険な既定値・注入として廃止** | ジョブ本文・引数への平文シークレット注入を全廃。ターゲット上の既存設定（HKLM / env）保持を既定化 |
 | `fleet-deploy.ps1` | `-AuthToken`, `-NatsToken` (平文引数) | **危険な既定値・注入として廃止** | オペレータ環境の `KANADE_AUTH_TOKEN` / NATS 資格情報を使用し、ターゲットには配送しない |
 | `fleet-deploy.ps1` | `-WipeDb` (簡易指定) | **危険な既定値・注入として廃止** | 暗黙実行を禁止。明示的 `--wipe-db` + 自動バックアップ + 二重確認に移行 |
-| `fleet-deploy.ps1` | `-NoVerify` | **危険な既定値・注入として廃止** | 完全廃止。常に実稼働プロセスの健全性と実版を検証 |
+| `fleet-deploy.ps1` | `-NoVerify` | **危険な既定値・注入として廃止** | 完全廃止。常に配置検証とロール・起動方針に応じた稼働検証を実施 |
 | `fleet-deploy.sh` | `--mode update` (agent) | **型付きジョブへ移行** | `kanade deploy plan agent` に統一 |
 | `fleet-deploy.sh` | `--mode install` (SSH bootstrap) | **bootstrap 手順として存続** | CLI スコープ外。初期ホスト構築スクリプトとしてそのまま存続 |
 | `setup.sh`, `setup-agent.sh` | 全機能 (ベアメタル構築) | **bootstrap 手順として存続** | CLI スコープ外。初回収束・オフライン構築用として存続 |
 | `scripts/deploy/nats.ps1` | 全機能 (ブローカー構築) | **bootstrap 手順として存続** | CLI スコープ外。ブローカー初期配備用として存続 |
 | Web UI ワンライナー | `installer.ps1`, `installer.sh` | **bootstrap 手順として存続** | CLI スコープ外。初期エージェント登録用として不変維持 |
+
+追加の入力・installer 挙動も削除前の parity 対象とする。以下の新オプションは technical proposal（推奨）であり、既存設定を黙って変更しない。
+
+| 現行入力 / 挙動 | 移行契約 |
+|---|---|
+| Windows `-ExePath`、Linux `--agent-bin` / `--backend-bin` | `plan --binary <path> --version <ver>`。ローカル読取のみ、identity・実版・publisher 検証必須。apply 時に app publish / agent publish で格納。PE のない成果物は版省略不可 |
+| Windows `-GitHubRepo`、Linux `--github-repo` / `--version` | `--github-repo <owner/repo>` / `--version <ver>`。別 repo も許すが信頼済み publisher は変更しない。未署名ローカル build は信頼済み署名を準備するまで拒否 |
+| Linux `--out` | bootstrap bundle 出力として存続。deploy は bundle を生成しない |
+| Linux `--host` / `--identity` / `--domain`、install の `--arch` | bootstrap のみ。fleet wrapper 削除時も setup/build 手順で代替し SSH を CLI に移植しない。update の arch は inventory と照合する `--arch` assertion へ |
+| Windows `-Server` / `-BackendUrl` / `-SourceUrl` | operator 接続設定と target download endpoint を分離。`--server` / `--backend-url` / `--source-url`（許可済み HTTPS endpoint のみ）。loopback 推測を廃止、到達性検査後 plan に固定 |
+| backend.ps1 `SourceDir` / `ServiceName` | artifact identity / 管理所有権 receipt で代替。任意サービス名・任意パスを停止しない |
+| `ForceConfig` / `FreshInstall` | config 強制上書き・秘密情報初期化は deploy から廃止。enrolled host 上の初回 backend install は検証済み既存 config 必須、不在なら設定準備を要求して拒否 |
+| `FirewallPort` / `NoFirewall` | 明示 `--firewall-port <1..65535>` / `--no-firewall`（相互排他）を plan に固定。既定は既存 firewall 保持、public bind から自動開放しない。固定名の Kanade 所有 rule のみ変更 |
+| `Recreate` | `--repair-service`。所有権・実行パス照合後、既存 service 設定を保存し管理 service のみ再登録。承認対象、失敗時は設定復元 |
+| `NoStart` | `--start-policy preserve|never`。既定 preserve は停止済み service を起動しない。never は配置検証だけで成功 |
+| backend.ps1 `NatsToken` / `NatsUser` / `NatsPassword` と他 secret | deploy 引数として廃止。既存設定保持、初回設定は別の安全な provisioning 手順。値を plan や job に記録しない |
+| Windows `KANADE_TARGET_PC` fallback、複数 Groups、agent の単一 group 制約 | 解決済み対象集合を plan に表示・固定。CLI は反復 `--group` を job roles に許可、agent は既存 rollout の単一 scope 制約を維持 |
+| 既存 jitter 省略時の scope 値維持、NoVerify、DryRun の一時ファイル | agent は省略時に既存 scope jitter を維持し、値を plan に表示。新 job jitter の既定は §2.13.5.4。NoVerify と secret 入り一時 script 生成は廃止 |
 
 #### 2.13.2.3 秘密情報・トークン・危険なフラグの安全化方針
 1. **秘密情報の不可侵化**:
@@ -2677,7 +2699,7 @@ pub struct JobProgress {
    - 新規シークレットのプロビジョニングが必要な場合は、デプロイ CLI の引数やジョブ定義に平文で含めることを禁止し、暗号化された秘密管理チャネル（将来の Vault 連携または専用の KLP チャネル）を必須とする。未整備の環境では設定変更操作を拒否する。
 2. **`-WipeDb` の安全化**:
    - デフォルトは常にデータベース保護（No Wipe）。
-   - `--wipe-db` フラグが指定された場合でも、Agent はデータベース消去前に SQLite データベースおよび WAL ファイルのタイムスタンプ付き完全バックアップをローカルに自動作成する。
+   - 通常更新と `--wipe-db` の両方で、§2.13.7.5 の整合 snapshot を必須とする。DB / WAL の稼働中単純コピーはバックアップとみなさない。
    - `users` テーブルは確実に保護し、JetStream からの再投影が完了して `/api/health` が green になるまで結果検証を継続する。
 3. **`-NoVerify` の廃止と検証の厳格化**:
    - ジョブがキューに受理されたこと（Admission）と、実際にサービスが起動して正しいバージョンで応答したこと（Verified Success）を明確に区別する。
@@ -2725,8 +2747,9 @@ Release ワークフローの記述だけで「全環境で即座に配布可能
    - `release.yml` が生成するのは単体の Mach-O バイナリ (`kanade-client`) のみである。
    - macOS 上で GUI アプリケーションとして動作し、通知やトレイ常駐を行うには `Contents/Info.plist`, `Resources/icon.icns` を含む `Kanade Client.app` バンドルが必須である。
    - さらに、Kanade ジョブから非対話的に特権インストールを行うには、`/Applications` への配置と LaunchAgent 登録をパッケージ化した `.pkg` インストーラ形式が必要であるが、CI パイプラインには `.pkg` 生成ステップが存在しない。
-2. **Ubuntu Linux Client のパッケージ未整備**:
-   - `release.yml` が生成するのは静的リンクされた musl バイナリのみである。
+2. **Ubuntu Linux Client の GUI とパッケージの未整備**:
+   - 現行 `crates/kanade-client/src/main.rs` の Linux entrypoint はメッセージを出して exit(1) する shim であり、GUI は未実装。musl tarball を .deb に包んでも GUI Client にはならない。
+   - 最初に Ubuntu 24.04 x86_64 GNOME 向け Tauri / WebKitGTK の GUI entrypoint と対応ビルド（GNU target と依存ライブラリの検証）を整備する。§2.11.7 の session / KLP / 通知等の未実装契約は独立した前提条件であり、この設計で実装済みとはしない。
    - Ubuntu 24.04 (GNOME) でデスクトップ統合（`.desktop` ファイル、アイコン、WebKitGTK 依存関係、ログイン起動ユニット）を行い、`apt` / `dpkg` で整合性を保って管理するための `.deb` パッケージ生成パイプラインが存在しない。
 3. **Packaging 整備の独立性**:
    - macOS GUI のコードベース実装（Tauri）が存在することと、配布可能な `.pkg` / `.deb` パッケージが存在することは別問題である。
@@ -2738,7 +2761,7 @@ Release ワークフローの記述だけで「全環境で即座に配布可能
    - ad-hoc 署名は Gatekeeper の信頼を確立しないため、初回起動時の手動許可（System Settings → Privacy & Security）または MDM プロファイルによるバイパスが前提となる。パッケージの SHA-256 ハッシュや ad-hoc 署名を「公証配布と同等の信頼」と偽ってはならない。
 2. **延期事項の厳格な維持**:
    - 以下の環境・機能は引き続き**延期（Deferred）**であり、本デプロイ設計でも「対応済み」と偽らず、明示的にスコープ外（非対応）として扱う。
-     - Linux: ARM (aarch64), Debian, Fedora (`dnf`), KDE, その他ディストリビューション
+     - Linux **Client のみ**: ARM (aarch64), Debian, Fedora (`dnf`), KDE, その他ディストリビューション。非 Client の既存 Linux ARM agent publish/rollout と release 成果物はこの制限に含めない
      - macOS: Intel (`x86_64`), Apple Developer ID 署名, Notarization
      - Client: 独立した自動アップデータ、`client_releases` 専用バケット、外部 package 管理の黙認引き継ぎ
 
@@ -2805,9 +2828,12 @@ pub struct ArtifactIdentity {
 - **ハッシュ単体認証の禁止**: 単なる SHA-256 ハッシュの一致は完全性（破損していないこと）を証明するに過ぎず、発行元（Publisher）の正当性を証明しない。マニフェストには信頼された発行元鍵による電子署名を付与し、Agent は実行前に署名を検証する。
 
 #### 2.13.4.4 不変性 (Immutability) の保証と実版検出
-1. **全書込経路での不変性強制**:
-   - Backend API (`POST /api/app-packages`, `POST /api/agents/publish`) および CLI は、同一の `ArtifactIdentity`（または同一キー）に対して、既存オブジェクトと異なるバイト列のアップロードを試みた場合、即座に `409 Conflict` を返して拒否する。
+1. **新 identity 経路の不変性と互換移行**:
+   - 新 identity API および CLI は、同一の `ArtifactIdentity` に対して、既存オブジェクトと異なるバイト列のアップロードを試みた場合、即座に `409 Conflict` を返して拒否する。
    - 同一バイト列の再アップロードは 200 OK (Idempotent no-op) とする。
+   - 現行 app-packages API は `<name>/<version>` を上書きする。Phase 1 は別の identity API / key namespace を追加し、旧 bare-key API と `release-extras.yml` の `publish-client-to-backend` は現行動作を維持する。agent publish/rollout も既存契約のまま維持する。一律 409 への変更は禁止。
+   - 旧 Windows alias は PE 検証だけで可変 object を参照せず、その時点の bytes / digest / publisher 証跡を新 identity に snapshot する。同じ版の再 build が異なる bytes なら新 identity では拒否し、新しい版を要求する（force overwrite は設けない）。旧経路の再 upload は既存 plan を変えない。
+   - CI producer と operator 手順を新 publish へ移行し、旧 consumer 不在・再 upload parity を検証後に旧 write API を廃止する。期限は Phase 7 の撤去 gate。移行中も新 CLI は bare key を直接配信しない。
 2. **実版（Installed Version）の検出契約**:
    - デプロイ前後のバージョン検出は、Windows PE に依存せず各 OS ネイティブの手法を用いる。
    - **Windows**: PE `VERSIONINFO` (`ProductVersion` / `FileVersion`)
@@ -2861,20 +2887,25 @@ kanade deploy status <plan-id | exec-id>
      - オフラインまたは長期間ハートビートが途絶えている端末
      - 対象ロールに非対応の OS / アーキテクチャの端末（例: macOS 端末に対する Windows 専用機能）
      - 必要な成果物やマニフェストが存在しない端末
-     - 新しい型付き操作に対応していない旧バージョン Agent
+     - backend/client/cli の計画で、新しい型付き操作に対応していない旧 Agent。agent 計画は例外で、既存 publish/rollout に必要な platform・版・self-update 経路だけを検査する。typed_deploy_v1 未対応の Agent 自身を先に更新できなければならない
    - **明示的除外 (`--skip-unsupported`)**:
      - 運用者が明示的に `--skip-unsupported` を指定した場合に限り、非対応端末をデプロイ対象から除外し、その端末 ID と除外理由（「OS 不一致」「成果物不在」「旧 Agent」等）を計画書および監査ログに明記した上で計画作成を許可する。
 
 #### 2.13.5.6 認可・承認・実行ゲート契約
 - デプロイの実行は CLI のローカルプロンプトだけで完結させない。
-- `plan` の生成により、Backend 上に一意の `Plan ID` を持つ承認待ちレコードが作成される。
+- `plan` はローカルに内容 digest 付き計画を出力する read-only 操作。`apply` の登録段階で Backend 上に一意の `Plan ID` を持つ承認待ちレコードを作る。
 - `apply` の実行には、Backend の RBAC における `operator` 以上のロール権限が必要であり、高リスク操作（後述の `--wipe-db` やフリート規模の更新）には Backend 側の二重承認ゲート（Approval Gate）へのバインドを要求する。
 
 #### 2.13.5.7 結果検証 (受理と検証済み成功の厳格な区別)
 - 従来の `--no-verify` フラグは完全廃止する。
 - デプロイ実行結果は、以下の二つの状態を厳格に区別して報告する。
   1. **Accepted (受理)**: Agent がコマンドを受信し、ローカルの実行キュー・台帳に記録した状態。
-  2. **Verified Success (検証済み成功)**: プロセスが停止・置換・再起動され、OS ネイティブのバージョン情報（PE / Info.plist / dpkg）から要求バージョンが読み取られ、ヘルスチェックが green を返した状態。
+  2. **Verified Success (検証済み成功)**: 配置検証（identity・digest・publisher・OS 実版・所有権 receipt）が成功し、以下のロール別 postcondition を満たした終端状態。
+     - Backend: 起動対象なら要求版の health と結果再投影まで検証し `running_verified`。`--start-policy never` または更新前停止なら起動せず `installed_verified`。
+     - Client: 適格な既存 GUI session に再起動した場合のみ session と要求版の応答を検証して `running_verified`。未ログイン・lock・opt-out は起動を抑止し、登録内容と配置を検証して `installed_verified`（理由付き）。GUI health を待ち続けない。
+     - Admin CLI: 常駐を要求せず、管理先 executable の安全な `--version` と配置検証で `installed_verified`。
+     - Agent: 既存 rollout の版収束・新 heartbeat を検証する。
+   両 verified 状態は成功。未検証・timeout・失敗・rollback は成功に含めない。
 - `kanade deploy status` は各端末が Verified Success に達したことを確認して初めて全体完了を出力する。
 
 ---
@@ -2885,7 +2916,41 @@ kanade deploy status <plan-id | exec-id>
 任意の `.ps1` や `.sh` スクリプトを配信・実行する方式は、シェル構文の解釈揺れ、引数展開によるコマンドインジェクション、および監査ログの不透明化を招く。
 特権インストール処理は、Rust で実装された型付きのエージェント操作（Typed Native Operation）とし、固定・検証された引数のみを受け取り、プラットフォームのネイティブ API やシステム標準ツールを直接呼び出す構成とする。
 
-#### 2.13.6.2 Wire Protocol 拡張スキーマ (`TypedOperation`)
+#### 2.13.6.2 Job schema・認可・Wire Protocol 拡張 (`TypedOperation`)
+
+**提案（新規実装が必要）**: 現行 `Manifest.execute: Execute` は shell と script source を必須とする。Command の追加だけでは足りず、`Execute` を互換 union に拡張する。既存 shell YAML は discriminator 省略で shell として維持し、typed は `kind: typed_operation` 必須。以下は保存される job の例である。
+
+```yaml
+execute:
+  kind: typed_operation
+  timeout: 10m
+  run_as: system
+  operation:
+    type: deploy_backend
+    spec:
+      artifact_identity: {role: backend, version: 0.80.0, os: linux, arch: aarch64, distro_abi: musl, format: tar_gz}
+      package_object_key: <immutable-key>
+      artifact_sha256: <sha256>
+      manifest_sha256: <signed-manifest-sha256>
+      preserve_config: true
+      require_db_backup: true
+      wipe_db: false
+      start_policy: preserve
+      repair_service: false
+      firewall: preserve
+require_approval: true
+deploy_authorization:
+  plan_id: <id>
+  plan_digest: <digest>
+```
+
+- typed branch は shell / script / script_file / script_object / cwd / 任意 install_path を禁止し、未知 field・enum、role/identity 不一致を拒否する。system 実行のみ、timeout と deadline は上限を検査。型別 spec は共通の完全な identity・artifact / manifest digest に加え、backend は上記安全設定、client は `opt_out_policy: respect` と `restart_gui_session_only: true`、cli は管理済み固定配置先を持つ。後掲 Rust は Command 内の概念スケッチであり、この必須 job validation を省略しない。Force opt-out は deploy では許可しない。
+- `kanade job validate/create`、`POST /api/jobs`、更新 API、保存済み manifest の読込で union の排他検証を共有する。typed の script source resolver は呼ばない。schema だけを受理して実行 gate 未実装の状態を release しない。
+- `plan` の read-only 出力を `apply` が Backend に登録し、その digest（対象 pc 集合、job/manifest digest、成果物、全 spec、期限、actor）へ承認を結び付ける。§2.13.5.6 の承認は新規実装要件。現行 installer の `require_approval` は parse-only であり、それだけを信用しない。変更時は承認を失効し再 plan、適用は実行 id による冪等性を保証する。
+- `POST /api/exec/{job_id}` と scheduler の共通 dispatch 境界で、対象 scope の既存 exec 権限・operator 以上・未失効の plan 承認・manifest digest・対象 inventory / capability を再検証する。通常 exec で typed job を直接指定しても plan 承認なしなら拒否。scheduler actor は承認済み一回分の plan/対象/期限を消費するだけで、新しい承認や繰返し deploy を生成しない。
+- KLP のローカル job 実行・action 起動にも同じ拒否条件を置く。既存 job/action allowlist は必要条件だが特権 deploy の十分条件ではない。Backend 承認に結び付いた署名 envelope を取得できない KLP/local scheduler 経路は typed を拒否し、ローカルから Command を直構築して迂回しない。一般 shell job の既存認可は維持する。
+- 検証済み Manifest.execute.operation を 1 対象 1 Command へ変換し、共通 timeout、exec/request/job id、承認 digest をコピーする。対象別 signed envelope を既存 command signer で署名し、既存 admission ledger・Outbox・execution audit に記録する。Agent は署名・宛先・expiry と job/plan digest を検証してから typed handler に入る。
+
 既存の `kanade_shared::wire::Command` スキーマを拡張し、スクリプト実行（`script` / `script_object`）と相互排他になる型付き操作フィールドを導入する。
 
 ```rust
@@ -2915,10 +2980,18 @@ pub struct Command {
     // --- 型付きネイティブ操作 (command_kind == "typed_operation" のみ有効) ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<TypedOperation>,
+    // typed の場合は必須。署名対象に含め、manifest と plan の束縛を検証
+    pub deploy_authorization: Option<DeployAuthorization>,
+}
+
+pub struct DeployAuthorization {
+    pub plan_id: String,
+    pub plan_digest: String,
+    pub manifest_digest: String,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
-#[serde(tag = "type", content = "spec")]
+#[serde(tag = "type", content = "spec", rename_all = "snake_case")]
 pub enum TypedOperation {
     DeployBackend(DeployBackendSpec),
     DeployClient(DeployClientSpec),
@@ -2927,41 +3000,55 @@ pub enum TypedOperation {
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct DeployBackendSpec {
-    pub target_version: String,
+    // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
+    pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub manifest_sha256: String,
     pub package_object_key: String,
-    pub preserve_config: bool,
+    pub preserve_config: bool, // true 必須
     pub wipe_db: bool,
-    pub require_db_backup: bool,
+    pub require_db_backup: bool, // wipe の有無にかかわらず true 必須
+    pub start_policy: StartPolicy, // preserve | never
+    pub repair_service: bool,     // false が既定
+    pub firewall: FirewallPolicy, // preserve | no_change | managed_port(u16)
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct DeployClientSpec {
-    pub target_version: String,
+    // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
+    pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub manifest_sha256: String,
     pub package_object_key: String,
-    pub opt_out_policy: OptOutPolicy, // Respect | Force
+    pub opt_out_policy: OptOutPolicy, // Respect のみ
     pub restart_gui_session_only: bool,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct DeployCliSpec {
-    pub target_version: String,
+    // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
+    pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub manifest_sha256: String,
     pub package_object_key: String,
-    pub install_path: Option<String>,
+    // 配置先は管理 receipt / role の固定 policy から解決（任意パス不可）
 }
 ```
 
-#### 2.13.6.3 旧 Agent との互換性確保 (Capability Preflight + Discriminator + Fail-Closed Stub)
+#### 2.13.6.3 旧 Agent との互換性確保 (Capability Preflight + Signed Envelope + Fail-Closed)
 未知のフィールドを無視して不正実行する旧バージョン Agent の存在は、重大な事故を引き起こすリスクがある。これを防ぐため以下の二重防御を採用する。
 
-1. **Capability Preflight (第 1 防御)**:
-   - Backend は各 Agent がハートビートで報告する `capabilities` 配列を照合する。
-   - `typed_deploy_v1` を保持していない旧 Agent に対しては、Backend が型付き操作ジョブの配信を拒否し、エラーとして報告する。
-2. **Discriminator による Fail-Closed パースエラー (第 2 防御)**:
-   - 万一、旧 Agent にメッセージが到達した場合でも、旧 Agent は `command_kind: "typed_operation"` の解釈を知らず、かつ `script` が空文字列または必須要件を満たさないため、Agent の命令受理台帳（admission ledger）のスキーマバリデーションでパースエラーとなり、安全に拒否（Fail-Closed）される。
-   - 旧 wire 形式との互換用フォールバック送信を行う場合は、スクリプト本文に `fail-closed stub`（実行されると直ちに明確なエラーを出して終了する安全なコード）を配置し、決して意図しないスクリプトが実行されないようにする。
+1. **Capability Preflight**:
+   - 現行 Heartbeat に `capabilities` はない。本提案で `deploy_capabilities: Option<Vec<String>>` を新設し、Backend projection / inventory API にも保存する。`None` は旧 Agent / 未報告（unknown）、`Some([])` は報告済み非対応。両方とも typed 配信を拒否し、必要な `typed_deploy_v1` と OS handler token の明示列挙だけを許す。fresh heartbeat と inventory の一致を apply でも確認する。
+   - 既存 `command_protocols` は別軸であり `Some` に `kanade.command.v2` が必要。`command_keys` は現在の signer の kid **と fingerprint** の一致が必要。None / 空 / 不一致はいずれも typed を拒否する。
+   - **Agent self-update は例外**: deploy_capabilities や v2 対応を新たな rollout 前提にしない。既存 agent publish/rollout の検査・quarantine・版収束を維持し、旧版を typed 対応版へ先に更新して heartbeat を再確認できる。shell installer による agent 更新には変換しない。
+2. **署名 envelope と fail-closed**:
+   - typed Command は既存 `kanade.command.v2` envelope 内だけで受理し、既存 command-signing keyring、鍵 rotation / revocation、宛先・期限検証、admission ledger の重複排除を必須とする。enforcement が一般 command に未適用の Agent でも typed に限って署名必須。unsigned / legacy bare Command / shell stub fallback は拒否する。
+   - discriminator だけでは未知 field を無視する旧 Agent の拒否を保証できない。旧 Agent への配信遮断と、旧 Command parser が required top-level field 不在で拒否する v2 envelope が防御となる。新 Agent も shell/typed 排他・未知 operation を拒否する。
+3. **Publisher と command signer の役割**:
+   - command signer は今回の実行権限、package publisher は配布物の出所を証明する。独立した無管理 trust root は作らない。提案は既存署名管理の管理者・配布・監査経路で、用途を `command` / `artifact-publisher` に分離した鍵 registry を管理すること。command 署名だけで任意のローカル package を publisher 認証済みとしない。
+   - publisher 公開鍵の fingerprint は認証済み管理経路で Agent に事前配布し、package 同梱鍵や同じ download URL から trust を追加しない。manifest 全 identity/digest/size/requirements を canonical bytes で署名（signature 自体を除外）。kid と fingerprint を検証する。
+   - rotation は新旧の有界重複期間、Agent trust 反映の確認、新鍵署名への切替、旧鍵失効の順。失効一覧を認証済み管理経路で配布し apply と install で再確認する。trust/revocation 情報の期限切れは fail-closed。失効後は保存済み plan も再承認・再署名が必要。鍵配布・失効検証が整うまで typed deploy を有効化しない。
 
 #### 2.13.6.4 プラットフォーム別インストーラ所有権・実行モデル
 
@@ -2969,7 +3056,9 @@ pub struct DeployCliSpec {
 |---|---|---|---|---|
 | **Windows** | `kanade-backend.exe`, `kanade-client.exe`, `kanade.exe` | `%ProgramFiles%\Kanade\` (バイナリ)<br>`%ProgramData%\Kanade\` (設定・DB) | Windows Service Control Manager (Advapi32 API), 原子的ファイルスワップ | `NT AUTHORITY\SYSTEM`, Administrators フルコントロール |
 | **macOS** | `Kanade Client.app`, `kanade` | `/Applications/Kanade Client.app`<br>`/Library/LaunchAgents/` | `/usr/sbin/installer -pkg`, `/bin/launchctl` | `root:wheel` (アプリバンドル), ログインユーザーセッション |
-| **Linux (Ubuntu)** | `kanade-backend`, `kanade-client`, `kanade` | `/usr/local/bin/` または `/usr/bin/`<br>`/etc/kanade/` (設定), `/var/lib/kanade/` (DB) | `/usr/bin/apt-get install -y <deb>`, `systemctl` | `root:root` (deb パッケージ所有権), systemd サービス |
+| **Linux (Ubuntu)** | `kanade-backend`, `kanade-client`, `kanade` | `/usr/local/bin/` または `/usr/bin/`<br>`/etc/kanade/` (設定), `/var/lib/kanade/` (DB) | Client のみ `/usr/bin/apt-get install -y <verified-local-deb>`、Backend / CLI は検証済み tar.gz の安全な展開、`systemctl` | `root:root` (Client は dpkg、Backend / CLI は Kanade receipt), systemd サービス |
+
+**Linux Backend / CLI tar.gz handler proposal**: 現在 .deb は存在せず、生成も前提にしない。x86_64 / aarch64 musl archive を固定 staging 領域に展開し、絶対パス・`..`・symlink/hardlink・device・複数 executable を拒否、role に対応する単一 ELF の arch / digest / `--version` を確認する。root 所有の `/usr/local/bin/kanade-backend` / `kanade` に同一 filesystem の atomic rename で配置し、版・digest・配置先・元 service 状態を root-only receipt に保存する。外部 package 管理のファイルは takeover せず拒否する。Backend は既存 setup の管理 systemd unit（`deploy/linux/systemd/kanade-backend.service`、ExecStart `/usr/local/bin/kanade-backend`、User/Group `kanade`、EnvironmentFile `/etc/kanade/kanade.env`、設定 `/etc/kanade/backend.toml` と照合）を保持し、初回 enrolled-host install のみ固定 unit を設置、daemon-reload を実行する。設定 `/etc/kanade/kanade.env`、DB の実設定パス、NATS/Caddy は変更しない。設定や service ownership を確認できなければ停止前に拒否する。CLI は service 登録なし。Client .deb の postinst 等にも hidden shell deploy を移さず、privileged lifecycle は typed Rust handler が所有する。
 
 #### 2.13.6.5 排他ロック・管理プロセス停止・データ保護
 1. **排他ファイルロック**:
@@ -2983,11 +3072,11 @@ pub struct DeployCliSpec {
 #### 2.13.6.6 ジャーナル・有界リトライ・障害復旧
 1. **ロールバックジャーナル**:
    - バイナリの置換前に、既存バイナリを `.old`（または OS のバックアップ領域）に退避し、操作ジャーナルを記録する。
-   - 新バイナリの起動検証（ヘルスチェック）が失敗した場合、直ちに `.old` を元の位置にアトミックに戻し、旧バージョンでサービスを再起動する。
+   - 失敗時はロール別に旧成果物と起動状態を復元する。Backend は必ず §2.13.7.5 の DB とバイナリの組を復元し、旧バイナリだけを戻してはならない。
 2. **有界リトライ (Bounded Retry)**:
    - 一時的なロック競合やネットワーク切断に対するリトライは最大 3 回、指数バックオフ付きで実行する。無限ループに陥るリトライは禁止する。
 3. **冪等性 (Idempotency)**:
-   - 要求されたバージョンが既に稼働中であり、プロセスが健全である場合は、一切のファイル置換やサービス再起動を行わず、成功（No-op Success）として即座に完了する。
+   - 要求された identity / digest が配置済みで、§2.13.5.7 のロール別検証が成功する場合は、一切のファイル置換やサービス再起動を行わず、成功（No-op Success）として即座に完了する。
 
 #### 2.13.6.7 GUI セッション安全性と Opt-out 尊重
 Client App (`kanade-client`) のデプロイ・更新における重要な安全要件：
@@ -3016,7 +3105,7 @@ Backend 自身のアップデートを Kanade ジョブとして実行する場�
    - CLI の `kanade deploy status` は、Backend が再起動してこの再投影が完了したことを確認して完了を報告する。
 
 #### 2.13.7.3 設定・DB・NATS・Caddy の完全保持
-Backend のデプロイにおいて、以下のインフラ・永続化要素は不可侵であり、一切の変更を行わない。
+Backend のデプロイでは以下を保持する。DB の forward migration、明示 wipe、失敗時の整合 snapshot 復元のみ §2.13.7.5 に従って例外的に行う。
 - **設定ファイル**: `%ProgramData%\Kanade\config\backend.toml` または `/etc/kanade/backend.toml`。
 - **データベース**: SQLite データベースファイル（`backend.db` および WAL/SHM ファイル）。
 - **メッセージング**: NATS サーバーの設定 (`nats-server.conf`)、認証トークン/ユーザー定義、およびプロセス。
@@ -3032,7 +3121,17 @@ Backend のデプロイにおいて、以下のインフラ・永続化要素は
 4. **再投影完了の検証**:
    - ワイプ後の初回起動時、Backend が JetStream の各ストリーム（Streams）からイベントを最初からリプレイし、プロジェクションテーブルの復元が完了するまで、デプロイ結果を「完了」と判定しない。
 
-#### 2.13.7.5 DB マイグレーション整合性検査
+#### 2.13.7.5 通常更新を含む DB 互換性・復旧契約
+
+**提案（必須の復旧要件）**: `main.rs` の boot sentinel が記す通り、forward migration 後に旧 binary だけを戻すと missing migration で起動不能になり得る。wipe の有無に関係なく全 Backend 更新で以下を実施する。
+
+1. 新旧 binary、実設定の DB path、migration 集合、サービス状態を journal に固定する。配置・DB backup・復旧に十分な空き容量と権限がなければ停止前に拒否する。
+2. 成果物と復旧用旧 binary を先にローカル cache へ完全取得する。Backend を正常停止して全 SQLite writer が終了したことを確認し、SQLite backup API 等で一貫した更新前 snapshot を作成する。稼働中 DB と WAL の単純コピーは禁止。復元試験用 copy で integrity_check と migration metadata を確認し、config・権限と共に root-only に保存する。backup 失敗時は更新を進めず旧サービスへ復帰する。
+3. 新版を起動して forward migration / health / projector readiness を有界時間で検証する。検証中は外部 API 書込を maintenance gate で拒否し、NATS event は保持する。migration 後に受けた非 event-source データを snapshot 復元で失う窓を作らない。この maintenance / readiness gate 自体は新規実装要件。
+4. 起動・migration・health 失敗時は新版と writer を停止し、失敗 DB/WAL を隔離する。journal に紐付く互換 snapshot を正しい owner/mode と整合した sidecar 状態で atomic 復元し、旧 binary / service 設定を一緒に復元して旧版を起動・検証する。旧版 health と event 再投影を確認し `failed_rolled_back` として報告する。復元にも失敗なら `recovery_required`、DB と backup を保持し再試行停止、管理者へ理由を提示する。
+5. backup は health だけで削除せず、結果再投影の確認後に明示保持期間で回収する。Agent journal / outbox は Backend DB と分離し、通信復帰後に同じ exec id で結果を再送する。boot sentinel の binary-only rollback と競合しないよう deploy journal と協調させることも handler の必須タスク。
+
+
 - 新バイナリへの置換前に、新バイナリが要求する DB マイグレーションと、ターゲット上の現在のマイグレーション状態（`_sqlx_migrations`）の互換性をチェックする。
 - スカッシュされたマイグレーションによる非互換が検出された場合、`--wipe-db` が明示されていない限りデプロイを即座にアボートする。
 
@@ -3041,15 +3140,15 @@ Backend のデプロイにおいて、以下のインフラ・永続化要素は
 ### 2.13.8 移行計画・Capability Matrix・受入基準・実装タスク
 
 #### 2.13.8.1 Capability Matrix (Operator OS × Target OS × Role)
-本設計がサポートする Operator OS、Target OS、およびコンポーネントロールの対応マトリクスは以下の通りである。
+本設計の到達目標を示す。✅ も typed は現時点の実装済みを意味せず、後述 handler / gate 実装と実機受入が必須。⚠️ は追加前提を明示する。非 Client Linux ARM の既存配備を Client の初期対象制限で削らない。
 
 | Operator OS | Target OS / Arch | Role: Agent | Role: Backend | Role: Client | Role: CLI | 備考 |
 |---|---|---|---|---|---|---|
 | **Windows / macOS / Linux** | **Windows x86_64** | ✅ Self-update | ✅ Typed Job | ✅ Typed Job | ✅ Typed Job | 現行本番対象 |
-| **Windows / macOS / Linux** | **Ubuntu 24.04 x86_64** | ✅ Self-update | ✅ Typed Job | ⚠️ Typed Job (deb整備要) | ✅ Typed Job | 初期 Linux 対象 (GNOME) |
+| **Windows / macOS / Linux** | **Ubuntu 24.04 x86_64** | ✅ Self-update | ⚠️ Typed tar.gz handler 要 | ⚠️ GUI 有効化・deb整備要 | ⚠️ Typed tar.gz handler 要 | GNOME 制限は Client のみ |
 | **Windows / macOS / Linux** | **macOS 14+ aarch64** | ✅ Self-update | ❌ (対象外) | ⚠️ Typed Job (pkg整備要) | ✅ Typed Job | 管理/試験用 Mac (Apple Silicon) |
-| **全 Operator** | **Linux aarch64 (ARM)** | 延期 | 延期 | 延期 | 延期 | サポート対象外 (告知しない) |
-| **全 Operator** | **Debian / Fedora / KDE** | 延期 | 延期 | 延期 | 延期 | サポート対象外 (告知しない) |
+| **全 Operator** | **Linux aarch64 (ARM)** | ✅ 既存 Self-update 維持 | ⚠️ Typed tar.gz handler 要 | 延期 | ⚠️ Typed tar.gz handler 要 | 非 Client の release 成果物を維持、ARM Agent update は撤去前必須 parity |
+| **全 Operator** | **その他 Linux / desktop** | 既存 self-update の検証済み環境を維持 | 要 distro/service 検証 | 延期 | 要 distro 検証 | Client の GNOME 制限を headless role に適用しない。不明な組合せは拒否 |
 | **全 Operator** | **macOS Intel (x86_64)** | 延期 | 延期 | 延期 | 延期 | サポート対象外 (告知しない) |
 
 #### 2.13.8.2 スクリプトから CLI への段階的移行計画
@@ -3060,13 +3159,13 @@ Backend のデプロイにおいて、以下のインフラ・永続化要素は
        ↓
 [Phase 1] 成果物 Identity 定義・Object Store 拡張・署名マニフェスト実装
        ↓
-[Phase 2] Backend 認可・実行ゲート・Capability Preflight 実装
+[Phase 2] Manifest / Command typed schema・署名 envelope 契約実装（配信無効）
        ↓
-[Phase 3] Typed Native Operations スキーマ定義 & Agent Handler 実装 (Windows/Linux/macOS)
+[Phase 3] Backend 承認ゲート・Capability Preflight → Agent Handler 実装 (Windows/Linux/macOS)
        ↓
 [Phase 4] kanade deploy CLI (plan / apply / status) 実装・結合
        ↓
-[Phase 5] Client Packaging (macOS .pkg / Ubuntu .deb) パイプライン整備
+[Phase 5] Ubuntu Client GUI 対応・§2.11.7 前提検証 → Client Packaging (macOS .pkg / Ubuntu .deb)
        ↓
 [Phase 6] 実機フリートでの同等性 (Parity) 検証
        ↓
@@ -3087,7 +3186,7 @@ Backend のデプロイにおいて、以下のインフラ・永続化要素は
    - 同一バージョンに対する再実行が No-op として安全に即座完了すること。
 2. **下位互換性と旧 Agent 拒否**:
    - `typed_deploy_v1` capability を持たない旧 Agent に対して型付きジョブが配信されず、安全に拒否されること。
-   - 旧 Agent が稼働しているフリートに対する `plan` 作成が Fail-closed で全体拒否され、`--skip-unsupported` 指定時のみ除外記録付きで許可されること。
+   - backend/client/cli について旧 Agent が稼働するフリートの `plan` が Fail-closed で全体拒否され、`--skip-unsupported` 指定時のみ除外記録付きで許可されること。
 3. **署名・アーキテクチャ不一致の拒否**:
    - 改ざんされたバイナリ、署名不一致、またはターゲット OS/arch と異なる成果物を含む計画が、Agent の事前検証で確実に拒否されること。
 4. **耐障害性と競合制御**:
@@ -3096,9 +3195,17 @@ Backend のデプロイにおいて、以下のインフラ・永続化要素は
 5. **Backend 更新とデータ保護**:
    - Backend 更新時、設定ファイル・SQLite DB・NATS サービスが保持され、再起動後に `/api/health` が green に復帰すること。
    - `--wipe-db` 指定時、事前バックアップが作成され、`users` テーブルが保持され、JetStream からの再投影が完了すること。
+   - Windows / Linux x86_64 / aarch64 で通常更新の forward migration 後に health を失敗させ、旧 binary + 更新前 snapshot 復元で起動・認証・結果再投影できること。backup 不可、disk full、migration 途中失敗、復元失敗、Agent 再起動も注入し、binary-only rollback を行わず、復旧不能は recovery_required となること。maintenance 中の書込拒否と NATS 継続も確認する。
 6. **Client GUI セッション安全性**:
    - 適格な GUI セッション（Aqua / GNOME）が存在する場合のみ `--tray` 起動され、未ログイン・SSH セッションでは起動しないこと。
-   - ユーザーの opt-out 設定が更新後も尊重されること。
+   - ユーザーの opt-out 設定が更新後も尊重されること。未ログイン・opt-out・lock 中はプロセスを作らず installed_verified で終端成功し、Windows / Mac / Ubuntu の CLI も常駐せず installed_verified となること。
+7. **認可・信頼・互換 API**:
+   - 通常 exec / scheduler / KLP の全経路で plan 未承認・期限切れ・対象拡大・manifest 改変を拒否する。署名なし / legacy typed、未知 operation、command key fingerprint 不一致、publisher 失効を Agent でも拒否する。
+   - deploy_capabilities None / 空を区別して記録し両者に typed を配信しない。一方その旧 Agent の Windows / Linux x86_64 / Linux aarch64 / macOS self-update を既存 publish/rollout で成功させ、更新後の typed 計画が通ること。
+   - Phase 1 中の Windows CI bare-key 再 upload は従来通り成功し、新 identity の異なる bytes は 409、同一 bytes は no-op、旧キー変更で既存 plan の digest が変わらないこと。
+8. **OS / role の追加前提**:
+   - Ubuntu x86_64 Client は実際の GUI build で手動起動・KLP・通知・session/opt-out を §2.11.7 に照らして検証し、shim を包んだ .deb を拒否する。Mac は ad-hoc app/pkg の receipt と GUI 境界、Windows は既存 protocol/shortcut の回帰を検証する。延期機能は別途未実装のまま明記する。
+   - Linux x86_64 / aarch64 Backend・CLI の tar.gz で traversal・外部管理所有権・既存 unit/config 保持・停止状態保持・No-op を確認する。Windows Backend では repair/firewall/start policy の明示指定と既定保持を検証する。全 operator OS から各対象を計画・適用でき、別 repository / ローカル成果物と拒否理由も parity 表で確認する。
 
 #### 2.13.8.4 依存関係順の小さな実装タスクリスト (Phase 1 〜 Phase 6)
 本仕様に基づく実装を、後続の開発者が安全かつインクリメンタルに進められるよう、依存関係順のタスクに細分化する。
@@ -3107,22 +3214,23 @@ Backend のデプロイにおいて、以下のインフラ・永続化要素は
   - `ArtifactIdentity` 型およびプラットフォーム解決ロジックの実装
   - `OBJECT_APP_PACKAGES` の新キー体系 (`<role>/<version>/<os>-<arch>-<distro_abi>.<format>`) 対応
   - レガシー Windows bare key の PE 検証付き安全な移行ロジック実装
-  - 同一 identity/version に対する不変性（書き換え拒否）の強制
+  - 新 identity API の不変性、旧 API 上書き動作の並存、CI producer 移行と alias snapshot の実装
 - [ ] **Task 2: 署名付きマニフェスト生成と Publisher 検証 (Shared / CLI / Agent)**
   - `package.manifest.json` のスキーマ定義と生成コマンド実装
-  - ed25519 署名生成および Agent 側での署名検証ロジック実装
-- [ ] **Task 3: Backend 実行ゲート & Capability Preflight 実装 (Backend)**
-  - Agent ハートビートへの `typed_deploy_v1` capability 追加
-  - Backend におけるデプロイ計画（Plan）の登録・永続化・認可 API 実装
-  - 未対応 Agent に対するジョブ配信遮断（Preflight 検査）
-- [ ] **Task 4: Command Wire Protocol 拡張 & Typed Native Operations 定義 (Shared)**
+  - ed25519 署名生成、既存管理経路での用途別 publisher 鍵配布・rotation・失効・freshness と Agent 検証の実装
+- [ ] **Task 3: Command Wire Protocol 拡張 & Typed Native Operations 定義 (Shared)**
   - `Command` struct への `command_kind` および `TypedOperation` フィールド追加
-  - Discriminator による旧パーサーでの安全なパースエラー (Fail-closed) 検証
+  - Manifest.execute の互換 union・CLI/API/read validation・typed source resolver 分岐・Command 変換を実装（Task 4 の gate 接続前に定義）。既存署名 v2 envelope 必須化と ledger/outbox 接続、旧 Agent の v2 拒否を検証
+- [ ] **Task 4: Backend 実行ゲート & Capability Preflight 実装 (Backend)**
+  - 新規 Heartbeat.deploy_capabilities Option と projection/API、None / 空の拒否、既存 command_protocols / command_keys 照合を追加。Agent self-update の適用除外を検証
+  - Backend におけるデプロイ計画（Plan）の登録・永続化・認可 API 実装
+  - 通常 exec / scheduler / KLP の共有承認 gate・plan digest 検証と typed 配信遮断を実装。Task 3 の schema に依存し、両者が揃うまで feature 無効
 - [ ] **Task 5: Agent プラットフォーム別 Typed Handler 実装 (Agent)**
   - Windows: SCM 制御、原子的バイナリスワップ、レジストリ保持
   - macOS: `/Applications` 配置、receipt 検証、LaunchAgent/LaunchDaemon 制御
-  - Linux (Ubuntu): `apt` / `dpkg` トランザクション呼び出し、systemd 制御
-  - 排他ロック、管理プロセスのみの停止、ジャーナル、および有界リトライの実装
+  - Linux: Backend/CLI 用 x86_64・aarch64 tar.gz 展開・receipt・atomic swap・固定 systemd unit、Client 用 apt/dpkg の独立 handler を実装
+  - 排他ロック、管理プロセスのみの停止、配置/稼働別の成功検証、ジャーナル、有界リトライを実装
+  - Backend の整合 DB snapshot・maintenance/readiness gate・DB/binary 組復元・boot sentinel 協調を独立した小変更で実装後、handler に結合
 - [ ] **Task 6: GUI セッション適格判定 & Opt-out 保持 (Client / Agent)**
   - macOS Aqua / Linux GNOME ログインセッションの保守的判定ロジック実装
   - ユーザー別 opt-out 設定の永続化と更新時引き継ぎ
@@ -3130,7 +3238,10 @@ Backend のデプロイにおいて、以下のインフラ・永続化要素は
   - `kanade deploy plan` (ターゲット検査、不変バージョン解決、Dry-run、Fail-closed)
   - `kanade deploy apply` (認可ゲート連携、ジョブ発行)
   - `kanade deploy status` (実版検証、ヘルスチェック照合)
-- [ ] **Task 8: Client Packaging パイプライン整備 (CI / Scripts)**
+- [ ] **Task 8a: Ubuntu Client GUI 前提 (Client / CI)**
+  - Linux exit-fast shim に代わる Ubuntu 24.04 x86_64 GNOME 対応 GUI entrypoint と GNU/WebKitGTK build を整備
+  - §2.11.7 の未実装 session / KLP / 通知契約を個別検証。GUI と Task 6 の受入前に Linux packaging を完了扱いしない
+- [ ] **Task 8b: Client Packaging パイプライン整備 (CI / Scripts、Linux は 8a 依存)**
   - Apple Silicon macOS 向け `Kanade Client.app` バンドルおよび `.pkg` 生成パイプラインの構築
   - Ubuntu 24.04 x86_64 向け `.deb` パッケージ生成パイプラインの構築
 - [ ] **Task 9: 実機フリートでの同等性検証 (Acceptance Testing)**
