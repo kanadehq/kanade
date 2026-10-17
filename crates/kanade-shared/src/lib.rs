@@ -1,4 +1,6 @@
+pub mod agent_metadata;
 pub mod bin_platform;
+pub use object;
 pub mod boot_sentinel;
 pub mod bootstrap;
 pub mod check_eval;

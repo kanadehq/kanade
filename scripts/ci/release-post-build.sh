@@ -7,7 +7,13 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mode="${1:?usage: release-post-build.sh <sign|verify-dist>}"
+
+if [[ "$mode" == "verify-dist" ]]; then
+  echo "release-post-build: verifying embedded agent release metadata in built artifacts..."
+  python3 "$here/verify-agent-dist.py"
+fi
+
 case "${TARGET:-}" in
   *apple-darwin) exec "$here/macos-codesign.sh" "$mode" ;;
-  *) echo "release-post-build: nothing to do for target '${TARGET:-}'" ;;
+  *) echo "release-post-build: codesign nothing to do for target '${TARGET:-}'" ;;
 esac

@@ -17,8 +17,42 @@
 // is a Windows-only build-dependency, so on Linux / macOS the
 // symbol isn't even in scope.
 
+fn generate_agent_metadata() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.80.0".to_string());
+    let target = std::env::var("TARGET").unwrap_or_else(|_| {
+        std::env::var("HOST").unwrap_or_else(|_| "aarch64-apple-darwin".to_string())
+    });
+
+    let platform = if target.contains("windows") {
+        "windows-x86_64"
+    } else if target.contains("darwin") || target.contains("apple") || target.contains("macos") {
+        "macos-aarch64"
+    } else if target.contains("aarch64") {
+        "linux-aarch64"
+    } else {
+        "linux-x86_64"
+    };
+
+    let json_payload = format!(
+        r#"{{"product":"kanade-agent","version":"{}","platform":"{}"}}"#,
+        version, platform
+    );
+
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(b"KNAGMETA");
+    encoded.extend_from_slice(&1u16.to_le_bytes()); // schema version 1
+    encoded.extend_from_slice(&0u16.to_le_bytes()); // flags
+    encoded.extend_from_slice(&(json_payload.len() as u32).to_le_bytes());
+    encoded.extend_from_slice(json_payload.as_bytes());
+
+    let dest = std::path::Path::new(&out_dir).join("agent_metadata.bin");
+    std::fs::write(&dest, encoded).expect("failed to write agent_metadata.bin");
+}
+
 #[cfg(target_os = "windows")]
 fn main() {
+    generate_agent_metadata();
     let mut res = winres::WindowsResource::new();
     res.set("ProductName", "kanade-agent");
     res.set("FileDescription", "Kanade endpoint management agent");
@@ -48,6 +82,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() {
+    generate_agent_metadata();
     use std::{env, path::PathBuf, process::Command};
     println!("cargo:rerun-if-changed=src/capture_macos.m");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
@@ -99,4 +134,6 @@ fn main() {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn main() {}
+fn main() {
+    generate_agent_metadata();
+}

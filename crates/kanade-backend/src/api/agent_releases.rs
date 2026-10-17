@@ -20,9 +20,8 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
 use kanade_shared::bin_platform::{
-    AgentPlatform, base_version_of_key, candidate_keys, platform_of_key,
+    base_version_of_key, candidate_keys, platform_of_key,
 };
-use kanade_shared::exe_version::extract_pe_version;
 use kanade_shared::kv::{
     BUCKET_AGENT_CONFIG, KEY_AGENT_CONFIG_GLOBAL, OBJECT_AGENT_RELEASES, agent_config_group_key,
     agent_config_pc_key, parse_agent_config_group_key, parse_agent_config_pc_key,
@@ -51,6 +50,7 @@ pub struct PublishResponse {
 
 /// Label for a Windows PE: the embedded VERSIONINFO wins and an explicit
 /// field must agree with it; without VERSIONINFO the field is the label.
+#[cfg(test)]
 fn windows_label(pe: Option<String>, field: Option<&str>) -> Result<String, (StatusCode, String)> {
     Ok(match (pe, field) {
         // The CLI's "must agree" rule (resolve_publish_version):
@@ -110,6 +110,9 @@ pub async fn publish(
     {
         match field.name().unwrap_or("") {
             "file" => {
+                if bytes.is_some() {
+                    return Err((StatusCode::BAD_REQUEST, "duplicate 'file' field".into()));
+                }
                 let buf = field
                     .bytes()
                     .await
@@ -117,6 +120,9 @@ pub async fn publish(
                 bytes = Some(buf.to_vec());
             }
             "version" => {
+                if version_field.is_some() {
+                    return Err((StatusCode::BAD_REQUEST, "duplicate 'version' field".into()));
+                }
                 let text = field
                     .text()
                     .await
@@ -137,31 +143,15 @@ pub async fn publish(
         return Err((StatusCode::BAD_REQUEST, "'file' field is empty".into()));
     }
 
-    let platform = AgentPlatform::detect(&bytes).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let version = match platform {
-        AgentPlatform::WindowsX86_64 | AgentPlatform::WindowsAarch64 => {
-            windows_label(extract_pe_version(&bytes), version_field.as_deref())?
-        }
-        AgentPlatform::LinuxX86_64 | AgentPlatform::LinuxAarch64 | AgentPlatform::MacOSAarch64 => {
-            let format = match platform {
-                AgentPlatform::MacOSAarch64 => "macOS Mach-O",
-                _ => "Linux ELF",
-            };
-            version_field.ok_or((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "no version: the uploaded binary is a {format} ({}), which carries no \
-                     embedded VERSIONINFO — include a 'version' form field (e.g. X.Y.Z). A \
-                     Windows PE built with `winres` (kanade ≥ v0.13.1) is auto-labelled.",
-                    platform.as_str()
-                ),
-            ))?
-        }
-    };
+    // Authoritative admission check: validate container format, architecture,
+    // embedded .kanade / __DATA,__kanade metadata, product ("kanade-agent"),
+    // platform consistency, and version agreement BEFORE touching the Object Store.
+    let admitted = kanade_shared::agent_metadata::admit_agent_binary(&bytes, version_field.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("admission validation failed: {e}")))?;
 
-    let key = platform.release_key(&version);
-    kanade_shared::bin_platform::check_release_key(&key)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let version = admitted.metadata.version.clone();
+    let platform = admitted.platform;
+    let key = admitted.key;
 
     let size = bytes.len() as u64;
     info!(
@@ -552,5 +542,90 @@ mod tests {
         );
         let (code, _) = windows_label(Some("1.2.3".into()), Some("9.9.9")).unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_agent_publish_admission_and_isolation() {
+        use kanade_shared::agent_metadata::{
+            AGENT_PRODUCT_NAME, AgentBinaryMetadata, AgentPlatform as SharedPlatform,
+            encode_metadata_bytes,
+        };
+        use kanade_shared::object::write::Object;
+        use kanade_shared::object::{Architecture, BinaryFormat, Endianness, SectionKind};
+
+        // Helper to construct test ELF bytes with given metadata
+        fn build_test_elf(meta: Option<&AgentBinaryMetadata>) -> Vec<u8> {
+            let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+            if let Some(m) = meta {
+                let encoded = encode_metadata_bytes(m);
+                let sec_id = obj.add_section(
+                    Vec::new(),
+                    b".kanade".to_vec(),
+                    SectionKind::ReadOnlyData,
+                );
+                obj.append_section_data(sec_id, &encoded, 1);
+            } else {
+                let sec_id = obj.add_section(
+                    Vec::new(),
+                    b".rodata".to_vec(),
+                    SectionKind::ReadOnlyData,
+                );
+                obj.append_section_data(sec_id, b"plain-binary", 1);
+            }
+            obj.write().expect("writing test ELF")
+        }
+
+        // Build valid and invalid test binaries
+        let valid_meta = AgentBinaryMetadata {
+            product: AGENT_PRODUCT_NAME.to_string(),
+            version: "0.80.0".to_string(),
+            platform: SharedPlatform::LinuxX86_64,
+        };
+        let valid_elf = build_test_elf(Some(&valid_meta));
+
+        // Incident reproduction: CLI binary published as agent
+        let incident_cli_meta = AgentBinaryMetadata {
+            product: "kanade-cli".to_string(),
+            version: "0.80.0".to_string(),
+            platform: SharedPlatform::LinuxX86_64,
+        };
+        let incident_cli_elf = build_test_elf(Some(&incident_cli_meta));
+
+        // Version mismatch
+        let wrong_ver_meta = AgentBinaryMetadata {
+            product: AGENT_PRODUCT_NAME.to_string(),
+            version: "0.79.0".to_string(),
+            platform: SharedPlatform::LinuxX86_64,
+        };
+        let wrong_ver_elf = build_test_elf(Some(&wrong_ver_meta));
+
+        // Legacy binary lacking .kanade section
+        let legacy_elf = build_test_elf(None);
+
+        // Verify direct admission checks match backend enforcement:
+        // 1. Valid agent binary is admitted
+        let admitted = kanade_shared::agent_metadata::admit_agent_binary(&valid_elf, Some("0.80.0"))
+            .expect("valid agent binary must be admitted");
+        assert_eq!(admitted.platform, SharedPlatform::LinuxX86_64);
+        assert_eq!(admitted.metadata.version, "0.80.0");
+        assert_eq!(admitted.key, "0.80.0-linux-x86_64.exe");
+
+        // Leading 'v' prefix in declared version is normalized
+        assert!(kanade_shared::agent_metadata::admit_agent_binary(&valid_elf, Some("v0.80.0")).is_ok());
+
+        // 2. Incident reproduction: CLI binary published as agent is rejected (ProductMismatch)
+        let err = kanade_shared::agent_metadata::admit_agent_binary(&incident_cli_elf, Some("0.80.0"))
+            .unwrap_err();
+        assert!(matches!(err, kanade_shared::agent_metadata::MetadataError::ProductMismatch(p) if p == "kanade-cli"));
+
+        // 3. Version mismatch is rejected
+        let err = kanade_shared::agent_metadata::admit_agent_binary(&wrong_ver_elf, Some("0.80.0"))
+            .unwrap_err();
+        assert!(matches!(err, kanade_shared::agent_metadata::MetadataError::VersionMismatch { .. }));
+
+        // 4. Legacy binary lacking metadata is explicitly rejected
+        let err = kanade_shared::agent_metadata::admit_agent_binary(&legacy_elf, Some("0.80.0"))
+            .unwrap_err();
+        assert!(matches!(err, kanade_shared::agent_metadata::MetadataError::MissingMetadata));
     }
 }

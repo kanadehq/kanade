@@ -20,6 +20,7 @@ mod output_cap;
 mod ping;
 mod process;
 mod process_perf;
+mod release_metadata;
 mod self_update;
 
 // KLP (SPEC §2.12): Named Pipe on Windows, Unix domain socket on
@@ -188,6 +189,9 @@ struct Cli {
 ///
 /// On non-Windows targets we always run in console mode.
 fn main() -> Result<()> {
+    // Retain embedded release metadata section against whole-program optimization / LTO.
+    std::hint::black_box(release_metadata::ensure_embedded());
+
     // #855: the `--session-agent` child is a plain in-session idle sensor.
     // It must NOT run the boot sentinel (it would corrupt the service's
     // rollback attempt counter in the shared data dir) and must NOT attach to
