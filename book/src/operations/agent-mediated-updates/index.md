@@ -47,7 +47,7 @@ and checks its digest before reporting success.
 | `kanade script publish <name> <version> <file>` | Upload to `OBJECT_SCRIPTS` through the backend API. |
 | `kanade job create <yaml>` | Upsert a job manifest into the `jobs` KV. |
 | `kanade exec <job-id> --pcs <pc> [--pcs <pc> …]` | Fire a registered job at a set of PCs. |
-| `kanade agent publish <file> [--version <version>]` | Upload an agent binary through the backend API (version extracted from PE VERSIONINFO; `--version` for a Linux / macOS binary). |
+| `kanade agent publish <file> [--version <version>]` | Upload an agent binary through the backend API (must be an official `kanade-agent` carrying release metadata; the version is read from it and `--version`, if given, must match — see [Agent release admission](../agent-release-admission.md)). |
 | `kanade agent rollout <version> --pc \| --group \| --global` | Flip `target_version` on the chosen scope; agents pick it up via their self-update watcher. Goes through the backend API. |
 | `kanade agent current` | Print the global `target_version` (group / pc overlays are not shown; use `kanade config get --group/--pc`). |
 | `kanade agent logs <pc_id> [--tail <n>]` | Tail an online agent's log via the backend API. |

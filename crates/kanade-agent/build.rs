@@ -17,8 +17,40 @@
 // is a Windows-only build-dependency, so on Linux / macOS the
 // symbol isn't even in scope.
 
+/// Write the release-metadata envelope (`OUT_DIR/agent_metadata.bin`) that
+/// `src/release_metadata.rs` links into a dedicated section. The layout is
+/// defined by `kanade_shared::agent_metadata`; keep the two in step (the
+/// agent's `embedded_metadata_is_admitted` test fails if they drift).
+fn generate_agent_metadata() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+    let version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS");
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH");
+    let platform = match (os.as_str(), arch.as_str()) {
+        ("windows", "x86_64") => "windows-x86_64",
+        ("windows", "aarch64") => "windows-aarch64",
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("macos", "aarch64") => "macos-aarch64",
+        other => panic!("kanade-agent has no release platform for target {other:?}"),
+    };
+
+    let payload =
+        format!(r#"{{"product":"kanade-agent","version":"{version}","platform":"{platform}"}}"#);
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(b"KNAGMETA");
+    encoded.extend_from_slice(&1u16.to_le_bytes()); // schema version
+    encoded.extend_from_slice(&0u16.to_le_bytes()); // flags
+    encoded.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    encoded.extend_from_slice(payload.as_bytes());
+
+    let dest = std::path::Path::new(&out_dir).join("agent_metadata.bin");
+    std::fs::write(dest, encoded).expect("write agent_metadata.bin");
+}
+
 #[cfg(target_os = "windows")]
 fn main() {
+    generate_agent_metadata();
     let mut res = winres::WindowsResource::new();
     res.set("ProductName", "kanade-agent");
     res.set("FileDescription", "Kanade endpoint management agent");
@@ -48,6 +80,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() {
+    generate_agent_metadata();
     use std::{env, path::PathBuf, process::Command};
     println!("cargo:rerun-if-changed=src/capture_macos.m");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
@@ -99,4 +132,6 @@ fn main() {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn main() {}
+fn main() {
+    generate_agent_metadata();
+}

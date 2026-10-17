@@ -107,6 +107,32 @@ jobs:
       - name: Offline-boot integration tests
         run: cargo test -p kanade-agent --test offline_boot -- --ignored
 
+      - name: Install agent admission coverage tools (Linux)
+        if: runner.os == 'Linux'
+        run: rustup component add llvm-tools-preview
+
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Agent publish admission coverage (backend HTTP, real Object Stores)
+        if: runner.os == 'Linux'
+        # The default coverage job skips these NATS-dependent ignored tests.
+        # Measure their existing integration run and merge it into Codecov.
+        run: cargo llvm-cov --locked -p kanade-backend --bin kanade-backend --lcov --output-path agent-admission-lcov.info -- api::agent_releases --ignored
+
+      - uses: codecov/codecov-action@v5
+        if: runner.os == 'Linux'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: agent-admission-lcov.info
+          fail_ci_if_error: false
+
+      - name: Agent publish admission (backend HTTP, real Object Stores)
+        if: runner.os != 'Linux'
+        run: cargo test -p kanade-backend api::agent_releases -- --ignored
+
       - name: NATS auth (user / token fallback) integration tests
         run: cargo test -p kanade-shared --test nats_auth_live -- --ignored
 

@@ -114,73 +114,21 @@ pub async fn execute(backend_url: &str, args: AgentArgs) -> Result<()> {
     }
 }
 
-/// Decide the publish label from the explicit `--version` (if any) and the
-/// version extracted from the binary's PE VERSIONINFO (if any). `Ok(None)`
-/// means neither was available — the caller falls back to an interactive
-/// prompt. Comparison ignores a leading `v` and surrounding whitespace so
-/// `v1.2.3`, `1.2.3 ` and `1.2.3` are the same label.
-fn resolve_publish_version(
-    version_override: Option<String>,
-    extracted: Option<String>,
-) -> Result<Option<String>> {
-    let strip = |s: &str| s.trim().trim_start_matches('v').to_string();
-    match (version_override, extracted) {
-        (Some(v), Some(pe)) if strip(&v) != strip(&pe) => bail!(
-            "--version {v} disagrees with the binary's embedded version {pe}; \
-             omit --version to use the embedded one, or pass the matching label"
-        ),
-        (Some(v), _) => Ok(Some(v)),
-        (None, Some(pe)) => Ok(Some(pe)),
-        (None, None) => Ok(None),
-    }
-}
-
 async fn publish(base: &str, binary: PathBuf, version_override: Option<String>) -> Result<()> {
     let bytes = fs::read(&binary)
         .await
         .with_context(|| format!("read {binary:?}"))?;
 
-    // v0.13.1+: for a Windows PE the version comes from the embedded
-    // VERSIONINFO resource (pelite, no spawn, cross-arch safe) so the
-    // binary IS its label. A Linux ELF / macOS Mach-O has no such
-    // resource, so `--version` supplies the label. Precedence:
-    //   * both present  → must agree (keeps the no-mismatch guarantee)
-    //   * --version only → use it (the ELF / Mach-O case)
-    //   * PE only        → use the embedded label
-    //   * neither        → interactive prompt, else fail fast
-    let extracted = kanade_shared::exe_version::extract_pe_version(&bytes);
-    let version = match resolve_publish_version(version_override, extracted)? {
-        Some(v) => v,
-        // Neither an explicit label nor an embedded one: last-resort
-        // interactive prompt; a pipe / CI still fails fast.
-        None => match super::prompt_version_if_interactive(binary.clone()).await? {
-            Some(v) => v,
-            None => bail!(
-                "no version: {binary:?} has no embedded VERSIONINFO (a non-PE binary, e.g. a \
-                 Linux ELF or macOS Mach-O?) — pass --version <X.Y.Z>. A Windows PE built with \
-                 `winres` (kanade ≥ v0.13.1) is auto-labelled."
-            ),
-        },
-    };
-    // A pelite-extracted label is always key-safe, but a prompt-entered
-    // one is operator input — validate before it becomes the `<version>`
-    // object-store key, matching `app publish`.
+    // Same admission the backend enforces (kanade_shared::agent_metadata),
+    // run here only to fail fast before the upload starts: the file must be
+    // an official kanade-agent whose embedded version matches `--version`.
+    // The backend repeats it and is the authority for every caller.
+    let admitted =
+        kanade_shared::agent_metadata::admit_agent_binary(&bytes, version_override.as_deref())
+            .map_err(|e| anyhow!("{binary:?} cannot be published as an agent release: {e}"))?;
+    let version = admitted.version;
     validate_segment("version", &version)?;
-
-    // Which platform is this binary? Read from its own bytes, not the
-    // filename: PE (Windows) stays at the bare `<version>` key, ELF
-    // (Linux) goes to `<version>-linux-<arch>`, thin arm64 Mach-O (macOS,
-    // Apple Silicon only) to `<version>-macos-aarch64`; an x86_64 (Intel)
-    // or universal Mach-O / unknown is a hard
-    // error — a publish that can't name its platform must not silently
-    // land on the Windows key (see kanade_shared::bin_platform). The
-    // backend repeats these checks; doing them here fails fast before the
-    // upload starts.
-    let platform =
-        kanade_shared::bin_platform::AgentPlatform::detect(&bytes).map_err(|e| anyhow!(e))?;
-    let key = platform.release_key(&version);
-    kanade_shared::bin_platform::check_release_key(&key).map_err(|e| anyhow!(e))?;
-
+    let platform = admitted.platform;
     // The parse needed the whole file in memory; the upload does not.
     let size = bytes.len() as u64;
     drop(bytes);
@@ -419,46 +367,14 @@ async fn current(base: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_http::{TEST_TOKEN, export_test_token, fake_backend, seen};
+    use kanade_shared::agent_metadata::fixtures::{elf_x86_64, macho_arm64, meta, pe_x86_64};
 
-    #[test]
-    fn version_override_only_is_used() {
-        // ELF case: no embedded version, explicit --version wins.
-        let v = resolve_publish_version(Some("1.2.3".into()), None).unwrap();
-        assert_eq!(v.as_deref(), Some("1.2.3"));
-    }
-
-    #[test]
-    fn embedded_only_is_used() {
-        let v = resolve_publish_version(None, Some("0.44.35".into())).unwrap();
-        assert_eq!(v.as_deref(), Some("0.44.35"));
-    }
-
-    #[test]
-    fn neither_yields_none_for_prompt_fallback() {
-        assert_eq!(resolve_publish_version(None, None).unwrap(), None);
-    }
-
-    #[test]
-    fn agreeing_override_and_embedded_ok_ignoring_v_prefix() {
-        // `v1.2.3` (flag) vs `1.2.3` (PE) must be treated as equal.
-        let v = resolve_publish_version(Some("v1.2.3".into()), Some("1.2.3".into())).unwrap();
-        assert_eq!(v.as_deref(), Some("v1.2.3"));
-    }
-
-    #[test]
-    fn disagreeing_override_and_embedded_errors() {
-        let e = resolve_publish_version(Some("9.9.9".into()), Some("1.2.3".into()));
-        assert!(e.is_err(), "a real mismatch must be rejected");
-    }
-
-    /// A Linux x86_64 ELF header followed by non-UTF-8 filler larger than one
-    /// read chunk, so a mangled or truncated stream cannot pass unnoticed.
+    /// A valid kanade-agent 1.2.3 (Linux x86_64) image with non-UTF-8 filler
+    /// larger than one read chunk, so a mangled or truncated stream cannot
+    /// pass unnoticed.
     fn elf_payload() -> Vec<u8> {
-        let mut b = vec![0u8; 20];
-        b[..4].copy_from_slice(b"\x7fELF");
-        b[4] = 2;
-        b[5] = 1;
-        b[18..20].copy_from_slice(&0x3Eu16.to_le_bytes());
+        let m = meta("kanade-agent", "1.2.3", "linux-x86_64");
+        let mut b = elf_x86_64(&[("", ".kanade", &m)]);
         b.extend((0..=255u8).rev().cycle().take(200_000));
         b
     }
@@ -533,14 +449,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_of_a_non_pe_without_version_fails_before_any_request() {
+    async fn publish_without_explicit_version_auto_derives_from_embedded_metadata() {
+        export_test_token();
+        let data = elf_payload();
+        let (base, log) = fake_backend(vec![(200, published_json(data.len()))]).await;
+        let (_dir, path) = file_with(&data);
+        execute(&format!("{base}/"), publish_sub(&path, None))
+            .await
+            .unwrap();
+
+        let got = seen(&log);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].method, "POST");
+        assert!(got[0].body.contains("\r\n\r\n1.2.3\r\n"), "{}", got[0].body);
+    }
+
+    #[tokio::test]
+    async fn publish_with_mismatched_version_fails_before_any_request() {
         let (base, log) = fake_backend(vec![]).await;
         let (_dir, path) = file_with(&elf_payload());
         let err = format!(
             "{:#}",
-            execute(&base, publish_sub(&path, None)).await.unwrap_err()
+            execute(&base, publish_sub(&path, Some("9.9.9")))
+                .await
+                .unwrap_err()
         );
-        assert!(err.contains("--version"), "{err}");
+        assert!(err.contains("version mismatch"), "{err}");
         assert!(seen(&log).is_empty());
     }
 
@@ -790,17 +724,44 @@ mod tests {
         );
     }
 
-    /// A PE with no VERSIONINFO (a build predating the embedded resource) must
-    /// still reach the backend under the explicit label.
+    /// The CLI fails fast, with no request, for anything the backend would
+    /// refuse: a non-agent product, a legacy build without the metadata
+    /// section, and a PE lacking it.
     #[tokio::test]
-    async fn publish_of_a_pe_without_versioninfo_sends_the_explicit_label() {
-        let mut pe = vec![0u8; 0x90];
-        pe[..2].copy_from_slice(b"MZ");
-        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
-        pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
-        let reply = r#"{"version":"0.1.0","key":"0.1.0","platform":"windows-x86_64","size":144,"digest":null}"#;
-        let (base, log) = fake_backend(vec![(200, reply)]).await;
+    async fn publish_refuses_non_agent_and_legacy_binaries_before_any_request() {
+        let (base, log) = fake_backend(vec![]).await;
+        let cli = macho_arm64(&[(
+            "__DATA",
+            "__kanade",
+            &meta("kanade", "0.79.0", "macos-aarch64"),
+        )]);
+        let legacy = elf_x86_64(&[("", ".rodata", b"kanade-agent 1.2.3")]);
+        let bare_pe = pe_x86_64(".text", b"code");
+        for (what, bytes) in [("cli", cli), ("legacy", legacy), ("pe", bare_pe)] {
+            let (_dir, path) = file_with(&bytes);
+            let err = format!(
+                "{:#}",
+                execute(&base, publish_sub(&path, Some("1.2.3")))
+                    .await
+                    .unwrap_err()
+            );
+            assert!(
+                err.contains("cannot be published as an agent release"),
+                "{what}: {err}"
+            );
+        }
+        assert!(seen(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_of_a_pe_with_metadata_succeeds() {
+        export_test_token();
+        let pe = pe_x86_64(".kanade", &meta("kanade-agent", "0.1.0", "windows-x86_64"));
+        let reply = format!(
+            r#"{{"version":"0.1.0","key":"0.1.0","platform":"windows-x86_64","size":{},"digest":null}}"#,
+            pe.len()
+        );
+        let (base, log) = fake_backend(vec![(200, Box::leak(reply.into_boxed_str()))]).await;
         let (_dir, path) = file_with(&pe);
         execute(&base, publish_sub(&path, Some("0.1.0")))
             .await

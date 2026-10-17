@@ -109,8 +109,8 @@ This works because the agent's self-update (`self_update.rs`) is
 OS-neutral — a three-step binary swap then `exit(64)`, which the
 `kanade-agent.service` `Restart`/`RestartForceExitStatus=64` turns into a
 restart, exactly as SCM failure-actions do on Windows. The one Linux-only
-enabler is `kanade agent publish --version` (an ELF has no PE VERSIONINFO
-to auto-label).
+enabler is `kanade agent publish --version` label, which must match the version
+embedded in the agent (see the book's *Agent release admission* page).
 
 The rest of this doc is the **manual, step-by-step** path the one-command
 tools automate — useful for closed networks where the collector can't

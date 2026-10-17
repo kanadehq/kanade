@@ -309,6 +309,18 @@ mod tests {
     #[tokio::test]
     async fn agent_dispatches_without_connecting_to_nats() {
         let dead_nats = "nats://127.0.0.1:1".to_string();
+        let elf = kanade_shared::agent_metadata::fixtures::elf_x86_64(&[(
+            "",
+            ".kanade",
+            &kanade_shared::agent_metadata::fixtures::meta("kanade-agent", "1.0.0", "linux-x86_64"),
+        )]);
+        let published: &'static str = Box::leak(
+            format!(
+                r#"{{"version":"1.0.0","key":"1.0.0-linux-x86_64","platform":"linux-x86_64","size":{},"digest":null}}"#,
+                elf.len()
+            )
+            .into_boxed_str(),
+        );
         let (base, log) = fake_backend(vec![
             (200, r#"{"target_version":"1.0.0"}"#),
             (200, "log"),
@@ -316,19 +328,11 @@ mod tests {
                 200,
                 r#"{"version":"1.0.0","scope_key":"global","scope_label":"global","jitter":null}"#,
             ),
-            (
-                200,
-                r#"{"version":"1.0.0","key":"1.0.0-linux-x86_64","platform":"linux-x86_64","size":20,"digest":null}"#,
-            ),
+            (200, published),
         ])
         .await;
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("agent");
-        let mut elf = vec![0u8; 20];
-        elf[..4].copy_from_slice(b"\x7fELF");
-        elf[4] = 2;
-        elf[5] = 1;
-        elf[18..20].copy_from_slice(&0x3Eu16.to_le_bytes());
         std::fs::write(&bin, &elf).unwrap();
         for sub in [
             cmd::agent::AgentSub::Current,
