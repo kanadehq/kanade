@@ -3031,6 +3031,7 @@ pub struct DeployCliSpec {
     pub artifact_sha256: String,
     pub manifest_sha256: String,
     pub package_object_key: String,
+    pub adopt_existing_cli: bool, // false が既定、macOS 固定配置先の明示採用のみ
     // 配置先は管理 receipt / role の固定 policy から解決（任意パス不可）
 }
 ```
@@ -3055,14 +3056,23 @@ pub struct DeployCliSpec {
 | OS | 管理対象成果物 | 配置先ディレクトリ | 実行ツール / API | 所有権・権限モデル |
 |---|---|---|---|---|
 | **Windows** | `kanade-backend.exe`, `kanade-client.exe`, `kanade.exe` | `%ProgramFiles%\Kanade\` (バイナリ)<br>`%ProgramData%\Kanade\` (設定・DB) | Windows Service Control Manager (Advapi32 API), 原子的ファイルスワップ | `NT AUTHORITY\SYSTEM`, Administrators フルコントロール |
-| **macOS** | `Kanade Client.app`, `kanade` | `/Applications/Kanade Client.app`<br>`/Library/LaunchAgents/` | `/usr/sbin/installer -pkg`, `/bin/launchctl` | `root:wheel` (アプリバンドル), ログインユーザーセッション |
+| **macOS Client** | `Kanade Client.app` | `/Applications/Kanade Client.app`<br>`/Library/LaunchAgents/` | `/usr/sbin/installer -pkg`, `/bin/launchctl` | `root:wheel` (アプリバンドル), ログインユーザーセッション |
+| **macOS Admin CLI** | `kanade-aarch64-apple-darwin.tar.gz` 内の `kanade` | `/usr/local/bin/kanade` | Rust archive 検査・同一 filesystem の atomic rename、固定絶対パスの `--version` | `root:wheel` 0755、Kanade receipt。service / LaunchAgent 登録なし |
 | **Linux (Ubuntu)** | `kanade-backend`, `kanade-client`, `kanade` | `/usr/local/bin/` または `/usr/bin/`<br>`/etc/kanade/` (設定), `/var/lib/kanade/` (DB) | Client のみ `/usr/bin/apt-get install -y <verified-local-deb>`、Backend / CLI は検証済み tar.gz の安全な展開、`systemctl` | `root:root` (Client は dpkg、Backend / CLI は Kanade receipt), systemd サービス |
 
 **Linux Backend / CLI tar.gz handler proposal**: 現在 .deb は存在せず、生成も前提にしない。x86_64 / aarch64 musl archive を固定 staging 領域に展開し、絶対パス・`..`・symlink/hardlink・device・複数 executable を拒否、role に対応する単一 ELF の arch / digest / `--version` を確認する。root 所有の `/usr/local/bin/kanade-backend` / `kanade` に同一 filesystem の atomic rename で配置し、版・digest・配置先・元 service 状態を root-only receipt に保存する。外部 package 管理のファイルは takeover せず拒否する。Backend は既存 setup の管理 systemd unit（`deploy/linux/systemd/kanade-backend.service`、ExecStart `/usr/local/bin/kanade-backend`、User/Group `kanade`、EnvironmentFile `/etc/kanade/kanade.env`、設定 `/etc/kanade/backend.toml` と照合）を保持し、初回 enrolled-host install のみ固定 unit を設置、daemon-reload を実行する。設定 `/etc/kanade/kanade.env`、DB の実設定パス、NATS/Caddy は変更しない。設定や service ownership を確認できなければ停止前に拒否する。CLI は service 登録なし。Client .deb の postinst 等にも hidden shell deploy を移さず、privileged lifecycle は typed Rust handler が所有する。
 
+**macOS Admin CLI tar.gz handler proposal（推奨）**: macOS 14+ Apple Silicon では既存の単体 CLI release を利用し、CLI 用 .pkg を要求しない。
+
+- publisher 署名済み manifest と archive digest / size / identity を検証後、root:wheel 0700 の staging に Rust で展開する。絶対パス・`..`・symlink/hardlink・device・重複 entry・展開容量超過を拒否し、実行対象は単一 `kanade` のみ。Mach-O arm64 と最低 OS、固定パスでの `--version` を確認する。Client.app や Agent の installer を流用しない。
+- `/usr/local/bin` は root 所有・非 group/world-writable であることを検証し、不在なら root:wheel 0755 で作成する。symlink の親・配置先や外部 package 管理（Homebrew 等）の所有物を辿って上書きしない。固定配置先は `/usr/local/bin/kanade`、receipt / journal / backup は `/Library/Application Support/Kanade/deploy/`（root:wheel 0700、各ファイル 0600）。receipt に identity、digest、publisher、mode、配置先と job/exec id を記録する。ユーザー config / credentials と PATH は変更しない。
+- 配置先が不在なら新規配置、正規 receipt と digest が一致すれば更新可能。既存の手動コピーを移行する場合は `--adopt-existing-cli` を明示し、既存 executable の arch・版・digest・所有権・外部管理不在を plan に記録して承認対象とする（typed `DeployCliSpec.adopt_existing_cli: bool`、既定 false、macOS の固定配置先だけで有効）。apply 時に再照合し、差分があれば拒否する。不明な所有物は移動・削除しない。他パスの CLI は対象外として plan に表示し、実機 parity では実際の operator PATH がこの固定配置を選ぶことを確認する。
+- 配置先 filesystem に root-only staging を作り、既存 binary の backup と journal を fsync してから atomic rename、mode / owner / digest と `/usr/local/bin/kanade --version` を検証する。実行中の CLI process を kill せず、既存 process は旧 inode で完了させる。常駐起動は不要で `installed_verified` が成功。検証失敗時は旧 executable と receipt を組で atomic 復元し再検証、新規配置なら今回作成したファイルだけを撤去する。復元失敗は `recovery_required`、backup を保持し有界リトライ後に停止する。
+
 #### 2.13.6.5 排他ロック・管理プロセス停止・データ保護
 1. **排他ファイルロック**:
-   - デプロイ処理開始時に、OS ごとの管理ロックファイル（Windows: `%ProgramData%\Kanade\locks\deploy.lock`、Unix: `/run/kanade/deploy.lock`）を取得する。ロックが競合した場合は上限付き（最大 60 秒）でリトライし、超過時は延期として安全に終了する。
+   - デプロイ処理開始時に、OS ごとの管理ロックファイル（Windows: `%ProgramData%\Kanade\locks\deploy.lock`、Linux: `/run/kanade/deploy.lock`、macOS: `/var/run/kanade/deploy.lock`）を取得する。ロックが競合した場合は上限付き（最大 60 秒）でリトライし、超過時は延期として安全に終了する。
+   - Unix の lock directory は root Agent が起動時および処理前に作成・検証する（Linux root:root 0700、macOS root:wheel 0700、lock file 0600）。macOS の `/var/run` は管理可能な runtime 領域であり `/run` を新設しない。再起動で消えても再作成する。symlink / 不正 owner / 非管理者書込可能な directory・lock file は拒否し、OS の advisory lock を取得した fd を処理終了まで保持する。lock file の削除・再生成で競合を回避しない。
 2. **管理対象プロセスのみの停止**:
    - 更新対象のサービス・プロセスのみをピンポイントで停止する（Windows SCM によるサービス停止、macOS `launchctl bootout`、Ubuntu `systemctl stop`）。
    - 同一マシン上で稼働している無関係なプロセスや、Agent 自身のメインプロセスを誤って巻き込んで停止させることを厳禁とする。
@@ -3128,9 +3138,18 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 1. 新旧 binary、実設定の DB path、migration 集合、サービス状態を journal に固定する。配置・DB backup・復旧に十分な空き容量と権限がなければ停止前に拒否する。
 2. 成果物と復旧用旧 binary を先にローカル cache へ完全取得する。Backend を正常停止して全 SQLite writer が終了したことを確認し、SQLite backup API 等で一貫した更新前 snapshot を作成する。稼働中 DB と WAL の単純コピーは禁止。復元試験用 copy で integrity_check と migration metadata を確認し、config・権限と共に root-only に保存する。backup 失敗時は更新を進めず旧サービスへ復帰する。
 3. 新版を起動して forward migration / health / projector readiness を有界時間で検証する。検証中は外部 API 書込を maintenance gate で拒否し、NATS event は保持する。migration 後に受けた非 event-source データを snapshot 復元で失う窓を作らない。この maintenance / readiness gate 自体は新規実装要件。
-4. 起動・migration・health 失敗時は新版と writer を停止し、失敗 DB/WAL を隔離する。journal に紐付く互換 snapshot を正しい owner/mode と整合した sidecar 状態で atomic 復元し、旧 binary / service 設定を一緒に復元して旧版を起動・検証する。旧版 health と event 再投影を確認し `failed_rolled_back` として報告する。復元にも失敗なら `recovery_required`、DB と backup を保持し再試行停止、管理者へ理由を提示する。
+4. 起動・migration・health 失敗時は新版と writer を停止し、失敗 DB/WAL を隔離する。journal に紐付く互換 snapshot を正しい owner/mode と整合した sidecar 状態で atomic 復元し、旧 binary / service 設定を一緒に復元して旧版を起動・検証する。下記の consumer checkpoint を復元してから旧版の projector を開始する。旧版 health と event 再投影を確認し `failed_rolled_back` として報告する。復元にも失敗なら `recovery_required`、DB と backup を保持し再試行停止、管理者へ理由を提示する。
 5. backup は health だけで削除せず、結果再投影の確認後に明示保持期間で回収する。Agent journal / outbox は Backend DB と分離し、通信復帰後に同じ exec id で結果を再送する。boot sentinel の binary-only rollback と競合しないよう deploy journal と協調させることも handler の必須タスク。
 
+
+**Snapshot と JetStream consumer 位置の一体復旧 proposal（推奨、必須の追加実装）**: DB snapshot だけを復元して broker 上の進んだ durable を再利用してはならない。現行 `projector/consumer_reset.rs` は空テーブルのみを検出するため、データ入り snapshot の復元を修復しない。
+
+- snapshot 作成前に単一 Backend の排他的 maintenance ownership を確保し、全 projector の新規 pull を停止、処理中 transaction と ACK を drain してからサービスを停止する。他の Backend instance が同じ DB / durable を進める構成では拒否する。停止後に各 durable の ACK floor の **stream sequence** `S`（consumer sequence ではない）を取得し、その後に同じ静止 DB を snapshot 化する。snapshot は S までの投影済みデータを必ず含み、commit 済み・未 ACK の重複は再配信で処理する。
+- snapshot と同じ journal に stream 名・生成識別情報、durable 名・全 consumer config（filter subject を含む）、S、snapshot digest、DB migration 版を記録する。対象は現行 `consumer_reset.rs` の5経路（results、events、audit、obs_events、notification_acks）すべて。events と notification_acks は同じ stream でも別 checkpoint とする。durable 名が新版で変わる場合も更新前の対応表を保持する。checkpoint が取得できなければ更新を開始しない。
+- この復旧を有効化する前提として、旧・新 projector の commit-before-ACK と再配信の冪等性（audit stream_seq、result_id 等、派生 counter と通知 ack/unack の順序も含む）を検証する。必要な修正は先行タスクとし、未検証の旧版を rollback 対象に認定しない。ACK floor より先に commit 済みの範囲が再配信されても重複や状態の逆行を生まないことを必須とする。
+- rollback は新版停止と snapshot 復元後、**旧版の projector 開始前**に、記録した5経路の durable を delete/recreate し、元の filter / ACK policy を維持して `DeliverPolicy::ByStartSequence(S + 1)`（S=0 なら最初から）に戻す。consumer の delivered position や新版が進めた ACK floor は採用しない。broker 管理操作は対象 durable のみに制限した native Rust recovery coordinator が行い、ローカルの Backend service identity / credentials を利用する。資格情報を job / journal / log に載せず、必要な権限がなければ停止前に拒否する。NATS process・stream 本体・他 consumer は変更しない。
+- consumer 再作成は journal の段階記録で冪等に再開し、全経路の復元が確認されるまで旧 Backend の自動再起動 / projector 開始を抑止する。boot sentinel / service recovery も同じ gate に従わせる。空テーブル向け既存 reset に任せる方式や、復元失敗を warn で無視して起動する方式は禁止する。
+- rollback 開始時に各 stream の high-water mark H を固定し、S+1 から H までの該当イベントを旧 projector が処理済みとなったことを recovery readiness で検証する。更新中に新版が投影・ACK した結果・監査も必ずこの範囲から復元する。先に stream retention（max_age / max_bytes / max_msgs と purge 方針）が有界更新・復旧期間中の必要範囲を保持することを確認し、保証できない場合は更新を拒否する。途中で stream 再作成・purge・retention 欠落を検出したら `recovery_required` とし、部分的再投影を成功にしない。DB backup と checkpoint は復旧完了まで保持する。
 
 - 新バイナリへの置換前に、新バイナリが要求する DB マイグレーションと、ターゲット上の現在のマイグレーション状態（`_sqlx_migrations`）の互換性をチェックする。
 - スカッシュされたマイグレーションによる非互換が検出された場合、`--wipe-db` が明示されていない限りデプロイを即座にアボートする。
@@ -3190,12 +3209,13 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 3. **署名・アーキテクチャ不一致の拒否**:
    - 改ざんされたバイナリ、署名不一致、またはターゲット OS/arch と異なる成果物を含む計画が、Agent の事前検証で確実に拒否されること。
 4. **耐障害性と競合制御**:
-   - ロックファイル競合時に有界時間待機し、デッドロックせず安全に延期終了すること。
+   - ロックファイル競合時に有界時間待機し、デッドロックせず安全に延期終了すること。macOS 14+ の Client / CLI では `/run` 不在でも `/var/run/kanade` の安全な作成・再起動後再作成・owner/mode 検査と同時 job の排他が成立し、不正 symlink を拒否すること。
    - ネットワーク切断や Backend 一時停止中も Agent が処理を継続し、復旧後に Outbox から正常に結果が再投影されること。
 5. **Backend 更新とデータ保護**:
    - Backend 更新時、設定ファイル・SQLite DB・NATS サービスが保持され、再起動後に `/api/health` が green に復帰すること。
    - `--wipe-db` 指定時、事前バックアップが作成され、`users` テーブルが保持され、JetStream からの再投影が完了すること。
    - Windows / Linux x86_64 / aarch64 で通常更新の forward migration 後に health を失敗させ、旧 binary + 更新前 snapshot 復元で起動・認証・結果再投影できること。backup 不可、disk full、migration 途中失敗、復元失敗、Agent 再起動も注入し、binary-only rollback を行わず、復旧不能は recovery_required となること。maintenance 中の書込拒否と NATS 継続も確認する。
+   - データ入り snapshot 作成 → 新版が結果・監査・obs・通知 ack/unack を投影して ACK → health 失敗 → DB と5経路の consumer checkpoint を復元、の順に障害試験を行う。S 以前のデータ保持、S 以降の再投影、監査の非重複、counter / 通知状態の整合を検証する。commit 後 ACK 前の crash、consumer 復元途中の再 crash、復元権限不足、retention 欠落も注入し、欠落を成功扱いせず復旧 gate が維持されること。
 6. **Client GUI セッション安全性**:
    - 適格な GUI セッション（Aqua / GNOME）が存在する場合のみ `--tray` 起動され、未ログイン・SSH セッションでは起動しないこと。
    - ユーザーの opt-out 設定が更新後も尊重されること。未ログイン・opt-out・lock 中はプロセスを作らず installed_verified で終端成功し、Windows / Mac / Ubuntu の CLI も常駐せず installed_verified となること。
@@ -3204,6 +3224,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
    - deploy_capabilities None / 空を区別して記録し両者に typed を配信しない。一方その旧 Agent の Windows / Linux x86_64 / Linux aarch64 / macOS self-update を既存 publish/rollout で成功させ、更新後の typed 計画が通ること。
    - Phase 1 中の Windows CI bare-key 再 upload は従来通り成功し、新 identity の異なる bytes は 409、同一 bytes は no-op、旧キー変更で既存 plan の digest が変わらないこと。
 8. **OS / role の追加前提**:
+   - macOS CLI は arm64 tar.gz から固定 `/usr/local/bin/kanade` に新規配置・更新・No-op できること。実行中 CLI を kill せず、署名 / arch / archive traversal 不正と Homebrew 所有物を拒否する。明示採用なしの手動配置拒否、採用時の digest 再照合、置換後検証失敗の旧 binary / receipt 復元、ユーザー config 保持を試験する。
    - Ubuntu x86_64 Client は実際の GUI build で手動起動・KLP・通知・session/opt-out を §2.11.7 に照らして検証し、shim を包んだ .deb を拒否する。Mac は ad-hoc app/pkg の receipt と GUI 境界、Windows は既存 protocol/shortcut の回帰を検証する。延期機能は別途未実装のまま明記する。
    - Linux x86_64 / aarch64 Backend・CLI の tar.gz で traversal・外部管理所有権・既存 unit/config 保持・停止状態保持・No-op を確認する。Windows Backend では repair/firewall/start policy の明示指定と既定保持を検証する。全 operator OS から各対象を計画・適用でき、別 repository / ローカル成果物と拒否理由も parity 表で確認する。
 
@@ -3227,10 +3248,10 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
   - 通常 exec / scheduler / KLP の共有承認 gate・plan digest 検証と typed 配信遮断を実装。Task 3 の schema に依存し、両者が揃うまで feature 無効
 - [ ] **Task 5: Agent プラットフォーム別 Typed Handler 実装 (Agent)**
   - Windows: SCM 制御、原子的バイナリスワップ、レジストリ保持
-  - macOS: `/Applications` 配置、receipt 検証、LaunchAgent/LaunchDaemon 制御
+  - macOS: Client の `/Applications` 配置・receipt・LaunchAgent 制御と、Admin CLI の arm64 tar.gz 検査・固定配置・明示採用・atomic 置換/復元を別 handler として実装。`/var/run/kanade` の安全な lock 作成も実装
   - Linux: Backend/CLI 用 x86_64・aarch64 tar.gz 展開・receipt・atomic swap・固定 systemd unit、Client 用 apt/dpkg の独立 handler を実装
   - 排他ロック、管理プロセスのみの停止、配置/稼働別の成功検証、ジャーナル、有界リトライを実装
-  - Backend の整合 DB snapshot・maintenance/readiness gate・DB/binary 組復元・boot sentinel 協調を独立した小変更で実装後、handler に結合
+  - Backend の整合 DB snapshot・maintenance/readiness gate・DB/binary 組復元・5経路の静止 checkpoint / consumer 再作成 / replay readiness・boot sentinel 協調を独立した小変更で実装後、handler に結合
 - [ ] **Task 6: GUI セッション適格判定 & Opt-out 保持 (Client / Agent)**
   - macOS Aqua / Linux GNOME ログインセッションの保守的判定ロジック実装
   - ユーザー別 opt-out 設定の永続化と更新時引き継ぎ
