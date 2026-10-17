@@ -1,7 +1,6 @@
 //! Console-user ScreenCaptureKit capture and the read-only remote responder.
 //! The child owns framework state; the daemon owns its lifetime and transport.
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,13 +36,8 @@ pub fn supported() -> bool {
 }
 
 fn console_uid() -> Result<u32> {
-    let uid = std::fs::metadata("/dev/console")
-        .context("cannot find console user")?
-        .uid();
-    if uid == 0 {
-        bail!("no user logged in; sign in on the Mac before connecting");
-    }
-    Ok(uid)
+    crate::screen_permission_macos::console_uid()
+        .context("no user logged in; sign in on the Mac before connecting")
 }
 
 fn require_console_user() -> Result<()> {
