@@ -568,6 +568,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplex_handshake_persists_intent_before_child_receives_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let child_path = path.clone();
+        let (child, parent) = tokio::io::duplex(64);
+        let (reader, mut writer) = tokio::io::split(parent);
+        let mut reader = BufReader::new(reader);
+        let exchange = async {
+            let child = async {
+                let (reader, mut writer) = tokio::io::split(child);
+                writer.write_all(b"READY\n").await.unwrap();
+                let mut reader = BufReader::new(reader);
+                let mut go = String::new();
+                reader.read_line(&mut go).await.unwrap();
+                assert_eq!(go, "GO\n");
+                assert!(load(&child_path).unwrap().requested);
+                go.clear();
+                assert_eq!(reader.read_line(&mut go).await.unwrap(), 0);
+            };
+            let parent = authorize(
+                &mut reader,
+                &mut writer,
+                || true,
+                || {
+                    save(
+                        &path,
+                        &History {
+                            requested: true,
+                            ..History::default()
+                        },
+                    )
+                },
+            );
+            let (result, ()) = tokio::join!(parent, child);
+            assert!(result.unwrap());
+        };
+        tokio::time::timeout(Duration::from_secs(1), exchange)
+            .await
+            .unwrap();
+        assert!(!load(&path).unwrap().eligible(u64::MAX));
+    }
+
+    #[tokio::test]
+    async fn duplex_early_child_exit_preserves_pre_request_retry() {
+        for reply in [&b""[..], &b"READY\n"[..]] {
+            let (mut child, parent) = tokio::io::duplex(64);
+            child.write_all(reply).await.unwrap();
+            // EOF before READY, or a broken GO pipe after durable intent.
+            drop(child);
+            let (reader, mut writer) = tokio::io::split(parent);
+            let mut reader = BufReader::new(reader);
+            let mut history = History::default();
+            history.launching(100);
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                authorize(
+                    &mut reader,
+                    &mut writer,
+                    || true,
+                    || {
+                        history.requested = true;
+                        Ok(())
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(result.is_err());
+            assert_eq!(history.requested, reply == b"READY\n");
+            assert!(!history.eligible(159));
+            assert_eq!(history.eligible(160), reply.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn pending_preflight_is_bounded_without_request_intent() {
         let (_writer, reader) = tokio::io::duplex(64);
         let mut reader = BufReader::new(reader);

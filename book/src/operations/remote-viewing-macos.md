@@ -22,22 +22,43 @@ fresh explicit user environment, never daemon credentials. A non-root developmen
 agent may capture only when it is the current console owner. No logged-in user
 means a refused session, not a silent capture of the login window.
 
+The root LaunchDaemon checks the console user at startup and every five seconds,
+independently of viewers, jobs and broker connectivity. An already signed-in
+user is handled at startup; login and user switching launch a short-lived
+`--screen-permission-check <uid>` helper in the foreground user's GUI session.
+It uses the same installed executable and user-session launch builder as capture.
+The helper only checks permission: it never captures or transmits pixels.
+
+If `CGPreflightScreenCaptureAccess` reports access, the helper exits silently.
+Otherwise, after the daemon durably records request intent, it calls
+`CGRequestScreenCaptureAccess` so macOS can offer its system permission flow and
+Settings registration where supported. The exact dialog, Settings entry and TCC
+responsible executable **remain unverified on an installed signed agent**; the
+shared launch route alone does not prove attribution.
+
 On the target Mac, as the logged-in user:
 
-1. Open **System Settings → Privacy & Security → Screen Recording**, or
-   **Screen & System Audio Recording** on newer versions.
-2. Enable the capture process macOS identifies. If necessary, use the `+` button
-   and file chooser to select the installed `kanade-agent` executable. The
-   refusal message includes the console UID and actual executable path.
-3. Restart the installed agent service after changing permission, then stop and
-   reconnect the browser viewer. Verify through the deployed LaunchDaemon, not
-   just a Terminal-launched development binary.
+1. Follow the system permission flow to **System Settings → Privacy & Security →
+   Screen Recording**, or **Screen & System Audio Recording** on newer versions.
+   If no dialog appears, open that pane directly. A prior denial does not imply
+   macOS will prompt again.
+2. Enable the entry macOS identifies for the installed capture context. Verify
+   its actual executable/signing identity; do not assume a matching display name
+   proves attribution. The request is intended to avoid manual `+` file selection
+   where the OS supports registration; record any OS limitation during acceptance.
+3. Stop and reconnect the browser viewer to create a fresh capture child. If it
+   still reports missing permission, restart the installed agent service and
+   reconnect. Honor any macOS restart instruction.
 
-The preflight check detects missing permission without waiting indefinitely for
-an interactive dialog. Kanade cannot grant TCC permission remotely. TCC may
-attribute capture to a responsible launcher depending on the launch context;
-adding a fixed binary path is **not a guarantee** that a particular installed
-launch chain will be authorized. Inspect the entry macOS actually presents.
+Attempts are deduplicated by session and persistent history per UID, installed
+path and signing identity. Pre-request failures have a finite three-launch budget
+with 60-second then 600-second retry delays; recorded request intent suppresses
+further requests across service restarts, including after refusal or a crash.
+The daemon stops the helper on logout, switching or a 30-second timeout; pending
+OS dialogs may outlive it. Normal agent work continues. Do not delete history to
+force another request. Kanade cannot grant permission or modify TCC consent.
+TCC may attribute capture to a responsible launcher depending on launch context;
+inspect the entry macOS actually presents.
 Terminal permission alone does not establish that the LaunchDaemon path works.
 Use the existing [stable code signing procedure](macos-code-signing.md) for
 releases; ad-hoc development builds and identity/path changes may need new grants.
@@ -88,14 +109,24 @@ Use a test Mac with a visible logged-in desktop, the installed signed agent and 
 backend connected to the same broker. Do not treat a development-shell test as
 proof of installed TCC behavior.
 
-1. With Screen Recording denied for the actual installed capture context,
-   connect from an authorized operator account and accept the audit notice.
-   Expect a refusal describing Settings, console user, permission target,
-   restart and reconnect. Other agent operations/ping should still work.
-2. Grant permission as above and restart the service. Connect again. Confirm a
-   changing clock, a moving window and text in all four corners appear right-side
-   up with correct colors and no padded/corrupted rows. Check the reported size
-   matches the canvas; test a noisy full-screen image to exercise tile splitting.
+First run the [installed signed-agent onboarding acceptance procedure](
+https://github.com/kanadehq/kanade/blob/main/crates/kanade-agent/SCREEN-RECORDING-MACOS.md#manual-acceptance-on-a-real-installed-signed-agent).
+It covers startup before/after login without viewers or jobs, the actual dialog,
+exact Settings entry and responsible executable, denial/pending-dialog deduplication,
+user switching, grant persistence and later viewing through the normal capture
+path. Use fresh test accounts without resetting or altering TCC. A Terminal grant
+or Files and Folders entry does not prove Screen Recording authorization.
+Record unverified attribution explicitly; no live acceptance has been performed.
+
+1. With Screen Recording denied for the installed capture context, connect from
+   an authorized operator account and accept the audit notice. Expect a refusal
+   describing Settings, console user, permission target, restart and reconnect.
+   Other agent operations/ping should still work.
+2. Enable permission through the OS flow above, reconnect, and record whether a
+   service restart is additionally needed. Confirm a changing clock, a moving
+   window and text in all four corners appear right-side up with correct colors
+   and no padded/corrupted rows. Check the reported size matches the canvas;
+   test a noisy full-screen image to exercise tile splitting.
 3. Confirm mouse/keyboard activity in the browser does not control the Mac. On
    a test broker/control client, Start with `allow_input: true` or
    `output_index: 1` must be refused without launching capture.
