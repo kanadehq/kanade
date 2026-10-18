@@ -1,12 +1,12 @@
 //! Bounded, durable connection samples. No raw names, credentials or addresses.
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use kanade_shared::wire::ServerSettings;
+use kanade_shared::{nats_client::NatsRole, wire::ServerSettings};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use super::nats_auth_audit::Poll;
-use super::nats_auth_findings::{Reported, evaluate_observed};
+use super::nats_auth_findings::{Claimed, Reported, evaluate_observed};
 use super::notice_ledger::Op;
 
 const SAMPLE_HALF: usize = 10;
@@ -36,6 +36,9 @@ pub struct Sample {
     pub last_observed_at: DateTime<Utc>,
     /// Fixed vocabulary; client supplied, not an authenticated identity.
     pub claimed_role: String,
+    /// Registered pc_id only; still a client claim, not broker authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_host: Option<String>,
     pub credential_class: String,
     pub poll_complete: bool,
 }
@@ -52,6 +55,21 @@ pub struct Occurrence {
     pub last_poll_complete: bool,
     pub sampled_out: bool,
     pub connections: Vec<Sample>,
+}
+
+// Timestamps are typed, roles/classes use fixed vocabularies, cid is decimal,
+// and server_id is ASCII. Never truncate identifiers into ambiguous identities.
+fn valid_identifiers(c: &Connection) -> bool {
+    !c.server_id.is_empty()
+        && c.server_id.len() <= 64
+        && c.server_id.bytes().all(|b| b.is_ascii_alphanumeric())
+        && c.cid
+            .parse::<u64>()
+            .is_ok_and(|id| id != 0 && id.to_string() == c.cid)
+}
+
+fn bounded_host(host: &str) -> String {
+    host.chars().filter(|c| !c.is_control()).take(64).collect()
 }
 
 /// Admin history, bounded to the latest 100 occurrences per response.
@@ -122,6 +140,9 @@ pub async fn update(
             let Some(c) = &o.connection else {
                 continue;
             };
+            if !valid_identifiers(c) {
+                continue;
+            }
             let observed_at = c.observed_at.unwrap_or(now);
             if let Some(s) = samples.iter_mut().find(|s| {
                 s.connection.cid == c.cid
@@ -147,6 +168,14 @@ pub async fn update(
                     first_observed_at: observed_at,
                     last_observed_at: observed_at,
                     claimed_role: o.claimed.subject().into(),
+                    claimed_host: o
+                        .pc_id
+                        .as_deref()
+                        .filter(|pc| {
+                            o.claimed == Claimed::Role(NatsRole::Agent)
+                                && poll.registered.contains(*pc)
+                        })
+                        .map(bounded_host),
                     poll_complete: poll.complete,
                     credential_class: match Reported::from_label(&o.label) {
                         Reported::NoAuth => "no-auth",
@@ -193,10 +222,7 @@ pub async fn prune(pool: &SqlitePool, now: DateTime<Utc>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        nats_auth_audit::run_poll,
-        nats_auth_findings::{Claimed, Observed},
-    };
+    use super::super::{nats_auth_audit::run_poll, nats_auth_findings::Observed};
     use super::*;
     use std::collections::HashSet;
 
@@ -280,6 +306,115 @@ mod tests {
         assert!(h[1].resolved_at.is_some());
         assert_eq!(h[1].connections.len(), 3);
         assert_eq!(history(&p, Some(h[0].id)).await.unwrap()[0].id, h[1].id);
+    }
+
+    #[tokio::test]
+    async fn head_tail_identity_and_resolved_samples_remain_stable() {
+        let p = pool().await;
+        let initial: Vec<_> = (1..=30).map(|id| observed(id, -60)).collect();
+        poll(&p, &initial, now(), true).await;
+        let h = history(&p, None).await.unwrap();
+        let occurrence = h[0].id;
+        let head = serde_json::to_value(&h[0].connections[..10]).unwrap();
+        // Refresh the retained tail in reverse order, then add ten new peers.
+        let next: Vec<_> = (21..=30)
+            .rev()
+            .chain(31..=40)
+            .map(|id| observed(id, -60))
+            .collect();
+        poll(&p, &next, now() + Duration::minutes(1), true).await;
+        let h = history(&p, None).await.unwrap();
+        assert_eq!(h[0].id, occurrence);
+        assert_eq!(serde_json::to_value(&h[0].connections[..10]).unwrap(), head);
+        let ids: Vec<_> = h[0]
+            .connections
+            .iter()
+            .map(|s| s.connection.cid.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            (1..=10)
+                .chain(31..=40)
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+        );
+        let samples = serde_json::to_value(&h[0].connections).unwrap();
+        poll(&p, &[], now() + Duration::minutes(2), true).await;
+        poll(&p, &[observed(50, -60)], now() + Duration::minutes(3), true).await;
+        let h = history(&p, None).await.unwrap();
+        assert_eq!(h[1].id, occurrence);
+        assert!(h[1].resolved_at.is_some());
+        assert_eq!(serde_json::to_value(&h[1].connections).unwrap(), samples);
+    }
+
+    #[tokio::test]
+    async fn host_claims_require_registration_and_all_text_fields_are_bounded() {
+        let p = pool().await;
+        let host = format!("PC\n\t{}", "界".repeat(100));
+        let mut obs: Vec<_> = (1..=3).map(|id| observed(id, -60)).collect();
+        for (o, pc) in obs
+            .iter_mut()
+            .zip([host.as_str(), "unknown-secret", host.as_str()])
+        {
+            o.claimed = Claimed::Role(NatsRole::Agent);
+            o.pc_id = Some(pc.into());
+        }
+        // Registration alone is insufficient for a non-agent role claim.
+        obs[2].claimed = Claimed::Unnamed;
+        run_poll(
+            &p,
+            Ok(ServerSettings::default()),
+            &Poll {
+                observed: &obs,
+                registered: &HashSet::from([host]),
+                complete: true,
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        let h = history(&p, None).await.unwrap();
+        let samples: Vec<_> = h.iter().flat_map(|o| &o.connections).collect();
+        assert_eq!(samples.len(), 3);
+        let named = samples.iter().find(|s| s.connection.cid == "1").unwrap();
+        let value = named.claimed_host.as_deref().unwrap();
+        assert_eq!(value.chars().count(), 64);
+        assert!(!value.chars().any(char::is_control));
+        assert!(
+            samples
+                .iter()
+                .filter(|s| s.connection.cid != "1")
+                .all(|s| s.claimed_host.is_none())
+        );
+        assert!(
+            !serde_json::to_string(&h)
+                .unwrap()
+                .contains("unknown-secret")
+        );
+        // Legacy JSON remains readable without the additive optional field.
+        let legacy = serde_json::to_value(observed(4, -60).connection.unwrap()).unwrap();
+        let mut legacy = legacy.as_object().unwrap().clone();
+        legacy.insert("first_observed_at".into(), serde_json::json!(now()));
+        legacy.insert("last_observed_at".into(), serde_json::json!(now()));
+        legacy.insert("claimed_role".into(), serde_json::json!("unnamed"));
+        legacy.insert("credential_class".into(), serde_json::json!("no-auth"));
+        legacy.insert("poll_complete".into(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<Sample>(legacy.into())
+                .unwrap()
+                .claimed_host
+                .is_none()
+        );
+        for invalid in ["BROKER\n".to_string(), "B".repeat(65)] {
+            let mut c = observed(5, -60).connection.unwrap();
+            c.server_id = invalid;
+            assert!(!valid_identifiers(&c));
+        }
+        let mut c = observed(5, -60).connection.unwrap();
+        for invalid in ["1\n", "01", "18446744073709551616"] {
+            c.cid = invalid.into();
+            assert!(!valid_identifiers(&c));
+        }
     }
 
     #[tokio::test]

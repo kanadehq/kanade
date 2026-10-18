@@ -146,6 +146,15 @@ ones. Pass `?before=<oldest-id>` to page backwards. Viewers and operators cannot
 read this endpoint. Existing service-token and auth-disabled administrator
 semantics still apply. Identifiers are selectable and copyable for log searches.
 
+A host claim is saved only for an agent role whose exact pc_id is registered;
+registration does not authenticate the claim. Stored host text removes control
+characters and is limited to 64 Unicode characters. Other sample text is bounded
+by typed timestamps, fixed role/credential vocabularies, decimal u64 cids and
+ASCII alphanumeric server IDs of at most 64 bytes. Invalid identifiers are
+rejected rather than truncated. Older samples have no host field; it is not
+backfilled. The Dashboard separates broker identifiers and credential classes
+from untrusted client role/host claims.
+
 A sample records the broker-issued decimal `cid`, `server_id` **and broker
 startup timestamp** (`/varz.start`), backend first/last observation times (page
 fetch completion, before settings/database work), broker page observation time, and connection start/last activity timestamps when supplied.
@@ -160,9 +169,10 @@ A paging cap reports an incomplete poll and likewise cannot resolve findings.
 This is a best-effort walk of live connections, not an atomic broker snapshot.
 
 Evidence includes only a fixed credential class (`user`, `shared-token`,
-`no-auth`, `unknown`) and a fixed `claimed_role` bucket. The role is an
-**untrusted client claim**, unlike broker-issued connection identifiers.
-Registered host samples remain in the existing aggregate notification. Raw
+`no-auth`, `unknown`), a fixed `claimed_role` bucket and an optional bounded
+registered host claim. Role and host are **untrusted client claims**, unlike
+broker-issued connection identifiers. Aggregate notifications also retain
+registered host samples. Raw
 `authorized_user`, tokens, passwords, connection names, arbitrary client metadata
 and unrestricted monitoring responses are never copied into connection evidence.
 Peer addresses are deliberately omitted: proxies and loopback commonly identify

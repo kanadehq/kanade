@@ -153,6 +153,7 @@ type AuthEvidence = {
     first_observed_at: string;
     last_observed_at: string;
     claimed_role: string;
+    claimed_host?: string;
     credential_class: string;
     poll_complete: boolean;
   }[];
@@ -204,7 +205,8 @@ function NatsAuthHistory() {
                   {t('natsAuth.evidence.start')}: {c.connection_start ?? '—'} ·{' '}
                   {t('natsAuth.evidence.activity')}: {c.last_activity ?? '—'}
                 </p>
-                <p>{t('natsAuth.evidence.claim')}: {c.claimed_role} · {c.credential_class}</p>
+                <p>{t('natsAuth.evidence.credentialClass')}: {c.credential_class}</p>
+                <p>{t('natsAuth.evidence.claim')}: {c.claimed_role} / {c.claimed_host ?? '—'}</p>
               </div>
             );
           })}
