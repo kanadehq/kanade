@@ -1,33 +1,38 @@
 # macOS code signing (stable identity)
 
 macOS TCC (Files and Folders, Documents, Photos, Full Disk Access) keys
-grants on the binary's code identity. The release build only carries the
-linker's ad-hoc signature, whose identity is the cdhash — it changes on
-every build, so every self-update looks like a new app and prompts again.
+grants on the binary's code identity. The linker's ad-hoc signature uses
+the cdhash as its identity — it changes on every build, so every
+self-update looks like a brand-new binary and prompts for privacy permissions again.
 
 The release workflow therefore signs `kanade-agent` (and any other shipped
 macOS binary) with a **stable self-signed code-signing certificate**. The
-designated requirement stays the same across versions, so a one-time grant
+designated requirement stays identical across versions, so a one-time grant
 (or an MDM PPPC profile) survives updates. No Apple Developer ID or
 notarization is involved; `spctl` still rejects the binary, which is fine
 for a launchd-run command-line tool.
 
 ## How it works
 
-- `scripts/ci/macos-codesign.sh` imports the certificate from the repo
-  secrets into a temporary keychain, then runs
-  `codesign --force --sign <sha1> --identifier com.kanade.agent --timestamp=none`
-  on each bin (`com.kanade.<bin>` for the others).
-- It then checks `codesign --verify --strict`, `codesign -dv`, and that the
-  designated requirement contains `identifier "com.kanade.agent"` and
-  `certificate leaf = H"<sha1>"`. A mere `--verify` would pass an ad-hoc
-  signature, so the DR check is what fails an unsigned artifact.
-- After packaging, the same check runs against the unpacked `.tar.gz`, still
-  inside the `build` job, so `release` / `publish` (`needs: build`) are blocked
-  on failure.
-- Without the secrets the step prints a notice and skips (forks keep
-  building). With only one of the two secrets, or on any import/sign/verify
-  failure, the build fails.
+- **Signing (`sign` hook)**: `scripts/ci/macos-codesign.sh sign` runs right after
+  the release build and before artifact packaging. It imports the certificate
+  from repo secrets (`MACOS_SIGN_CERT_P12_BASE64`, `MACOS_SIGN_CERT_PASSWORD`)
+  into an ephemeral keychain and signs each binary:
+  `codesign --force --sign <sha1> --keychain <kc> --identifier <id> -r="designated => identifier \"<id>\" and certificate leaf = H\"<sha1>\"" --timestamp=none <bin>`
+- **Post-package verification (`verify-dist` hook)**: Runs after packaging and
+  before uploading artifacts. This step is strictly **secretless**: it unpacks
+  the shipped `dist/*.tar.gz` and verifies the binaries against the pinned
+  fingerprint in `deploy/macos/signing-cert.sha1`.
+- **Integrity checks**:
+  - `codesign --verify --strict -v` ensures Mach-O code directory validity.
+  - Designated requirement verification checks that the binary specifies
+    `identifier "com.kanade.agent"` and `certificate leaf = H"<sha1>"`.
+  - Rejects unstable `cdhash` constraints so ad-hoc or fallback signatures
+    never pass unnoticed.
+- **Strict enforcement**:
+  - `deploy/macos/signing-cert.sha1` is required for official releases. Missing,
+    invalid, or mismatched fingerprints fail the build.
+  - Releases never fall back silently to ad-hoc linker signatures.
 
 ## One-time setup
 
@@ -64,7 +69,8 @@ base64 -i kanade-sign.p12 | gh secret set MACOS_SIGN_CERT_P12_BASE64
 gh secret set MACOS_SIGN_CERT_PASSWORD
 ```
 
-Back up the `.p12` somewhere safe; losing it means rotating the identity.
+Back up the `.p12` file in a secure password vault or encrypted backup;
+losing the private key requires rotating the identity and invalidates all existing grants.
 
 ### 3. Pin the certificate SHA-1
 
@@ -73,10 +79,8 @@ openssl x509 -in cert.pem -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' \
   > deploy/macos/signing-cert.sha1
 ```
 
-Commit `deploy/macos/signing-cert.sha1`. The release then fails if the
-imported certificate or a signed binary does not match it. Until the file
-exists the build only prints the imported SHA-1 and checks the binaries
-against it.
+Commit `deploy/macos/signing-cert.sha1`. Official builds require this pinned
+fingerprint to match the certificate used for signing.
 
 ## Granting access on devices
 
@@ -98,26 +102,40 @@ against it.
 </dict>
 ```
 
-The IdentifierType and how a bare (non-bundle) executable is matched should
-be confirmed on a real device; test the profile on one Mac before rolling out.
-Some MDMs want `IdentifierType` `path` with `/usr/local/bin/kanade-agent`.
-
 ### Manual
 
 System Settings → Privacy & Security → Full Disk Access → `+` → add
 `/usr/local/bin/kanade-agent` (⇧⌘G to type the path). Once, per device.
 
-## Caveats
+## Migration and operational caveats
 
-- Moving from an existing ad-hoc build to the first self-signed build needs
-  one re-grant.
-- Rotating the certificate changes the leaf SHA-1 and invalidates every PPPC
-  profile and manual grant. Plan the expiry, keep the key backed up.
-- The self-update path (`crates/kanade-agent/src/self_update.rs`) copies the
-  downloaded Mach-O bytes verbatim and only changes the mode bits; nothing on
-  the device re-signs or strips. Neither `setup-agent.sh` (xattr removal only)
-  nor the release → object-store publish touches the binary.
-- `release.yml` is kata-managed (`.kata/applied.toml`) and overwritten on
-  `kata apply`. The two hook steps calling `scripts/ci/release-post-build.sh`
-  must also exist in the upstream templates (`yukimemi/pj-rust-cli`,
-  `yukimemi/pj-rust-workspace`); otherwise a re-apply silently drops signing.
+### One-time migration grant vs recurring update prompts
+
+- **Expected one-time regrant**: Moving an installation from an ad-hoc signed
+  binary (cdhash requirement) to the stable self-signed identity requires
+  exactly one manual permission grant or PPPC profile deployment.
+- **Recurring prompts are regressions**: If an update between two versions signed
+  with the stable certificate triggers a privacy prompt, this indicates an identity
+  regression (such as an accidental fallback to linker ad-hoc signing or a changed
+  leaf fingerprint).
+- **Do not use workarounds**: Never reset TCC permissions (`tccutil reset ...`) or
+  re-sign running agent binaries on production devices as a workaround. Investigate
+  the binary's code requirement with `codesign -dr - /usr/local/bin/kanade-agent`
+  and verify CI release signing artifacts.
+
+### Key storage, validity, and rotation
+
+- The private key `.p12` must be archived securely.
+- Certificate expiry must be tracked. Rotating the certificate changes the leaf
+  SHA-1, requiring `deploy/macos/signing-cert.sha1` updates and re-granting
+  permissions across all managed machines.
+- The self-update mechanism (`crates/kanade-agent/src/self_update.rs`) copies
+  downloaded Mach-O binaries verbatim and only alters permissions bits (`0o755`).
+  Nothing on the client device strips or re-signs the executable.
+
+### Kata template integration
+
+- `.github/workflows/release.yml` is kata-managed. The post-build `sign` and
+  post-package `verify-dist` hooks calling `scripts/ci/release-post-build.sh`
+  must also be preserved in upstream templates (`yukimemi/pj-rust-workspace`
+  and `yukimemi/pj-rust-cli`) so `kata apply` cannot overwrite or remove them.
