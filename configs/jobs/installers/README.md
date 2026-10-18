@@ -1,5 +1,7 @@
 # `configs/jobs/installers/` — kanade-component install manifests
 
+The cross-platform `kanade deploy` design and script retirement gates are in [SPEC §2.13](../../../docs/SPEC.md#213-クロスプラットフォーム-デプロイ設計-kanade-deploy-cli--typed-operations). This is an unimplemented design; keep using the current procedures below during migration. It targets enrolled agents only and leaves the Agent Installation screen one-liners unchanged.
+
 This directory holds the `kanade Job` manifests that install /
 update the kanade components themselves (backend, client, CLI). They
 sit under `configs/jobs/` alongside the example operational
@@ -59,21 +61,25 @@ version (PE VERSIONINFO of the staged exe, or `-Version latest`), the exe
 path (`dist/<role>/`), the tokens (`$env:KANADE_*_TOKEN` → `dev`), and the
 SourceUrl port (read from the staged `backend.toml`).
 
-**From an ops-management terminal** (not the broker host) point the CLI at
-the broker — `-Server` (or `$env:KANADE_NATS_URL`) carries the
-publish/job/exec traffic:
+**From an ops-management terminal**, set `-BackendUrl` (or
+`$env:KANADE_BACKEND_URL`) for the CLI's HTTP publish/job/exec/rollout
+requests:
 
 ```powershell
 .\scripts\fleet-deploy.ps1 -Role backend -Version latest `
-  -Server nats://broker.corp:4222 -NatsToken $tok -Pc some-host
+  -BackendUrl https://<backend-endpoint> -Pc <pc-id>
 ```
 
-Three endpoints, all localhost by default, all overridable: `-Server`
-(this terminal → NATS broker), `-BackendUrl` (this terminal → backend
-HTTP), and `-SourceUrl` (the *target host's* agent → its co-located
-backend — usually leave at `127.0.0.1`). The local-install verify step is
-auto-skipped when the target isn't this machine; confirm the rollout on
-the SPA Inventory page instead.
+`-Server` exports `KANADE_NATS_URL`; it does not route those HTTP CLI
+requests through the broker. Agent command delivery and result reporting
+still use NATS. `-SourceUrl` is the download base reachable **from the
+target**. When omitted, the script inherits a non-loopback `BackendUrl`;
+otherwise it uses loopback with the staged `backend.toml` bind port
+(fallback 8080). A terminal's loopback tunnel is not a remote target's
+download endpoint; set `-SourceUrl` explicitly when these differ.
+The local-install verify step is auto-skipped for a remote PC; confirm the
+installed version in SPA Inventory. These are current script behaviors,
+not the proposed deploy safety defaults.
 
 What it automates per role:
 
