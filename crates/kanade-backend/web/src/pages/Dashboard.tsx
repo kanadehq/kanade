@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Activity,
@@ -39,6 +40,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ApiError, apiFetch, formatError } from '@/lib/api';
 import { exitTone } from '@/lib/exitCode';
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/lib/auth';
 import type {
   ActiveInvestigationsResponse,
   FleetPerfResponse,
@@ -113,6 +115,7 @@ function NatsAuthBanner({ audit }: { audit: NatsAuthHealth }) {
                 subject: t(`natsAuth.subjects.${f.subject}`, { defaultValue: f.subject }),
               })}
             </span>
+            {f.occurrence_id && <span className="text-muted"> · #{f.occurrence_id}</span>}
             {f.sample_hosts.length > 0 && (
               <span className="text-muted"> — {f.sample_hosts.join(', ')}</span>
             )}
@@ -127,6 +130,95 @@ function NatsAuthBanner({ audit }: { audit: NatsAuthHealth }) {
         </p>
       )}
     </div>
+  );
+}
+
+type AuthEvidence = {
+  id: number;
+  kind: string;
+  subject: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+  count: number;
+  sampled_out: boolean;
+  last_poll_complete: boolean;
+  connections: {
+    cid: string;
+    server_id: string;
+    broker_start: string;
+    broker_now: string | null;
+    connection_start: string | null;
+    last_activity: string | null;
+    first_observed_at: string;
+    last_observed_at: string;
+    claimed_role: string;
+    claimed_host?: string;
+    credential_class: string;
+    poll_complete: boolean;
+  }[];
+};
+
+function NatsAuthHistory() {
+  const { hasRole } = useAuth();
+  const { t } = useTranslation('dashboard');
+  const [open, setOpen] = useState(false);
+  const [before, setBefore] = useState<number | null>(null);
+  const history = useQuery({
+    queryKey: ['nats-auth-history', before],
+    queryFn: () => apiFetch<AuthEvidence[]>(`/api/notices/nats-auth${before ? `?before=${before}` : ''}`),
+    enabled: hasRole('admin') && open,
+    refetchInterval: 60_000,
+  });
+  if (!hasRole('admin')) return null;
+  return (
+    <details onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className="cursor-pointer">{t('natsAuth.evidence.history')}</summary>
+      <p className="text-muted text-xs">{t('natsAuth.evidence.limits')}</p>
+      {history.error && <p role="alert">{formatError(history.error)}</p>}
+      {history.data?.length === 0 && <p>{t('natsAuth.evidence.empty')}</p>}
+      {history.data?.map((o) => (
+        <details key={o.id} className="my-2 rounded border p-2">
+          <summary>
+            #{o.id} {t(`natsAuth.kinds.${o.kind.replace('nats_auth.', '')}.title`)} · {o.subject} · {o.count} ·{' '}
+            {t(o.resolved_at ? 'natsAuth.evidence.resolved' : 'natsAuth.evidence.open')}
+          </summary>
+          <p>{t('natsAuth.evidence.observed')}: {o.first_seen_at} → {o.last_seen_at}</p>
+          {o.resolved_at && <p>{t('natsAuth.evidence.resolved')}: {o.resolved_at}</p>}
+          {!o.last_poll_complete && <p>{t('natsAuth.evidence.incomplete')}</p>}
+          {o.sampled_out && <p>{t('natsAuth.evidence.sampled')}</p>}
+          {o.connections.length === 0 && <p>{t('natsAuth.evidence.empty')}</p>}
+          {o.connections.map((c) => {
+            const identifier = `${c.server_id} / ${c.broker_start} / cid=${c.cid}`;
+            return (
+              <div key={identifier} className="my-2 break-all border-t pt-2 text-xs">
+                <p>{t('natsAuth.evidence.broker')}: <code className="select-all">{identifier}</code></p>
+                <button type="button" onClick={() => {
+                  void navigator.clipboard?.writeText(identifier).catch(() => {
+                    // The identifier remains selectable when clipboard permission is unavailable.
+                  });
+                }}>{t('natsAuth.evidence.copy')}</button>
+                <p>{t('natsAuth.evidence.observed')}: {c.first_observed_at} → {c.last_observed_at}</p>
+                {!c.poll_complete && <p>{t('natsAuth.evidence.incomplete')}</p>}
+                <p>
+                  {t('natsAuth.evidence.brokerTime')}: {c.broker_now ?? '—'} ·{' '}
+                  {t('natsAuth.evidence.start')}: {c.connection_start ?? '—'} ·{' '}
+                  {t('natsAuth.evidence.activity')}: {c.last_activity ?? '—'}
+                </p>
+                <p>{t('natsAuth.evidence.credentialClass')}: {c.credential_class}</p>
+                <p>{t('natsAuth.evidence.claim')}: {c.claimed_role} / {c.claimed_host ?? '—'}</p>
+              </div>
+            );
+          })}
+        </details>
+      ))}
+      {before && <button type="button" onClick={() => setBefore(null)}>{t('natsAuth.evidence.latest')}</button>}
+      {history.data?.length === 100 && (
+        <button type="button" onClick={() => setBefore(history.data![history.data!.length - 1].id)}>
+          {t('natsAuth.evidence.older')}
+        </button>
+      )}
+    </details>
   );
 }
 
@@ -156,6 +248,7 @@ type NatsAuthFinding = {
   count: number;
   sample_hosts: string[];
   first_seen_at: string;
+  occurrence_id?: number | null;
 };
 
 type NatsAuthHealth = {
@@ -598,6 +691,7 @@ export function Dashboard() {
         </Card>
       )}
 
+      <NatsAuthHistory />
       {health?.nats_auth && (
         <NatsAuthBanner audit={health.nats_auth} />
       )}

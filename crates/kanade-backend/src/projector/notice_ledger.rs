@@ -140,11 +140,23 @@ pub async fn load(pool: &SqlitePool, prefix: &str) -> Result<Vec<Stored>> {
 }
 
 /// Write `ops` in one transaction. Returns how many were applied.
+#[cfg(test)]
 pub async fn apply(pool: &SqlitePool, ops: &[Op], now: DateTime<Utc>) -> Result<usize> {
     if ops.is_empty() {
         return Ok(0);
     }
     let mut tx = pool.begin().await.context("begin backend_notices tx")?;
+    apply_tx(&mut tx, ops, now).await?;
+    tx.commit().await.context("commit backend_notices tx")?;
+    Ok(ops.len())
+}
+
+/// Share the audit transaction with occurrence evidence.
+pub async fn apply_tx(
+    conn: &mut sqlx::SqliteConnection,
+    ops: &[Op],
+    now: DateTime<Utc>,
+) -> Result<()> {
     for op in ops {
         match op {
             Op::Raise(d) => {
@@ -168,7 +180,7 @@ pub async fn apply(pool: &SqlitePool, ops: &[Op], now: DateTime<Utc>) -> Result<
                 .bind(sample_json(&d.sample))
                 .bind(now)
                 .bind(now)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .with_context(|| format!("raise notice {}", d.kind))?;
             }
@@ -184,7 +196,7 @@ pub async fn apply(pool: &SqlitePool, ops: &[Op], now: DateTime<Utc>) -> Result<
                 .bind(now)
                 .bind(&d.kind)
                 .bind(&d.subject)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .with_context(|| format!("update notice {}", d.kind))?;
             }
@@ -198,14 +210,13 @@ pub async fn apply(pool: &SqlitePool, ops: &[Op], now: DateTime<Utc>) -> Result<
                 .bind(now)
                 .bind(kind)
                 .bind(subject)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
                 .with_context(|| format!("resolve notice {kind}"))?;
             }
         }
     }
-    tx.commit().await.context("commit backend_notices tx")?;
-    Ok(ops.len())
+    Ok(())
 }
 
 fn sample_json(sample: &[String]) -> String {

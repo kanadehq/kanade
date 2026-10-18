@@ -162,6 +162,25 @@
     }
   },
   "natsAuth": {
+    "evidence": {
+      "incomplete": "The last observation came from an incomplete poll; counts and samples may miss connections.",
+      "history": "NATS authentication evidence and resolved history (admin)",
+      "limits": "Sampled observations, retained for 30 days. Last observed is not a disconnect time. Polls can miss short-lived connections.",
+      "empty": "Connection evidence not captured or expired.",
+      "resolved": "Resolved",
+      "open": "Open",
+      "observed": "Observed (UTC)",
+      "sampled": "Connections omitted by sample or size limits.",
+      "broker": "Broker-issued ID / startup / connection ID",
+      "copy": "Copy connection identifier",
+      "brokerTime": "Broker observation time",
+      "start": "Connection start",
+      "activity": "Last activity",
+      "claim": "Untrusted client claims: role / registered host",
+      "credentialClass": "Broker-reported credential class",
+      "latest": "Latest",
+      "older": "Older occurrences"
+    },
     "grace": "Broker authentication mode was changed recently: new findings are held back until {{until}} while connections re-establish.",
     "summary_one": "{{count}} connection claiming the {{subject}} role",
     "summary_other": "{{count}} connections claiming the {{subject}} role",

@@ -242,11 +242,22 @@ pub fn evaluate(mode: NatsAuthMode, claimed: Claimed, reported: &Reported) -> Op
 /// projector's classifier, never the broker's raw field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {
+    pub connection: Option<super::nats_auth_evidence::Connection>,
     pub claimed: Claimed,
     /// The host identity the connection announced. Claimed, so it is only
     /// ever named in a sample if it is a registered pc_id.
     pub pc_id: Option<String>,
     pub label: String,
+}
+
+/// Shared membership boundary for aggregate notices and retained evidence.
+/// Observation-specific classification rules belong here so both agree.
+pub fn evaluate_observed(mode: NatsAuthMode, observed: &Observed) -> Option<Finding> {
+    evaluate(
+        mode,
+        observed.claimed,
+        &Reported::from_label(&observed.label),
+    )
 }
 
 /// Connections sharing a finding kind and a claimed-role bucket.
@@ -273,7 +284,7 @@ pub fn group(
 ) -> Vec<Group> {
     let mut acc: BTreeMap<(FindingKind, &'static str), (usize, BTreeSet<String>)> = BTreeMap::new();
     for o in observed {
-        let Some(f) = evaluate(mode, o.claimed, &Reported::from_label(&o.label)) else {
+        let Some(f) = evaluate_observed(mode, o) else {
             continue;
         };
         let entry = acc.entry((f.kind, o.claimed.subject())).or_default();
@@ -473,6 +484,7 @@ mod tests {
 
     fn obs(claimed: Claimed, pc: Option<&str>, label: &str) -> Observed {
         Observed {
+            connection: None,
             claimed,
             pc_id: pc.map(str::to_string),
             label: label.to_string(),

@@ -131,7 +131,11 @@ pub async fn run_poll(
     };
     let stored = notice_ledger::load(pool, NOTICE_PREFIX).await?;
     let ops = plan(&settings, poll, &stored, now);
-    let written = notice_ledger::apply(pool, &ops, now).await?;
+    let mut tx = pool.begin().await?;
+    notice_ledger::apply_tx(&mut tx, &ops, now).await?;
+    super::nats_auth_evidence::update(&mut tx, &settings, poll, &ops, now).await?;
+    tx.commit().await?;
+    let written = ops.len();
     let status = if poll.complete {
         PollStatus::Ok
     } else {
@@ -142,6 +146,7 @@ pub async fn run_poll(
 }
 
 pub async fn record_state(pool: &SqlitePool, status: PollStatus, now: DateTime<Utc>) -> Result<()> {
+    super::nats_auth_evidence::prune(pool, now).await?;
     sqlx::query(
         "INSERT INTO nats_auth_audit_state (id, status, polled_at) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET status = excluded.status, polled_at = excluded.polled_at",
@@ -178,6 +183,7 @@ pub struct NatsAuthHealth {
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct FindingView {
+    pub occurrence_id: Option<i64>,
     pub kind: String,
     pub subject: String,
     pub severity: String,
@@ -205,6 +211,7 @@ pub async fn health_block(
         .into_iter()
         .filter(|s| s.resolved_at.is_none())
         .map(|s| FindingView {
+            occurrence_id: None,
             kind: s
                 .kind
                 .strip_prefix(NOTICE_PREFIX)
@@ -217,6 +224,22 @@ pub async fn health_block(
             first_seen_at: s.first_seen_at,
         })
         .collect();
+    let occurrences: Vec<(i64, String, String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, kind, subject, first_seen_at FROM nats_auth_occurrences WHERE resolved_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    for f in &mut findings {
+        f.occurrence_id = occurrences
+            .iter()
+            .find(|(_, k, s, first)| {
+                k == &format!("{NOTICE_PREFIX}{}", f.kind)
+                    && s == &f.subject
+                    && first == &f.first_seen_at
+            })
+            .map(|(id, _, _, _)| *id);
+    }
     findings.sort_by(|a, b| {
         (severity_rank(&a.severity), &a.kind, &a.subject).cmp(&(
             severity_rank(&b.severity),
@@ -273,6 +296,7 @@ mod tests {
 
     fn agent(pc: &str, label: &str) -> Observed {
         Observed {
+            connection: None,
             claimed: Claimed::Role(NatsRole::Agent),
             pc_id: Some(pc.into()),
             label: label.into(),
@@ -374,6 +398,8 @@ mod tests {
         assert_eq!(h.findings.len(), 1);
         assert_eq!(h.findings[0].kind, "token_reverted");
         assert_eq!(h.findings[0].first_seen_at, t0());
+        let first_occurrence = h.findings[0].occurrence_id;
+        assert!(first_occurrence.is_some());
 
         // Gone: resolved, and health shows nothing open.
         let t2 = t0() + Duration::minutes(2);
@@ -397,6 +423,8 @@ mod tests {
         );
         let h = health_block(&pool, Some(&s), t3).await;
         assert_eq!(h.findings[0].first_seen_at, t3);
+        assert!(h.findings[0].occurrence_id.is_some());
+        assert_ne!(h.findings[0].occurrence_id, first_occurrence);
     }
 
     #[tokio::test]
@@ -460,6 +488,7 @@ mod tests {
         // misbehaving broker/host could produce.
         let o = [
             Observed {
+                connection: None,
                 claimed: Claimed::Role(NatsRole::Agent),
                 pc_id: Some(secret.into()),
                 label: secret.into(),
@@ -499,6 +528,7 @@ mod tests {
                 "count",
                 "first_seen_at",
                 "kind",
+                "occurrence_id",
                 "sample_hosts",
                 "severity",
                 "subject"

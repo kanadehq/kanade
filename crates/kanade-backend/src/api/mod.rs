@@ -633,6 +633,7 @@ pub fn router(state: AppState) -> Router {
 
     // Account management — admin only.
     let admin = Router::new()
+        .merge(health::nats_auth_routes())
         .route("/api/accounts", get(accounts::list).post(accounts::create))
         .route(
             "/api/accounts/{username}",

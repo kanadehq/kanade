@@ -700,3 +700,18 @@ Widening either allow list is a licensing decision, not a build fix.
   it stops capture after abrupt daemon death even when no screen pixels change.
   Screen Recording permission must be verified through the installed launch
   route; a development Terminal grant does not establish daemon authorization.
+
+## NATS authentication evidence
+
+- `projector/nats_auth_evidence.rs` stores occurrence samples separately from
+  the aggregate notice ledger. Keep its updates and notice changes in the same
+  transaction. Use `nats_auth_findings::evaluate_observed` for both grouping and evidence
+  membership so classification changes cannot leave them disagreeing.
+- The 32 KiB evidence cap exists in `nats_auth_evidence::MAX_BYTES` and the
+  `nats_auth_occurrences.evidence_json` CHECK introduced by
+  `migrations/20261018000000_nats_auth_evidence.sql`. Changing the schema cap
+  requires an additive migration; never edit an applied migration.
+- Evidence identifies a connection by broker `server_id` + `/varz.start` +
+  decimal `cid`. Client role claims are untrusted. Raw names, reported users,
+  credentials and peer addresses must not enter this history. Keep its API
+  admin-only and its expiry active even when monitoring polls fail.
