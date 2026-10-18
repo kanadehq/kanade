@@ -257,7 +257,6 @@ struct Varz {
     start: DateTime<Utc>,
     now: DateTime<Utc>,
     config_load_time: DateTime<Utc>,
-    total_connections: u64,
     auth_timeout: f64,
     auth_required: Option<bool>,
 }
@@ -289,12 +288,20 @@ impl Varz {
         else {
             return Acceptance::Unproven(EvidenceReason::IncompleteMonitoring);
         };
+        // /varz does not expose effective WS authorization (including its
+        // token/user overrides and cookies). A second CONNECT overwrites the
+        // identity before authentication but retains earlier traffic counters.
+        // Without listener policy evidence those counters cannot prove that
+        // the currently missing WS identity was accepted.
+        if c.transport.as_deref() == Some("websocket") {
+            return Acceptance::Unproven(EvidenceReason::ListenerAuthUnproven);
+        }
         if input > 0 || output > 0 || subs > 0 {
             // On an auth-required TCP listener, a missing identity conflicts
             // with broker policy. Counters can predate a second CONNECT
             // (which overwrites options before re-authentication), so they
             // cannot prove that this missing identity was accepted.
-            if c.transport.as_deref() == Some("nats") && self.auth_required == Some(true) {
+            if self.auth_required == Some(true) {
                 return Acceptance::Unproven(EvidenceReason::AuthPolicyConflict);
             }
             return Acceptance::NoAuth(EvidenceReason::AcceptedTrafficNoAuth);
@@ -621,7 +628,7 @@ async fn fetch_page(client: &MonitorClient, base: &str, offset: usize) -> Result
     // `auth=1` is what makes the endpoint report `authorized_user` at all;
     // `subs=0` keeps subscription lists (by far the largest part of a
     // connection record) off the wire.
-    let url = format!("{base}/connz?auth=1&subs=0&limit={PAGE_SIZE}&offset={offset}");
+    let url = format!("{base}/connz?auth=1&subs=0&sort=cid&limit={PAGE_SIZE}&offset={offset}");
     fetch_json(client, &url).await
 }
 
@@ -672,29 +679,44 @@ async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>
     }
     let mut out: Vec<ConnInfo> = Vec::new();
     let mut ids = HashSet::new();
-    let mut total = None;
     let mut complete = false;
     let mut consistent = true;
     let mut last_now = before.now;
     for _ in 0..MAX_PAGES {
-        let z = fetch_page(client, base, out.len()).await?;
+        // CID order is ascending and new connections append. Re-read the
+        // preceding boundary row: prefix removals would shift offsets and
+        // otherwise silently skip unseen connections. New arrivals alone do
+        // not invalidate absence evidence for the pages already covered.
+        let anchor = out.last().map(|c| c.cid);
+        let offset = out.len().saturating_sub(1);
+        let z = fetch_page(client, base, offset).await?;
         let observed_at = Utc::now();
         let at = z.now.context("connz missing timestamp")?;
         if z.server_id != before.server_id || at < last_now || at < before.start {
             bail!("broker identity or time changed during connz walk");
         }
         last_now = at;
-        if z.offset != Some(out.len()) || z.num_connections != Some(z.connections.len()) {
+        if z.offset != Some(offset) || z.num_connections != Some(z.connections.len()) {
             bail!("connz page metadata missing or inconsistent");
         }
-        consistent &= total.is_none_or(|t| t == z.total);
-        total = Some(z.total);
         let got = z.connections.len();
-        for mut c in z.connections {
-            if c.cid == 0 || !ids.insert(c.cid) {
+        let end = offset
+            .checked_add(got)
+            .context("connz page range overflow")?;
+        consistent &= end <= z.total;
+        if let Some(cid) = anchor {
+            consistent &= z.connections.first().is_some_and(|c| c.cid == cid);
+        }
+        let mut previous = anchor.unwrap_or(0);
+        for (index, mut c) in z.connections.into_iter().enumerate() {
+            if index == 0 && anchor == Some(c.cid) {
+                continue;
+            }
+            if c.cid <= previous || !ids.insert(c.cid) {
                 consistent = false;
                 continue;
             }
+            previous = c.cid;
             c.acceptance = before.acceptance(&c, at);
             c.connection = Some(super::nats_auth_evidence::Connection {
                 observed_at: Some(observed_at),
@@ -707,8 +729,8 @@ async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>
             });
             out.push(c);
         }
-        if got == 0 || out.len() >= z.total || !consistent {
-            complete = out.len() == z.total && consistent;
+        if got <= usize::from(anchor.is_some()) || end >= z.total || !consistent {
+            complete = end == z.total && consistent;
             break;
         }
     }
@@ -716,9 +738,6 @@ async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>
     if !before.same_epoch(&after) || last_now > after.now {
         bail!("broker restarted or reloaded during monitoring poll");
     }
-    // Offset pagination isn't an atomic snapshot. Any new connection while
-    // walking invalidates absence evidence, but not a positive observation.
-    complete &= before.total_connections == after.total_connections;
     Ok((out, complete, before))
 }
 
@@ -1102,7 +1121,7 @@ mod tests {
     async fn canned_connz(
         pages: Vec<String>,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-        let mut offset = 0;
+        let mut offset: usize = 0;
         let mut responses = vec![varz_fixture()];
         for page in pages {
             let mut page: serde_json::Value = serde_json::from_str(&page).unwrap();
@@ -1111,7 +1130,7 @@ mod tests {
             page["offset"] = offset.into();
             let len = page["connections"].as_array().unwrap().len();
             page["num_connections"] = len.into();
-            offset += len;
+            offset = (offset + len).saturating_sub(1);
             responses.push(page.to_string());
         }
         responses.push(varz_fixture());
@@ -1191,7 +1210,7 @@ mod tests {
             vec![
                 epoch.clone(),
                 page.replace("\"total\":1", "\"total\":2"),
-                page.clone(),
+                page.replace("\"offset\":0", "\"offset\":1"),
             ],
         ] {
             let (base, _) = canned_http(pages).await;
@@ -1204,8 +1223,20 @@ mod tests {
         let epoch = varz_fixture().replace("TESTSERVER", "BROKER1");
         let mut pages = vec![epoch.clone()];
         for cid in 1..=MAX_PAGES {
-            let offset = cid - 1;
-            pages.push(format!(r#"{{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","offset":{offset},"num_connections":1,"total":1000,"connections":[{{"cid":{cid}}}]}}"#));
+            let offset = cid.saturating_sub(2);
+            let conns = if cid == 1 {
+                serde_json::json!([{"cid":cid}])
+            } else {
+                serde_json::json!([{"cid":cid-1},{"cid":cid}])
+            };
+            pages.push(
+                serde_json::json!({
+                    "server_id":"BROKER1","now":"2026-10-18T02:24:58Z",
+                    "offset":offset,"num_connections":conns.as_array().unwrap().len(),
+                    "total":1000,"connections":conns
+                })
+                .to_string(),
+            );
         }
         pages.push(epoch);
         let (base, _) = canned_http(pages).await;
@@ -1245,7 +1276,7 @@ mod tests {
                 .collect();
             format!(r#"{{"total":3,"connections":[{}]}}"#, conns.join(","))
         };
-        let (base, queries) = canned_connz(vec![page(&[1, 2]), page(&[3])]).await;
+        let (base, queries) = canned_connz(vec![page(&[1, 2]), page(&[2, 3])]).await;
         let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
 
         let conns = fetch_all(&client, &base).await.expect("walk both pages");
@@ -1262,7 +1293,7 @@ mod tests {
             .collect();
         assert_eq!(queries.len(), 2, "{queries:?}");
         assert!(queries[0].contains("offset=0"), "{}", queries[0]);
-        assert!(queries[1].contains("offset=2"), "{}", queries[1]);
+        assert!(queries[1].contains("offset=1"), "{}", queries[1]);
         // And `auth=1` is what makes the endpoint report the credential at
         // all — without it every connection would look unauthenticated.
         assert!(queries.iter().all(|q| q.contains("auth=1")), "{queries:?}");
@@ -1626,7 +1657,11 @@ mod tests {
                 c.acceptance = v.acceptance(&c, v.now);
                 assert_eq!(
                     classify_connection(&c, &probe, Evidence::Unproven),
-                    LABEL_NO_AUTH
+                    if transport == "nats" {
+                        LABEL_NO_AUTH
+                    } else {
+                        LABEL_UNPROVEN
+                    }
                 );
             }
         }
@@ -1638,7 +1673,7 @@ mod tests {
         c.transport = Some("websocket".into());
         assert_eq!(v.acceptance(&c, v.now).label(), LABEL_UNPROVEN);
         c.subscriptions = Some(1);
-        assert_eq!(v.acceptance(&c, v.now).label(), LABEL_NO_AUTH);
+        assert_eq!(v.acceptance(&c, v.now).label(), LABEL_UNPROVEN);
     }
 
     #[test]
@@ -1747,7 +1782,7 @@ mod tests {
         churn["total_connections"] = 11.into();
         let (base, _) =
             canned_http(vec![varz_fixture(), page.to_string(), churn.to_string()]).await;
-        assert!(!fetch_walk(&http, &base).await.unwrap().1);
+        assert!(fetch_walk(&http, &base).await.unwrap().1);
         let (base, _) = canned_http(vec!["{}".into()]).await;
         assert!(fetch_walk(&http, &base).await.is_err());
     }
@@ -1988,14 +2023,93 @@ mod tests {
         assert_eq!(ev(true, "TESTSERVER", 1, &v, &c), Evidence::Unproven);
     }
     #[test]
-    fn old_traffic_during_reauthentication_cannot_override_required_tcp_auth() {
-        let v = snapshot_fixture();
-        let mut c = connection_fixture();
-        c.in_msgs = Some(12);
-        c.subscriptions = Some(2);
-        c.name = Some("kanade-cli".into());
-        assert_eq!(v.acceptance(&c, v.now).label(), LABEL_UNPROVEN);
+    fn old_traffic_during_reauthentication_cannot_override_listener_auth() {
+        let mut v = snapshot_fixture();
+        let probe = probe_holding(None);
+        for transport in ["nats", "websocket"] {
+            for policy in [Some(true), Some(false), None] {
+                if transport == "nats" && policy != Some(true) {
+                    continue;
+                }
+                v.auth_required = policy;
+                for name in [None, Some("kanade-cli")] {
+                    // Snapshot after an authenticated CONNECT/PUB, while a
+                    // second CONNECT with an empty token has overwritten opts
+                    // but has not yet failed authentication. WS may use its
+                    // own token even when TCP auth_required is false/absent.
+                    let mut c = connection_fixture();
+                    c.transport = Some(transport.into());
+                    c.in_msgs = Some(12);
+                    c.out_msgs = Some(3);
+                    c.subscriptions = Some(2);
+                    c.name = name.map(str::to_owned);
+                    c.authorized_user = Some(String::new());
+                    c.acceptance = v.acceptance(&c, v.now);
+                    assert_eq!(c.acceptance.label(), LABEL_UNPROVEN);
+                    let reason = if transport == "websocket" {
+                        EvidenceReason::ListenerAuthUnproven
+                    } else {
+                        EvidenceReason::AuthPolicyConflict
+                    };
+                    assert_eq!(
+                        uncertainty_reasons(std::slice::from_ref(&c)),
+                        BTreeMap::from([(reason, 1)])
+                    );
+                    let observations = observe(&[c], &probe, Evidence::Unproven);
+                    let findings = super::super::nats_auth_findings::group(
+                        kanade_shared::wire::NatsAuthMode::Token,
+                        &observations,
+                        &HashSet::new(),
+                    );
+                    assert!(findings.is_empty(), "{transport} {policy:?} {name:?}");
+                }
+            }
+        }
     }
+
+    #[tokio::test]
+    async fn overlapping_cid_boundaries_tolerate_appends_but_detect_skipped_rows() {
+        let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let page = |offset: usize, total: usize, cids: &[u64]| {
+            serde_json::json!({
+                "server_id":"TESTSERVER","now":"2026-10-18T02:24:58Z",
+                "offset":offset,"num_connections":cids.len(),"total":total,
+                "connections":cids.iter().map(|cid| serde_json::json!({"cid":cid})).collect::<Vec<_>>()
+            }).to_string()
+        };
+        let mut after: serde_json::Value = serde_json::from_str(&varz_fixture()).unwrap();
+        after["total_connections"] = 100.into();
+        for (next, expected_complete, expected_ids) in [
+            // New higher CIDs append without skipping any old connections.
+            (page(1, 4, &[2, 3, 4]), true, vec![1, 2, 3, 4]),
+            // A connection after the boundary can close before it is read.
+            (page(1, 2, &[2]), true, vec![1, 2]),
+            // CID 1 disappeared before offset 1: CID 3 would be skipped by
+            // an ordinary non-overlapping walk. Preserve positives but hold
+            // absence claims when the expected boundary CID 2 is missing.
+            (page(1, 3, &[3, 4]), false, vec![1, 2, 3, 4]),
+            // Re-reading the anchor without making progress terminates.
+            (page(1, 3, &[2]), false, vec![1, 2]),
+        ] {
+            let (base, queries) = canned_http(vec![
+                varz_fixture(),
+                page(0, 3, &[1, 2]),
+                next,
+                after.to_string(),
+            ])
+            .await;
+            let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+            assert_eq!(complete, expected_complete);
+            assert_eq!(
+                conns.iter().map(|c| c.cid).collect::<Vec<_>>(),
+                expected_ids
+            );
+            let queries = queries.lock().unwrap();
+            assert!(queries[1].contains("sort=cid"));
+            assert!(queries[2].contains("offset=1"));
+        }
+    }
+
     #[tokio::test]
     async fn page_identity_changes_and_duplicate_cids_cannot_resolve_findings() {
         let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
@@ -2004,8 +2118,9 @@ mod tests {
             "offset":0,"num_connections":1,"total":2,"connections":[{"cid":1}]
         });
         let mut next = first.clone();
-        next["offset"] = 1.into();
-        // Offset drift can repeat a row; it must not count as two connections.
+        next["num_connections"] = 2.into();
+        next["connections"] = serde_json::json!([{"cid":1},{"cid":1}]);
+        // The anchor is expected once; another copy must not count twice.
         let (base, _) = canned_http(vec![
             varz_fixture(),
             first.to_string(),

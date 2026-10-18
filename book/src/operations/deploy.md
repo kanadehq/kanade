@@ -116,14 +116,17 @@ version, RTT, or elapsed time alone does not prove access without authentication
 The projector brackets its paged connz walk with `/varz`, checking server id,
 startup/configuration timestamps and response/page metadata. A restart, reload,
 identity change, malformed/missing response or timeout invalidates the poll.
-Connection churn or an incomplete walk prevents resolution, while usable positive
-observations can still raise findings. Offset pagination is not an atomic snapshot;
-counts and monotonically assigned cids detect inconsistencies, not every possible
-race or a change immediately after the final response.
+Pages are sorted by ascending CID and overlap at the preceding boundary CID.
+New connections append and do not by themselves prevent resolution; a missing
+boundary, duplicate/reordered CID or incomplete walk holds resolutions, while
+usable positive observations can still raise findings. The cumulative
+`total_connections` counter is not a completeness condition. Offset pagination
+is not an atomic snapshot: the boundary checks detect skipped prefixes, not
+every possible race or a change immediately after the final response.
 
-With no reported identity, application message traffic (in/out messages) or a
-live subscription proves the client was allowed to use the protocol. On TCP,
-positive traffic must also be consistent with broker policy: explicit
+With no reported identity on TCP, application message traffic (in/out messages)
+or a live subscription proves the client was allowed to use the protocol.
+Positive traffic must also be consistent with broker policy: explicit
 `auth_required: true` plus a missing identity stays unproven. Counters can predate
 a second CONNECT, whose options are overwritten before re-authentication.
 All three
@@ -141,14 +144,18 @@ Pending/unproven connections do not replace an agent's last observed credential.
 
 TCP auth policy and timeouts are never applied to WebSocket connections. WS can
 have separate authorization, credentials from cookies, or `no_auth_user`.
-Positive protocol activity with no broker identity still reveals open WS access;
-a reported identity takes precedence over activity. Cookie/token auth retains
+The current monitoring fields do not expose its effective authorization policy.
+Without a reported identity, even positive traffic remains
+`auth-unproven` with reason `listener_auth_unproven`: counters may predate a
+second CONNECT whose replacement credentials will be rejected. This also limits
+detection of truly open WS listeners; TCP acceptance evidence remains available.
+A reported identity takes precedence over activity. Cookie/token auth retains
 redaction. WS user values stay `unknown` because a live TCP user login cannot
 prove that another listener's value is a username rather than a secret.
 `no_auth_user` assigns a broker identity, so this audit cannot distinguish that
 fallback from a credentialed login as the same user: it is not proof of a
-fully open broker. Idle WS authentication remains unproven. MQTT/leaf/unknown
-transports without a reported identity are also unproven. This audit trusts the
+fully open broker. WS authentication without an identity remains unproven.
+MQTT/leaf/unknown transports without a reported identity are also unproven. This audit trusts the
 configured monitoring endpoint to be the broker and to honor `auth=1`; it does
 not test listener reachability or actively probe production with empty credentials.
 
