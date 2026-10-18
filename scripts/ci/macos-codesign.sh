@@ -39,20 +39,27 @@ ident_for() { if [[ "$1" == kanade-agent ]]; then echo com.kanade.agent; else ec
 
 # verify_bin <path> <identifier> <sha1>
 verify_bin() {
-  local f="$1" id="$2" sha="$3" dr dr_l
+  local f="$1" id="$2" sha="$3" dr actual_sha
+  local requirement="identifier \"$2\" and certificate leaf = H\"$3\""
   codesign --verify --strict -v "$f"
   codesign -dv "$f"
   dr=$(codesign -dr - "$f" 2>&1)
   echo "$dr"
-  dr_l=$(printf '%s' "$dr" | tr 'A-Z' 'a-z')
-  if [[ "$dr_l" == *"cdhash"* ]]; then
-    echo "::error::$f: designated requirement contains unstable cdhash constraint"
+  # Exact DR rejects cdhash, OR branches, and any additional constraints.
+  dr=$(printf '%s\n' "$dr" | sed -n 's/^designated => //p' | tr 'A-F' 'a-f')
+  if [[ "$dr" != "$requirement" ]]; then
+    echo "::error::$f: designated requirement differs from the pinned stable identity"
     return 1
   fi
-  if [[ "$dr_l" != *"identifier \"$id\""* || "$dr_l" != *"certificate leaf = h\"$sha\""* ]]; then
-    echo "::error::$f: designated requirement lacks identifier \"$id\" or certificate leaf H\"$sha\""
-    return 1
-  fi
+  codesign -dv "$f" 2>&1 | grep -Fx "Identifier=$id" >/dev/null
+  # Check the embedded leaf independently of the text in the requirement.
+  rm -f "$work/leaf-0"
+  codesign -d --extract-certificates "$work/leaf-" "$f"
+  actual_sha=$(openssl x509 -inform DER -in "$work/leaf-0" -noout -fingerprint -sha1)
+  actual_sha=$(printf '%s' "${actual_sha#*=}" | tr -d ':' | tr 'A-F' 'a-f')
+  [[ "$actual_sha" == "$sha" ]] || {
+    echo "::error::$f: embedded leaf certificate differs from $sha_file"; return 1;
+  }
 }
 
 work=$(mktemp -d)
@@ -112,7 +119,18 @@ case "$mode" in
       a="dist/$bin-$TARGET.tar.gz"
       [[ -f "$a" ]] || { echo "::error::missing $a"; exit 1; }
       d="$work/x-$bin"; mkdir -p "$d"
-      tar xzf "$a" -C "$d"
+      # Only copy the expected regular executable; never follow archive links.
+      python3 - "$a" "$bin-$TARGET" "$d/$bin-$TARGET" <<'PYTHON'
+import shutil
+import sys
+import tarfile
+with tarfile.open(sys.argv[1], 'r:gz') as archive:
+    members = archive.getmembers()
+    if len(members) != 1 or members[0].name != sys.argv[2] or not members[0].isfile():
+        raise SystemExit('archive must contain exactly the expected regular executable')
+    with archive.extractfile(members[0]) as src, open(sys.argv[3], 'wb') as dst:
+        shutil.copyfileobj(src, dst)
+PYTHON
       verify_bin "$d/$bin-$TARGET" "$(ident_for "$bin")" "$expected_sha"
     done
     echo "all archives carry the expected signature"
