@@ -82,6 +82,21 @@ echo "PASS: sign rejected missing signing-cert.sha1"
 
 echo "$test_sha" > "$work/repo/deploy/macos/signing-cert.sha1"
 
+echo "=== Mismatched certificate must fail before keychain import ==="
+(
+  cd "$work/repo"
+  export TARGET="$mock_target"
+  export MACOS_SIGN_CERT_P12_BASE64="$p12_b64" MACOS_SIGN_CERT_PASSWORD="$p12_pass"
+  PATH="$work/repo/scripts/ci:$PATH"
+  ln -s mock_cargo scripts/ci/cargo
+  echo "0000000000000000000000000000000000000000" > deploy/macos/signing-cert.sha1
+  if bash scripts/ci/macos-codesign.sh sign >"$work/rejected.log" 2>&1; then
+    echo "FAIL: sign accepted a mismatched certificate"; exit 1
+  fi
+  grep -q 'imported certificate SHA-1' "$work/rejected.log"
+  echo "$test_sha" > deploy/macos/signing-cert.sha1
+)
+
 echo "=== Test 2: Successful sign with matching certificate ==="
 (
   cd "$work/repo"
@@ -125,7 +140,7 @@ echo "=== Test 4: Rejection of ad-hoc (unsigned / cdhash-only) binary ==="
 (
   cd "$work/repo"
   echo 'int main(void) { return 1; }' | clang -x c - -target "$mock_target" -o "$stem"
-  codesign -s - "$stem" # ad-hoc sign
+  codesign --force -s - "$stem" # replace the linker ad-hoc signature
   tar czf "dist/$stem.tar.gz" "$stem"
   rm "$stem"
   export TARGET="$mock_target"
@@ -177,5 +192,50 @@ echo "=== Test 6: Rejection of tampered binary inside archive ==="
   fi
 )
 echo "PASS: tampered binary rejected by verify-dist"
+
+echo "=== Test 7: Different builds preserve the same signing identity ==="
+(
+  cd "$work/repo"
+  export TARGET="$mock_target" PATH="$work/bin:$PATH"
+  export MACOS_SIGN_CERT_P12_BASE64="$p12_b64" MACOS_SIGN_CERT_PASSWORD="$p12_pass"
+  binary="target/$mock_target/release/kanade-agent"
+  before=$(shasum -a 256 "$binary")
+  echo 'int main(void) { return 2; }' | clang -x c - -target "$mock_target" -o "$binary"
+  bash scripts/ci/macos-codesign.sh sign
+  [[ "$before" != "$(shasum -a 256 "$binary")" ]]
+  [[ "$dr" == "$(codesign -dr - "$binary" 2>&1)" ]]
+  cp "$binary" "$stem"
+  tar czf "dist/$stem.tar.gz" "$stem"
+  unset MACOS_SIGN_CERT_P12_BASE64 MACOS_SIGN_CERT_PASSWORD
+  bash scripts/ci/macos-codesign.sh verify-dist
+)
+echo "PASS: distinct signed builds share the DR and pass packaged verification"
+
+echo "=== Test 8: Archive links and unexpected members are rejected ==="
+(
+  cd "$work/repo"
+  export TARGET="$mock_target" PATH="$work/bin:$PATH"
+  for shape in symlink hardlink extra duplicate traversal; do
+    python3 - "dist/$stem.tar.gz" "$stem" "$shape" <<'PYTHON'
+import sys
+import tarfile
+with tarfile.open(sys.argv[1], 'w:gz') as archive:
+    member = tarfile.TarInfo(sys.argv[2])
+    shape = sys.argv[3]
+    if shape in ('symlink', 'hardlink'):
+        member.type = tarfile.SYMTYPE if shape == 'symlink' else tarfile.LNKTYPE
+        member.linkname = '../outside'
+    elif shape == 'traversal':
+        member.name = '../outside'
+    archive.addfile(member)
+    if shape in ('extra', 'duplicate'):
+        archive.addfile(tarfile.TarInfo('unexpected' if shape == 'extra' else member.name))
+PYTHON
+    if bash scripts/ci/macos-codesign.sh verify-dist >"$work/rejected.log" 2>&1; then
+      echo "FAIL: accepted archive $shape"; exit 1
+    fi
+    grep -q 'archive must contain exactly' "$work/rejected.log"
+  done
+)
 
 echo "=== All test-macos-codesign checks passed! ==="
