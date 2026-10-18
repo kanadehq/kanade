@@ -492,3 +492,80 @@ mod tests {
         assert_eq!(percentile(&v, 1.5), 10);
     }
 }
+
+/// Connection evidence is intentionally confined to the admin router.
+#[derive(serde::Deserialize)]
+pub struct HistoryQuery {
+    before: Option<i64>,
+}
+
+pub async fn nats_auth_history(
+    State(pool): State<sqlx::SqlitePool>,
+    axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<Vec<crate::projector::nats_auth_evidence::Occurrence>>, StatusCode> {
+    crate::projector::nats_auth_evidence::history(&pool, query.before)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Keep the production and access-control test route identical.
+pub fn nats_auth_routes<S>() -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    sqlx::SqlitePool: axum::extract::FromRef<S>,
+{
+    axum::Router::new()
+        .route(
+            "/api/notices/nats-auth",
+            axum::routing::get(nats_auth_history),
+        )
+        .route_layer(axum::middleware::from_fn(crate::auth::require_admin))
+}
+
+#[cfg(test)]
+mod evidence_access_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn evidence_history_requires_authentication_and_admin_role() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let router = nats_auth_routes::<sqlx::SqlitePool>().with_state(pool.clone());
+        for (role, expected) in [("viewer", 403), ("operator", 403), ("admin", 200)] {
+            let mut request = Request::builder()
+                .uri("/api/notices/nats-auth")
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(crate::auth::Claims {
+                sub: "test-account".into(),
+                exp: 4102444800,
+                aud: None,
+                roles: vec![role.into()],
+                allowed_features: None,
+            });
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status().as_u16(), expected);
+        }
+        let protected = router.layer(axum::middleware::from_fn_with_state(
+            pool,
+            crate::auth::verify,
+        ));
+        let response = protected
+            .oneshot(
+                Request::builder()
+                    .uri("/api/notices/nats-auth")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}

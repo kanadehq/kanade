@@ -120,7 +120,7 @@ resolve during it. The Dashboard says when the window is open.
 **Reading it from outside.** `GET /api/health/fleet` carries a `nats_auth`
 block: `expected_mode`, `grace_until`, `poll_status`, `open_total` (the
 connections covered) and `findings[]` (`kind`, `subject`, `severity`, `count`,
-`sample_hosts`, `first_seen_at`). It does **not** change the response's
+`sample_hosts`, `first_seen_at`, `occurrence_id`). It does **not** change the response's
 `status` or HTTP code, so an existing monitor keeps behaving as before; a
 monitor that should alert on this must read `nats_auth.findings`. A
 `poll_status` other than `ok` means the audit could not see the whole broker
@@ -128,10 +128,73 @@ monitor that should alert on this must read `nats_auth.findings`. A
 empty list is then not a clean result.
 
 **What is never shown.** The reported value of a connection may be a secret on
-some broker builds, so findings carry only fixed vocabularies (kind, severity,
-the role bucket `agent` / `backend` / `cli` / `unnamed` / `other`), counts and
-the names of hosts registered in the fleet. Neither the credential, nor the
-user name, nor the raw connection name is stored or served.
+some broker builds, so findings carry fixed vocabularies (kind, severity,
+the role bucket `agent` / `backend` / `cli` / `unnamed` / `other`), counts,
+registered host samples and an occurrence reference. Admin-only connection
+evidence adds broker-issued identifiers and parsed timestamps, as described
+below. Neither the credential, nor the reported user name, nor the raw
+connection name is copied into notice evidence.
+
+### Retained NATS authentication evidence
+
+Each new occurrence has its own numeric `occurrence_id` in the authenticated
+fleet health finding. The aggregate `backend_notices` row remains compatible;
+reopening it does not overwrite earlier occurrences. Dashboard's admin-only
+**NATS authentication evidence and resolved history** details and
+`GET /api/notices/nats-auth` expose the latest 100 occurrences, including resolved
+ones. Pass `?before=<oldest-id>` to page backwards. Viewers and operators cannot
+read this endpoint. Existing service-token and auth-disabled administrator
+semantics still apply. Identifiers are selectable and copyable for log searches.
+
+A sample records the broker-issued decimal `cid`, `server_id` **and broker
+startup timestamp** (`/varz.start`), backend first/last observation times (page
+fetch completion, before settings/database work), broker page observation time, and connection start/last activity timestamps when supplied.
+Occurrence timestamps describe notice processing; individual sample timestamps
+describe page acquisition. A cid alone, or server_id alone, must not be treated
+as a restart identity.
+The collector reads `/varz` before and after the paginated `/connz` walk and
+checks each page's server_id, timestamp and duplicate cids, within the existing
+20-second timeout. Missing identity or an inconsistent/restarted broker rejects
+the snapshot, reports an unreadable poll and leaves open findings unresolved.
+A paging cap reports an incomplete poll and likewise cannot resolve findings.
+This is a best-effort walk of live connections, not an atomic broker snapshot.
+
+Evidence includes only a fixed credential class (`user`, `shared-token`,
+`no-auth`, `unknown`) and a fixed `claimed_role` bucket. The role is an
+**untrusted client claim**, unlike broker-issued connection identifiers.
+Registered host samples remain in the existing aggregate notification. Raw
+`authorized_user`, tokens, passwords, connection names, arbitrary client metadata
+and unrestricted monitoring responses are never copied into connection evidence.
+Peer addresses are deliberately omitted: proxies and loopback commonly identify
+an intermediary rather than the originating client. The admin boundary limits
+exposure of retained connection correlation data.
+
+Per occurrence, at most the first 10 sampled identities and 10 most recently
+observed other identities are retained, deduplicated by server_id/start/cid,
+within a 32 KiB JSON limit. Each sample and the latest occurrence observation
+record whether their poll was complete; partial polls may undercount connections. Broker IDs are limited to 64 alphanumeric bytes;
+other context is parsed timestamps or fixed vocabulary. `sampled_out` indicates
+sample/size omissions. Evidence updates on each successful poll even if group
+counts/host samples have not changed. Ledger changes, occurrence creation,
+resolution and evidence updates commit in one SQLite transaction.
+
+Samples expire 30 days after their last observation, including samples in open
+findings. Resolved occurrences expire 30 days after resolution and are also
+capped at the newest 1000. Cleanup runs when the projector starts and every
+poll (including failed polls); an offline backend performs cleanup when restarted.
+There are only the classifier's fixed kind/role buckets of open occurrences.
+SQLite backups must use the operator's corresponding retention/access policy;
+logical expiry does not securely erase old database pages or backups.
+
+Old notices have no recoverable connection evidence; the UI labels absent or
+expired evidence accordingly. The identifiers lost in the 2026-10-18 incident
+cannot be reconstructed by this migration. Last observed is **not** a disconnect
+time. Connections that open and close between minute polls can be missed, and
+wiping the projection database loses these snapshots permanently. This change
+leaves classification conditions unchanged; authentication/pre-authentication
+classification is a separate change. Its integration boundary remains `Observed`,
+`Poll.complete` and the shared `evaluate_observed` adapter; the additive migration is named
+`20261018000000_nats_auth_evidence.sql`.
 
 ---
 

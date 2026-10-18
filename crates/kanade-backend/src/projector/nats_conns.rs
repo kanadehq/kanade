@@ -139,6 +139,10 @@ pub const LABEL_UNKNOWN: &str = "unknown";
 /// The subset of `/connz` this projector reads.
 #[derive(Debug, Deserialize)]
 struct Connz {
+    #[serde(default)]
+    server_id: Option<String>,
+    #[serde(default)]
+    now: Option<chrono::DateTime<Utc>>,
     /// Connections matching the query across ALL pages — the paging bound.
     #[serde(default)]
     total: usize,
@@ -148,10 +152,16 @@ struct Connz {
 
 #[derive(Debug, Deserialize)]
 struct ConnInfo {
-    /// Server-assigned connection id. Used only to break ties between two
-    /// live connections claiming one pc_id: higher = more recent.
+    #[serde(skip)]
+    connection: Option<super::nats_auth_evidence::Connection>,
+    /// Broker-issued id, scoped to its startup epoch. Also breaks ties
+    /// between live connections claiming one pc_id: higher = more recent.
     #[serde(default)]
     cid: u64,
+    #[serde(default)]
+    start: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    last_activity: Option<chrono::DateTime<Utc>>,
     /// The client-supplied connection name. Absent for clients that set
     /// none (the `nats` CLI does set one; a raw library user may not).
     #[serde(default)]
@@ -320,6 +330,7 @@ fn observe(conns: &[ConnInfo], probe: &CredentialProbe, ev: Evidence) -> Vec<Obs
                 .and_then(|p| p.identity)
                 .map(str::to_string);
             Some(Observed {
+                connection: c.connection.clone(),
                 claimed,
                 pc_id,
                 label: classify(c.authorized_user.as_deref(), probe, ev),
@@ -433,9 +444,82 @@ async fn fetch_page(client: &MonitorClient, base: &str, offset: usize) -> Result
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("read body of {url} (cap {MAX_BODY_BYTES} bytes)"))?
         .to_bytes();
-    serde_json::from_slice(&body).with_context(|| format!("decode /connz from {url}"))
+    serde_json::from_slice(&body).map_err(|_| anyhow::anyhow!("invalid /connz response"))
 }
 
+/// Startup epoch is server_id + start, never server_id alone.
+#[derive(Deserialize, PartialEq, Eq)]
+struct BrokerEpoch {
+    server_id: String,
+    start: chrono::DateTime<Utc>,
+}
+
+async fn fetch_epoch(client: &MonitorClient, base: &str) -> Result<BrokerEpoch> {
+    let uri: hyper::Uri = format!("{base}/varz").parse()?;
+    let res = client.get(uri).await?;
+    if !res.status().is_success() {
+        bail!("monitor identity unavailable");
+    }
+    let bytes = http_body_util::Limited::new(res.into_body(), MAX_BODY_BYTES)
+        .collect()
+        .await
+        .map_err(|_| anyhow::anyhow!("read broker identity response failed"))?
+        .to_bytes();
+    // Never include response bodies or deserialization errors in logs.
+    let epoch: BrokerEpoch =
+        serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid broker epoch"))?;
+    if epoch.server_id.is_empty()
+        || epoch.server_id.len() > 64
+        || !epoch.server_id.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        bail!("invalid broker identifier");
+    }
+    Ok(epoch)
+}
+
+async fn fetch_snapshot(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>, bool)> {
+    let before = fetch_epoch(client, base).await?;
+    let mut conns = Vec::new();
+    let mut complete = false;
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..MAX_PAGES {
+        let mut page = fetch_page(client, base, conns.len()).await?;
+        let observed_at = Utc::now();
+        let now = page
+            .now
+            .filter(|t| *t >= before.start)
+            .ok_or_else(|| anyhow::anyhow!("missing broker observation time"))?;
+        if page.server_id.as_deref() != Some(&before.server_id) {
+            bail!("broker changed during connection poll");
+        }
+        let got = page.connections.len();
+        for c in &mut page.connections {
+            if c.cid == 0 || !seen.insert(c.cid) {
+                bail!("inconsistent connection identifiers");
+            }
+            c.connection = Some(super::nats_auth_evidence::Connection {
+                observed_at: Some(observed_at),
+                cid: c.cid.to_string(),
+                server_id: before.server_id.clone(),
+                broker_start: before.start,
+                broker_now: Some(now),
+                connection_start: c.start,
+                last_activity: c.last_activity,
+            });
+        }
+        conns.extend(page.connections);
+        if got == 0 || conns.len() >= page.total {
+            complete = conns.len() >= page.total;
+            break;
+        }
+    }
+    if before != fetch_epoch(client, base).await? {
+        bail!("broker restarted during connection poll");
+    }
+    Ok((conns, complete))
+}
+
+#[cfg(test)]
 /// Walk every page of `/connz`. The flag says whether the walk covered the
 /// broker's own `total`: a walk cut short by the page cap, or by a broker
 /// that stopped serving, is not the full picture, and a caller reasoning from
@@ -519,6 +603,7 @@ pub async fn run(
     nats: async_nats::Client,
     js: async_nats::jetstream::Context,
 ) -> Result<()> {
+    super::nats_auth_evidence::prune(&pool, Utc::now()).await?;
     let probe = CredentialProbe::for_role(NatsRole::Backend);
     let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
     info!(
@@ -535,10 +620,10 @@ pub async fn run(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        // Dropping the `fetch_all` future on timeout cancels the in-flight
+        // Dropping the `fetch_snapshot` future on timeout cancels the in-flight
         // request and closes the connection, so a wedged endpoint costs one
         // poll rather than the projector.
-        let polled = match tokio::time::timeout(POLL_TIMEOUT, fetch_walk(&client, &monitor_url))
+        let polled = match tokio::time::timeout(POLL_TIMEOUT, fetch_snapshot(&client, &monitor_url))
             .await
         {
             Ok(result) => result,
@@ -562,13 +647,13 @@ pub async fn run(
                 if anomalies != reported {
                     if !anomalies.non_agent.is_empty() {
                         warn!(
-                            connections = ?anomalies.non_agent,
+                            connections = anomalies.non_agent.len(),
                             "NATS connections name a pc_id under a non-agent role; ignored",
                         );
                     }
                     if !anomalies.conflicting.is_empty() {
                         warn!(
-                            hosts = ?anomalies.conflicting,
+                            hosts = anomalies.conflicting.len(),
                             "two live NATS connections claim one pc_id with different credentials",
                         );
                     }
@@ -853,6 +938,77 @@ mod tests {
         (format!("http://127.0.0.1:{port}"), queries)
     }
 
+    #[tokio::test]
+    async fn coherent_snapshot_captures_anonymous_id_without_raw_secrets() {
+        let secret = "must-not-appear-in-evidence";
+        let epoch = r#"{"server_id":"BROKER1","start":"2026-10-18T02:24:31Z"}"#.to_string();
+        let page = format!(
+            r#"{{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","total":1,"connections":[{{"cid":18446744073709551615,"authorized_user":"{secret}","ip":"127.0.0.1","start":"2026-10-18T02:24:57Z"}}]}}"#
+        );
+        let (base, _) = canned_connz(vec![epoch.clone(), page, epoch]).await;
+        let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let (conns, complete) = fetch_snapshot(&client, &base).await.unwrap();
+        let obs = observe(&conns, &probe_holding(None), Evidence::Unproven);
+        assert!(complete);
+        assert_eq!(obs.len(), 1);
+        let c = obs[0].connection.as_ref().unwrap();
+        assert_eq!(c.cid, u64::MAX.to_string());
+        assert_eq!(c.server_id, "BROKER1");
+        assert!(c.connection_start.is_some());
+        let json = serde_json::to_string(c).unwrap();
+        assert!(!json.contains(secret));
+        assert!(!json.contains("127.0.0.1"));
+        assert_eq!(obs[0].label, LABEL_UNKNOWN);
+    }
+
+    #[tokio::test]
+    async fn restart_missing_identity_and_inconsistent_pages_cannot_be_complete() {
+        let epoch = r#"{"server_id":"BROKER1","start":"2026-10-18T02:24:31Z"}"#.to_string();
+        let page = r#"{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","total":1,"connections":[{"cid":1}]}"#.to_string();
+        let restarted = r#"{"server_id":"BROKER1","start":"2026-10-18T02:24:59Z"}"#.to_string();
+        let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        for pages in [
+            vec![epoch.clone(), page.clone(), restarted],
+            vec!["{}".into()],
+            vec![epoch.clone(), page.replace("BROKER1", "BROKER2")],
+            vec![
+                epoch.clone(),
+                page.replace("\"total\":1", "\"total\":2"),
+                page.clone(),
+            ],
+        ] {
+            let (base, _) = canned_connz(pages).await;
+            assert!(fetch_snapshot(&client, &base).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_page_cap_reports_incomplete_without_losing_sampled_ids() {
+        let epoch = r#"{"server_id":"BROKER1","start":"2026-10-18T02:24:31Z"}"#.to_string();
+        let mut pages = vec![epoch.clone()];
+        for cid in 1..=MAX_PAGES {
+            pages.push(format!(r#"{{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","total":1000,"connections":[{{"cid":{cid}}}]}}"#));
+        }
+        pages.push(epoch);
+        let (base, _) = canned_connz(pages).await;
+        let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let (conns, complete) = fetch_snapshot(&client, &base).await.unwrap();
+        assert!(!complete);
+        assert_eq!(conns.len(), MAX_PAGES);
+        assert_eq!(
+            conns.last().unwrap().connection.as_ref().unwrap().cid,
+            MAX_PAGES.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_monitor_response_errors_do_not_echo_credentials() {
+        let (base, _) = canned_connz(vec![r#"{"total":"secret-must-not-be-logged"}"#.into()]).await;
+        let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let err = fetch_page(&client, &base, 0).await.unwrap_err();
+        assert!(!format!("{err:#}").contains("secret-must-not-be-logged"));
+    }
+
     /// A fleet larger than one `/connz` page has to be walked, and a walk
     /// that stops early is the failure this projection cannot have: the
     /// hosts in the tail would read as "never correlated" — indistinguishable
@@ -1098,7 +1254,10 @@ mod tests {
 
         let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
         let base = format!("http://127.0.0.1:{http_port}");
-        let conns = fetch_all(&http, &base).await.expect("read live /connz");
+        let (conns, complete) = fetch_snapshot(&http, &base)
+            .await
+            .expect("read live broker snapshot");
+        assert!(complete);
         let ours = conns
             .iter()
             .find(|c| c.name.as_deref() == Some(name.as_str()))

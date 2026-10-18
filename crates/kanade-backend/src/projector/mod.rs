@@ -10,6 +10,7 @@ pub mod heartbeat;
 pub mod history;
 pub mod host_perf;
 pub mod nats_auth_audit;
+pub mod nats_auth_evidence;
 pub mod nats_auth_findings;
 pub mod nats_conns;
 pub mod notice_ledger;
