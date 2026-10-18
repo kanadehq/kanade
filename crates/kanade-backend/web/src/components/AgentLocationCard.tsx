@@ -47,12 +47,14 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
 
   const requestMutation = useMutation({
     mutationFn: () =>
-      apiFetch<{ request_id: string; requested_at: string }>(
+      apiFetch<DeviceLocationResponse>(
         `/api/agents/${encodeURIComponent(pcId)}/location/request`,
         { method: 'POST' },
       ),
-    onSuccess: () => {
-      toast.success(t('location.requestSuccess'));
+    onSuccess: (res) => {
+      // The request can complete with a failure (offline, denied, ...).
+      if (res.latest_request?.status === 'success') toast.success(t('location.requestSuccess'));
+      else toast.error(t(`location.statuses.${res.latest_request?.status ?? 'unavailable'}`));
       qc.invalidateQueries({ queryKey: ['agent-location', pcId] });
     },
     onError: (err) => {
@@ -80,7 +82,7 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
         </div>
         <Button
           size="sm"
-          disabled={requestMutation.isPending}
+          disabled={requestMutation.isPending || data?.enabled === false}
           onClick={() => requestMutation.mutate()}
         >
           {requestMutation.isPending ? (
@@ -108,8 +110,14 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
             {/* Last known location */}
             <div className="space-y-2">
               <h4 className="text-sm font-semibold text-foreground">
-                {t('location.lastKnownTitle')}
+                {lastKnown?.current ? t('location.currentTitle') : t('location.lastKnownTitle')}
               </h4>
+              {data && !data.enabled && (
+                <p className="text-sm text-destructive">{t('location.disabled')}</p>
+              )}
+              {lastKnown && !lastKnown.current && (
+                <p className="text-xs text-muted">{t('location.notCurrent')}</p>
+              )}
               {lastKnown ? (
                 <div className="space-y-2">
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-muted/30 p-3 rounded-md text-sm">
@@ -128,11 +136,7 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
                     <div>
                       <div className="text-xs text-muted">{t('location.source')}</div>
                       <div>
-                        {lastKnown.source === 'gps'
-                          ? t('location.sourceGps')
-                          : lastKnown.source === 'wifi'
-                            ? t('location.sourceWifi')
-                            : t('location.sourceCellular')}
+                        {t(`location.sources.${lastKnown.source}`)}
                       </div>
                     </div>
                     <div className="col-span-2 md:col-span-4">
@@ -143,7 +147,7 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
 
                   <div className="pt-1">
                     <a
-                      href={`https://www.openstreetmap.org/?mlat=${lastKnown.latitude}&mlon=${lastKnown.longitude}#map=16/${lastKnown.latitude}/${lastKnown.longitude}`}
+                      href={lastKnown.map_url}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1.5 text-primary hover:underline text-sm font-medium"

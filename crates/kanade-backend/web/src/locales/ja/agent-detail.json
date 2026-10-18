@@ -145,16 +145,13 @@
     "intro": "OSの位置情報サービスを利用した紛失端末の位置可視化。管理者による機能の有効化が必要です。",
     "request": "最新位置を取得",
     "requesting": "位置情報を取得中…",
-    "requestSuccess": "位置情報取得要求を送信しました",
+    "requestSuccess": "最新の位置を取得しました",
     "lastKnownTitle": "最終既知位置",
     "latitude": "緯度",
     "longitude": "経度",
     "accuracy": "精度",
     "accuracyMeters": "約 {{meters}} m",
     "source": "測位ソース",
-    "sourceGps": "GPS",
-    "sourceWifi": "Wi-Fi",
-    "sourceCellular": "携帯基地局",
     "acquiredAt": "取得日時",
     "noLastKnown": "この端末の位置情報記録はありません。",
     "openMap": "OpenStreetMap で表示",
@@ -174,6 +171,16 @@
       "timeout": "タイムアウト",
       "offline": "端末オフライン",
       "expired": "期限切れ"
+    },
+    "currentTitle": "現在地(取得直後)",
+    "notCurrent": "最後に確認できた位置です。端末が今もその場所にあるとは限りません。",
+    "disabled": "位置情報の閲覧は無効です。管理者がサーバー設定で有効にする必要があります。",
+    "sources": {
+      "unknown": "OS が提供元を報告していません",
+      "gps": "GPS",
+      "wifi": "Wi-Fi",
+      "cellular": "携帯網",
+      "ip": "IP ベース(粗い位置)"
     }
   }
 }

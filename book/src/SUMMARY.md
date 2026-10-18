@@ -22,6 +22,7 @@
 - [Removing kanade (undeploy)](./operations/undeploy.md)
 - [macOS code signing](./operations/macos-code-signing.md)
 - [macOS remote viewing](./operations/remote-viewing-macos.md)
+- [Lost-device location](./operations/lost-device-location.md)
 - [Broker sizing & scaling](./operations/broker-sizing.md)
 
 # 3. Developer Guide

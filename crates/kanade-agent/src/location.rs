@@ -166,7 +166,9 @@ async fn measure_macos_location() -> (LocationStatus, Option<String>, Option<Loc
                     longitude: lon,
                     accuracy_meters: acc,
                     acquired_at: Utc::now().to_rfc3339(),
-                    source: LocationSource::Wifi,
+                    // Neither CoreLocation nor the Windows reading API is asked which
+                    // provider produced the fix, so do not guess.
+                    source: LocationSource::Unknown,
                 };
                 (LocationStatus::Success, None, Some(reading))
             }
@@ -308,7 +310,9 @@ async fn acquire_winrt_location() -> Result<LocationReading, (LocationStatus, St
                 longitude: pos_point.Longitude,
                 accuracy_meters: accuracy,
                 acquired_at: Utc::now().to_rfc3339(),
-                source: LocationSource::Wifi,
+                // Neither CoreLocation nor the Windows reading API is asked which
+                // provider produced the fix, so do not guess.
+                source: LocationSource::Unknown,
             })
         }
         _ => Err((

@@ -145,16 +145,13 @@
     "intro": "Lost-device location tracking via OS location services. Only available when enabled by an administrator.",
     "request": "Request location",
     "requesting": "Requesting location…",
-    "requestSuccess": "Location request sent successfully",
+    "requestSuccess": "Fresh location acquired",
     "lastKnownTitle": "Last known location",
     "latitude": "Latitude",
     "longitude": "Longitude",
     "accuracy": "Accuracy",
     "accuracyMeters": "±{{meters}} m",
     "source": "Source",
-    "sourceGps": "GPS",
-    "sourceWifi": "Wi-Fi",
-    "sourceCellular": "Cellular",
     "acquiredAt": "Acquired at",
     "noLastKnown": "No location reading has been recorded for this device.",
     "openMap": "Open in OpenStreetMap",
@@ -174,6 +171,16 @@
       "timeout": "Timeout",
       "offline": "Endpoint offline",
       "expired": "Request expired"
+    },
+    "currentTitle": "Current location (just acquired)",
+    "notCurrent": "This is the last known position, not necessarily where the device is now.",
+    "disabled": "Location visibility is disabled. An administrator must enable it in server settings.",
+    "sources": {
+      "unknown": "Not reported by the OS",
+      "gps": "GPS",
+      "wifi": "Wi-Fi",
+      "cellular": "Cellular",
+      "ip": "IP-based (coarse)"
     }
   }
 }

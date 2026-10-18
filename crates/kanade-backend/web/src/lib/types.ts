@@ -391,7 +391,7 @@ export type LocationStatus =
   | 'offline'
   | 'expired';
 
-export type LocationSource = 'gps' | 'wifi' | 'cellular';
+export type LocationSource = 'unknown' | 'gps' | 'wifi' | 'cellular' | 'ip';
 
 export type LastKnownLocation = {
   latitude: number;
@@ -399,6 +399,9 @@ export type LastKnownLocation = {
   accuracy_meters: number;
   source: LocationSource;
   acquired_at: string;
+  /** true only for a young success answering the latest request. */
+  current: boolean;
+  map_url: string;
 };
 
 export type LatestLocationRequest = {
@@ -410,6 +413,7 @@ export type LatestLocationRequest = {
 
 export type DeviceLocationResponse = {
   pc_id: string;
+  enabled: boolean;
   last_known: LastKnownLocation | null;
   latest_request: LatestLocationRequest | null;
   retention_days: number;

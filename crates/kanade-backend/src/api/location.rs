@@ -42,6 +42,85 @@ const OFFLINE_HEARTBEAT_THRESHOLD_SECS: i64 = 90;
 /// Request timeout for on-demand location acquisition via NATS.
 const LOCATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// A success is shown as the device's current position only while it is this
+/// young. Past it the reading is "last known": the endpoint may have been
+/// powered off or moved since, and nothing here can tell.
+const CURRENT_READING_MAX_AGE_SECS: i64 = 120;
+
+/// Tolerated clock skew between endpoint and backend when judging a reading's
+/// acquisition timestamp.
+const CLOCK_SKEW_SECS: i64 = 30;
+
+/// Endpoints with a location request currently in flight (one at a time each).
+static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+struct InFlightGuard(String);
+
+impl InFlightGuard {
+    fn acquire(pc_id: &str) -> Option<Self> {
+        let mut set = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        set.insert(pc_id.to_string())
+            .then(|| Self(pc_id.to_string()))
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// Reject readings that cannot be believed: out-of-range or non-finite
+/// coordinates, or an acquisition time that is not between the operator's
+/// request and now (a stale OS cache or a wrong endpoint clock).
+fn validate_reading(
+    r: &LocationReading,
+    requested_at: &str,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    if !(r.latitude.is_finite() && (-90.0..=90.0).contains(&r.latitude))
+        || !(r.longitude.is_finite() && (-180.0..=180.0).contains(&r.longitude))
+        || !(r.accuracy_meters.is_finite() && r.accuracy_meters >= 0.0)
+    {
+        return Err("Endpoint returned out-of-range coordinates".into());
+    }
+    let acquired = DateTime::parse_from_rfc3339(&r.acquired_at)
+        .map_err(|_| "Endpoint returned an unparseable acquisition time".to_string())?
+        .with_timezone(&Utc);
+    let requested = DateTime::parse_from_rfc3339(requested_at)
+        .map_err(|_| "unparseable request time".to_string())?
+        .with_timezone(&Utc);
+    let skew = chrono::Duration::seconds(CLOCK_SKEW_SECS);
+    if acquired < requested - skew {
+        return Err("Reading predates the request (stale OS cache or endpoint clock)".into());
+    }
+    if acquired > now + skew {
+        return Err("Reading is timestamped in the future (endpoint clock skew)".into());
+    }
+    Ok(())
+}
+
+/// Whether the stored success is a fresh answer to the latest request rather
+/// than merely the last known position.
+fn is_current(
+    latest_status: Option<LocationStatus>,
+    acquired_at: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    latest_status == Some(LocationStatus::Success)
+        && DateTime::parse_from_rfc3339(acquired_at)
+            .map(|dt| {
+                let age = now.signed_duration_since(dt.with_timezone(&Utc));
+                age >= -chrono::Duration::seconds(CLOCK_SKEW_SECS)
+                    && age <= chrono::Duration::seconds(CURRENT_READING_MAX_AGE_SECS)
+            })
+            .unwrap_or(false)
+}
+
 /// Minimum interval between subsequent location requests for the same PC.
 const MIN_REQUEST_INTERVAL_SECS: i64 = 5;
 
@@ -65,6 +144,10 @@ pub struct LastKnownLocation {
     pub accuracy_meters: f64,
     pub source: LocationSource,
     pub acquired_at: String,
+    /// `true` only for a successful answer to the latest request that is still
+    /// young; otherwise this is the *last known* position, not where the
+    /// device is now.
+    pub current: bool,
     /// Direct link to view coordinates in OpenStreetMap (opened only on explicit click).
     pub map_url: String,
 }
@@ -182,7 +265,12 @@ pub async fn get_location(
                 })
                 .unwrap_or(true);
 
+            let latest_status = r
+                .get::<Option<String>, _>("last_request_status")
+                .as_deref()
+                .and_then(LocationStatus::parse);
             if !is_expired && loc_settings.enabled {
+                let current = is_current(latest_status, &acquired_at, Utc::now());
                 let source = src
                     .as_deref()
                     .and_then(LocationSource::parse)
@@ -194,6 +282,7 @@ pub async fn get_location(
                     accuracy_meters,
                     source,
                     acquired_at,
+                    current,
                     map_url,
                 });
             }
@@ -255,7 +344,6 @@ pub async fn request_location(
             "Lost-device location visibility is disabled in server settings".into(),
         ));
     }
-    let _retention_days = loc_settings.effective_retention_days();
 
     // Check endpoint existence and heartbeat
     let agent_row = sqlx::query("SELECT last_heartbeat FROM agents WHERE pc_id = ?")
@@ -321,6 +409,13 @@ pub async fn request_location(
 
         return get_location(State(s), Path(pc_id), caller).await;
     }
+
+    let Some(_in_flight) = InFlightGuard::acquire(&pc_id) else {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("A location request for `{pc_id}` is already in progress"),
+        ));
+    };
 
     // Rate-limiting check: avoid flooding requests
     let last_req_row = sqlx::query("SELECT last_request_at FROM device_locations WHERE pc_id = ?")
@@ -400,6 +495,21 @@ pub async fn request_location(
                 None,
             ),
         },
+    };
+
+    // A success without a believable reading is not a success.
+    let (status, reason, reading) = match (status, reading) {
+        (LocationStatus::Success, Some(r)) => match validate_reading(&r, &requested_at, Utc::now())
+        {
+            Ok(()) => (LocationStatus::Success, reason, Some(r)),
+            Err(why) => (LocationStatus::Unavailable, Some(why), None),
+        },
+        (LocationStatus::Success, None) => (
+            LocationStatus::Unavailable,
+            Some("Endpoint reported success without a reading".to_string()),
+            None,
+        ),
+        (st, _) => (st, reason, None),
     };
 
     // Update database
@@ -843,5 +953,82 @@ mod tests {
             row_stale.get::<Option<String>, _>("last_request_id"),
             Some("req-stale".to_string())
         );
+    }
+
+    fn reading(acquired_at: &str) -> LocationReading {
+        LocationReading {
+            latitude: 35.0,
+            longitude: 139.0,
+            accuracy_meters: 10.0,
+            acquired_at: acquired_at.into(),
+            source: LocationSource::Unknown,
+        }
+    }
+
+    #[test]
+    fn reading_validation_rejects_stale_future_and_out_of_range() {
+        let now = Utc::now();
+        let requested = now.to_rfc3339();
+        let ok = reading(&now.to_rfc3339());
+        assert!(validate_reading(&ok, &requested, now).is_ok());
+
+        let stale = reading(&(now - chrono::Duration::minutes(10)).to_rfc3339());
+        assert!(validate_reading(&stale, &requested, now).is_err());
+
+        let future = reading(&(now + chrono::Duration::minutes(10)).to_rfc3339());
+        assert!(validate_reading(&future, &requested, now).is_err());
+
+        let mut bad = reading(&now.to_rfc3339());
+        bad.latitude = 91.0;
+        assert!(validate_reading(&bad, &requested, now).is_err());
+        bad.latitude = f64::NAN;
+        assert!(validate_reading(&bad, &requested, now).is_err());
+        assert!(validate_reading(&reading("garbage"), &requested, now).is_err());
+    }
+
+    #[test]
+    fn only_young_success_is_current() {
+        let now = Utc::now();
+        let young = (now - chrono::Duration::seconds(10)).to_rfc3339();
+        let old = (now - chrono::Duration::minutes(30)).to_rfc3339();
+        assert!(is_current(Some(LocationStatus::Success), &young, now));
+        // Aged past the window: last known only.
+        assert!(!is_current(Some(LocationStatus::Success), &old, now));
+        // Any later failure (offline, timeout, denied...) demotes it.
+        for st in [
+            LocationStatus::Offline,
+            LocationStatus::Timeout,
+            LocationStatus::PermissionDenied,
+            LocationStatus::Unsupported,
+        ] {
+            assert!(!is_current(Some(st), &young, now));
+        }
+        assert!(!is_current(None, &young, now));
+        assert!(!is_current(Some(LocationStatus::Success), "garbage", now));
+    }
+
+    #[test]
+    fn in_flight_guard_is_exclusive_per_endpoint() {
+        let a = InFlightGuard::acquire("guard-pc-a").expect("first acquire");
+        assert!(InFlightGuard::acquire("guard-pc-a").is_none());
+        assert!(InFlightGuard::acquire("guard-pc-b").is_some());
+        drop(a);
+        assert!(InFlightGuard::acquire("guard-pc-a").is_some());
+    }
+
+    #[test]
+    fn location_routes_are_operator_gated_and_settings_admin_gated() {
+        // The router wires /location routes into the operator group and the
+        // settings route into the admin group; guard the source so a refactor
+        // cannot silently move them to the viewer-level base router.
+        let src = include_str!("mod.rs");
+        let op = src.find("let operator = Router::new()").unwrap();
+        let adm = src.find("let admin = Router::new()").unwrap();
+        let loc = src.find("location::get_location").unwrap();
+        let req = src.find("location::request_location").unwrap();
+        let set = src.find("location::get_settings").unwrap();
+        assert!(op < loc && loc < adm);
+        assert!(op < req && req < adm);
+        assert!(set > adm);
     }
 }
