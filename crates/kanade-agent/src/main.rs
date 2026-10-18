@@ -14,6 +14,7 @@ mod job_object;
 mod job_tail;
 mod kill;
 mod live_tail;
+mod location;
 mod log_tail;
 mod logs;
 mod output_cap;
@@ -804,6 +805,9 @@ pub(crate) async fn run_agent() -> Result<()> {
         Some(std::env::consts::OS.to_string()),
         staleness_tracker.clone(),
     ));
+
+    // Lost-device location listener: handles on-demand location acquisition requests
+    tokio::spawn(location::start_listener(client.clone(), pc_id.clone()));
 
     // KLP listener (SPEC §2.12) — Windows Named Pipe today, Linux
     // UDS in a follow-up. The detached JoinHandle is intentional:

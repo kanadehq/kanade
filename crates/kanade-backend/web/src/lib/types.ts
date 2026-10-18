@@ -379,3 +379,39 @@ export type NotificationReuse = {
     issued_by?: string | null;
   };
 };
+
+export type LocationStatus =
+  | 'success'
+  | 'unsupported'
+  | 'permission_denied'
+  | 'location_disabled'
+  | 'no_user_session'
+  | 'unavailable'
+  | 'timeout'
+  | 'offline'
+  | 'expired';
+
+export type LocationSource = 'gps' | 'wifi' | 'cellular';
+
+export type LastKnownLocation = {
+  latitude: number;
+  longitude: number;
+  accuracy_meters: number;
+  source: LocationSource;
+  acquired_at: string;
+};
+
+export type LatestLocationRequest = {
+  request_id: string;
+  requested_at: string;
+  status: LocationStatus;
+  reason: string | null;
+};
+
+export type DeviceLocationResponse = {
+  pc_id: string;
+  last_known: LastKnownLocation | null;
+  latest_request: LatestLocationRequest | null;
+  retention_days: number;
+};
+

@@ -260,6 +260,14 @@ pub fn remote_ctrl(pc_id: &str) -> String {
     format!("remote.ctrl.{pc_id}")
 }
 
+/// `location.req.<pc_id>` — on-demand lost-device location request/reply.
+///
+/// Backend sends a [`crate::wire::LocationRequest`] and the agent answers
+/// with a [`crate::wire::LocationReply`]. Core NATS only; not retained.
+pub fn location_req(pc_id: &str) -> String {
+    format!("location.req.{pc_id}")
+}
+
 /// `remote.frame.<session_id>` — agent → backend, one encoded tile per
 /// message.
 ///
@@ -395,6 +403,7 @@ mod tests {
     #[test]
     fn remote_subjects_format_their_scope() {
         assert_eq!(remote_ctrl("PC1234"), "remote.ctrl.PC1234");
+        assert_eq!(location_req("PC1234"), "location.req.PC1234");
         assert_eq!(remote_frame("sess-9f3a"), "remote.frame.sess-9f3a");
         assert_eq!(remote_input("sess-9f3a"), "remote.input.sess-9f3a");
     }
@@ -404,7 +413,12 @@ mod tests {
         // The whole plane is core-NATS-only. If any of these ever started
         // with a retained prefix, JetStream would quietly begin storing a
         // video stream — this test is the guard on that.
-        for s in [remote_ctrl("PC1"), remote_frame("s1"), remote_input("s1")] {
+        for s in [
+            remote_ctrl("PC1"),
+            location_req("PC1"),
+            remote_frame("s1"),
+            remote_input("s1"),
+        ] {
             for retained in [
                 "events.",
                 "obs.",

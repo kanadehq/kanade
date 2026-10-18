@@ -15,6 +15,7 @@ import {
 } from 'recharts';
 import { toast } from 'sonner';
 
+import { AgentLocationCard } from '@/components/AgentLocationCard';
 import { AgentProcessSection } from '@/components/AgentProcessSection';
 import { ErrorCard } from '@/components/ErrorCard';
 import { TimeRangePicker } from '@/components/TimeRangePicker';
@@ -369,6 +370,8 @@ export function AgentDetail() {
           )}
         </CardContent>
       </Card>
+
+      <AgentLocationCard key={`loc-${agent.pc_id}`} pcId={agent.pc_id} />
 
       {/* key={pc_id} remounts the card on an agent switch so its seed-once
           draft state can't carry over to a different pc_id if in-page

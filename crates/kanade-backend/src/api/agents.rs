@@ -869,6 +869,11 @@ pub async fn delete(
                 format!("delete agent {pc_id}: {e}"),
             )
         })?;
+    // Also clean up any associated lost-device location state
+    let _ = sqlx::query("DELETE FROM device_locations WHERE pc_id = ?")
+        .bind(&pc_id)
+        .execute(&s.pool)
+        .await;
     // Only a real deletion is worth an info line + audit row; a no-op
     // (already gone) is a silent success.
     if res.rows_affected() > 0 {

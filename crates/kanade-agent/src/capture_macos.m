@@ -5,6 +5,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <Security/Security.h>
+#import <CoreLocation/CoreLocation.h>
 
 bool kanade_capture_supported(void) {
     if (@available(macOS 14.0, *)) return true;
@@ -128,5 +129,90 @@ bool kanade_signing_identity(char *buffer, size_t length) {
         if (!team.length || !identifier.length) return false;
         NSString *identity = [NSString stringWithFormat:@"%@:%@", team, identifier];
         return [identity getCString:buffer maxLength:length encoding:NSUTF8StringEncoding];
+    }
+}
+
+@interface KanadeLocationDelegate : NSObject <CLLocationManagerDelegate>
+@property (nonatomic, strong) dispatch_semaphore_t sema;
+@property (nonatomic, strong) CLLocation *location;
+@property (nonatomic, strong) NSError *error;
+@end
+
+@implementation KanadeLocationDelegate
+- (instancetype)initWithSemaphore:(dispatch_semaphore_t)sema {
+    self = [super init];
+    if (self) {
+        _sema = sema;
+    }
+    return self;
+}
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    (void)manager;
+    self.location = locations.lastObject;
+    dispatch_semaphore_signal(self.sema);
+}
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
+    (void)manager;
+    self.error = error;
+    dispatch_semaphore_signal(self.sema);
+}
+@end
+
+// Status codes: 0 = Success, 1 = LocationDisabled, 2 = PermissionDenied, 3 = Unavailable
+bool kanade_macos_acquire_location(int32_t *status_code, double *latitude, double *longitude, double *accuracy) {
+    @autoreleasepool {
+        if (![CLLocationManager locationServicesEnabled]) {
+            *status_code = 1;
+            return false;
+        }
+
+        CLLocationManager *tempMgr = [[CLLocationManager alloc] init];
+        CLAuthorizationStatus status = tempMgr.authorizationStatus;
+
+        if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted || status == kCLAuthorizationStatusNotDetermined) {
+            *status_code = 2;
+            return false;
+        }
+
+        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        KanadeLocationDelegate *delegate = [[KanadeLocationDelegate alloc] initWithSemaphore:sema];
+        CLLocationManager *manager = [[CLLocationManager alloc] init];
+        manager.delegate = delegate;
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters;
+
+        if (manager.location && manager.location.horizontalAccuracy >= 0 &&
+            fabs([manager.location.timestamp timeIntervalSinceNow]) < 300) {
+            *latitude = manager.location.coordinate.latitude;
+            *longitude = manager.location.coordinate.longitude;
+            *accuracy = manager.location.horizontalAccuracy;
+            *status_code = 0;
+            return true;
+        }
+
+        [manager requestLocation];
+        if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+            *status_code = 3;
+            return false;
+        }
+
+        if (delegate.location && delegate.location.horizontalAccuracy >= 0) {
+            *latitude = delegate.location.coordinate.latitude;
+            *longitude = delegate.location.coordinate.longitude;
+            *accuracy = delegate.location.horizontalAccuracy;
+            *status_code = 0;
+            return true;
+        }
+
+        if (delegate.error) {
+            if (delegate.error.code == kCLErrorDenied) {
+                *status_code = 2;
+            } else {
+                *status_code = 3;
+            }
+            return false;
+        }
+
+        *status_code = 3;
+        return false;
     }
 }

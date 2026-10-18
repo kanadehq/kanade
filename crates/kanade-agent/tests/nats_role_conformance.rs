@@ -2395,6 +2395,7 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Agent, Publish("logs.fetch.other.example.local"), Denied),
         (Agent, Publish("job.tail.other.example.local"), Denied),
         (Agent, Publish("remote.ctrl.other.example.local"), Denied),
+        (Agent, Publish("location.req.other.example.local"), Denied),
         (Agent, Publish("kill.other.example.local"), Denied),
         (Agent, Subscribe("results.other.example.local"), Denied),
         (Agent, Subscribe("heartbeat.other.example.local"), Denied),
@@ -3544,6 +3545,20 @@ const PC_SUBJECTS: &[PcSubject] = &[
         Role::Backend,
         Dir::Publish,
         "remote.ctrl.{pc}",
+        false,
+    ),
+    entry(
+        "location_req",
+        Role::Agent,
+        Dir::Subscribe,
+        "location.req.{pc}",
+        false,
+    ),
+    entry(
+        "location_req",
+        Role::Backend,
+        Dir::Publish,
+        "location.req.{pc}",
         false,
     ),
     entry(

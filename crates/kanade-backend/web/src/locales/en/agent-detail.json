@@ -139,5 +139,41 @@
       }
     }
   },
-  "remoteScreen": "Remote screen"
+  "remoteScreen": "Remote screen",
+  "location": {
+    "title": "Device location",
+    "intro": "Lost-device location tracking via OS location services. Only available when enabled by an administrator.",
+    "request": "Request location",
+    "requesting": "Requesting location…",
+    "requestSuccess": "Location request sent successfully",
+    "lastKnownTitle": "Last known location",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "accuracy": "Accuracy",
+    "accuracyMeters": "±{{meters}} m",
+    "source": "Source",
+    "sourceGps": "GPS",
+    "sourceWifi": "Wi-Fi",
+    "sourceCellular": "Cellular",
+    "acquiredAt": "Acquired at",
+    "noLastKnown": "No location reading has been recorded for this device.",
+    "openMap": "Open in OpenStreetMap",
+    "mapNotice": "Clicking the map link will transmit coordinates to the external service (OpenStreetMap).",
+    "latestRequestTitle": "Latest request",
+    "status": "Status",
+    "requestedAt": "Requested at",
+    "reason": "Reason",
+    "noRequests": "No recent location requests.",
+    "statuses": {
+      "success": "Success",
+      "unsupported": "Unsupported OS",
+      "permission_denied": "Permission denied",
+      "location_disabled": "Location service disabled",
+      "no_user_session": "No active user session",
+      "unavailable": "Location unavailable",
+      "timeout": "Timeout",
+      "offline": "Endpoint offline",
+      "expired": "Request expired"
+    }
+  }
 }
