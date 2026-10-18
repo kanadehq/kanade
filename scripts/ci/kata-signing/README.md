@@ -27,3 +27,9 @@ run `kata apply` in the consumer and commit the resulting source revision and
 workflow updates. Verify the generated workflow retains both hook invocations
 in sign → package → verify → upload order. Keep release readiness blocked
 until that integration and the production certificate match are confirmed.
+
+Note: the templates keep the hook optional for other consumers. This
+repository's own `release.yml` deliberately does not: the sign step fails when
+`scripts/ci/release-post-build.sh` is missing, and `check_release_signing.rs`
+asserts that. If `kata apply` regenerates the workflow without these steps,
+that test fails in CI, so the loss cannot merge silently.

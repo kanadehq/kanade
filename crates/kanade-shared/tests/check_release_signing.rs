@@ -63,6 +63,20 @@ fn release_workflow_contains_signing_hooks_in_order() {
     let content = fs::read_to_string(&workflow_path)
         .unwrap_or_else(|e| panic!("failed to read {workflow_path:?}: {e}"));
 
+    assert!(
+        root.join("scripts/ci/release-post-build.sh").is_file()
+            && root.join("scripts/ci/macos-codesign.sh").is_file(),
+        "release hook scripts must exist"
+    );
+    assert!(
+        !content.contains("hashFiles('scripts/ci/release-post-build.sh')"),
+        "signing hook steps must not be skipped when the hook script is missing"
+    );
+    assert!(
+        content.contains("release-post-build.sh is missing"),
+        "sign step must fail explicitly when the hook script is missing"
+    );
+
     let sign_idx = content
         .find("scripts/ci/release-post-build.sh sign")
         .expect("release.yml must invoke `release-post-build.sh sign`");
