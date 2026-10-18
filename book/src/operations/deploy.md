@@ -1,5 +1,7 @@
 # Installation and Deployment
 
+The cross-platform `kanade deploy` design and script retirement gates are in [SPEC §2.13](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md#213-クロスプラットフォーム-デプロイ設計-kanade-deploy-cli--typed-operations). This is an unimplemented design; keep using the current procedures below during migration. It targets enrolled agents only and leaves the Agent Installation screen one-liners unchanged.
+
 This section details how to bootstrap `kanade` components as native Windows services in production or staging environments.
 
 ## Deployment Model

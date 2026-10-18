@@ -1791,7 +1791,7 @@ C:\ProgramData\Mgmt\logs\
 
 ### 2.11.6 Client App 配置 (Windows)
 
-本節の配置・配布・自己アップデートは **Windows 専用**。Linux / macOS は §2.11.7 の設計記録 (承認済み決定と proposal、未実装) を参照。
+本節の配置・配布・自己アップデートは **Windows 専用の旧設計記録**。MSI / ActiveSetup / `client_releases` を実装済みとはしない。独立 Client updater 案は §2.13 の全 OS 共通 jobs / app-packages 契約で置換済み。Linux / macOS の GUI 要件は §2.11.7 を参照。
 
 ```
 C:\Program Files\Kanade\
@@ -1832,13 +1832,13 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 指定実装を基準にした現状は以下。§2.10.4 / §2.11.6 の MSI / ActiveSetup / 更新経路は設計であり、Unix へそのまま移植できる完成品ではない。
 
-- `crates/kanade-client/src/main.rs` / `Cargo.toml` / `build.rs` は GUI、Tauri、notification / single-instance plugin、build helper を Windows に限定。Unix の executable はメッセージを出して exit(1) する shim。KLP ライブラリと `window_size.rs` の純粋ロジックは OS 共通である。
+- この棚卸しは Unix GUI 着手前の記録。現在の `crates/kanade-client/src/main.rs` / `Cargo.toml` / `build.rs` は Windows と Apple Silicon macOS の GUI を持ち、Linux と Intel Mac は exit-fast shim。Mac の実 GUI / ad-hoc `.app` と、未整備の pkg / session integration は区別する (§2.13.3)。KLP ライブラリと `window_size.rs` の純粋ロジックは OS 共通である。
 - `src/app.rs` は通常起動でウィンドウ表示、`--show-notification <id>` / `--resurface` で非表示起動、protocol クリックで表示・通知へ focus。single-instance が二回目の argv を転送する。tray 作成、`--tray` 判定、HKCU Run 登録はまだ無い。サイズは Tauri `app_local_data_dir()/window-size.json` に保存し、close は保存するだけで hide-to-tray にしていない。
 - 通常通知は Tauri notification plugin、緊急通知は WinRT の `scenario=reminder` と protocol activation。AppUserModelID は Tauri identifier と Agent の Start Menu shortcut の `System.AppUserModel.ID` に一致させる。これは Windows 固有である。
 - 現行の `configs/jobs/installers/scripts/install-kanade-client.ps1` は app-packages HTTP 経由で exe を取得し、operator 指定 SHA-256 を検証して Program Files に配置、HKLM に `kanade-client://` を登録する。Start Menu shortcut / 表示名の同期は `client_shortcut.rs` が担当する。MSI / ActiveSetup と §2.11.6 の HKCU Run 展開を実装済みとはしない。
 - §2.11.6 のユーザー別 log は仕様上の配置。現行 `main.rs` は `C:\ProgramData\Kanade\logs\client.log` に書く。以下の表は **Windows 仕様との対応** であって、現行の log / Tauri path をそのまま写した表ではない。
 - `session_supervisor.rs` は WTS の active console に idle 計測用 `--session-agent` を維持する Windows 専用機構。緊急通知 fallback は別の `klp/emergency_notify.rs` が WTS 経由で Client を起動し、10 秒 cooldown と logon / unlock 時の `--resurface` を持つ。Unix の通知配送に idle 計測まで同時移植する必要はない。
-- `self_update.rs` が実装するのは `agent_releases` の Agent バイナリ検証・swap・exit(64)。`client_releases` は Windows 向け §2.11.6 の予定契約であり、現行 crates に bucket 定義・publish / watch / Client 更新処理は無い。Unix は同 bucket を使わず、既存の app-packages 配布 + Kanade ジョブで導入・更新する (§2.11.7.9)。
+- `self_update.rs` が実装するのは `agent_releases` の Agent バイナリ検証・swap・exit(64)。`client_releases` は Windows 向け §2.11.6 の旧案であり、現行 crates に bucket 定義・publish / watch / Client 更新処理は無い。§2.13 で全 OS とも既存の app-packages 配布 + Kanade ジョブへ統一する (§2.11.7.9)。
 - macOS の `deploy/macos/README.md` / `setup-agent.sh` は Apple Silicon の Agent を `/usr/local/bin/kanade-agent`、root LaunchDaemon を `/Library/LaunchDaemons/com.kanade.agent.plist` に配置する。現行 Agent の self-signed identity / quarantine 除去は GUI 配布の信頼モデルに流用しない。Linux の `setup-agent.sh` / systemd unit も root Agent を `/usr/local/bin` に配置する tarball 配布であり、Client package は無い。Linux README の旧 arch 記述より現行 release matrix を基準にする。
 
 #### 2.11.7.2 配布・インストールの所有者
@@ -1953,11 +1953,11 @@ Tauri 2 の Linux 要件は **WebKit2GTK API / ABI 4.1** ([Tauri prerequisites](
 
 #### 2.11.7.9 Kanade ジョブによる Client 導入・更新・復旧
 
-**確定（運用者承認済み・未実装）**: Unix の Client 導入・更新は、Windows の `configs/jobs/installers/scripts/install-kanade-client.ps1` (`install-kanade-client` ジョブ) と同じく、**既存の Kanade ジョブ** と **app-packages 配布機構** (`GET /api/app-packages/kanade-client/<version>`、名前 + version による取得、operator 指定 SHA-256、必要時の Bearer token) だけで行う。更新の所有者は常にこのジョブであり、次は初期段階で追加しない。
+**確定（運用者承認済み・未実装）**: Unix の Client 導入・更新は、Windows の `configs/jobs/installers/scripts/install-kanade-client.ps1` (`install-kanade-client` ジョブ) と同じく、**既存の Kanade ジョブ** と **app-packages 配布機構** (現行は `GET /api/app-packages/kanade-client/<version>`、名前 + version による取得、operator 指定 SHA-256、必要時の Bearer token。新 deploy は §2.13.4 の identity / publisher 検証へ段階移行) だけで行う。更新の所有者は常にこのジョブであり、次は初期段階で追加しない。
 
 - Client 専用の自動 updater、`client_releases` Object Store bucket、専用の watch / target loop、更新 journal、Agent / Client の KLP 更新状態契約。
 - ジョブと並走する第二の更新経路 (並行する更新所有者)。Tauri updater は使わない。
-- 既存 Agent の配布・self-update の挙動変更。Windows の `install-kanade-client` ジョブと exe 配置の挙動も現状のまま。
+- 既存 Agent の配布・self-update の挙動変更。Windows の `install-kanade-client` ジョブと exe 配置も本節だけでは変更しない。§2.13 の typed adapter への移行は parity gate 後に行う。
 
 OS 別の installer 呼び出しは以下で確定。
 
@@ -2569,11 +2569,13 @@ pub struct JobProgress {
 
 本節は、Windows / Linux / macOS の全 operator 環境から利用可能な統一 CLI `kanade deploy` と、登録済み Agent 上で安全に動作する型付き操作（Typed Native Operations）の設計仕様である。現行の PowerShell / Bash による個別フリートデプロイスクリプト（`scripts/fleet-deploy.ps1`, `deploy/linux/fleet-deploy.sh` 等）を置き換え、プラットフォーム間の不整合や平文シークレットの漏洩リスク、バージョン/成果物のキー衝突を解消する。
 
+本節の新 deploy CLI / typed operation / identity API は **設計のみ・未実装**。既存運用は移行 gate 完了まで継続する。以下の具体的 schema / option / timeout / policy は、§2.13.1.2 の確定製品判断を除き技術 proposal である。
+
 ### 2.13.1 背景・スコープ・確定判断と技術 proposal
 
 #### 2.13.1.1 背景と現行 fleet-deploy スクリプトの課題
 現行のデプロイ運用は、Windows 向けの `scripts/fleet-deploy.ps1` と Linux 向けの `deploy/linux/fleet-deploy.sh` という二つの独立したスクリプトに分断されている。
-- **プラットフォーム間の実装乖離**: Windows 版は NATS 経由で Agent の自己更新や一時的ジョブ生成を駆動するのに対し、Linux 版は SSH とオフライン tarball 配布（`--mode install`）または制限付きの Agent 自己更新（`--mode update`）という全く異なるモデルで動作している。
+- **プラットフォーム間の実装乖離**: Windows 版の publish / job / exec / agent rollout は現在 CLI の HTTP API 経由（Backend から Agent への配送は NATS）であるのに対し、Linux 版は SSH とオフライン tarball 配布（`--mode install`）または既存 HTTP publish / rollout による Agent 自己更新（`--mode update`）という全く異なるモデルで動作している。
 - **平文シークレットの危険な露出**: `fleet-deploy.ps1` は一時スクリプト生成時に JWT シークレットや管理者パスワード、NATS トークンを平文でパラメータ注入しており、プロセス引数や一時ファイル、ジョブ履歴への漏洩リスクを抱えている。
 - **成果物キーの衝突**: `kanade app publish` の Object Store キーが `<name>/<version>` のみで定義されているため、同一バージョンにおける Windows PE、macOS `.app` / `.pkg`、Linux パッケージが同一キーで上書き衝突する。
 - **PE 前提のバージョン検出**: バージョン自動検出が Windows PE の `VERSIONINFO` (`pelite`) に依存しており、Unix バイナリや非 PE 成果物で破綻している。
@@ -2642,7 +2644,7 @@ pub struct JobProgress {
   - `-DryRun`: 実行コマンドのプレビュー（一時ファイルは生成・保持）。
 - **`deploy/linux/fleet-deploy.sh` (Linux)**:
   - `--role`: `backend` | `agent`。
-  - `--mode`: `install` (SSH 経由で bundle コピー & `setup.sh` 実行) | `update` (NATS 経由で agent publish + rollout)。
+  - `--mode`: `install` (SSH 経由で bundle コピー & `setup.sh` 実行) | `update` (HTTP API 経由で agent publish + rollout)。
   - `--host`, `--identity`, `--domain`: SSH 接続先と Caddy/NATS 用ドメイン。
   - `--arch`: `x86_64` | `aarch64`。
   - `--pc`, `--group`, `--all`, `--jitter`: update モードのスコープ。
@@ -2663,7 +2665,7 @@ pub struct JobProgress {
 | `fleet-deploy.ps1` | `-Jitter <dur>` | **型付きジョブへ移行** | `--jitter <dur>` (Agent rollout およびジョブ配信の分散) |
 | `fleet-deploy.ps1` | `-Version latest` | **型付きジョブへ移行** | 不変バージョン解決 (`plan` 時に版・digest を固定) |
 | `fleet-deploy.ps1` | `-Stage` | **型付きジョブへ移行** | CLI に統合せず、ローカル成果物の指定 (`--binary <path>`) で代替 |
-| `fleet-deploy.ps1` | `-SourceUrl` | **型付きジョブへ移行** | 署名付きマニフェストの app-packages URL 自動解決に移行 |
+| `fleet-deploy.ps1` | `-SourceUrl` | **型付きジョブへ移行** | 後掲の `--source-url` / endpoint policy に移行。署名 manifest の identity / digest と到達可能な download endpoint を別々に検証し plan に固定 |
 | `fleet-deploy.ps1` | `-DryRun` | **型付きジョブへ移行** | `kanade deploy plan` (副作用なしの完全 Read-Only 実行) |
 | `fleet-deploy.ps1` | `-JwtSecret`, `-StaticToken`, `-BootstrapAdminPassword`, `-MailPassword` | **危険な既定値・注入として廃止** | ジョブ本文・引数への平文シークレット注入を全廃。ターゲット上の既存設定（HKLM / env）保持を既定化 |
 | `fleet-deploy.ps1` | `-AuthToken`, `-NatsToken` (平文引数) | **危険な既定値・注入として廃止** | オペレータ環境の `KANADE_AUTH_TOKEN` / NATS 資格情報を使用し、ターゲットには配送しない |
@@ -2700,7 +2702,7 @@ pub struct JobProgress {
 2. **`-WipeDb` の安全化**:
    - デフォルトは常にデータベース保護（No Wipe）。
    - 通常更新と `--wipe-db` の両方で、§2.13.7.5 の整合 snapshot を必須とする。DB / WAL の稼働中単純コピーはバックアップとみなさない。
-   - `users` テーブルは確実に保護し、JetStream からの再投影が完了して `/api/health` が green になるまで結果検証を継続する。
+   - `users` / `permission_groups` / `user_passkeys` を保護する。その他の非再生成データと replay source / retention の調査も wipe 承認の前提とし、再投影 readiness と結果投影まで検証する (§2.13.7.4–5)。
 3. **`-NoVerify` の廃止と検証の厳格化**:
    - ジョブがキューに受理されたこと（Admission）と、実際にサービスが起動して正しいバージョンで応答したこと（Verified Success）を明確に区別する。
    - タイムアウト付きでヘルスチェックと実版照合を自動実行し、未達の場合は失敗（または警告付き延期）として報告する。
@@ -2714,11 +2716,11 @@ pub struct JobProgress {
 
 - **`release.yml` (kata 管理)**:
   - ワークスペース内の全 `[[bin]]` ターゲット（`kanade`, `kanade-agent`, `kanade-backend`, `kanade-client`）をビルド。
-  - 成果物アーカイブ形式:
-    - Windows (`x86_64-pc-windows-msvc`): `<bin>-x86_64-pc-windows-msvc.zip` (内部に `<bin>.exe`)
-    - Linux x86_64 (`x86_64-unknown-linux-musl`): `<bin>-x86_64-unknown-linux-musl.tar.gz` (内部に `<bin>`)
-    - Linux aarch64 (`aarch64-unknown-linux-musl`): `<bin>-aarch64-unknown-linux-musl.tar.gz` (内部に `<bin>`)
-    - macOS aarch64 (`aarch64-apple-darwin`): `<bin>-aarch64-apple-darwin.tar.gz` (内部に `<bin>`)
+  - 成果物アーカイブ形式（workflow の `stem="$bin-$TARGET"` で内部 executable にも target suffix が付く。handler はこれを固定 role 名へ正規化する）:
+    - Windows (`x86_64-pc-windows-msvc`): `<bin>-x86_64-pc-windows-msvc.zip` (内部に `<bin>-x86_64-pc-windows-msvc.exe`)
+    - Linux x86_64 (`x86_64-unknown-linux-musl`): `<bin>-x86_64-unknown-linux-musl.tar.gz` (内部に `<bin>-x86_64-unknown-linux-musl`)
+    - Linux aarch64 (`aarch64-unknown-linux-musl`): `<bin>-aarch64-unknown-linux-musl.tar.gz` (内部に `<bin>-aarch64-unknown-linux-musl`)
+    - macOS aarch64 (`aarch64-apple-darwin`): `<bin>-aarch64-apple-darwin.tar.gz` (内部に `<bin>-aarch64-apple-darwin`)
   - 注意: Intel Mac (`x86_64-apple-darwin`) はビルドマトリクスから明示的に除外されている。
 - **`release-extras.yml`**:
   - `publish-client-to-backend`: Windows 向け `kanade-client.exe` を backend の `/api/app-packages/kanade-client/<version>` にアップロード。
@@ -2729,7 +2731,7 @@ pub struct JobProgress {
 
 #### 2.13.3.2 成果物マトリクス (実物アセットと配布形式)
 
-| ロール | プラットフォーム | release.yml 成果物 (実在) | 実行・配置形式 |
+| ロール | プラットフォーム | release.yml が生成する想定名 (実物未検証) | 実行・配置形式 |
 |---|---|---|---|
 | **agent** | Windows x86_64 | `kanade-agent-x86_64-pc-windows-msvc.zip` | `kanade-agent.exe` (Windows サービス) |
 | **agent** | Linux x86_64 / aarch64 | `kanade-agent-<arch>-unknown-linux-musl.tar.gz` | `kanade-agent` (systemd ユニット) |
@@ -2784,19 +2786,15 @@ pub struct ArtifactIdentity {
 ```
 
 #### 2.13.4.2 Object Store キー設計と Windows Bare Key 互換移行
-1. **新キー体系 (Recommended Proposal)**:
-   - `OBJECT_APP_PACKAGES`:
-     `kanade-app-packages/<role>/<version>/<os>-<arch>-<distro_abi>.<format>`
-     例: `kanade-client/0.80.0/macos-aarch64-darwin14.pkg`
-     例: `kanade-client/0.80.0/linux-x86_64-ubuntu-24.04.deb`
-     例: `kanade-client/0.80.0/windows-x86_64-msvc.exe`
-   - `OBJECT_AGENT_RELEASES`:
-     既存の `AgentPlatform::release_key` 体系を維持。
-     Windows: `<version>` (bare key)
-     Linux: `<version>-linux-<arch>`
-     macOS: `<version>-macos-aarch64`
+1. **新キー体系 (Recommended Proposal、未実装)**:
+   - bucket 名と object key は別の値である。`OBJECT_APP_PACKAGES` の bucket は `app_packages`、その内部の推奨 key は `<role>/<version>/<os>-<arch>-<distro_abi>.<format>`。role は `backend|client|cli` とし、bucket 名を key に重ねない。
+     例: bucket=`app_packages`, key=`client/0.80.0/macos-aarch64-darwin14.pkg`。
+     例: key=`client/0.80.0/linux-x86_64-ubuntu-24.04.deb`、`client/0.80.0/windows-x86_64-msvc.exe`。
+   - identity tuple から key への正規化と逆照合を Shared の一箇所で定義する。省略可能な `distro_abi` の表現、許可文字・長さ・区切りの曖昧性、package revision の扱いは **未解決の schema proposal**。異なる tuple が同じ key にならないことを試験し、確定するまで deploy publish を有効化しない。
+   - 現行 `api/app_packages.rs` は slash-free な `name` / `version` の2 segment API で、list もその形を仮定する。この新 key は現行 API にそのまま渡せない。§2.13.4.4 の別 identity API / namespace の設計と producer / list / download / delete / CLI 全 consumer の対応が前提。具体的な namespace / API route は未確定で、新 bucket 作成の製品承認を意味しない。
+   - `OBJECT_AGENT_RELEASES` の bucket は `agent_releases`。既存の `AgentPlatform::release_key` を維持する。Windows: `<version>`、Linux: `<version>-linux-<arch>`、macOS: `<version>-macos-aarch64`。app identity key をこの bucket へ適用しない。
 2. **レガシー Windows Bare Key の安全な移行**:
-   - 既存の `OBJECT_APP_PACKAGES` に存在する `<name>/<version>` 形式のオブジェクトは、一律に Windows 用とみなすのではなく、バイナリの先頭バイト（`MZ` マジックバイト）および PE ヘッダを検査し、**Windows x86_64 成果物であると明示的に確認されたもののみ**、新キー体系の Windows エイリアスとして解決する。
+   - 既存の `OBJECT_APP_PACKAGES` に存在する `<name>/<version>` 形式のオブジェクトは、一律に Windows 用とみなすのではなく、バイナリの `MZ` / PE header と Machine=`AMD64` (`0x8664`)、実版・role・publisher provenance を検査し、**Windows x86_64 成果物であると明示的に確認されたもののみ**、新キー体系の Windows エイリアスとして解決する。
    - PE ヘッダを持たない非 Windows 成果物がレガシーキーに存在する場合はエラーとし、推測による上書きや他 OS への配信を行わない。
 
 #### 2.13.4.3 署名付きマニフェスト (`package.manifest.json`)
@@ -2830,7 +2828,8 @@ pub struct ArtifactIdentity {
 #### 2.13.4.4 不変性 (Immutability) の保証と実版検出
 1. **新 identity 経路の不変性と互換移行**:
    - 新 identity API および CLI は、同一の `ArtifactIdentity` に対して、既存オブジェクトと異なるバイト列のアップロードを試みた場合、即座に `409 Conflict` を返して拒否する。
-   - 同一バイト列の再アップロードは 200 OK (Idempotent no-op) とする。
+   - 同一 identity・bytes・署名 metadata の再アップロードだけを 200 OK (Idempotent no-op) とする。metadata の不一致も衝突として拒否する。
+   - **追加実装 proposal**: payload / manifest の途中失敗や並行 publish で不完全な組を公開しない。検証済み組だけを可視化する commit marker と conditional create を推奨する。HTTP / CLI / CI / direct Object Store principal を含む全書込経路で新 identity の上書きを防ぐ必要があり、read-back / Range / If-Match だけでは不変性を保証しない。権限制約と競合・中断・再試行を試験する。承認済み / 実行中 plan の参照先は delete / GC から保護し、旧 API からも新 identity を変更・削除できないよう分離する。保持期間・参照解除は実装時に確定する。
    - 現行 app-packages API は `<name>/<version>` を上書きする。Phase 1 は別の identity API / key namespace を追加し、旧 bare-key API と `release-extras.yml` の `publish-client-to-backend` は現行動作を維持する。agent publish/rollout も既存契約のまま維持する。一律 409 への変更は禁止。
    - 旧 Windows alias は PE 検証だけで可変 object を参照せず、その時点の bytes / digest / publisher 証跡を新 identity に snapshot する。同じ版の再 build が異なる bytes なら新 identity では拒否し、新しい版を要求する（force overwrite は設けない）。旧経路の再 upload は既存 plan を変えない。
    - CI producer と operator 手順を新 publish へ移行し、旧 consumer 不在・再 upload parity を検証後に旧 write API を廃止する。期限は Phase 7 の撤去 gate。移行中も新 CLI は bare key を直接配信しない。
@@ -2868,6 +2867,8 @@ kanade deploy status <plan-id | exec-id>
   - Agent が NATS に登録する `pc_id`（OS ホスト名由来）は大文字・小文字が混在しており、NATS subject (`commands.pc.<id>`) はケースセンシティブである。
   - CLI は入力された `pc_id` の大文字小文字を勝手に変換（lowercase / uppercase）せず、登録インベントリと完全一致で照合する。不一致の場合は計画作成を拒否する。
 
+**Agent scope の持続性**: 既存 `agent_config` の pc / group / global target は一回の固定 cohort job ではなく、将来の所属変更にも作用する持続 policy。plan / 承認に scope・実効 target・jitter・優先する pin とその影響を表示する。CLI の観測 timeout や plan 開始期限で policy を自動解除せず、変更は別の明示操作とする。固定 cohort だけを更新したい場合は PC scope を選ぶ。scope revision 競合と将来の enrollment / membership 変更時の platform 適合確認は追加実装 proposal とし、全 platform 成果物不足を単一 key の存在で隠さない。
+
 #### 2.13.5.3 不変バージョン解決 (`latest` の一括解決・固定)
 - `--version <ver>` に `latest` が指定された場合、または省略された場合：
   - `plan` コマンド実行時にのみ、GitHub Release API または最新の署名付きマニフェストに問い合わせ、具体的な SemVer バージョン、Git コミット SHA、成果物 URL、および SHA-256 ダイジェストを確定する。
@@ -2875,7 +2876,7 @@ kanade deploy status <plan-id | exec-id>
   - `apply` 実行時には動的なバージョン解決を一切行わず、計画に記録された不変の成果物のみを取得・デプロイする。これにより、計画から適用までの間に新しいリリースが出ても意図しないバージョンが混入しない。
 
 #### 2.13.5.4 Jitter, タイムアウト, デッドライン
-- `--jitter <duration>`: フリート一斉ダウンロードによる NATS / Backend 負荷を分散するための遅延時間を設定。デフォルト: `--pc` では `0s`、`--group` / `--all` では `15m`。
+- `--jitter <duration>`: job roles (`backend/client/cli`) の提案既定は `--pc` で `0s`、`--group` / `--all` で `15m`。Agent rollout へこの既定を適用しない。既存 fleet facade の PC 既定 `0s`、group / global の省略時は既存 scope jitter を保持する挙動を維持し、実効値・継承元を plan に表示する。
 - `--timeout <duration>`: 個々の端末におけるインストール処理の最大実行時間（デフォルト: `10m`）。
 - `--deadline <timestamp | duration>`: 計画の有効期限。期限を過ぎたコマンドは Agent 側で実行を拒否（exit code 125 でスキップ記録）。
 
@@ -2892,9 +2893,10 @@ kanade deploy status <plan-id | exec-id>
      - 運用者が明示的に `--skip-unsupported` を指定した場合に限り、非対応端末をデプロイ対象から除外し、その端末 ID と除外理由（「OS 不一致」「成果物不在」「旧 Agent」等）を計画書および監査ログに明記した上で計画作成を許可する。
 
 #### 2.13.5.6 認可・承認・実行ゲート契約
+- 以下は新規実装を要する技術 proposal であり、承認済み製品判断とは区別する。特に別人による二者承認の必須化・適用閾値は未解決。既存 `require_approval` は parse-only なので enforcement の実装前に承認済み実行を保証しない。
 - デプロイの実行は CLI のローカルプロンプトだけで完結させない。
 - `plan` はローカルに内容 digest 付き計画を出力する read-only 操作。`apply` の登録段階で Backend 上に一意の `Plan ID` を持つ承認待ちレコードを作る。
-- `apply` の実行には、Backend の RBAC における `operator` 以上のロール権限が必要であり、高リスク操作（後述の `--wipe-db` やフリート規模の更新）には Backend 側の二重承認ゲート（Approval Gate）へのバインドを要求する。
+- `apply` の実行には、Backend の RBAC における `operator` 以上のロール権限が必要であり、高リスク操作（後述の `--wipe-db` やフリート規模の更新）には Backend 側の plan に束縛した承認ゲート（Approval Gate）を要求する案とする。二者承認 policy は上記の未解決事項。
 
 #### 2.13.5.7 結果検証 (受理と検証済み成功の厳格な区別)
 - 従来の `--no-verify` フラグは完全廃止する。
@@ -2906,6 +2908,7 @@ kanade deploy status <plan-id | exec-id>
      - Admin CLI: 常駐を要求せず、管理先 executable の安全な `--version` と配置検証で `installed_verified`。
      - Agent: 既存 rollout の版収束・新 heartbeat を検証する。
    両 verified 状態は成功。未検証・timeout・失敗・rollback は成功に含めない。
+- **未解決 CLI proposal**: `--no-wait` を設ける場合は exec / plan ID と Accepted のみを返し、Verified Success と区別する。待機・部分失敗・延期・Accepted の終了コード、canary / wave / 同時実行数の既定は別途設計・承認し、ここでは製品判断を追加しない。
 - `kanade deploy status` は各端末が Verified Success に達したことを確認して初めて全体完了を出力する。
 
 ---
@@ -3064,7 +3067,7 @@ pub struct DeployCliSpec {
 
 **macOS Admin CLI tar.gz handler proposal（推奨）**: macOS 14+ Apple Silicon では既存の単体 CLI release を利用し、CLI 用 .pkg を要求しない。
 
-- publisher 署名済み manifest と archive digest / size / identity を検証後、root:wheel 0700 の staging に Rust で展開する。絶対パス・`..`・symlink/hardlink・device・重複 entry・展開容量超過を拒否し、実行対象は単一 `kanade` のみ。Mach-O arm64 と最低 OS、固定パスでの `--version` を確認する。Client.app や Agent の installer を流用しない。
+- publisher 署名済み manifest と archive digest / size / identity を検証後、root:wheel 0700 の staging に Rust で展開する。絶対パス・`..`・symlink/hardlink・device・重複 entry・展開容量超過を拒否し、許容 entry は workflow の単一 `kanade-aarch64-apple-darwin`（配置名は `kanade`）のみ。Mach-O arm64 と最低 OS、固定パスでの `--version` を確認する。Client.app や Agent の installer を流用しない。
 - `/usr/local/bin` は root 所有・非 group/world-writable であることを検証し、不在なら root:wheel 0755 で作成する。symlink の親・配置先や外部 package 管理（Homebrew 等）の所有物を辿って上書きしない。固定配置先は `/usr/local/bin/kanade`、receipt / journal / backup は `/Library/Application Support/Kanade/deploy/`（root:wheel 0700、各ファイル 0600）。receipt に identity、digest、publisher、mode、配置先と job/exec id を記録する。ユーザー config / credentials と PATH は変更しない。
 - 配置先が不在なら新規配置、正規 receipt と digest が一致すれば更新可能。既存の手動コピーを移行する場合は `--adopt-existing-cli` を明示し、既存 executable の arch・版・digest・所有権・外部管理不在を plan に記録して承認対象とする（typed `DeployCliSpec.adopt_existing_cli: bool`、既定 false、macOS の固定配置先だけで有効）。apply 時に再照合し、差分があれば拒否する。不明な所有物は移動・削除しない。他パスの CLI は対象外として plan に表示し、実機 parity では実際の operator PATH がこの固定配置を選ぶことを確認する。
 - 配置先 filesystem に root-only staging を作り、既存 binary の backup と journal を fsync してから atomic rename、mode / owner / digest と `/usr/local/bin/kanade --version` を検証する。実行中の CLI process を kill せず、既存 process は旧 inode で完了させる。常駐起動は不要で `installed_verified` が成功。検証失敗時は旧 executable と receipt を組で atomic 復元し再検証、新規配置なら今回作成したファイルだけを撤去する。復元失敗は `recovery_required`、backup を保持し有界リトライ後に停止する。
@@ -3072,12 +3075,12 @@ pub struct DeployCliSpec {
 #### 2.13.6.5 排他ロック・管理プロセス停止・データ保護
 1. **排他ファイルロック**:
    - デプロイ処理開始時に、OS ごとの管理ロックファイル（Windows: `%ProgramData%\Kanade\locks\deploy.lock`、Linux: `/run/kanade/deploy.lock`、macOS: `/var/run/kanade/deploy.lock`）を取得する。ロックが競合した場合は上限付き（最大 60 秒）でリトライし、超過時は延期として安全に終了する。
-   - Unix の lock directory は root Agent が起動時および処理前に作成・検証する（Linux root:root 0700、macOS root:wheel 0700、lock file 0600）。macOS の `/var/run` は管理可能な runtime 領域であり `/run` を新設しない。再起動で消えても再作成する。symlink / 不正 owner / 非管理者書込可能な directory・lock file は拒否し、OS の advisory lock を取得した fd を処理終了まで保持する。lock file の削除・再生成で競合を回避しない。
+   - Unix の lock directory は root Agent が起動時および処理前に作成・検証する（Linux root:root 0700、macOS root:wheel 0700、lock file 0600）。macOS の `/var/run` は OS 所有の標準 `/var` → `/private/var` を通る runtime 領域であり `/run` を新設しない。標準リンク自体を一律拒否せず、Kanade 管理の `kanade` directory / lock file の symlink・不正 owner・非管理者書込みは拒否する。再起動で消えても再作成する。標準リンクの owner / target 検証と、競合差替えを防ぐ directory fd 相対の no-follow 作成・open 手順の詳細は **未解決技術 proposal** とし、実機検証を前提とする。OS の advisory lock を取得した fd を処理終了まで保持する。lock file の削除・再生成で競合を回避しない。
 2. **管理対象プロセスのみの停止**:
    - 更新対象のサービス・プロセスのみをピンポイントで停止する（Windows SCM によるサービス停止、macOS `launchctl bootout`、Ubuntu `systemctl stop`）。
    - 同一マシン上で稼働している無関係なプロセスや、Agent 自身のメインプロセスを誤って巻き込んで停止させることを厳禁とする。
 3. **不可侵データの保護**:
-   - 設定ファイル（`backend.toml`, `agent.toml`）、SQLite データベース、ログファイル、TLS 証明書、および NATS の認証設定ファイルは、バイナリの置換によって絶対に上書き・削除されない保護領域に配置し、更新処理中も一切変更しない。
+   - 設定ファイル（`backend.toml`, `agent.toml`）、SQLite データベース、ログファイル、TLS 証明書、および NATS の認証設定ファイルは、バイナリの置換によって絶対に上書き・削除されない保護領域に配置する。バイナリ配置はこれらを上書き・削除しない。DB の forward migration、明示承認された wipe、整合 snapshot 復元は §2.13.7.4–5 の別責務であり、更新全体で DB が不変という意味ではない。
 
 #### 2.13.6.6 ジャーナル・有界リトライ・障害復旧
 1. **ロールバックジャーナル**:
@@ -3094,8 +3097,8 @@ Client App (`kanade-client`) のデプロイ・更新における重要な安全
    - 更新後の Client App 自動起動は、**更新前に稼働していた現在もアクティブな GUI セッション**（macOS: Aqua コンソールユーザー、Linux: GNOME ログインセッション）に限定する。
    - SSH セッション、ヘッドレス環境、画面ロック中、未ログイン状態では Client App を起動しない。
 2. **ユーザー Opt-out の尊重**:
-   - ユーザーが明示的にトレイ常駐を無効化（Quit または設定で opt-out）している場合、その設定を永続化領域に保持し、アップデートをまたいでも自動起動しない。
-   - 管理者が緊急通知等で強制表示を必要とする場合を除き、ユーザーの意図しないウィンドウポップアップを禁止する。
+   - 明示 Quit は当該 session の通常常駐の停止であり、永続 opt-out に変換しない (§2.11.7.4)。Quit 済みの Client は更新の自動復帰対象外。永続 opt-out は別設定として更新・再導入をまたいで保持する。保存・検出方法は §2.11.7.4 の未解決事項のまま。
+   - 更新中の新規 launch と緊急通知 fallback は共通 launch gate と協調させる。解放後の緊急通知 fallback は §2.11.7.4–5 の別判定に従い、Quit 後も再起動し得る既存契約を維持する。deploy に opt-out の強制解除を追加しない。
 
 ---
 
@@ -3126,8 +3129,9 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
    - データベースの初期化（Wipe）は、マイグレーション統合等で真に必要な場合に限られる高リスク操作である。いかなる場合もデフォルトで実行してはならない。
 2. **厳格な事前バックアップ**:
    - `--wipe-db` が指定された場合、Agent は既存 DB の snapshot バックアップを作成し、退避を確認してから `kanade-backend wipe-projector` を呼び出す。
-3. **`users` テーブルの完全保護**:
-   - アカウント情報（`users` テーブル）は常に保護され、ワイプ後も再シードなしでログイン可能であることを保証する。
+3. **非再生成データの保護**:
+   - 現行 `main.rs::wipe_projector_at` は `users` / `permission_groups` / `user_passkeys` を snapshot し、schema 再生成後に復元する。承認 plan と受入試験はアカウントだけでなく permission group の feature 権限・所属・passkey credential とログインを照合する。
+   - この3テーブル以外の非 event-source データが全て再生成可能と確認したわけではない。wipe 前に全データの source / retention / 復旧可否を棚卸しし、保持不能・不明なら拒否する。既存 wipe の3テーブル退避は §2.13.7.5 の全 DB snapshot・consumer checkpoint と組の復旧契約の代用ではない。
 4. **再投影完了の検証**:
    - ワイプ後の初回起動時、Backend が JetStream の各ストリーム（Streams）からイベントを最初からリプレイし、プロジェクションテーブルの復元が完了するまで、デプロイ結果を「完了」と判定しない。
 
@@ -3135,7 +3139,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 
 **提案（必須の復旧要件）**: `main.rs` の boot sentinel が記す通り、forward migration 後に旧 binary だけを戻すと missing migration で起動不能になり得る。wipe の有無に関係なく全 Backend 更新で以下を実施する。
 
-1. 新旧 binary、実設定の DB path、migration 集合、サービス状態を journal に固定する。配置・DB backup・復旧に十分な空き容量と権限がなければ停止前に拒否する。
+1. 新旧 binary、実設定の DB path、migration 集合、サービス状態を journal に固定する。 置換前の preflight で現在の `_sqlx_migrations` と新版が要求する集合を照合する。既知のスカッシュ非互換は停止前に拒否し、wipe が必要なら §2.13.7.4 の backup・保持対象・replay source に束縛した別の明示承認 plan を要求する。単なる `--wipe-db` 指定でこの gate を迂回しない。preflight を通過した後の予期しない migration / health 失敗は手順4の組復元へ進む。配置・DB backup・復旧に十分な空き容量と権限がなければ停止前に拒否する。
 2. 成果物と復旧用旧 binary を先にローカル cache へ完全取得する。Backend を正常停止して全 SQLite writer が終了したことを確認し、SQLite backup API 等で一貫した更新前 snapshot を作成する。稼働中 DB と WAL の単純コピーは禁止。復元試験用 copy で integrity_check と migration metadata を確認し、config・権限と共に root-only に保存する。backup 失敗時は更新を進めず旧サービスへ復帰する。
 3. 新版を起動して forward migration / health / projector readiness を有界時間で検証する。検証中は外部 API 書込を maintenance gate で拒否し、NATS event は保持する。migration 後に受けた非 event-source データを snapshot 復元で失う窓を作らない。この maintenance / readiness gate 自体は新規実装要件。
 4. 起動・migration・health 失敗時は新版と writer を停止し、失敗 DB/WAL を隔離する。journal に紐付く互換 snapshot を正しい owner/mode と整合した sidecar 状態で atomic 復元し、旧 binary / service 設定を一緒に復元して旧版を起動・検証する。下記の consumer checkpoint を復元してから旧版の projector を開始する。旧版 health と event 再投影を確認し `failed_rolled_back` として報告する。復元にも失敗なら `recovery_required`、DB と backup を保持し再試行停止、管理者へ理由を提示する。
@@ -3151,8 +3155,6 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 - consumer 再作成は journal の段階記録で冪等に再開し、全経路の復元が確認されるまで旧 Backend の自動再起動 / projector 開始を抑止する。boot sentinel / service recovery も同じ gate に従わせる。空テーブル向け既存 reset に任せる方式や、復元失敗を warn で無視して起動する方式は禁止する。
 - rollback 開始時に各 stream の high-water mark H を固定し、S+1 から H までの該当イベントを旧 projector が処理済みとなったことを recovery readiness で検証する。更新中に新版が投影・ACK した結果・監査も必ずこの範囲から復元する。先に stream retention（max_age / max_bytes / max_msgs と purge 方針）が有界更新・復旧期間中の必要範囲を保持することを確認し、保証できない場合は更新を拒否する。途中で stream 再作成・purge・retention 欠落を検出したら `recovery_required` とし、部分的再投影を成功にしない。DB backup と checkpoint は復旧完了まで保持する。
 
-- 新バイナリへの置換前に、新バイナリが要求する DB マイグレーションと、ターゲット上の現在のマイグレーション状態（`_sqlx_migrations`）の互換性をチェックする。
-- スカッシュされたマイグレーションによる非互換が検出された場合、`--wipe-db` が明示されていない限りデプロイを即座にアボートする。
 
 ---
 
@@ -3196,6 +3198,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
   1. 全サポート対象 OS / Role において `kanade deploy` CLI によるデプロイが green で完了すること。
   2. 旧スクリプトと同等以上の安全性（秘密情報の非露出、実版検証、Fail-closed）が実証されること。
   3. 運用ドキュメント（`book/src/operations/` 等）が更新され、新 CLI 手順に差し替えられること。
+  4. 撤去対象ファイル単位で未代替機能がないこと。`install-kanade-agent.yaml` / `scripts/deploy/agent-emergency-swap.ps1` は self-update 故障時の enrolled Agent 救済であり初期 bootstrap ではない。通常 rollout で代替したことにせず、detached swap / rollback と新 heartbeat の parity 完了まで残す（job の scheduled は更新成功ではない）。`install-kanade-nats.yaml` / `scripts/deploy/nats.ps1` は broker 更新も担う別 maintenance、`uninstall-kanade-client.yaml` は Client 除去であり四 role の通常 deploy で代替しない。bootstrap / 汎用 shell / build と共に未代替機能を残す。
 
 #### 2.13.8.3 OS / Role 別受入テスト基準 (Acceptance Tests)
 実装後の受入テスト（E2E / 手動検証）で満たすべき基準を以下に定義する。
@@ -3209,20 +3212,20 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 3. **署名・アーキテクチャ不一致の拒否**:
    - 改ざんされたバイナリ、署名不一致、またはターゲット OS/arch と異なる成果物を含む計画が、Agent の事前検証で確実に拒否されること。
 4. **耐障害性と競合制御**:
-   - ロックファイル競合時に有界時間待機し、デッドロックせず安全に延期終了すること。macOS 14+ の Client / CLI では `/run` 不在でも `/var/run/kanade` の安全な作成・再起動後再作成・owner/mode 検査と同時 job の排他が成立し、不正 symlink を拒否すること。
+   - ロックファイル競合時に有界時間待機し、デッドロックせず安全に延期終了すること。macOS 14+ の Client / CLI では `/run` 不在でも `/var/run/kanade` の安全な作成・再起動後再作成・owner/mode 検査と同時 job の排他が成立し、OS 標準 `/var` リンクを検証して許容し、Kanade 管理配下の不正 symlink と競合差替えを拒否すること。
    - ネットワーク切断や Backend 一時停止中も Agent が処理を継続し、復旧後に Outbox から正常に結果が再投影されること。
 5. **Backend 更新とデータ保護**:
    - Backend 更新時、設定ファイル・SQLite DB・NATS サービスが保持され、再起動後に `/api/health` が green に復帰すること。
-   - `--wipe-db` 指定時、事前バックアップが作成され、`users` テーブルが保持され、JetStream からの再投影が完了すること。
+   - `--wipe-db` 指定時、事前バックアップが作成され、`users` / `permission_groups` / `user_passkeys` と認証・feature 権限が保持され、JetStream からの再投影が完了すること。
    - Windows / Linux x86_64 / aarch64 で通常更新の forward migration 後に health を失敗させ、旧 binary + 更新前 snapshot 復元で起動・認証・結果再投影できること。backup 不可、disk full、migration 途中失敗、復元失敗、Agent 再起動も注入し、binary-only rollback を行わず、復旧不能は recovery_required となること。maintenance 中の書込拒否と NATS 継続も確認する。
    - データ入り snapshot 作成 → 新版が結果・監査・obs・通知 ack/unack を投影して ACK → health 失敗 → DB と5経路の consumer checkpoint を復元、の順に障害試験を行う。S 以前のデータ保持、S 以降の再投影、監査の非重複、counter / 通知状態の整合を検証する。commit 後 ACK 前の crash、consumer 復元途中の再 crash、復元権限不足、retention 欠落も注入し、欠落を成功扱いせず復旧 gate が維持されること。
 6. **Client GUI セッション安全性**:
    - 適格な GUI セッション（Aqua / GNOME）が存在する場合のみ `--tray` 起動され、未ログイン・SSH セッションでは起動しないこと。
-   - ユーザーの opt-out 設定が更新後も尊重されること。未ログイン・opt-out・lock 中はプロセスを作らず installed_verified で終端成功し、Windows / Mac / Ubuntu の CLI も常駐せず installed_verified となること。
+   - Quit が永続 opt-out に変換されず、更新で Quit 済み instance を復帰させず、launch gate 解放後の緊急通知 fallback は既存契約で動作すること。ユーザーの opt-out 設定が更新後も尊重されること。未ログイン・opt-out・lock 中はプロセスを作らず installed_verified で終端成功し、Windows / Mac / Ubuntu の CLI も常駐せず installed_verified となること。
 7. **認可・信頼・互換 API**:
    - 通常 exec / scheduler / KLP の全経路で plan 未承認・期限切れ・対象拡大・manifest 改変を拒否する。署名なし / legacy typed、未知 operation、command key fingerprint 不一致、publisher 失効を Agent でも拒否する。
    - deploy_capabilities None / 空を区別して記録し両者に typed を配信しない。一方その旧 Agent の Windows / Linux x86_64 / Linux aarch64 / macOS self-update を既存 publish/rollout で成功させ、更新後の typed 計画が通ること。
-   - Phase 1 中の Windows CI bare-key 再 upload は従来通り成功し、新 identity の異なる bytes は 409、同一 bytes は no-op、旧キー変更で既存 plan の digest が変わらないこと。
+   - Phase 1 中の Windows CI bare-key 再 upload は従来通り成功し、新 identity の異なる bytes / metadata は 409、同一組は no-op、旧キー変更で既存 plan の digest が変わらないこと。並行 publish・payload / manifest の途中失敗・全書込経路・参照中 delete / GC を試験し、不完全な組や差替えが resolver に見えないこと。
 8. **OS / role の追加前提**:
    - macOS CLI は arm64 tar.gz から固定 `/usr/local/bin/kanade` に新規配置・更新・No-op できること。実行中 CLI を kill せず、署名 / arch / archive traversal 不正と Homebrew 所有物を拒否する。明示採用なしの手動配置拒否、採用時の digest 再照合、置換後検証失敗の旧 binary / receipt 復元、ユーザー config 保持を試験する。
    - Ubuntu x86_64 Client は実際の GUI build で手動起動・KLP・通知・session/opt-out を §2.11.7 に照らして検証し、shim を包んだ .deb を拒否する。Mac は ad-hoc app/pkg の receipt と GUI 境界、Windows は既存 protocol/shortcut の回帰を検証する。延期機能は別途未実装のまま明記する。
@@ -3271,6 +3274,35 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 - [ ] **Task 10: 運用ドキュメント差し替え & 旧スクリプト削除**
   - `book/` および `docs/` 内の運用マニュアルを `kanade deploy` 手順へ改定
   - 同等性が実証された `scripts/fleet-deploy.ps1` および `deploy/linux/fleet-deploy.sh` の削除
+
+### 2.13.9 復元代替案との照合記録 (2026-10-18)
+
+元タスク4167の保存済み `kanade-deploy-design.patch`（SHA-256 `a9ec040b6b886454f93eb5f5d85d25e287484d56363adc053faba01d809bbcfa`、431 additions / 2 deletions、3文書）は変更せず外部添付として保持。基点 `ed11a224878725120b0056de0b193d5b773c0945` の3ファイルを scratch に抽出し、`patch -p1 --batch` で全 hunk が成功した復元文書の §2.11.8.1–10 を比較した。原本は本リポジトリにコピーしない。
+
+元 instruction、`impl-B.out` の復旧生成・適用検証記録、run `20261017-192308-2c31` の `run.json` を確認した。未コミット案は files=0 / commits=0 / empty=true、verified_noop は null、judge_skipped=true / judgements=[] であり、比較による設計棄却や検証済み no-op の証拠ではない。正本は PR #1618 の `098daa38` に着地した本 §2.13 とする。元 run の review / fix 記録にある認可・旧 Agent 拒否・Linux ARM / GUI 前提・署名鍵管理・Mac CLI・DB snapshot / consumer checkpoint 復旧の追補を維持する。
+
+照合時の HEAD / ローカル `origin/main` は `0ba31158e9f16c75e142982dc12e8b440ca71cfa`。`git fetch --no-write-fetch-head origin main` は DNS 解決失敗で最新 upstream 一致は未確認。PR #1618 後のローカル履歴は release #1619 / #1621 と macOS Screen Recording onboarding `b43fc9c5` であり、この機能を Client の pkg / GUI session 配送の完成とは扱わない。`3b7948fc` の Agent embedded metadata 検査は現在の publish に存在し、旧案の一般的な magic / version 照合だけへ戻さない。
+
+| 差分 | 判断・根拠と反映先 |
+|---|---|
+| 全 OS CLI / enrolled only / jobs / typed native / 既存 Agent rollout、Client 初期範囲 | **既存で充足**。§2.13.1 の確定判断を維持。bootstrap one-liner・独立 updater 不採用も変更しない |
+| 旧 Client updater 記述と現状調査 | **採用・修正**。§2.11.6 は履歴を残して置換済みと注記、§2.11.7 は Mac GUI と Linux shim を分離。README / book は未実装仕様への案内を加え、現行手順を維持 |
+| HTTP endpoint / SourceUrl、Agent jitter | **採用**。現行 CLI `cmd/{app,agent,exec,job}.rs` と fleet script を照合し、§2.13.1–2 / .5 と README を修正。job の15m案を Agent scope 継承へ適用しない |
+| platform family を既存 name に符号化 | **不採用（現時点）**。2 segment API を再利用できる利点はあるが family grammar / revision の恒久化を伴う。現行 identity tuple と別 API 移行を維持し、bucket / key の矛盾だけ解消。正規化・revision・namespace 詳細は未解決 |
+| 全書込経路の不変性、競合 publish / 部分失敗 / GC 保護 | **採用 proposal**。現行 `api/app_packages.rs` は無条件 put、list は2 segment 前提。§2.13.4 の新経路だけを強化し旧 CI upload 契約を維持。旧 Windows alias は AMD64 / 実版 / provenance と immutable snapshot が必要 |
+| 通常 plan で upload / Backend 保存、dry-run だけ read-only | **不採用**。現行の全 plan read-only と apply 登録を維持。ローカル入力の publish は apply、旧案の CLI 綴り・節構成への全面置換もしない |
+| 別 wire kind / shell stub 代替、publisher trust | **既存を維持**。現行 §2.13.6 の v2 envelope 必須・preflight・鍵 fingerprint / 失効・全 dispatch 認可が具体的。旧案の別 kind や stub へ変更する必要はなく、stub fallback は採らない |
+| Quit / opt-out / 緊急 fallback | **採用**。§2.11.7.4 の確定契約を優先し §2.13.6.7 / 受入を整合。永続 opt-out 保存方式は未解決 |
+| Backend 復旧・不可侵データ | **部分採用**。wipe の保持対象は `main.rs::wipe_projector_at` の3テーブルに訂正。migration preflight と実行後失敗を分離。旧案の「互換保証がなければ自動復旧しない」へ後退せず、現行の maintenance・全 DB snapshot・5 consumer checkpoint・DB/binary 組復元を維持。他の非再生成データ調査は未完了 |
+| Mac lock / native package ownership | **部分採用**。既存 Mac CLI handler と `/var/run` を維持し、OS 標準リンクと管理配下 symlink を区別。安全な open 手順は未解決。pkg/deb の復旧手順・依存 transaction は adapter 実装時に検証 |
+| Agent scope の持続と将来 membership | **採用**。`cmd/agent.rs` / `agent_config` は持続 target を設定する。固定 job cohort と区別し、timeout で scope を clear しない。競合検出は追加 proposal |
+| emergency swap / NATS maintenance / Client uninstall | **採用**。現行ファイルに機能が存在し、四 role 通常更新だけでは代替できない。§2.13.8.2 のファイル単位の撤去 gate に追加 |
+| 二者承認、canary 1 / 同時5、具体的終了コード、no-wait | **未解決 proposal**。有用だが operator 承認済みの数値・policy ではない。Accepted / Verified の区別は維持し、詳細決定を保留 |
+| Release 実物・全 OS parity | **未検証を維持**。workflow の archive 内部名は target suffix 付きと訂正。公開 asset の実物・publisher 証跡・実機挙動は未確認で、列挙を配布可能性の証明にしない |
+
+検証は復元パッチ適用・変更文書の UTF-8 / LF / fence / 参照先・`git diff --check` とコードの静的照合。HTML はローカル mdBook 0.5.4 の en / ja 設定で生成できたが、gettext 不在を optional にした検査で翻訳と CI 固定版 0.4.40 の検証ではない。所定の gate / pre-PR review の成否は PR 記録に別記し、実機・公開 Release 実物の受入とは区別する。
+
+これは設計文書の reconciliation であり、実装・配備・script 削除・元 run の再実行・task 登録を行わない。受入項目は将来の検証条件であり、本変更で合格した試験ではない。
 
 ---
 
