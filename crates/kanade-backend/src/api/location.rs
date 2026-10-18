@@ -55,6 +55,25 @@ const CLOCK_SKEW_SECS: i64 = 30;
 static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
 
+// Settings updates and reply persistence share this lock. The epoch also
+// invalidates replies across disable/re-enable cycles while NATS is in flight.
+static SETTINGS_EPOCH: tokio::sync::RwLock<u64> = tokio::sync::RwLock::const_new(0);
+
+async fn reply_epoch_guard(epoch: u64) -> Option<tokio::sync::RwLockReadGuard<'static, u64>> {
+    let guard = SETTINGS_EPOCH.read().await;
+    (*guard == epoch).then_some(guard)
+}
+
+fn heartbeat_online(heartbeat: Option<&str>, now: DateTime<Utc>) -> bool {
+    heartbeat
+        .and_then(|hb| DateTime::parse_from_rfc3339(hb).ok())
+        .is_some_and(|hb| {
+            let age = now.signed_duration_since(hb.with_timezone(&Utc));
+            age >= -chrono::Duration::seconds(CLOCK_SKEW_SECS)
+                && age <= chrono::Duration::seconds(OFFLINE_HEARTBEAT_THRESHOLD_SECS)
+        })
+}
+
 struct InFlightGuard(String);
 
 impl InFlightGuard {
@@ -110,8 +129,10 @@ fn is_current(
     latest_status: Option<LocationStatus>,
     acquired_at: &str,
     now: DateTime<Utc>,
+    online: bool,
 ) -> bool {
-    latest_status == Some(LocationStatus::Success)
+    online
+        && latest_status == Some(LocationStatus::Success)
         && DateTime::parse_from_rfc3339(acquired_at)
             .map(|dt| {
                 let age = now.signed_duration_since(dt.with_timezone(&Utc));
@@ -213,6 +234,7 @@ pub async fn get_location(
     Path(pc_id): Path<String>,
     caller: Caller,
 ) -> Result<Json<DeviceLocationResponse>, (StatusCode, String)> {
+    let settings_guard = SETTINGS_EPOCH.read().await;
     let loc_settings = load_location_settings(&s).await;
     let retention_days = loc_settings.effective_retention_days();
 
@@ -228,7 +250,8 @@ pub async fn get_location(
             last_request_id,
             last_request_at,
             last_request_status,
-            last_request_reason
+            last_request_reason,
+            (SELECT last_heartbeat FROM agents WHERE agents.pc_id = device_locations.pc_id) AS heartbeat
         FROM device_locations
         WHERE pc_id = ?
         "#,
@@ -270,7 +293,14 @@ pub async fn get_location(
                 .as_deref()
                 .and_then(LocationStatus::parse);
             if !is_expired && loc_settings.enabled {
-                let current = is_current(latest_status, &acquired_at, Utc::now());
+                let now = Utc::now();
+                let heartbeat: Option<String> = r.get("heartbeat");
+                let current = is_current(
+                    latest_status,
+                    &acquired_at,
+                    now,
+                    heartbeat_online(heartbeat.as_deref(), now),
+                );
                 let source = src
                     .as_deref()
                     .and_then(LocationSource::parse)
@@ -303,6 +333,8 @@ pub async fn get_location(
             });
         }
     }
+
+    drop(settings_guard);
 
     // Audit log: record viewing access, but NEVER include coordinates
     audit::record(
@@ -337,7 +369,10 @@ pub async fn request_location(
     Path(pc_id): Path<String>,
     caller: Caller,
 ) -> Result<Json<DeviceLocationResponse>, (StatusCode, String)> {
+    let epoch_guard = SETTINGS_EPOCH.read().await;
+    let request_epoch = *epoch_guard;
     let loc_settings = load_location_settings(&s).await;
+    drop(epoch_guard);
     if !loc_settings.enabled {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -366,15 +401,7 @@ pub async fn request_location(
     };
 
     let last_hb_str: Option<String> = agent.get("last_heartbeat");
-    let is_offline = match last_hb_str {
-        Some(hb) => DateTime::parse_from_rfc3339(&hb)
-            .map(|dt| {
-                let diff = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
-                diff.num_seconds() > OFFLINE_HEARTBEAT_THRESHOLD_SECS
-            })
-            .unwrap_or(true),
-        None => true,
-    };
+    let is_offline = !heartbeat_online(last_hb_str.as_deref(), Utc::now());
 
     let request_id = Uuid::new_v4().to_string();
     let requested_at = Utc::now().to_rfc3339();
@@ -462,7 +489,14 @@ pub async fn request_location(
 
     let reply_result = tokio::time::timeout(
         LOCATION_REQUEST_TIMEOUT,
-        s.nats.request(req_subject, body.into()),
+        s.nats.send_request(
+            req_subject,
+            async_nats::Request::new()
+                .payload(body.into())
+                .timeout(Some(LOCATION_REQUEST_TIMEOUT))
+                // Shared agent inbox grants must not expose sensitive replies.
+                .inbox(format!("location.reply.{}", Uuid::new_v4())),
+        ),
     )
     .await;
 
@@ -512,6 +546,27 @@ pub async fn request_location(
         (st, _) => (st, reason, None),
     };
 
+    // Serialize with disabling/purging. A request from an older settings
+    // epoch must never restore data, even if location has since been enabled.
+    let epoch_guard = reply_epoch_guard(request_epoch).await;
+    if epoch_guard.is_none() || !load_location_settings(&s).await.enabled {
+        drop(epoch_guard);
+        audit::record(
+            &s.nats,
+            "operator",
+            "agent.location.request",
+            Some(&pc_id),
+            Some(&caller),
+            serde_json::json!({"pc_id": &pc_id, "request_id": &request_id,
+                "status": "expired", "reason": "Location settings changed during acquisition"}),
+        )
+        .await;
+        return Err((
+            StatusCode::CONFLICT,
+            "Location settings changed during acquisition; reading discarded".into(),
+        ));
+    }
+
     // Update database
     if let (LocationStatus::Success, Some(r)) = (status, reading.as_ref()) {
         record_successful_reading(&s.pool, &pc_id, r, &request_id, &requested_at, &now).await?;
@@ -527,6 +582,8 @@ pub async fn request_location(
         )
         .await?;
     }
+
+    drop(epoch_guard);
 
     // Audit log: record request outcome, but NEVER include coordinates
     audit::record(
@@ -702,6 +759,7 @@ pub async fn put_settings(
         retention_days,
     };
 
+    let mut epoch_guard = SETTINGS_EPOCH.write().await;
     let kv = open_server_settings_bucket(&s).await?;
 
     let new_loc_clone = new_location.clone();
@@ -718,9 +776,11 @@ pub async fn put_settings(
         )
     })?;
 
+    *epoch_guard = epoch_guard.wrapping_add(1);
+
     // If disabled, purge stored coordinates from database
     if !new_location.enabled {
-        let _ = sqlx::query(
+        sqlx::query(
             r#"
             UPDATE device_locations
             SET last_latitude = NULL,
@@ -731,8 +791,15 @@ pub async fn put_settings(
             "#,
         )
         .execute(&s.pool)
-        .await;
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("purge location: {e}"),
+            )
+        })?;
     }
+    drop(epoch_guard);
 
     audit::record(
         &s.nats,
@@ -787,6 +854,39 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn disable_and_reenable_rejects_inflight_success() {
+        let pool = test_pool().await;
+        let now = Utc::now().to_rfc3339();
+        let fix = reading(&now);
+        record_successful_reading(&pool, "epoch-pc", &fix, "before", &now, &now)
+            .await
+            .unwrap();
+        let request_epoch = *SETTINGS_EPOCH.read().await;
+        {
+            let mut settings = SETTINGS_EPOCH.write().await;
+            *settings = settings.wrapping_add(1); // disable + purge
+            sqlx::query("DELETE FROM device_locations")
+                .execute(&pool)
+                .await
+                .unwrap();
+            *settings = settings.wrapping_add(1); // re-enable
+        }
+        // Same guard used at the production persistence boundary.
+        if let Some(_guard) = reply_epoch_guard(request_epoch).await {
+            record_successful_reading(&pool, "epoch-pc", &fix, "late", &now, &now)
+                .await
+                .unwrap();
+        }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM device_locations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let current = *SETTINGS_EPOCH.read().await;
+        assert!(reply_epoch_guard(current).await.is_some());
     }
 
     #[test]
@@ -972,7 +1072,7 @@ mod tests {
         let ok = reading(&now.to_rfc3339());
         assert!(validate_reading(&ok, &requested, now).is_ok());
 
-        let stale = reading(&(now - chrono::Duration::minutes(10)).to_rfc3339());
+        let stale = reading(&(now - chrono::Duration::minutes(4)).to_rfc3339());
         assert!(validate_reading(&stale, &requested, now).is_err());
 
         let future = reading(&(now + chrono::Duration::minutes(10)).to_rfc3339());
@@ -991,9 +1091,20 @@ mod tests {
         let now = Utc::now();
         let young = (now - chrono::Duration::seconds(10)).to_rfc3339();
         let old = (now - chrono::Duration::minutes(30)).to_rfc3339();
-        assert!(is_current(Some(LocationStatus::Success), &young, now));
+        assert!(is_current(Some(LocationStatus::Success), &young, now, true));
+        assert!(!is_current(
+            Some(LocationStatus::Success),
+            &young,
+            now,
+            false
+        ));
+        let overdue = (now - chrono::Duration::seconds(91)).to_rfc3339();
+        assert!(!heartbeat_online(Some(&overdue), now));
+        assert!(!heartbeat_online(None, now));
+        assert!(!heartbeat_online(Some("invalid"), now));
+        assert!(heartbeat_online(Some(&young), now));
         // Aged past the window: last known only.
-        assert!(!is_current(Some(LocationStatus::Success), &old, now));
+        assert!(!is_current(Some(LocationStatus::Success), &old, now, true));
         // Any later failure (offline, timeout, denied...) demotes it.
         for st in [
             LocationStatus::Offline,
@@ -1001,10 +1112,15 @@ mod tests {
             LocationStatus::PermissionDenied,
             LocationStatus::Unsupported,
         ] {
-            assert!(!is_current(Some(st), &young, now));
+            assert!(!is_current(Some(st), &young, now, true));
         }
-        assert!(!is_current(None, &young, now));
-        assert!(!is_current(Some(LocationStatus::Success), "garbage", now));
+        assert!(!is_current(None, &young, now, true));
+        assert!(!is_current(
+            Some(LocationStatus::Success),
+            "garbage",
+            now,
+            true
+        ));
     }
 
     #[test]

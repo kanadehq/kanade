@@ -133,33 +133,26 @@ bool kanade_signing_identity(char *buffer, size_t length) {
 }
 
 @interface KanadeLocationDelegate : NSObject <CLLocationManagerDelegate>
-@property (nonatomic, strong) dispatch_semaphore_t sema;
+@property (nonatomic) BOOL finished;
 @property (nonatomic, strong) CLLocation *location;
 @property (nonatomic, strong) NSError *error;
 @end
 
 @implementation KanadeLocationDelegate
-- (instancetype)initWithSemaphore:(dispatch_semaphore_t)sema {
-    self = [super init];
-    if (self) {
-        _sema = sema;
-    }
-    return self;
-}
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
     (void)manager;
     self.location = locations.lastObject;
-    dispatch_semaphore_signal(self.sema);
+    self.finished = YES;
 }
 - (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
     (void)manager;
     self.error = error;
-    dispatch_semaphore_signal(self.sema);
+    self.finished = YES;
 }
 @end
 
-// Status codes: 0 = Success, 1 = LocationDisabled, 2 = PermissionDenied, 3 = Unavailable
-bool kanade_macos_acquire_location(int32_t *status_code, double *latitude, double *longitude, double *accuracy) {
+// Status codes: 0 = Success, 1 = LocationDisabled, 2 = PermissionDenied, 3 = Unavailable, 4 = Timeout, 5 = NotDetermined
+bool kanade_macos_acquire_location(int32_t *status_code, double *latitude, double *longitude, double *accuracy, int64_t *acquired_ms) {
     @autoreleasepool {
         if (![CLLocationManager locationServicesEnabled]) {
             *status_code = 1;
@@ -169,29 +162,31 @@ bool kanade_macos_acquire_location(int32_t *status_code, double *latitude, doubl
         CLLocationManager *tempMgr = [[CLLocationManager alloc] init];
         CLAuthorizationStatus status = tempMgr.authorizationStatus;
 
-        if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted || status == kCLAuthorizationStatusNotDetermined) {
+        if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) {
             *status_code = 2;
             return false;
         }
 
-        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-        KanadeLocationDelegate *delegate = [[KanadeLocationDelegate alloc] initWithSemaphore:sema];
+        if (status == kCLAuthorizationStatusNotDetermined) {
+            *status_code = 5;
+            return false;
+        }
+        KanadeLocationDelegate *delegate = [[KanadeLocationDelegate alloc] init];
         CLLocationManager *manager = [[CLLocationManager alloc] init];
         manager.delegate = delegate;
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters;
 
-        if (manager.location && manager.location.horizontalAccuracy >= 0 &&
-            fabs([manager.location.timestamp timeIntervalSinceNow]) < 300) {
-            *latitude = manager.location.coordinate.latitude;
-            *longitude = manager.location.coordinate.longitude;
-            *accuracy = manager.location.horizontalAccuracy;
-            *status_code = 0;
-            return true;
-        }
-
+        // CLLocationManager delivers delegate callbacks on its creating thread's
+        // RunLoop. This function runs on a blocking worker and pumps that loop.
         [manager requestLocation];
-        if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
-            *status_code = 3;
+        double deadline = [NSProcessInfo processInfo].systemUptime + 5.0;
+        while (!delegate.finished && [NSProcessInfo processInfo].systemUptime < deadline) {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+        }
+        [manager stopUpdatingLocation];
+        manager.delegate = nil;
+        if (!delegate.finished) {
+            *status_code = 4;
             return false;
         }
 
@@ -199,6 +194,7 @@ bool kanade_macos_acquire_location(int32_t *status_code, double *latitude, doubl
             *latitude = delegate.location.coordinate.latitude;
             *longitude = delegate.location.coordinate.longitude;
             *accuracy = delegate.location.horizontalAccuracy;
+            *acquired_ms = (int64_t)(delegate.location.timestamp.timeIntervalSince1970 * 1000.0);
             *status_code = 0;
             return true;
         }

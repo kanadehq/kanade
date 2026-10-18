@@ -2396,6 +2396,10 @@ fn expectations() -> Vec<(Role, Op, Expect)> {
         (Agent, Publish("job.tail.other.example.local"), Denied),
         (Agent, Publish("remote.ctrl.other.example.local"), Denied),
         (Agent, Publish("location.req.other.example.local"), Denied),
+        (Agent, Subscribe("location.req.other.example.local"), Denied),
+        (Agent, Subscribe("location.req.>"), Denied),
+        (Agent, Subscribe("location.reply.>"), Denied),
+        (Agent, Publish("location.reply.forged"), Denied),
         (Agent, Publish("kill.other.example.local"), Denied),
         (Agent, Subscribe("results.other.example.local"), Denied),
         (Agent, Subscribe("heartbeat.other.example.local"), Denied),
@@ -3549,13 +3553,6 @@ const PC_SUBJECTS: &[PcSubject] = &[
     ),
     entry(
         "location_req",
-        Role::Agent,
-        Dir::Subscribe,
-        "location.req.{pc}",
-        false,
-    ),
-    entry(
-        "location_req",
         Role::Backend,
         Dir::Publish,
         "location.req.{pc}",
@@ -3804,6 +3801,32 @@ fn the_replay_durable_name_is_one_token_whatever_the_pc_id() {
         replay_consumer(DOTTED_PC_ID),
         "agent_replay_host_example_local"
     );
+}
+
+#[test]
+fn shared_agents_cannot_observe_location_requests_or_replies() {
+    for subject in [
+        "location.req.host.example.local",
+        "location.req.other.example.local",
+        "location.req.>",
+        "location.reply.private-request",
+        "location.reply.>",
+    ] {
+        assert!(
+            !conf_allows(Role::Agent, Dir::Subscribe, subject),
+            "{subject}"
+        );
+    }
+    assert!(conf_allows(
+        Role::Backend,
+        Dir::Publish,
+        "location.req.host.example.local"
+    ));
+    assert!(conf_allows(
+        Role::Backend,
+        Dir::Subscribe,
+        "location.reply.private-request"
+    ));
 }
 
 #[test]

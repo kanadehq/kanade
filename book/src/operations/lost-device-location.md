@@ -12,9 +12,24 @@ visibility only** (no remote lock or wipe) and it is off by default.
 2. Accounts that need it must hold the `location` feature **and** the Operator
    role. Both `GET /api/agents/{pc_id}/location` and
    `POST /api/agents/{pc_id}/location/request` enforce both.
-3. The broker must run the role-level user config that allows `location.req.>`
-   (`configs/nats-server.users.conf`): the backend publishes, an agent may
-   subscribe only to its own `location.req.<pc_id>`.
+3. Use NATS user authentication with **unique credentials for each endpoint**.
+   The shared `agent` role in `configs/nats-server.users.conf` deliberately has
+   no location subscription permission. Provision a separate user per endpoint
+   using the agent role's existing grants plus exactly
+   `location.req.<pc_id>` in its subscribe allow list (preserve hostname casing).
+   Set that user's `allow_responses` to `{ max: 1, expires: "15s" }` so a
+   five-second OS acquisition can answer; NATS's default response grant expires
+   after two seconds. Never grant `location.req.>` or another endpoint's
+   subject. Keep the backend's publish grant and private `location.reply.*`
+   subscription grant. Replies use this private namespace rather than the
+   shared `_INBOX.>` namespace. Distribute the unique credentials to that
+   endpoint and restart
+   it with `KANADE_LOCATION_ENABLED=1` in the agent process environment
+   (the listener is off otherwise); verify both its own subscription and
+   rejection of a different endpoint's subscription at the broker before enabling this feature. Provisioning these
+   users is currently manual; shared-token and shared-agent credentials are
+   unsuitable for location because they cannot authenticate which endpoint
+   answered. Without the exact grant, requests return unavailable or timeout.
 
 Disabling the feature clears every stored coordinate immediately. Deleting an
 endpoint clears its row. The cleanup sweep clears readings older than the
@@ -31,10 +46,14 @@ retention window, and the API withholds them even before the sweep runs.
   outcome** separately. A failure never overwrites the coordinates or their
   acquisition time.
 - A position is shown as *current* only when the latest request succeeded and
-  the reading is under 2 minutes old; otherwise it is labelled *last known*.
+  the reading is under 2 minutes old and the heartbeat is under 90 seconds
+  old; otherwise it is labelled *last known*.
   An endpoint whose heartbeat is older than 90 s is not asked at all and is
   recorded as `offline`. Readings dated before the request, or in the future,
-  are rejected as `unavailable`.
+  are rejected as `unavailable` (30 seconds of clock skew tolerated). OS fix
+  timestamps are preserved; receiving a cached fix does not renew its age.
+  The detail card refreshes status every 10 seconds and expires its current
+  label locally if the data or refresh becomes stale.
 - Outcomes are explicit: `success`, `unsupported`, `permission_denied`,
   `location_disabled`, `no_user_session`, `unavailable`, `timeout`, `expired`,
   `offline`.
@@ -43,7 +62,8 @@ retention window, and the API withholds them even before the sweep runs.
   and sends the coordinates to that third party. kanade adds no IP geolocation
   and uses no paid service.
 - Views, requests and setting changes are audited. **Coordinates are never put
-  in audit records**, the normal agent API, search or export.
+  in audit records**, the normal agent API, search or export. Ad-hoc SQL and
+  SQL-backed widgets/groups cannot access location records, including via views.
 
 ## Platform prerequisites and limits
 
@@ -67,3 +87,11 @@ Limitations to expect:
 - A powered-off, offline, logged-out or permission-revoked device cannot answer.
   Only a previous reading (with its age) is available, and the device may have
   moved since. This is an aid for lost-device response, not a recovery guarantee.
+
+Core Location runs on a bounded worker RunLoop, rather than blocking delegate
+callbacks on the async executor. A missing grant (`notDetermined`) is reported
+as unavailable with authorization instructions; denied/restricted grants report
+permission_denied. A five-second wait without a fix reports timeout.
+
+API references: [Apple Core Location](https://developer.apple.com/documentation/corelocation/cllocationmanager)
+and [Windows coordinate timestamp](https://learn.microsoft.com/en-us/uwp/api/windows.devices.geolocation.geocoordinate.timestamp).

@@ -150,14 +150,15 @@ async fn measure_macos_location() -> (LocationStatus, Option<String>, Option<Loc
         );
     }
 
-    // Call native CoreLocation bridge
-    unsafe {
+    // Run the bounded native RunLoop off the async executor.
+    tokio::task::spawn_blocking(|| unsafe {
         let mut status_code: i32 = 0;
         let mut lat: f64 = 0.0;
         let mut lon: f64 = 0.0;
         let mut acc: f64 = 0.0;
+        let mut acquired_ms: i64 = 0;
 
-        let res = kanade_macos_acquire_location(&mut status_code, &mut lat, &mut lon, &mut acc);
+        let res = kanade_macos_acquire_location(&mut status_code, &mut lat, &mut lon, &mut acc, &mut acquired_ms);
 
         match status_code {
             0 if res => {
@@ -165,7 +166,10 @@ async fn measure_macos_location() -> (LocationStatus, Option<String>, Option<Loc
                     latitude: lat,
                     longitude: lon,
                     accuracy_meters: acc,
-                    acquired_at: Utc::now().to_rfc3339(),
+                    acquired_at: match DateTime::<Utc>::from_timestamp_millis(acquired_ms) {
+                        Some(dt) => dt.to_rfc3339(),
+                        None => return (LocationStatus::Unavailable, Some("Invalid OS acquisition timestamp".into()), None),
+                    },
                     // Neither CoreLocation nor the Windows reading API is asked which
                     // provider produced the fix, so do not guess.
                     source: LocationSource::Unknown,
@@ -179,9 +183,11 @@ async fn measure_macos_location() -> (LocationStatus, Option<String>, Option<Loc
             ),
             2 => (
                 LocationStatus::PermissionDenied,
-                Some("Location permission was denied or not determined by user".to_string()),
+                Some("Location permission was denied or restricted".to_string()),
                 None,
             ),
+            4 => (LocationStatus::Timeout, Some("CoreLocation acquisition timed out".into()), None),
+            5 => (LocationStatus::Unavailable, Some("Location permission has not been granted; authorize the installed app in a user session".into()), None),
             3 => (
                 LocationStatus::Unavailable,
                 Some("Location hardware or network fix is currently unavailable".to_string()),
@@ -193,18 +199,19 @@ async fn measure_macos_location() -> (LocationStatus, Option<String>, Option<Loc
                 None,
             ),
         }
-    }
+    }).await.unwrap_or_else(|_| (LocationStatus::Unavailable, Some("CoreLocation worker failed".into()), None))
 }
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     /// Native bridge implemented in Objective-C.
-    /// Status codes: 0 = Success, 1 = LocationDisabled, 2 = PermissionDenied, 3 = Unavailable
+    /// Status codes: 0 = Success, 1 = LocationDisabled, 2 = PermissionDenied, 3 = Unavailable, 4 = Timeout, 5 = NotDetermined
     fn kanade_macos_acquire_location(
         status_code: *mut i32,
         latitude: *mut f64,
         longitude: *mut f64,
         accuracy: *mut f64,
+        acquired_ms: *mut i64,
     ) -> bool;
 }
 
@@ -303,13 +310,34 @@ async fn acquire_winrt_location() -> Result<LocationReading, (LocationStatus, St
                 )
             })?;
 
-            let accuracy = coord.Accuracy().unwrap_or(50.0);
+            let accuracy = coord.Accuracy().map_err(|e| {
+                (
+                    LocationStatus::Unavailable,
+                    format!("Failed to get accuracy: {e}"),
+                )
+            })?;
+            let timestamp = coord.Timestamp().map_err(|e| {
+                (
+                    LocationStatus::Unavailable,
+                    format!("Failed to get OS timestamp: {e}"),
+                )
+            })?;
+            // WinRT DateTime counts 100 ns ticks since 1601-01-01 UTC.
+            let acquired_ms = timestamp.UniversalTime / 10_000 - 11_644_473_600_000;
+            let acquired_at = DateTime::<Utc>::from_timestamp_millis(acquired_ms)
+                .ok_or_else(|| {
+                    (
+                        LocationStatus::Unavailable,
+                        "Invalid OS acquisition timestamp".into(),
+                    )
+                })?
+                .to_rfc3339();
 
             Ok(LocationReading {
                 latitude: pos_point.Latitude,
                 longitude: pos_point.Longitude,
                 accuracy_meters: accuracy,
-                acquired_at: Utc::now().to_rfc3339(),
+                acquired_at,
                 // Neither CoreLocation nor the Windows reading API is asked which
                 // provider produced the fix, so do not guess.
                 source: LocationSource::Unknown,
@@ -357,6 +385,7 @@ mod tests {
                     | LocationStatus::PermissionDenied
                     | LocationStatus::LocationDisabled
                     | LocationStatus::Unavailable
+                    | LocationStatus::Timeout
                     | LocationStatus::Success
             ),
             "Unexpected status: {:?}",

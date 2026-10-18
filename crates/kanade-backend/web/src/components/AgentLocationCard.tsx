@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, Loader2, MapPin } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -9,25 +10,26 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { locationIsCurrent } from '@/lib/locationFreshness';
 import type { DeviceLocationResponse, LocationStatus } from '@/lib/types';
 import { fmtIsoLocal } from '@/lib/utils';
 
-function statusBadgeVariant(status: LocationStatus): 'default' | 'outline' | 'secondary' | 'destructive' {
+function statusBadgeVariant(status: LocationStatus): 'default' | 'success' | 'amber' | 'danger' {
   switch (status) {
     case 'success':
-      return 'default';
+      return 'success';
     case 'offline':
     case 'timeout':
     case 'no_user_session':
     case 'unavailable':
-      return 'secondary';
+      return 'amber';
     case 'permission_denied':
     case 'location_disabled':
     case 'unsupported':
     case 'expired':
-      return 'destructive';
+      return 'danger';
     default:
-      return 'outline';
+      return 'default';
   }
 }
 
@@ -35,6 +37,11 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
   const { t } = useTranslation('agent-detail');
   const { hasRole, canSee } = useAuth();
   const qc = useQueryClient();
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const canAccess = hasRole('operator') && canSee('location');
 
@@ -43,6 +50,7 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
     queryFn: () => apiFetch<DeviceLocationResponse>(`/api/agents/${encodeURIComponent(pcId)}/location`),
     enabled: !!pcId && canAccess,
     retry: false,
+    refetchInterval: 10_000,
   });
 
   const requestMutation = useMutation({
@@ -69,6 +77,9 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
   const data = locationQ.data;
   const lastKnown = data?.last_known;
   const latestReq = data?.latest_request;
+  // A failed refresh or a suspended browser must not keep a cached "current"
+  // label alive. Refetch also observes heartbeat expiry and settings changes.
+  const current = locationIsCurrent(lastKnown, locationQ.dataUpdatedAt, now, locationQ.isError);
 
   return (
     <Card>
@@ -110,12 +121,12 @@ export function AgentLocationCard({ pcId }: { pcId: string }) {
             {/* Last known location */}
             <div className="space-y-2">
               <h4 className="text-sm font-semibold text-foreground">
-                {lastKnown?.current ? t('location.currentTitle') : t('location.lastKnownTitle')}
+                {current ? t('location.currentTitle') : t('location.lastKnownTitle')}
               </h4>
               {data && !data.enabled && (
                 <p className="text-sm text-destructive">{t('location.disabled')}</p>
               )}
-              {lastKnown && !lastKnown.current && (
+              {lastKnown && !current && (
                 <p className="text-xs text-muted">{t('location.notCurrent')}</p>
               )}
               {lastKnown ? (

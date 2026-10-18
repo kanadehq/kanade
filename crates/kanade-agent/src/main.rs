@@ -806,8 +806,11 @@ pub(crate) async fn run_agent() -> Result<()> {
         staleness_tracker.clone(),
     ));
 
-    // Lost-device location listener: handles on-demand location acquisition requests
-    tokio::spawn(location::start_listener(client.clone(), pc_id.clone()));
+    // Location is opt-in on the endpoint as well as the backend. Enable only
+    // after provisioning a unique broker credential with an exact host grant.
+    if std::env::var("KANADE_LOCATION_ENABLED").as_deref() == Ok("1") {
+        location::start_listener(client.clone(), pc_id.clone());
+    }
 
     // KLP listener (SPEC §2.12) — Windows Named Pipe today, Linux
     // UDS in a follow-up. The detached JoinHandle is intentional:
