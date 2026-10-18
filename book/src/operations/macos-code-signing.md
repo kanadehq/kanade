@@ -33,10 +33,44 @@ for a launchd-run command-line tool.
   - `deploy/macos/signing-cert.sha1` is required for official releases. Missing,
     invalid, or mismatched fingerprints fail the build.
   - Releases never fall back silently to ad-hoc linker signatures.
+  - This policy also applies to fork and `workflow_dispatch` release builds:
+    missing secrets fail the macOS matrix entry and block publication. There is
+    no unsigned-release opt-out. Ordinary pull-request checks do not need the
+    production secrets; the signing integration test uses a disposable test
+    certificate and never publishes its binaries.
 
 ## One-time setup
 
-### 1. Create the certificate
+### 1. Reuse the established certificate
+
+Before creating anything, list secret **names only**:
+
+```sh
+gh secret list --repo kanadehq/kanade --json name --jq '.[].name'
+```
+
+Check for both `MACOS_SIGN_CERT_P12_BASE64` and `MACOS_SIGN_CERT_PASSWORD`.
+Secret presence does not prove that the pinned fingerprint matches the stored
+certificate. GitHub does not return secret values. The operator must derive the
+public fingerprint from the securely archived established certificate, or supply
+its public certificate for comparison. Do not export or log the private key,
+P12 contents, or password to perform this check. Do not replace an existing
+certificate merely because its private key cannot be read back from GitHub.
+
+**Provisioning status:** both secret names (`MACOS_SIGN_CERT_P12_BASE64` and
+`MACOS_SIGN_CERT_PASSWORD`) are present in the repository, checked by name only.
+The current pin in `deploy/macos/signing-cert.sha1` has **not** been matched to
+the certificate stored in that secret, because GitHub never returns secret
+values. A syntactically valid pin is not evidence of a match. If it differs,
+`macos-codesign.sh sign` fails on the imported-vs-pinned comparison and blocks
+the release by design; that is an operator provisioning item, not something to
+patch around. The operator must confirm the established certificate's public
+SHA-1 (or replace the pin with it) before the next release.
+### Only if no established identity exists: create the certificate
+
+Creating a new certificate is an explicit operator provisioning decision. It
+changes the TCC identity if a certificate was previously used. Reuse the
+existing P12 and certificate whenever available.
 
 Keychain Access: *Certificate Assistant → Create a Certificate…*, name
 `Kanade Code Signing`, Identity Type *Self Signed Root*, Certificate Type
@@ -75,7 +109,7 @@ losing the private key requires rotating the identity and invalidates all existi
 ### 3. Pin the certificate SHA-1
 
 ```sh
-openssl x509 -in cert.pem -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' \
+openssl x509 -in cert.pem -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f' \
   > deploy/macos/signing-cert.sha1
 ```
 
@@ -139,3 +173,8 @@ System Settings → Privacy & Security → Full Disk Access → `+` → add
   post-package `verify-dist` hooks calling `scripts/ci/release-post-build.sh`
   must also be preserved in upstream templates (`yukimemi/pj-rust-workspace`
   and `yukimemi/pj-rust-cli`) so `kata apply` cannot overwrite or remove them.
+- Prepared upstream patches and their exact source blob IDs are recorded in
+  `scripts/ci/kata-signing/README.md`. These patches are pending upstream
+  application, not evidence of completed integration. Do not mark the repair
+  complete until the upstream changes are reviewed, applied, and the workspace
+  source revision in `.kata/applied.toml` is updated by `kata apply`.
