@@ -328,7 +328,7 @@ jobs:
               echo "staged dist/$stem.zip"
             else
               cp "$src" "$stem"
-              tar czf "dist/$stem.tar.gz" "$stem"
+              COPYFILE_DISABLE=1 tar czf "dist/$stem.tar.gz" "$stem"
               echo "staged dist/$stem.tar.gz"
             fi
           done
