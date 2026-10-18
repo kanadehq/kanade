@@ -181,6 +181,8 @@ pub async fn update(
                         Reported::NoAuth => "no-auth",
                         Reported::SharedToken => "shared-token",
                         Reported::Unknown => "unknown",
+                        Reported::Pending => "auth-pending",
+                        Reported::Unproven => "auth-unproven",
                         Reported::User(_) => "user",
                     }
                     .into(),
@@ -259,6 +261,7 @@ mod tests {
             p,
             Ok(ServerSettings::default()),
             &Poll {
+                uncertainty_reasons: None,
                 observed: obs,
                 registered: &HashSet::new(),
                 complete,
@@ -365,6 +368,7 @@ mod tests {
             &p,
             Ok(ServerSettings::default()),
             &Poll {
+                uncertainty_reasons: None,
                 observed: &obs,
                 registered: &HashSet::from([host]),
                 complete: true,
@@ -457,6 +461,7 @@ mod tests {
             &p,
             Ok(ServerSettings::default()),
             &Poll {
+                uncertainty_reasons: None,
                 observed: &[],
                 registered: &HashSet::new(),
                 complete: true,
@@ -591,6 +596,7 @@ mod tests {
             &p,
             Ok(settings),
             &Poll {
+                uncertainty_reasons: None,
                 observed: &[o],
                 registered: &HashSet::new(),
                 complete: true,

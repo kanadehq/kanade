@@ -59,6 +59,8 @@ pub struct Policy<'a> {
     /// Kinds whose evidence is unreliable this poll: neither raised nor
     /// resolved, left exactly as they were.
     pub frozen_kinds: &'a [String],
+    /// Hold absence-based resolutions while allowing positive findings.
+    pub hold_resolve_kinds: &'a [String],
 }
 
 /// Decide the writes that bring `stored` in line with `desired`.
@@ -92,10 +94,11 @@ pub fn reconcile(stored: &[Stored], desired: &[Desired], policy: Policy<'_>) -> 
         }
     }
     if policy.complete {
-        for s in stored
-            .iter()
-            .filter(|s| s.resolved_at.is_none() && !frozen(&s.kind))
-        {
+        for s in stored.iter().filter(|s| {
+            s.resolved_at.is_none()
+                && !frozen(&s.kind)
+                && !policy.hold_resolve_kinds.contains(&s.kind)
+        }) {
             let still = desired
                 .iter()
                 .any(|d| d.kind == s.kind && d.subject == s.subject);
@@ -259,6 +262,7 @@ mod tests {
         in_grace: false,
         complete: true,
         frozen_kinds: &[],
+        hold_resolve_kinds: &[],
     };
 
     #[test]
@@ -359,6 +363,38 @@ mod tests {
         // Present but frozen: not raised, not updated.
         assert!(reconcile(&[], std::slice::from_ref(&open), policy).is_empty());
         assert!(reconcile(&[s(&open, false)], &[d("k.f", "agent", 9, &[])], policy).is_empty());
+    }
+
+    #[test]
+    fn held_resolutions_allow_positive_updates_and_other_kinds_to_resolve() {
+        let held = d("k.held", "agent", 1, &[]);
+        let gone = d("k.gone", "agent", 1, &[]);
+        let new = d("k.new", "agent", 1, &[]);
+        let kinds = [held.kind.clone()];
+        let policy = Policy {
+            hold_resolve_kinds: &kinds,
+            ..LIVE
+        };
+        let stored = [s(&held, false), s(&gone, false)];
+        assert_eq!(
+            reconcile(&stored, std::slice::from_ref(&new), policy),
+            [
+                Op::Raise(new),
+                Op::Resolve {
+                    kind: gone.kind,
+                    subject: gone.subject
+                },
+            ]
+        );
+        let changed = d("k.held", "agent", 2, &[]);
+        assert_eq!(
+            reconcile(&stored[..1], std::slice::from_ref(&changed), policy),
+            [Op::Update(changed)]
+        );
+        assert_eq!(
+            reconcile(&[], std::slice::from_ref(&held), policy),
+            [Op::Raise(held)]
+        );
     }
 
     async fn pool() -> SqlitePool {

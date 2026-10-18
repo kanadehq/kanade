@@ -33,6 +33,12 @@
 //!   accepts alongside no `users` array — that IS the shared token, and so
 //!   the fleet lands in one countable bucket, [`LABEL_SHARED_TOKEN`].
 //!
+//! An empty/missing user also describes a socket awaiting CONNECT. Only
+//! broker policy or application activity may establish unauthenticated
+//! access; see `Acceptance`. Pending/unproven are health uncertainty, not
+//! credentials and not proof of an open broker. `/varz` brackets each walk
+//! so restarts/reloads cannot join evidence from different broker epochs.
+//!
 //! # Why the stored value is still not the reported value
 //!
 //! That redaction is a courtesy of the broker's build, not an invariant
@@ -69,12 +75,12 @@
 //! impersonate anyone); closing it for good is per-agent identity, not a
 //! naming convention.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -130,24 +136,88 @@ const REDACTED_BY_BROKER: &str = "[REDACTED]";
 /// Authenticated with the token — which, on a broker that accepts token
 /// auth at all, is the single fleet-wide credential. The migration queue.
 pub const LABEL_SHARED_TOKEN: &str = "shared-token";
-/// The broker authenticated nobody: no `authorization` block at all.
+/// Positive broker evidence of access without an authenticated identity.
 pub const LABEL_NO_AUTH: &str = "no-auth";
 /// Connected, but the credential cannot be named without disclosing a
 /// secret. Distinct from NULL, which means "not seen at all".
 pub const LABEL_UNKNOWN: &str = "unknown";
+/// No acceptance evidence yet, within the broker's own TCP auth timeout.
+pub const LABEL_PENDING: &str = "auth-pending";
+/// Authentication acceptance cannot be established from this observation.
+pub const LABEL_UNPROVEN: &str = "auth-unproven";
+
+/// Fixed, secret-free classification vocabulary; never contains broker values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceReason {
+    BrokerOpenConfig,
+    AcceptedTrafficNoAuth,
+    PreConnectPending,
+    IncompleteMonitoring,
+    ListenerAuthUnproven,
+    InvalidConnectionStart,
+    AuthPolicyConflict,
+    AcceptanceUnproven,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Acceptance {
+    NoAuth(EvidenceReason),
+    Pending,
+    Unproven(EvidenceReason),
+}
+
+impl Default for Acceptance {
+    fn default() -> Self {
+        Self::Unproven(EvidenceReason::IncompleteMonitoring)
+    }
+}
+
+impl Acceptance {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NoAuth(_) => LABEL_NO_AUTH,
+            Self::Pending => LABEL_PENDING,
+            Self::Unproven(_) => LABEL_UNPROVEN,
+        }
+    }
+
+    fn reason(self) -> EvidenceReason {
+        match self {
+            Self::NoAuth(reason) | Self::Unproven(reason) => reason,
+            Self::Pending => EvidenceReason::PreConnectPending,
+        }
+    }
+}
+
+/// Aggregate only identity-less, unproven observations, without changing the
+/// companion evidence ledger's `Observed` shape.
+fn uncertainty_reasons(conns: &[ConnInfo]) -> BTreeMap<EvidenceReason, usize> {
+    let mut counts = BTreeMap::new();
+    for c in conns {
+        if Claimed::from_name(c.name.as_deref()).is_some()
+            && c.authorized_user
+                .as_deref()
+                .is_none_or(|u| u.trim().is_empty())
+            && matches!(c.acceptance, Acceptance::Pending | Acceptance::Unproven(_))
+        {
+            *counts.entry(c.acceptance.reason()).or_default() += 1;
+        }
+    }
+    counts
+}
 
 /// The subset of `/connz` this projector reads.
 #[derive(Debug, Deserialize)]
 struct Connz {
-    #[serde(default)]
-    server_id: Option<String>,
-    #[serde(default)]
-    now: Option<chrono::DateTime<Utc>>,
     /// Connections matching the query across ALL pages — the paging bound.
-    #[serde(default)]
     total: usize,
-    #[serde(default)]
     connections: Vec<ConnInfo>,
+    #[serde(default)]
+    server_id: String,
+    now: Option<DateTime<Utc>>,
+    offset: Option<usize>,
+    num_connections: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,10 +236,114 @@ struct ConnInfo {
     /// none (the `nats` CLI does set one; a raw library user may not).
     #[serde(default)]
     name: Option<String>,
-    /// Present only with `auth=1`. Empty / absent when the broker required
-    /// no credential.
+    /// Present only with `auth=1`. Empty / absent also BEFORE authentication.
     #[serde(default)]
     authorized_user: Option<String>,
+    kind: Option<String>,
+    #[serde(rename = "type")]
+    transport: Option<String>,
+    in_msgs: Option<u64>,
+    out_msgs: Option<u64>,
+    subscriptions: Option<u64>,
+    #[serde(skip)]
+    acceptance: Acceptance,
+}
+
+/// Required fields deliberately have no defaults: `{}` is not a healthy broker.
+/// Optional auth_required remains unknown when omitted (NATS uses omitempty).
+#[derive(Debug, Deserialize)]
+struct Varz {
+    server_id: String,
+    start: DateTime<Utc>,
+    now: DateTime<Utc>,
+    config_load_time: DateTime<Utc>,
+    auth_timeout: f64,
+    auth_required: Option<bool>,
+}
+
+impl Varz {
+    fn same_epoch(&self, other: &Self) -> bool {
+        !self.server_id.is_empty()
+            && self.server_id == other.server_id
+            && self.start == other.start
+            && self.config_load_time == other.config_load_time
+            && self.auth_required == other.auth_required
+            && self.auth_timeout == other.auth_timeout
+            && self.now <= other.now
+    }
+
+    fn acceptance(&self, c: &ConnInfo, at: DateTime<Utc>) -> Acceptance {
+        if c.kind.as_deref() != Some("Client")
+            || !matches!(c.transport.as_deref(), Some("nats" | "websocket"))
+        {
+            return Acceptance::Unproven(EvidenceReason::ListenerAuthUnproven);
+        }
+        let Some(start) = c.start.filter(|start| *start >= self.start && *start <= at) else {
+            return Acceptance::Unproven(EvidenceReason::InvalidConnectionStart);
+        };
+        // NATS parser gates SUB/PUB behind authentication. These counters
+        // count application messages/subscriptions, not INFO, CONNECT or PING.
+        // Require all fields: omitted counters are NOT zero.
+        let (Some(input), Some(output), Some(subs)) = (c.in_msgs, c.out_msgs, c.subscriptions)
+        else {
+            return Acceptance::Unproven(EvidenceReason::IncompleteMonitoring);
+        };
+        // /varz does not expose effective WS authorization (including its
+        // token/user overrides and cookies). A second CONNECT overwrites the
+        // identity before authentication but retains earlier traffic counters.
+        // Without listener policy evidence those counters cannot prove that
+        // the currently missing WS identity was accepted.
+        if c.transport.as_deref() == Some("websocket") {
+            return Acceptance::Unproven(EvidenceReason::ListenerAuthUnproven);
+        }
+        if input > 0 || output > 0 || subs > 0 {
+            // On an auth-required TCP listener, a missing identity conflicts
+            // with broker policy. Counters can predate a second CONNECT
+            // (which overwrites options before re-authentication), so they
+            // cannot prove that this missing identity was accepted.
+            if self.auth_required == Some(true) {
+                return Acceptance::Unproven(EvidenceReason::AuthPolicyConflict);
+            }
+            return Acceptance::NoAuth(EvidenceReason::AcceptedTrafficNoAuth);
+        }
+        if c.transport.as_deref() == Some("nats") {
+            if self.auth_required == Some(false) {
+                return Acceptance::NoAuth(EvidenceReason::BrokerOpenConfig);
+            }
+            // A deadline is explanatory only; expiry is never acceptance.
+            if self.auth_required == Some(true)
+                && self.auth_timeout.is_finite()
+                && self.auth_timeout > 0.0
+                && (at - start).num_milliseconds() as f64 / 1000.0 < self.auth_timeout
+            {
+                return Acceptance::Pending;
+            }
+        }
+        // TCP auth flags/timeouts cannot describe WS overrides, cookies or
+        // no_auth_user. Idle WS connections stay unproven, not healthy.
+        Acceptance::Unproven(if c.transport.as_deref() == Some("websocket") {
+            EvidenceReason::ListenerAuthUnproven
+        } else {
+            EvidenceReason::AcceptanceUnproven
+        })
+    }
+}
+
+fn classify_connection(c: &ConnInfo, probe: &CredentialProbe, ev: Evidence) -> String {
+    if c.authorized_user
+        .as_deref()
+        .is_none_or(|u| u.trim().is_empty())
+    {
+        return c.acceptance.label().to_string();
+    }
+    // A WS listener may use a different token even while TCP uses users.
+    // Never extend TCP's proof that a value is a username to another listener.
+    let ev = if c.transport.as_deref() != Some("nats") {
+        Evidence::Unproven
+    } else {
+        ev
+    };
+    classify(c.authorized_user.as_deref(), probe, ev)
 }
 
 /// What this poll can *prove* about the broker's authentication mode.
@@ -205,12 +379,38 @@ fn evidence(probe: &CredentialProbe, connected: bool) -> Evidence {
     }
 }
 
+/// A local connection proves a credential mode only for its current monitored
+/// broker and TCP listener. Reconnecting to a different server, an old cid, or
+/// a WS auth override must not make another listener's token safe to store.
+fn monitor_evidence(
+    probe: &CredentialProbe,
+    connected: bool,
+    server_id: &str,
+    client_id: u64,
+    broker: &Varz,
+    conns: &[ConnInfo],
+) -> Evidence {
+    evidence(
+        probe,
+        connected
+            && server_id == broker.server_id
+            && broker.auth_required == Some(true)
+            && conns.iter().any(|c| {
+                c.cid == client_id
+                    && c.transport.as_deref() == Some("nats")
+                    && c.authorized_user
+                        .as_deref()
+                        .is_some_and(|u| !u.trim().is_empty())
+            }),
+    )
+}
+
 /// Classify one connection's reported `authorized_user` into a value that
 /// is safe to store. See the module docs for why this is not the identity
 /// function.
 fn classify(authorized_user: Option<&str>, probe: &CredentialProbe, ev: Evidence) -> String {
     match authorized_user.map(str::trim).filter(|s| !s.is_empty()) {
-        None => LABEL_NO_AUTH.to_string(),
+        None => LABEL_UNPROVEN.to_string(),
         // The broker hid the credential, which it only does for token auth.
         // A config that accepts a token has exactly one, so this is the
         // shared credential even though we never see its value.
@@ -285,7 +485,10 @@ fn correlate(
             anomalies.non_agent.push(name.to_string());
             continue;
         }
-        let label = classify(c.authorized_user.as_deref(), probe, ev);
+        let label = classify_connection(c, probe, ev);
+        if matches!(label.as_str(), LABEL_PENDING | LABEL_UNPROVEN) {
+            continue;
+        }
         match best.get(pc_id) {
             Some((cid, existing)) if *cid >= c.cid => {
                 if existing != &label {
@@ -333,7 +536,7 @@ fn observe(conns: &[ConnInfo], probe: &CredentialProbe, ev: Evidence) -> Vec<Obs
                 connection: c.connection.clone(),
                 claimed,
                 pc_id,
-                label: classify(c.authorized_user.as_deref(), probe, ev),
+                label: classify_connection(c, probe, ev),
             })
         })
         .collect()
@@ -425,7 +628,14 @@ async fn fetch_page(client: &MonitorClient, base: &str, offset: usize) -> Result
     // `auth=1` is what makes the endpoint report `authorized_user` at all;
     // `subs=0` keeps subscription lists (by far the largest part of a
     // connection record) off the wire.
-    let url = format!("{base}/connz?auth=1&subs=0&limit={PAGE_SIZE}&offset={offset}");
+    let url = format!("{base}/connz?auth=1&subs=0&sort=cid&limit={PAGE_SIZE}&offset={offset}");
+    fetch_json(client, &url).await
+}
+
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    client: &MonitorClient,
+    url: &str,
+) -> Result<T> {
     let uri: hyper::Uri = url.parse().with_context(|| format!("parse {url}"))?;
     let res = client
         .get(uri)
@@ -444,110 +654,91 @@ async fn fetch_page(client: &MonitorClient, base: &str, offset: usize) -> Result
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("read body of {url} (cap {MAX_BODY_BYTES} bytes)"))?
         .to_bytes();
-    serde_json::from_slice(&body).map_err(|_| anyhow::anyhow!("invalid /connz response"))
+    serde_json::from_slice(&body).map_err(|e| {
+        // Deserializer errors can embed a raw value from an invalid field.
+        // Keep response content and credentials out of logs.
+        anyhow::anyhow!(
+            "invalid monitoring response from {url} at line {}, column {}",
+            e.line(),
+            e.column()
+        )
+    })
 }
 
-/// Startup epoch is server_id + start, never server_id alone.
-#[derive(Deserialize, PartialEq, Eq)]
-struct BrokerEpoch {
-    server_id: String,
-    start: chrono::DateTime<Utc>,
-}
-
-async fn fetch_epoch(client: &MonitorClient, base: &str) -> Result<BrokerEpoch> {
-    let uri: hyper::Uri = format!("{base}/varz").parse()?;
-    let res = client.get(uri).await?;
-    if !res.status().is_success() {
-        bail!("monitor identity unavailable");
-    }
-    let bytes = http_body_util::Limited::new(res.into_body(), MAX_BODY_BYTES)
-        .collect()
-        .await
-        .map_err(|_| anyhow::anyhow!("read broker identity response failed"))?
-        .to_bytes();
-    // Never include response bodies or deserialization errors in logs.
-    let epoch: BrokerEpoch =
-        serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid broker epoch"))?;
-    if epoch.server_id.is_empty()
-        || epoch.server_id.len() > 64
-        || !epoch.server_id.bytes().all(|b| b.is_ascii_alphanumeric())
+/// Walk every page of `/connz`. The flag says whether the walk covered the
+/// broker's own `total`: a walk cut short by the page cap, or by a broker
+/// that stopped serving, is not the full picture, and a caller reasoning from
+/// absence ("no such connection any more") must know that.
+async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>, bool, Varz)> {
+    let before: Varz = fetch_json(client, &format!("{base}/varz")).await?;
+    if before.server_id.is_empty()
+        || before.server_id.len() > 64
+        || !before.server_id.bytes().all(|b| b.is_ascii_alphanumeric())
     {
         bail!("invalid broker identifier");
     }
-    Ok(epoch)
-}
-
-async fn fetch_snapshot(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>, bool)> {
-    let before = fetch_epoch(client, base).await?;
-    let mut conns = Vec::new();
+    let mut out: Vec<ConnInfo> = Vec::new();
+    let mut ids = HashSet::new();
     let mut complete = false;
-    let mut seen = std::collections::HashSet::new();
+    let mut consistent = true;
+    let mut last_now = before.now;
     for _ in 0..MAX_PAGES {
-        let mut page = fetch_page(client, base, conns.len()).await?;
+        // CID order is ascending and new connections append. Re-read the
+        // preceding boundary row: prefix removals would shift offsets and
+        // otherwise silently skip unseen connections. New arrivals alone do
+        // not invalidate absence evidence for the pages already covered.
+        let anchor = out.last().map(|c| c.cid);
+        let offset = out.len().saturating_sub(1);
+        let z = fetch_page(client, base, offset).await?;
         let observed_at = Utc::now();
-        let now = page
-            .now
-            .filter(|t| *t >= before.start)
-            .ok_or_else(|| anyhow::anyhow!("missing broker observation time"))?;
-        if page.server_id.as_deref() != Some(&before.server_id) {
-            bail!("broker changed during connection poll");
+        let at = z.now.context("connz missing timestamp")?;
+        if z.server_id != before.server_id || at < last_now || at < before.start {
+            bail!("broker identity or time changed during connz walk");
         }
-        let got = page.connections.len();
-        for c in &mut page.connections {
-            if c.cid == 0 || !seen.insert(c.cid) {
-                bail!("inconsistent connection identifiers");
+        last_now = at;
+        if z.offset != Some(offset) || z.num_connections != Some(z.connections.len()) {
+            bail!("connz page metadata missing or inconsistent");
+        }
+        let got = z.connections.len();
+        let end = offset
+            .checked_add(got)
+            .context("connz page range overflow")?;
+        consistent &= end <= z.total;
+        if let Some(cid) = anchor {
+            consistent &= z.connections.first().is_some_and(|c| c.cid == cid);
+        }
+        let mut previous = anchor.unwrap_or(0);
+        for (index, mut c) in z.connections.into_iter().enumerate() {
+            if index == 0 && anchor == Some(c.cid) {
+                continue;
             }
+            if c.cid <= previous || !ids.insert(c.cid) {
+                consistent = false;
+                continue;
+            }
+            previous = c.cid;
+            c.acceptance = before.acceptance(&c, at);
             c.connection = Some(super::nats_auth_evidence::Connection {
                 observed_at: Some(observed_at),
                 cid: c.cid.to_string(),
                 server_id: before.server_id.clone(),
                 broker_start: before.start,
-                broker_now: Some(now),
+                broker_now: Some(at),
                 connection_start: c.start,
                 last_activity: c.last_activity,
             });
+            out.push(c);
         }
-        conns.extend(page.connections);
-        if got == 0 || conns.len() >= page.total {
-            complete = conns.len() >= page.total;
+        if got <= usize::from(anchor.is_some()) || end >= z.total || !consistent {
+            complete = end == z.total && consistent;
             break;
         }
     }
-    if before != fetch_epoch(client, base).await? {
-        bail!("broker restarted during connection poll");
+    let after: Varz = fetch_json(client, &format!("{base}/varz")).await?;
+    if !before.same_epoch(&after) || last_now > after.now {
+        bail!("broker restarted or reloaded during monitoring poll");
     }
-    Ok((conns, complete))
-}
-
-#[cfg(test)]
-/// Walk every page of `/connz`. The flag says whether the walk covered the
-/// broker's own `total`: a walk cut short by the page cap, or by a broker
-/// that stopped serving, is not the full picture, and a caller reasoning from
-/// absence ("no such connection any more") must know that.
-async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>, bool)> {
-    let mut out: Vec<ConnInfo> = Vec::new();
-    for page in 0..MAX_PAGES {
-        let z = fetch_page(client, base, out.len()).await?;
-        let got = z.connections.len();
-        out.extend(z.connections);
-        // Stop on a short page (the last one) or once the broker's own
-        // total is covered. A page that returns nothing also stops us —
-        // otherwise a broker whose `total` outruns what it will serve would
-        // loop until MAX_PAGES every poll.
-        if got == 0 || out.len() >= z.total {
-            let complete = out.len() >= z.total;
-            return Ok((out, complete));
-        }
-        if page + 1 == MAX_PAGES {
-            warn!(
-                pages = MAX_PAGES,
-                fetched = out.len(),
-                total = z.total,
-                "/connz paging hit its cap; the tail of the connection list was not read",
-            );
-        }
-    }
-    Ok((out, false))
+    Ok((out, complete, before))
 }
 
 /// Walk every page of `/connz` and return the connections.
@@ -564,6 +755,7 @@ async fn audit_authentication(
     js: &async_nats::jetstream::Context,
     observed: &[Observed],
     complete: bool,
+    reasons: &BTreeMap<EvidenceReason, usize>,
 ) {
     let registered = match nats_auth_audit::registered_pcs(pool).await {
         Ok(r) => r,
@@ -577,6 +769,7 @@ async fn audit_authentication(
         observed,
         registered: &registered,
         complete,
+        uncertainty_reasons: Some(reasons),
     };
     match nats_auth_audit::run_poll(pool, settings, &poll, Utc::now()).await {
         Ok(0) => {}
@@ -594,9 +787,9 @@ async fn audit_authentication(
 /// so a permanently-disabled endpoint doesn't drown the log while a
 /// *newly* broken one is still visible.
 ///
-/// `nats` is the backend's own broker connection, and is read for one thing:
-/// whether it is currently up. That is what turns a locally-resolved
-/// credential into evidence about the broker — see [`Evidence`].
+/// The backend's live connection, server id and cid must match the monitored
+/// TCP listener before its credential can prove the broker's mode. A resolved
+/// credential alone is not evidence — see [`Evidence`].
 pub async fn run(
     pool: SqlitePool,
     monitor_url: String,
@@ -620,10 +813,10 @@ pub async fn run(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        // Dropping the `fetch_snapshot` future on timeout cancels the in-flight
+        // Dropping the `fetch_walk` future on timeout cancels the in-flight
         // request and closes the connection, so a wedged endpoint costs one
         // poll rather than the projector.
-        let polled = match tokio::time::timeout(POLL_TIMEOUT, fetch_snapshot(&client, &monitor_url))
+        let polled = match tokio::time::timeout(POLL_TIMEOUT, fetch_walk(&client, &monitor_url))
             .await
         {
             Ok(result) => result,
@@ -633,16 +826,28 @@ pub async fn run(
             )),
         };
         match polled {
-            Ok((conns, complete)) => {
+            Ok((conns, complete, broker)) => {
                 let seen = conns.len();
                 // Re-read per poll: the backend's link can drop and come
                 // back, and the proof is only as current as the connection.
-                let ev = evidence(
+                let backend = nats.server_info();
+                let ev = monitor_evidence(
                     &probe,
                     nats.connection_state() == async_nats::connection::State::Connected,
+                    &backend.server_id,
+                    backend.client_id,
+                    &broker,
+                    &conns,
                 );
                 let (labels, anomalies) = correlate(&conns, &probe, ev);
-                audit_authentication(&pool, &js, &observe(&conns, &probe, ev), complete).await;
+                audit_authentication(
+                    &pool,
+                    &js,
+                    &observe(&conns, &probe, ev),
+                    complete,
+                    &uncertainty_reasons(&conns),
+                )
+                .await;
                 let correlated = labels.len();
                 if anomalies != reported {
                     if !anomalies.non_agent.is_empty() {
@@ -713,7 +918,12 @@ mod tests {
     /// The literal shape the monitoring endpoint returns, so the decode is
     /// tested against the real field names rather than a hand-built struct.
     fn parse(json: &str) -> Connz {
-        serde_json::from_str(json).expect("decode /connz")
+        let mut z: Connz = serde_json::from_str(json).expect("decode /connz");
+        // Legacy credential fixtures describe standard TCP clients.
+        for c in &mut z.connections {
+            c.transport.get_or_insert_with(|| "nats".into());
+        }
+        z
     }
 
     /// A probe around a known credential. Deliberately NOT
@@ -810,7 +1020,7 @@ mod tests {
             [
                 (Claimed::Role(NatsRole::Agent), LABEL_UNKNOWN),
                 (Claimed::Role(NatsRole::Backend), LABEL_SHARED_TOKEN),
-                (Claimed::Unnamed, LABEL_NO_AUTH),
+                (Claimed::Unnamed, LABEL_UNPROVEN),
                 (Claimed::Role(NatsRole::Cli), LABEL_SHARED_TOKEN),
             ],
             "the probe connection is not ours to judge",
@@ -842,18 +1052,18 @@ mod tests {
     }
 
     #[test]
-    fn no_credential_at_all_is_its_own_state() {
+    fn missing_user_does_not_prove_no_auth() {
         let probe = probe_holding(None);
         for reported in [None, Some(""), Some("   ")] {
             assert_eq!(
                 classify(reported, &probe, Evidence::Unproven),
-                LABEL_NO_AUTH,
-                "{reported:?} means the broker authenticated nobody",
+                LABEL_UNPROVEN,
+                "{reported:?} alone proves nothing about acceptance",
             );
         }
-        // Even holding a token, an unauthenticated connection is not "ours".
+        // Holding a token cannot turn missing broker data into acceptance.
         let probe = probe_holding(Some("fleet-secret"));
-        assert_eq!(classify(None, &probe, Evidence::TokenMode), LABEL_NO_AUTH);
+        assert_eq!(classify(None, &probe, Evidence::TokenMode), LABEL_UNPROVEN);
     }
 
     #[test]
@@ -911,6 +1121,32 @@ mod tests {
     async fn canned_connz(
         pages: Vec<String>,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let mut offset: usize = 0;
+        let mut responses = vec![varz_fixture()];
+        for page in pages {
+            let mut page: serde_json::Value = serde_json::from_str(&page).unwrap();
+            page["server_id"] = "TESTSERVER".into();
+            page["now"] = "2026-10-18T02:24:58Z".into();
+            page["offset"] = offset.into();
+            let len = page["connections"].as_array().unwrap().len();
+            page["num_connections"] = len.into();
+            offset = (offset + len).saturating_sub(1);
+            responses.push(page.to_string());
+        }
+        responses.push(varz_fixture());
+        canned_http(responses).await
+    }
+
+    fn varz_fixture() -> String {
+        r#"{"server_id":"TESTSERVER","start":"2026-10-18T02:00:00Z",
+        "now":"2026-10-18T02:24:58Z","config_load_time":"2026-10-18T02:00:00Z",
+        "total_connections":10,"auth_timeout":2,"auth_required":true}"#
+            .into()
+    }
+
+    async fn canned_http(
+        pages: Vec<String>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let queries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -941,13 +1177,13 @@ mod tests {
     #[tokio::test]
     async fn coherent_snapshot_captures_anonymous_id_without_raw_secrets() {
         let secret = "must-not-appear-in-evidence";
-        let epoch = r#"{"server_id":"BROKER1","start":"2026-10-18T02:24:31Z"}"#.to_string();
+        let epoch = varz_fixture().replace("TESTSERVER", "BROKER1");
         let page = format!(
-            r#"{{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","total":1,"connections":[{{"cid":18446744073709551615,"authorized_user":"{secret}","ip":"127.0.0.1","start":"2026-10-18T02:24:57Z"}}]}}"#
+            r#"{{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","offset":0,"num_connections":1,"total":1,"connections":[{{"cid":18446744073709551615,"authorized_user":"{secret}","ip":"127.0.0.1","start":"2026-10-18T02:24:57Z"}}]}}"#
         );
-        let (base, _) = canned_connz(vec![epoch.clone(), page, epoch]).await;
+        let (base, _) = canned_http(vec![epoch.clone(), page, epoch]).await;
         let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
-        let (conns, complete) = fetch_snapshot(&client, &base).await.unwrap();
+        let (conns, complete, _) = fetch_walk(&client, &base).await.unwrap();
         let obs = observe(&conns, &probe_holding(None), Evidence::Unproven);
         assert!(complete);
         assert_eq!(obs.len(), 1);
@@ -963,9 +1199,9 @@ mod tests {
 
     #[tokio::test]
     async fn restart_missing_identity_and_inconsistent_pages_cannot_be_complete() {
-        let epoch = r#"{"server_id":"BROKER1","start":"2026-10-18T02:24:31Z"}"#.to_string();
-        let page = r#"{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","total":1,"connections":[{"cid":1}]}"#.to_string();
-        let restarted = r#"{"server_id":"BROKER1","start":"2026-10-18T02:24:59Z"}"#.to_string();
+        let epoch = varz_fixture().replace("TESTSERVER", "BROKER1");
+        let page = r#"{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","offset":0,"num_connections":1,"total":1,"connections":[{"cid":1}]}"#.to_string();
+        let restarted = epoch.replace("02:00:00Z", "02:24:59Z");
         let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
         for pages in [
             vec![epoch.clone(), page.clone(), restarted],
@@ -974,25 +1210,38 @@ mod tests {
             vec![
                 epoch.clone(),
                 page.replace("\"total\":1", "\"total\":2"),
-                page.clone(),
+                page.replace("\"offset\":0", "\"offset\":1"),
             ],
         ] {
-            let (base, _) = canned_connz(pages).await;
-            assert!(fetch_snapshot(&client, &base).await.is_err());
+            let (base, _) = canned_http(pages).await;
+            assert!(fetch_walk(&client, &base).await.is_err());
         }
     }
 
     #[tokio::test]
     async fn snapshot_page_cap_reports_incomplete_without_losing_sampled_ids() {
-        let epoch = r#"{"server_id":"BROKER1","start":"2026-10-18T02:24:31Z"}"#.to_string();
+        let epoch = varz_fixture().replace("TESTSERVER", "BROKER1");
         let mut pages = vec![epoch.clone()];
         for cid in 1..=MAX_PAGES {
-            pages.push(format!(r#"{{"server_id":"BROKER1","now":"2026-10-18T02:24:58Z","total":1000,"connections":[{{"cid":{cid}}}]}}"#));
+            let offset = cid.saturating_sub(2);
+            let conns = if cid == 1 {
+                serde_json::json!([{"cid":cid}])
+            } else {
+                serde_json::json!([{"cid":cid-1},{"cid":cid}])
+            };
+            pages.push(
+                serde_json::json!({
+                    "server_id":"BROKER1","now":"2026-10-18T02:24:58Z",
+                    "offset":offset,"num_connections":conns.as_array().unwrap().len(),
+                    "total":1000,"connections":conns
+                })
+                .to_string(),
+            );
         }
         pages.push(epoch);
-        let (base, _) = canned_connz(pages).await;
+        let (base, _) = canned_http(pages).await;
         let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
-        let (conns, complete) = fetch_snapshot(&client, &base).await.unwrap();
+        let (conns, complete, _) = fetch_walk(&client, &base).await.unwrap();
         assert!(!complete);
         assert_eq!(conns.len(), MAX_PAGES);
         assert_eq!(
@@ -1003,7 +1252,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_monitor_response_errors_do_not_echo_credentials() {
-        let (base, _) = canned_connz(vec![r#"{"total":"secret-must-not-be-logged"}"#.into()]).await;
+        let (base, _) = canned_http(vec![r#"{"total":"secret-must-not-be-logged"}"#.into()]).await;
         let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
         let err = fetch_page(&client, &base, 0).await.unwrap_err();
         assert!(!format!("{err:#}").contains("secret-must-not-be-logged"));
@@ -1027,7 +1276,7 @@ mod tests {
                 .collect();
             format!(r#"{{"total":3,"connections":[{}]}}"#, conns.join(","))
         };
-        let (base, queries) = canned_connz(vec![page(&[1, 2]), page(&[3])]).await;
+        let (base, queries) = canned_connz(vec![page(&[1, 2]), page(&[2, 3])]).await;
         let client: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
 
         let conns = fetch_all(&client, &base).await.expect("walk both pages");
@@ -1035,10 +1284,16 @@ mod tests {
 
         // The second request must resume where the first stopped, or the
         // walk silently re-reads page one until MAX_PAGES.
-        let queries = queries.lock().unwrap().clone();
+        let queries: Vec<_> = queries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|q| q.contains("/connz?"))
+            .cloned()
+            .collect();
         assert_eq!(queries.len(), 2, "{queries:?}");
         assert!(queries[0].contains("offset=0"), "{}", queries[0]);
-        assert!(queries[1].contains("offset=2"), "{}", queries[1]);
+        assert!(queries[1].contains("offset=1"), "{}", queries[1]);
         // And `auth=1` is what makes the endpoint report the credential at
         // all — without it every connection would look unauthenticated.
         assert!(queries.iter().all(|q| q.contains("auth=1")), "{queries:?}");
@@ -1057,7 +1312,12 @@ mod tests {
         let conns = fetch_all(&client, &base).await.expect("walk terminates");
         assert_eq!(conns.len(), 1);
         assert_eq!(
-            queries.lock().unwrap().len(),
+            queries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|q| q.contains("/connz?"))
+                .count(),
             2,
             "an empty page ends the walk"
         );
@@ -1254,7 +1514,7 @@ mod tests {
 
         let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
         let base = format!("http://127.0.0.1:{http_port}");
-        let (conns, complete) = fetch_snapshot(&http, &base)
+        let (conns, complete, _) = fetch_walk(&http, &base)
             .await
             .expect("read live broker snapshot");
         assert!(complete);
@@ -1312,5 +1572,581 @@ mod tests {
             .try_get(0)
             .unwrap();
         assert_eq!(n, 1);
+    }
+    fn connection_fixture() -> ConnInfo {
+        serde_json::from_str(
+            r#"{"cid":1,"kind":"Client","type":"nats",
+            "start":"2026-10-18T02:24:57Z","in_msgs":0,"out_msgs":0,
+            "subscriptions":0}"#,
+        )
+        .unwrap()
+    }
+
+    fn snapshot_fixture() -> Varz {
+        serde_json::from_str(&varz_fixture()).unwrap()
+    }
+
+    #[test]
+    fn uncertainty_reasons_use_only_fixed_codes_and_ignore_authenticated_connections() {
+        let v = snapshot_fixture();
+        let mut pending = connection_fixture();
+        pending.acceptance = v.acceptance(&pending, v.now);
+        let mut missing = connection_fixture();
+        missing.in_msgs = None;
+        missing.acceptance = v.acceptance(&missing, v.now);
+        let mut ws = connection_fixture();
+        ws.transport = Some("websocket".into());
+        ws.acceptance = v.acceptance(&ws, v.now);
+        let mut expired = connection_fixture();
+        expired.acceptance = v.acceptance(&expired, v.now + chrono::Duration::seconds(5));
+        let mut authenticated = connection_fixture();
+        authenticated.authorized_user = Some("secret-must-not-escape".into());
+        let reasons = uncertainty_reasons(&[pending, missing, ws, expired, authenticated]);
+        assert_eq!(
+            reasons,
+            BTreeMap::from([
+                (EvidenceReason::PreConnectPending, 1),
+                (EvidenceReason::IncompleteMonitoring, 1),
+                (EvidenceReason::ListenerAuthUnproven, 1),
+                (EvidenceReason::AcceptanceUnproven, 1),
+            ])
+        );
+        let json = serde_json::to_string(&reasons).unwrap();
+        assert!(json.contains("pre_connect_pending"));
+        assert!(!json.contains("secret-must-not-escape"));
+    }
+
+    #[test]
+    fn pre_connect_is_pending_and_expiry_is_unproven_never_no_auth() {
+        let v = snapshot_fixture();
+        let mut c = connection_fixture();
+        let probe = probe_holding(None);
+        for (at, expected) in [
+            (v.now, LABEL_PENDING),
+            (v.now + chrono::Duration::seconds(2), LABEL_UNPROVEN),
+        ] {
+            c.acceptance = v.acceptance(&c, at);
+            assert_eq!(
+                classify_connection(&c, &probe, Evidence::Unproven),
+                expected
+            );
+        }
+        // CONNECT metadata and RTT are not proof of successful authentication.
+        c.name = Some("kanade-agent/PC1".into());
+        c.acceptance = v.acceptance(&c, v.now);
+        assert_eq!(
+            classify_connection(&c, &probe, Evidence::Unproven),
+            LABEL_PENDING
+        );
+        assert!(correlate(&[c], &probe, Evidence::Unproven).0.is_empty());
+    }
+
+    #[test]
+    fn only_positive_application_activity_or_explicit_tcp_policy_proves_no_auth() {
+        let mut v = snapshot_fixture();
+        v.auth_required = None; // The real open broker omits its false flag.
+        let probe = probe_holding(None);
+        for transport in ["nats", "websocket"] {
+            for field in ["in_msgs", "out_msgs", "subscriptions"] {
+                let mut json = serde_json::json!({
+                    "cid":1,"kind":"Client","type":transport,
+                    "start":"2026-10-18T02:24:57Z","in_msgs":0,"out_msgs":0,"subscriptions":0
+                });
+                json[field] = 1.into();
+                let mut c: ConnInfo = serde_json::from_value(json).unwrap();
+                c.acceptance = v.acceptance(&c, v.now);
+                assert_eq!(
+                    classify_connection(&c, &probe, Evidence::Unproven),
+                    if transport == "nats" {
+                        LABEL_NO_AUTH
+                    } else {
+                        LABEL_UNPROVEN
+                    }
+                );
+            }
+        }
+        let mut c = connection_fixture();
+        v.auth_required = None;
+        assert_eq!(v.acceptance(&c, v.now).label(), LABEL_UNPROVEN);
+        v.auth_required = Some(false);
+        assert_eq!(v.acceptance(&c, v.now).label(), LABEL_NO_AUTH);
+        c.transport = Some("websocket".into());
+        assert_eq!(v.acceptance(&c, v.now).label(), LABEL_UNPROVEN);
+        c.subscriptions = Some(1);
+        assert_eq!(v.acceptance(&c, v.now).label(), LABEL_UNPROVEN);
+    }
+
+    #[test]
+    fn incomplete_connection_counters_or_listener_are_unproven() {
+        let mut v = snapshot_fixture();
+        v.auth_required = None;
+        for missing in [
+            "in_msgs",
+            "out_msgs",
+            "subscriptions",
+            "kind",
+            "type",
+            "start",
+        ] {
+            let mut json = serde_json::json!({
+                "cid":1,"kind":"Client","type":"nats",
+                "start":"2026-10-18T02:24:57Z","in_msgs":0,"out_msgs":0,"subscriptions":1
+            });
+            let complete: ConnInfo = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(v.acceptance(&complete, v.now).label(), LABEL_NO_AUTH);
+            json.as_object_mut().unwrap().remove(missing);
+            let c: ConnInfo = serde_json::from_value(json).unwrap();
+            assert_eq!(v.acceptance(&c, v.now).label(), LABEL_UNPROVEN, "{missing}");
+        }
+        assert!(serde_json::from_str::<Varz>("{}").is_err());
+        assert!(serde_json::from_str::<Connz>("{}").is_err());
+        assert!(serde_json::from_str::<Connz>(r#"{"total":0}"#).is_err());
+    }
+
+    #[test]
+    fn anonymous_authenticated_connections_and_ws_overrides_remain_redacted() {
+        let probe = CredentialProbe::from_user("backend");
+        let mut c = connection_fixture();
+        c.authorized_user = Some("agent".into());
+        assert_eq!(
+            classify_connection(&c, &probe, Evidence::UsersMode),
+            "agent"
+        );
+        c.authorized_user = Some(REDACTED_BY_BROKER.into());
+        assert_eq!(
+            classify_connection(&c, &probe, Evidence::UsersMode),
+            LABEL_SHARED_TOKEN
+        );
+        c.transport = Some("websocket".into());
+        c.authorized_user = Some("different-listener-secret".into());
+        assert_eq!(
+            classify_connection(&c, &probe, Evidence::UsersMode),
+            LABEL_UNKNOWN
+        );
+        c.authorized_user = Some(REDACTED_BY_BROKER.into());
+        assert_eq!(
+            classify_connection(&c, &probe, Evidence::UsersMode),
+            LABEL_SHARED_TOKEN
+        );
+    }
+
+    #[test]
+    fn a_restart_reload_or_time_reversal_invalidates_the_epoch() {
+        let v = snapshot_fixture();
+        let mut next = snapshot_fixture();
+        assert!(v.same_epoch(&next));
+        next.server_id = "restarted".into();
+        assert!(!v.same_epoch(&next));
+        next = snapshot_fixture();
+        next.start += chrono::Duration::seconds(1);
+        assert!(!v.same_epoch(&next));
+        next = snapshot_fixture();
+        next.config_load_time += chrono::Duration::seconds(1);
+        assert!(!v.same_epoch(&next));
+        next = snapshot_fixture();
+        next.now -= chrono::Duration::seconds(1);
+        assert!(!v.same_epoch(&next));
+    }
+
+    #[tokio::test]
+    async fn inconsistent_monitoring_never_proves_a_clean_poll() {
+        let page = serde_json::json!({
+            "server_id":"TESTSERVER","now":"2026-10-18T02:24:58Z",
+            "offset":0,"num_connections":0,"total":0,"connections":[]
+        });
+        let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        for field in [
+            "server_id",
+            "offset",
+            "num_connections",
+            "now",
+            "connections",
+            "total",
+        ] {
+            let mut broken = page.clone();
+            broken.as_object_mut().unwrap().remove(field);
+            let (base, _) =
+                canned_http(vec![varz_fixture(), broken.to_string(), varz_fixture()]).await;
+            assert!(fetch_walk(&http, &base).await.is_err(), "{field}");
+        }
+        let mut restarted: serde_json::Value = serde_json::from_str(&varz_fixture()).unwrap();
+        restarted["server_id"] = "restarted".into();
+        let (base, _) = canned_http(vec![
+            varz_fixture(),
+            page.to_string(),
+            restarted.to_string(),
+        ])
+        .await;
+        assert!(fetch_walk(&http, &base).await.is_err());
+        let mut churn: serde_json::Value = serde_json::from_str(&varz_fixture()).unwrap();
+        churn["total_connections"] = 11.into();
+        let (base, _) =
+            canned_http(vec![varz_fixture(), page.to_string(), churn.to_string()]).await;
+        assert!(fetch_walk(&http, &base).await.unwrap().1);
+        let (base, _) = canned_http(vec!["{}".into()]).await;
+        assert!(fetch_walk(&http, &base).await.is_err());
+    }
+
+    async fn disposable_broker(
+        extra: &str,
+    ) -> (tokio::process::Child, tempfile::TempDir, u16, String) {
+        let port = portpicker::pick_unused_port().unwrap();
+        let monitor = portpicker::pick_unused_port().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nats.conf");
+        std::fs::write(
+            &path,
+            format!("host: 127.0.0.1\nport: {port}\nhttp_port: {monitor}\n{extra}\n"),
+        )
+        .unwrap();
+        let mut server = tokio::process::Command::new("nats-server")
+            .arg("-c")
+            .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("nats-server in PATH");
+        let base = format!("http://127.0.0.1:{monitor}");
+        let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        for _ in 0..50 {
+            if fetch_json::<Varz>(&http, &format!("{base}/varz"))
+                .await
+                .is_ok()
+            {
+                return (server, dir, port, base);
+            }
+            assert!(
+                server.try_wait().unwrap().is_none(),
+                "disposable broker exited before ready"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("disposable broker did not start");
+    }
+
+    async fn raw_info(port: u16) -> (tokio::io::BufReader<tokio::net::TcpStream>, u64) {
+        use tokio::io::AsyncBufReadExt;
+        let mut socket = tokio::io::BufReader::new(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap(),
+        );
+        let mut line = String::new();
+        socket.read_line(&mut line).await.unwrap();
+        let info: serde_json::Value =
+            serde_json::from_str(line.strip_prefix("INFO ").unwrap().trim()).unwrap();
+        (socket, info["client_id"].as_u64().unwrap())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server and loopback sockets"]
+    async fn live_connz_pre_connect_rejection_anonymous_auth_and_reconnect() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            for users in [false, true] {
+                let config = if users {
+                    "authorization { timeout: 10, users: [{user: agent, password: test-password}] }"
+                } else {
+                    "authorization { timeout: 10, token: test-token }"
+                };
+                let (mut server, _dir, port, base) = disposable_broker(config).await;
+                let mut previous = None;
+                // A reconnect is a new cid, with no inherited acceptance evidence.
+                for _ in 0..2 {
+                    let (mut socket, cid) = raw_info(port).await;
+                    assert_ne!(previous, Some(cid));
+                    previous = Some(cid);
+                    let conns = fetch_all(&http, &base).await.unwrap();
+                    let c = conns.iter().find(|c| c.cid == cid).unwrap();
+                    assert!(c.name.is_none());
+                    assert!(c.authorized_user.is_none());
+                    assert_eq!(
+                        (c.in_msgs, c.out_msgs, c.subscriptions),
+                        (Some(0), Some(0), Some(0))
+                    );
+                    assert_eq!(
+                        classify_connection(c, &probe_holding(None), Evidence::Unproven),
+                        LABEL_PENDING
+                    );
+                    // No credentials: metadata is present, but authentication fails.
+                    socket
+                        .get_mut()
+                        .write_all(
+                            b"CONNECT {\"verbose\":false,\"lang\":\"test\",\"version\":\"1\"}\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    let mut reply = String::new();
+                    socket.read_line(&mut reply).await.unwrap();
+                    assert!(reply.contains("Authorization Violation"), "{reply}");
+                    let mut removed = false;
+                    for _ in 0..50 {
+                        if !fetch_all(&http, &base)
+                            .await
+                            .unwrap()
+                            .iter()
+                            .any(|c| c.cid == cid)
+                        {
+                            removed = true;
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    assert!(removed, "rejected cid remained in monitoring");
+                }
+                let opts = if users {
+                    async_nats::ConnectOptions::new()
+                        .user_and_password("agent".into(), "test-password".into())
+                } else {
+                    async_nats::ConnectOptions::new().token("test-token".into())
+                };
+                let authenticated = opts
+                    .connect(format!("nats://127.0.0.1:{port}"))
+                    .await
+                    .unwrap();
+                authenticated.flush().await.unwrap();
+                let conns = fetch_all(&http, &base).await.unwrap();
+                let c = conns.iter().find(|c| c.authorized_user.is_some()).unwrap();
+                assert!(c.name.as_deref().is_none_or(str::is_empty));
+                let expected = if users { "agent" } else { LABEL_SHARED_TOKEN };
+                let ev = if users {
+                    Evidence::UsersMode
+                } else {
+                    Evidence::TokenMode
+                };
+                assert_eq!(
+                    classify_connection(c, &probe_holding(Some("test-token")), ev),
+                    expected
+                );
+                drop(authenticated);
+                server.kill().await.unwrap();
+                server.wait().await.unwrap();
+            }
+        })
+        .await
+        .expect("live auth test deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server and loopback sockets"]
+    async fn live_connz_open_broker_has_positive_acceptance_evidence() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (mut server, _dir, port, base) = disposable_broker("").await;
+            let (mut socket, cid) = raw_info(port).await;
+            socket.get_mut().write_all(b"CONNECT {\"verbose\":false}\r\nSUB audit.test 1\r\nPUB audit.test 1\r\nx\r\nPING\r\n").await.unwrap();
+            loop {
+                let mut line = String::new();
+                assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                if line == "PONG\r\n" { break; }
+            }
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            let conns = fetch_all(&http, &base).await.unwrap();
+            let c = conns.iter().find(|c| c.cid == cid).unwrap();
+            assert_eq!(classify_connection(c, &probe_holding(None), Evidence::Unproven), LABEL_NO_AUTH);
+            let findings = super::super::nats_auth_findings::group(
+                kanade_shared::wire::NatsAuthMode::Token,
+                &observe(&conns, &probe_holding(None), Evidence::Unproven),
+                &HashSet::new(),
+            );
+            assert!(findings.iter().any(|f| f.kind == super::super::nats_auth_findings::FindingKind::BrokerOpen));
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+        }).await.expect("live open-broker test deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server and loopback sockets"]
+    async fn live_connz_websocket_token_override_is_not_an_open_broker() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let ws_port = portpicker::pick_unused_port().unwrap();
+            let config = format!("websocket {{ port: {ws_port}, no_tls: true, authorization {{ token: ws-test-token }} }}");
+            let (mut server, _dir, _port, base) = disposable_broker(&config).await;
+            let authenticated = async_nats::ConnectOptions::new().token("ws-test-token".into())
+                .connect(format!("ws://127.0.0.1:{ws_port}")).await.unwrap();
+            authenticated.flush().await.unwrap();
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            let conns = fetch_all(&http, &base).await.unwrap();
+            let c = conns.iter().find(|c| c.transport.as_deref() == Some("websocket")).unwrap();
+            assert_eq!(classify_connection(c, &probe_holding(None), Evidence::UsersMode), LABEL_SHARED_TOKEN);
+            drop(authenticated);
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+        }).await.expect("live websocket test deadline");
+    }
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server and loopback sockets"]
+    async fn live_connz_websocket_no_auth_user_has_a_broker_assigned_identity() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let ws_port = portpicker::pick_unused_port().unwrap();
+            let config = format!("authorization {{ users: [{{user: guest, password: test-password}}] }}\nwebsocket {{ port: {ws_port}, no_tls: true, no_auth_user: guest }}");
+            let (mut server, _dir, _port, base) = disposable_broker(&config).await;
+            let anonymous = async_nats::ConnectOptions::new()
+                .connect(format!("ws://127.0.0.1:{ws_port}")).await.unwrap();
+            let sub = anonymous.subscribe("audit.test").await.unwrap();
+            anonymous.flush().await.unwrap();
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            let conns = fetch_all(&http, &base).await.unwrap();
+            let c = conns.iter().find(|c| c.transport.as_deref() == Some("websocket")).unwrap();
+            assert_eq!(c.authorized_user.as_deref(), Some("guest"));
+            assert!(c.subscriptions.is_some_and(|n| n > 0));
+            // Activity does not override an identity supplied by the broker.
+            assert_eq!(classify_connection(c, &probe_holding(None), Evidence::UsersMode), LABEL_UNKNOWN);
+            drop(sub);
+            drop(anonymous);
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+        }).await.expect("live websocket no_auth_user test deadline");
+    }
+    #[test]
+    fn startup_reconnect_and_another_broker_cannot_prove_safe_user_labels() {
+        let mut v = snapshot_fixture();
+        let mut c = connection_fixture();
+        c.authorized_user = Some("backend".into());
+        let probe = CredentialProbe::from_user("backend");
+        let ev = |connected, id: &str, cid, v: &Varz, c: &ConnInfo| {
+            monitor_evidence(&probe, connected, id, cid, v, std::slice::from_ref(c))
+        };
+        assert_eq!(ev(true, "TESTSERVER", 1, &v, &c), Evidence::UsersMode);
+        assert_eq!(ev(false, "TESTSERVER", 1, &v, &c), Evidence::Unproven);
+        assert_eq!(ev(true, "another-server", 1, &v, &c), Evidence::Unproven);
+        assert_eq!(ev(true, "TESTSERVER", 2, &v, &c), Evidence::Unproven);
+        v.auth_required = None;
+        assert_eq!(ev(true, "TESTSERVER", 1, &v, &c), Evidence::Unproven);
+        v.auth_required = Some(true);
+        c.authorized_user = None;
+        assert_eq!(ev(true, "TESTSERVER", 1, &v, &c), Evidence::Unproven);
+        c.authorized_user = Some("backend".into());
+        c.transport = Some("websocket".into());
+        assert_eq!(ev(true, "TESTSERVER", 1, &v, &c), Evidence::Unproven);
+    }
+    #[test]
+    fn old_traffic_during_reauthentication_cannot_override_listener_auth() {
+        let mut v = snapshot_fixture();
+        let probe = probe_holding(None);
+        for transport in ["nats", "websocket"] {
+            for policy in [Some(true), Some(false), None] {
+                if transport == "nats" && policy != Some(true) {
+                    continue;
+                }
+                v.auth_required = policy;
+                for name in [None, Some("kanade-cli")] {
+                    // Snapshot after an authenticated CONNECT/PUB, while a
+                    // second CONNECT with an empty token has overwritten opts
+                    // but has not yet failed authentication. WS may use its
+                    // own token even when TCP auth_required is false/absent.
+                    let mut c = connection_fixture();
+                    c.transport = Some(transport.into());
+                    c.in_msgs = Some(12);
+                    c.out_msgs = Some(3);
+                    c.subscriptions = Some(2);
+                    c.name = name.map(str::to_owned);
+                    c.authorized_user = Some(String::new());
+                    c.acceptance = v.acceptance(&c, v.now);
+                    assert_eq!(c.acceptance.label(), LABEL_UNPROVEN);
+                    let reason = if transport == "websocket" {
+                        EvidenceReason::ListenerAuthUnproven
+                    } else {
+                        EvidenceReason::AuthPolicyConflict
+                    };
+                    assert_eq!(
+                        uncertainty_reasons(std::slice::from_ref(&c)),
+                        BTreeMap::from([(reason, 1)])
+                    );
+                    let observations = observe(&[c], &probe, Evidence::Unproven);
+                    let findings = super::super::nats_auth_findings::group(
+                        kanade_shared::wire::NatsAuthMode::Token,
+                        &observations,
+                        &HashSet::new(),
+                    );
+                    assert!(findings.is_empty(), "{transport} {policy:?} {name:?}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_cid_boundaries_tolerate_appends_but_detect_skipped_rows() {
+        let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let page = |offset: usize, total: usize, cids: &[u64]| {
+            serde_json::json!({
+                "server_id":"TESTSERVER","now":"2026-10-18T02:24:58Z",
+                "offset":offset,"num_connections":cids.len(),"total":total,
+                "connections":cids.iter().map(|cid| serde_json::json!({"cid":cid})).collect::<Vec<_>>()
+            }).to_string()
+        };
+        let mut after: serde_json::Value = serde_json::from_str(&varz_fixture()).unwrap();
+        after["total_connections"] = 100.into();
+        for (next, expected_complete, expected_ids) in [
+            // New higher CIDs append without skipping any old connections.
+            (page(1, 4, &[2, 3, 4]), true, vec![1, 2, 3, 4]),
+            // A connection after the boundary can close before it is read.
+            (page(1, 2, &[2]), true, vec![1, 2]),
+            // CID 1 disappeared before offset 1: CID 3 would be skipped by
+            // an ordinary non-overlapping walk. Preserve positives but hold
+            // absence claims when the expected boundary CID 2 is missing.
+            (page(1, 3, &[3, 4]), false, vec![1, 2, 3, 4]),
+            // Re-reading the anchor without making progress terminates.
+            (page(1, 3, &[2]), false, vec![1, 2]),
+        ] {
+            let (base, queries) = canned_http(vec![
+                varz_fixture(),
+                page(0, 3, &[1, 2]),
+                next,
+                after.to_string(),
+            ])
+            .await;
+            let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+            assert_eq!(complete, expected_complete);
+            assert_eq!(
+                conns.iter().map(|c| c.cid).collect::<Vec<_>>(),
+                expected_ids
+            );
+            let queries = queries.lock().unwrap();
+            assert!(queries[1].contains("sort=cid"));
+            assert!(queries[2].contains("offset=1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn page_identity_changes_and_duplicate_cids_cannot_resolve_findings() {
+        let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let first = serde_json::json!({
+            "server_id":"TESTSERVER","now":"2026-10-18T02:24:58Z",
+            "offset":0,"num_connections":1,"total":2,"connections":[{"cid":1}]
+        });
+        let mut next = first.clone();
+        next["num_connections"] = 2.into();
+        next["connections"] = serde_json::json!([{"cid":1},{"cid":1}]);
+        // The anchor is expected once; another copy must not count twice.
+        let (base, _) = canned_http(vec![
+            varz_fixture(),
+            first.to_string(),
+            next.to_string(),
+            varz_fixture(),
+        ])
+        .await;
+        let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+        assert_eq!(conns.len(), 1);
+        assert!(!complete);
+        next["server_id"] = "another-broker".into();
+        next["connections"][0]["cid"] = 2.into();
+        let (base, _) =
+            canned_http(vec![varz_fixture(), first.to_string(), next.to_string()]).await;
+        assert!(fetch_walk(&http, &base).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_monitoring_values_cannot_leak_into_errors() {
+        let secret = "example-secret-value";
+        let (base, _) = canned_http(vec![format!(
+            r#"{{"server_id":"test","start":"{secret}"}}"#
+        )])
+        .await;
+        let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let err = fetch_walk(&http, &base).await.unwrap_err();
+        assert!(!format!("{err:#}").contains(secret));
     }
 }

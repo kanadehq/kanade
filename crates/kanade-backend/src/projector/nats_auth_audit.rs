@@ -7,16 +7,19 @@
 //! records how the poll went, so the health response can say whether "no
 //! findings" is a fresh answer or a blind spot.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
 use kanade_shared::wire::ServerSettings;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-use super::nats_auth_findings::{NOTICE_PREFIX, Observed, Severity, grace_until, group, in_grace};
+use super::nats_auth_findings::{
+    FindingKind, NOTICE_PREFIX, Observed, Severity, grace_until, group, in_grace,
+};
+use super::nats_conns::{EvidenceReason, LABEL_PENDING, LABEL_UNPROVEN};
 use super::notice_ledger::{self, Desired, Op, Policy, Stored};
 
 /// A recorded poll older than this is reported as `stale`: the projector
@@ -31,6 +34,8 @@ pub enum PollStatus {
     /// The list was cut short (paging cap): findings can still be raised, but
     /// nothing is resolved because absence proves nothing.
     Incomplete,
+    /// Some live connections have no proof of authentication acceptance.
+    AuthenticationUncertain,
     /// The monitoring endpoint could not be read; the ledger was left as is.
     EndpointUnreadable,
     /// The expected mode could not be read, so nothing could be judged.
@@ -42,6 +47,7 @@ impl PollStatus {
         match self {
             PollStatus::Ok => "ok",
             PollStatus::Incomplete => "incomplete",
+            PollStatus::AuthenticationUncertain => "authentication_uncertain",
             PollStatus::EndpointUnreadable => "endpoint_unreadable",
             PollStatus::SettingsUnreadable => "settings_unreadable",
         }
@@ -54,6 +60,27 @@ pub struct Poll<'a> {
     pub registered: &'a HashSet<String>,
     /// Every page of the connection list was read.
     pub complete: bool,
+    /// None for older callers without reason-level classification evidence.
+    pub uncertainty_reasons: Option<&'a BTreeMap<EvidenceReason, usize>>,
+}
+
+impl Poll<'_> {
+    fn uncertainty(&self) -> (usize, usize) {
+        (
+            self.observed
+                .iter()
+                .filter(|o| o.label == LABEL_PENDING)
+                .count(),
+            self.observed
+                .iter()
+                .filter(|o| o.label == LABEL_UNPROVEN)
+                .count(),
+        )
+    }
+
+    fn judged(&self) -> bool {
+        self.complete && self.uncertainty() == (0, 0)
+    }
 }
 
 /// The ledger writes this poll calls for.
@@ -74,6 +101,14 @@ pub fn plan(
             sample: g.sample_hosts,
         })
         .collect();
+    let hold_resolve_kinds: Vec<String> = if poll.judged() {
+        Vec::new()
+    } else {
+        FindingKind::ALL
+            .iter()
+            .map(|kind| kind.notice_kind())
+            .collect()
+    };
     notice_ledger::reconcile(
         stored,
         &desired,
@@ -81,6 +116,7 @@ pub fn plan(
             in_grace: in_grace(now, settings.nats_auth_mode_changed_at),
             complete: poll.complete,
             frozen_kinds: &[],
+            hold_resolve_kinds: &hold_resolve_kinds,
         },
     )
 }
@@ -136,22 +172,60 @@ pub async fn run_poll(
     super::nats_auth_evidence::update(&mut tx, &settings, poll, &ops, now).await?;
     tx.commit().await?;
     let written = ops.len();
-    let status = if poll.complete {
-        PollStatus::Ok
-    } else {
+    let (pending, unproven) = poll.uncertainty();
+    let status = if !poll.complete {
         PollStatus::Incomplete
+    } else if pending + unproven > 0 {
+        PollStatus::AuthenticationUncertain
+    } else {
+        PollStatus::Ok
     };
-    record_state(pool, status, now).await?;
+    record_details(
+        pool,
+        status,
+        Some((pending, unproven)),
+        poll.uncertainty_reasons,
+        now,
+    )
+    .await?;
     Ok(written)
 }
 
 pub async fn record_state(pool: &SqlitePool, status: PollStatus, now: DateTime<Utc>) -> Result<()> {
+    record_details(pool, status, None, None, now).await
+}
+
+// Aggregate poll metadata only; connection evidence belongs to the separate
+// evidence ledger. Store an envelope in the existing TEXT field, accepting
+// legacy plain statuses when reading, so no connection schema is coupled here.
+#[derive(Serialize, Deserialize)]
+struct RecordedState {
+    status: String,
+    pending_connections: Option<usize>,
+    unproven_connections: Option<usize>,
+    #[serde(default)]
+    uncertainty_reasons: Option<BTreeMap<EvidenceReason, usize>>,
+}
+
+async fn record_details(
+    pool: &SqlitePool,
+    status: PollStatus,
+    counts: Option<(usize, usize)>,
+    reasons: Option<&BTreeMap<EvidenceReason, usize>>,
+    now: DateTime<Utc>,
+) -> Result<()> {
     super::nats_auth_evidence::prune(pool, now).await?;
+    let state = RecordedState {
+        status: status.as_str().into(),
+        pending_connections: counts.map(|c| c.0),
+        unproven_connections: counts.map(|c| c.1),
+        uncertainty_reasons: reasons.cloned(),
+    };
     sqlx::query(
         "INSERT INTO nats_auth_audit_state (id, status, polled_at) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET status = excluded.status, polled_at = excluded.polled_at",
     )
-    .bind(status.as_str())
+    .bind(serde_json::to_string(&state)?)
     .bind(now)
     .execute(pool)
     .await
@@ -171,11 +245,16 @@ pub struct NatsAuthHealth {
     pub expected_mode: Option<&'static str>,
     /// While set, newly appearing findings are held back after a mode change.
     pub grace_until: Option<DateTime<Utc>>,
-    /// `ok`, `incomplete`, `endpoint_unreadable`, `settings_unreadable`,
-    /// `stale` (no recent poll) or `pending` (none yet). Anything but `ok`
+    /// `ok`, `authentication_uncertain`, `incomplete`, `endpoint_unreadable`,
+    /// `settings_unreadable`, `state_unreadable`, `stale` (no recent poll) or `pending` (none yet). Anything but `ok`
     /// means an empty `findings` list is not a clean bill of health.
     pub poll_status: String,
     pub polled_at: Option<DateTime<Utc>>,
+    /// Counts from the last successful read; None when unavailable or stale.
+    pub pending_connections: Option<usize>,
+    pub unproven_connections: Option<usize>,
+    /// Safe reason counts from this poll; null when unavailable or stale.
+    pub uncertainty_reasons: Option<BTreeMap<EvidenceReason, usize>>,
     /// Connections covered by the open findings (the sum of their `count`s).
     pub open_total: i64,
     pub findings: Vec<FindingView>,
@@ -252,11 +331,38 @@ pub async fn health_block(
         .await
         .ok()
         .flatten();
+    let mut pending_connections = None;
+    let mut unproven_connections = None;
+    let mut uncertainty_reasons = None;
     let (poll_status, polled_at) = match state {
         None => ("pending".to_string(), None),
         Some(r) => {
             let at: Option<DateTime<Utc>> = r.try_get("polled_at").ok();
-            let status: String = r.try_get("status").unwrap_or_default();
+            let raw: String = r.try_get("status").unwrap_or_default();
+            let recorded =
+                serde_json::from_str::<RecordedState>(&raw).unwrap_or_else(|_| RecordedState {
+                    status: if [
+                        "ok",
+                        "incomplete",
+                        "endpoint_unreadable",
+                        "settings_unreadable",
+                    ]
+                    .contains(&raw.as_str())
+                    {
+                        raw
+                    } else {
+                        "state_unreadable".into()
+                    },
+                    pending_connections: None,
+                    unproven_connections: None,
+                    uncertainty_reasons: None,
+                });
+            if at.is_some_and(|t| now - t <= STALE_AFTER) {
+                pending_connections = recorded.pending_connections;
+                unproven_connections = recorded.unproven_connections;
+                uncertainty_reasons = recorded.uncertainty_reasons;
+            }
+            let status = recorded.status;
             match at {
                 Some(t) if now - t > STALE_AFTER => ("stale".to_string(), Some(t)),
                 _ => (status, at),
@@ -268,6 +374,9 @@ pub async fn health_block(
         grace_until: settings.and_then(|s| grace_until(now, s.nats_auth_mode_changed_at)),
         poll_status,
         polled_at,
+        pending_connections,
+        unproven_connections,
+        uncertainty_reasons,
         open_total: findings.iter().map(|f| f.count).sum(),
         findings,
     }
@@ -312,6 +421,7 @@ mod tests {
             observed: o,
             registered: r,
             complete: true,
+            uncertainty_reasons: None,
         }
     }
 
@@ -511,8 +621,11 @@ mod tests {
                 "findings",
                 "grace_until",
                 "open_total",
+                "pending_connections",
                 "poll_status",
-                "polled_at"
+                "polled_at",
+                "uncertainty_reasons",
+                "unproven_connections"
             ]
         );
         let mut fkeys: Vec<_> = json["findings"][0]
@@ -545,5 +658,118 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!format!("{stored:?}").contains(secret));
+    }
+    #[tokio::test]
+    async fn uncertain_auth_holds_resolution_but_allows_new_proven_critical_findings() {
+        let pool = pool().await;
+        let r = reg();
+        let s = users();
+        let old = [Observed {
+            connection: None,
+            claimed: Claimed::Unnamed,
+            pc_id: None,
+            label: LABEL_NO_AUTH.into(),
+        }];
+        run_poll(&pool, Ok(s.clone()), &poll(&old, &r), t0())
+            .await
+            .unwrap();
+        let uncertain = [agent("PC1", LABEL_PENDING), agent("PC2", LABEL_UNPROVEN)];
+        assert_eq!(
+            run_poll(&pool, Ok(s.clone()), &poll(&uncertain, &r), t0())
+                .await
+                .unwrap(),
+            0
+        );
+        let h = health_block(&pool, Some(&s), t0()).await;
+        assert_eq!(h.poll_status, "authentication_uncertain");
+        assert_eq!(
+            (h.pending_connections, h.unproven_connections),
+            (Some(1), Some(1))
+        );
+        assert_eq!(h.findings.len(), 1);
+        assert_eq!(h.findings[0].kind, "broker_open");
+        let history = super::super::nats_auth_evidence::history(&pool, None)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].resolved_at.is_none());
+        assert!(history[0].connections.is_empty());
+        let mixed = [
+            agent("PC1", LABEL_PENDING),
+            agent("PC2", LABEL_SHARED_TOKEN),
+        ];
+        assert_eq!(
+            run_poll(&pool, Ok(s.clone()), &poll(&mixed, &r), t0())
+                .await
+                .unwrap(),
+            1
+        );
+        let h = health_block(&pool, Some(&s), t0()).await;
+        assert_eq!(h.findings.len(), 2);
+        assert!(h.findings.iter().all(|f| f.severity == "critical"));
+        // Only a complete, judged poll may resolve either finding.
+        run_poll(&pool, Ok(s.clone()), &poll(&[], &r), t0())
+            .await
+            .unwrap();
+        let h = health_block(&pool, Some(&s), t0()).await;
+        assert_eq!(h.poll_status, "ok");
+        assert!(h.findings.is_empty());
+        assert_eq!(
+            (h.pending_connections, h.unproven_connections),
+            (Some(0), Some(0))
+        );
+    }
+
+    #[tokio::test]
+    async fn uncertainty_counts_are_unavailable_on_unreadable_or_stale_polls() {
+        let pool = pool().await;
+        let r = reg();
+        let s = users();
+        let o = [agent("PC1", LABEL_UNPROVEN)];
+        let mut incomplete = poll(&o, &r);
+        incomplete.complete = false;
+        let reasons = BTreeMap::from([(EvidenceReason::IncompleteMonitoring, 1)]);
+        incomplete.uncertainty_reasons = Some(&reasons);
+        run_poll(&pool, Ok(s.clone()), &incomplete, t0())
+            .await
+            .unwrap();
+        let h = health_block(&pool, Some(&s), t0()).await;
+        assert_eq!(h.poll_status, "incomplete");
+        assert_eq!(h.unproven_connections, Some(1));
+        assert_eq!(h.uncertainty_reasons.as_ref(), Some(&reasons));
+        assert_eq!(
+            serde_json::to_value(&h).unwrap()["uncertainty_reasons"]["incomplete_monitoring"],
+            1
+        );
+        let h = health_block(&pool, Some(&s), t0() + STALE_AFTER + Duration::seconds(1)).await;
+        assert_eq!(h.poll_status, "stale");
+        assert_eq!(h.unproven_connections, None);
+        assert_eq!(h.uncertainty_reasons, None);
+        record_state(&pool, PollStatus::EndpointUnreadable, t0())
+            .await
+            .unwrap();
+        let h = health_block(&pool, Some(&s), t0()).await;
+        assert_eq!(h.poll_status, "endpoint_unreadable");
+        assert_eq!(h.uncertainty_reasons, None);
+        assert_eq!(
+            (h.pending_connections, h.unproven_connections),
+            (None, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_statuses_remain_readable_and_corruption_is_unknown() {
+        let pool = pool().await;
+        for (raw, expected) in [
+            ("ok", "ok"),
+            ("incomplete", "incomplete"),
+            ("broken", "state_unreadable"),
+        ] {
+            sqlx::query("INSERT INTO nats_auth_audit_state VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status")
+                .bind(raw).bind(t0()).execute(&pool).await.unwrap();
+            let h = health_block(&pool, None, t0()).await;
+            assert_eq!(h.poll_status, expected);
+            assert_eq!(h.uncertainty_reasons, None);
+        }
     }
 }
