@@ -31,8 +31,10 @@ visibility only** (no remote lock or wipe) and it is off by default.
    unsuitable for location because they cannot authenticate which endpoint
    answered. Without the exact grant, requests return unavailable or timeout.
 
-Disabling the feature clears every stored coordinate immediately. Deleting an
-endpoint clears its row. The cleanup sweep clears readings older than the
+Disabling the feature clears every stored coordinate before the setting is
+saved; if clearing fails the save is refused and the feature stays enabled.
+Re-enabling clears coordinates again, so nothing kept while disabled can
+reappear. Deleting an endpoint clears its row. The cleanup sweep clears readings older than the
 retention window, and the API withholds them even before the sweep runs.
 
 ## Behaviour
@@ -57,8 +59,9 @@ retention window, and the API withholds them even before the sweep runs.
 - Outcomes are explicit: `success`, `unsupported`, `permission_denied`,
   `location_disabled`, `no_user_session`, `unavailable`, `timeout`, `expired`,
   `offline`.
-- Coordinates, accuracy, acquisition time and source (`unknown` when the OS
-  does not say) are shown, plus an OpenStreetMap link that opens only on click
+- Coordinates, accuracy, acquisition time and source are shown. Windows
+  reports satellite, Wi-Fi, cellular or IP (labelled as coarse); macOS does not
+  say, so its source is `unknown`. An OpenStreetMap link opens only on click
   and sends the coordinates to that third party. kanade adds no IP geolocation
   and uses no paid service.
 - Views are audited once per caller and endpoint in each five-minute window

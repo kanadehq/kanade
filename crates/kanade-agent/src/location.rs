@@ -170,8 +170,8 @@ async fn measure_macos_location() -> (LocationStatus, Option<String>, Option<Loc
                         Some(dt) => dt.to_rfc3339(),
                         None => return (LocationStatus::Unavailable, Some("Invalid OS acquisition timestamp".into()), None),
                     },
-                    // Neither CoreLocation nor the Windows reading API is asked which
-                    // provider produced the fix, so do not guess.
+                    // CLLocation does not expose which provider produced the fix,
+                    // so do not guess.
                     source: LocationSource::Unknown,
                 };
                 (LocationStatus::Success, None, Some(reading))
@@ -333,14 +333,18 @@ async fn acquire_winrt_location() -> Result<LocationReading, (LocationStatus, St
                 })?
                 .to_rfc3339();
 
+            // Optional on older builds; an unreadable source is reported as unknown.
+            let source = coord
+                .PositionSource()
+                .map(windows_position_source)
+                .unwrap_or(LocationSource::Unknown);
+
             Ok(LocationReading {
                 latitude: pos_point.Latitude,
                 longitude: pos_point.Longitude,
                 accuracy_meters: accuracy,
                 acquired_at,
-                // Neither CoreLocation nor the Windows reading API is asked which
-                // provider produced the fix, so do not guess.
-                source: LocationSource::Unknown,
+                source,
             })
         }
         _ => Err((
@@ -350,9 +354,56 @@ async fn acquire_winrt_location() -> Result<LocationReading, (LocationStatus, St
     }
 }
 
+/// Map the provider Windows reports for a fix. `IPAddress` stays `Ip` so the
+/// UI labels it as coarse rather than passing it off as a precise fix.
+#[cfg(target_os = "windows")]
+fn windows_position_source(
+    source: windows::Devices::Geolocation::PositionSource,
+) -> LocationSource {
+    use windows::Devices::Geolocation::PositionSource;
+    match source {
+        PositionSource::Satellite => LocationSource::Gps,
+        PositionSource::WiFi => LocationSource::Wifi,
+        PositionSource::Cellular => LocationSource::Cellular,
+        PositionSource::IPAddress => LocationSource::Ip,
+        // Unknown, Default, Obfuscated, ...: the OS did not name a provider.
+        _ => LocationSource::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_position_source_maps_reported_provider() {
+        use windows::Devices::Geolocation::PositionSource;
+        assert_eq!(
+            windows_position_source(PositionSource::Satellite),
+            LocationSource::Gps
+        );
+        assert_eq!(
+            windows_position_source(PositionSource::WiFi),
+            LocationSource::Wifi
+        );
+        assert_eq!(
+            windows_position_source(PositionSource::Cellular),
+            LocationSource::Cellular
+        );
+        assert_eq!(
+            windows_position_source(PositionSource::IPAddress),
+            LocationSource::Ip
+        );
+        assert_eq!(
+            windows_position_source(PositionSource::Unknown),
+            LocationSource::Unknown
+        );
+        assert_eq!(
+            windows_position_source(PositionSource::Obfuscated),
+            LocationSource::Unknown
+        );
+    }
 
     #[tokio::test]
     async fn expired_request_is_rejected() {

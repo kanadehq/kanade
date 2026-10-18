@@ -450,6 +450,38 @@ pub async fn request_location(
         ));
     };
 
+    let Some(_in_flight) = InFlightGuard::acquire(&pc_id) else {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("A location request for `{pc_id}` is already in progress"),
+        ));
+    };
+
+    // Rate-limiting check: avoid flooding requests (offline ones included,
+    // which would otherwise each rewrite the row and emit an audit event)
+    let last_req_row = sqlx::query("SELECT last_request_at FROM device_locations WHERE pc_id = ?")
+        .bind(&pc_id)
+        .fetch_optional(&s.pool)
+        .await
+        .unwrap_or(None);
+
+    if let Some(r) = last_req_row {
+        let prev_req_at: Option<String> = r.get("last_request_at");
+        if let Some(prev) = prev_req_at
+            && let Ok(prev_dt) = DateTime::parse_from_rfc3339(&prev)
+        {
+            let diff = Utc::now().signed_duration_since(prev_dt.with_timezone(&Utc));
+            if diff.num_seconds() < MIN_REQUEST_INTERVAL_SECS {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "A location request for `{pc_id}` was already initiated recently. Please wait {MIN_REQUEST_INTERVAL_SECS}s."
+                    ),
+                ));
+            }
+        }
+    }
+
     let last_hb_str: Option<String> = agent.get("last_heartbeat");
     let is_offline = !heartbeat_online(last_hb_str.as_deref(), Utc::now());
 
@@ -485,37 +517,6 @@ pub async fn request_location(
         .await;
 
         return load_location_response(&s, &pc_id).await.map(Json);
-    }
-
-    let Some(_in_flight) = InFlightGuard::acquire(&pc_id) else {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("A location request for `{pc_id}` is already in progress"),
-        ));
-    };
-
-    // Rate-limiting check: avoid flooding requests
-    let last_req_row = sqlx::query("SELECT last_request_at FROM device_locations WHERE pc_id = ?")
-        .bind(&pc_id)
-        .fetch_optional(&s.pool)
-        .await
-        .unwrap_or(None);
-
-    if let Some(r) = last_req_row {
-        let prev_req_at: Option<String> = r.get("last_request_at");
-        if let Some(prev) = prev_req_at
-            && let Ok(prev_dt) = DateTime::parse_from_rfc3339(&prev)
-        {
-            let diff = Utc::now().signed_duration_since(prev_dt.with_timezone(&Utc));
-            if diff.num_seconds() < MIN_REQUEST_INTERVAL_SECS {
-                return Err((
-                    StatusCode::TOO_MANY_REQUESTS,
-                    format!(
-                        "A location request for `{pc_id}` was already initiated recently. Please wait {MIN_REQUEST_INTERVAL_SECS}s."
-                    ),
-                ));
-            }
-        }
     }
 
     // Prepare NATS on-demand request
@@ -809,8 +810,29 @@ pub async fn put_settings(
         retention_days,
     };
 
+    // Held across the KV write on purpose: replies persist only under a read
+    // guard of the same epoch, so releasing it between purge and the setting
+    // write would let a reading land after the purge.
     let mut epoch_guard = SETTINGS_EPOCH.write().await;
     let kv = open_server_settings_bucket(&s).await?;
+    let previous = load_location_settings(&s).await;
+
+    // Purge before the setting is saved, so a failed purge leaves the old
+    // setting in place instead of a disabled setting with coordinates behind
+    // it. Leaving the disabled state purges as well: nothing kept while
+    // disabled (e.g. by an older build) may reappear on re-enable.
+    if !new_location.enabled || !previous.enabled {
+        purge_coordinates(&s.pool).await.map_err(|e| {
+            warn!(error = %e, "purge location coordinates");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("purge location: {e}"),
+            )
+        })?;
+        // In-flight requests from before the purge must not restore data,
+        // even if the setting write below fails.
+        *epoch_guard = epoch_guard.wrapping_add(1);
+    }
 
     let new_loc_clone = new_location.clone();
     let _ = kv_cas::read_modify_write::<ServerSettings, _>(&kv, KEY_SERVER_SETTINGS, |doc| {
@@ -827,28 +849,6 @@ pub async fn put_settings(
     })?;
 
     *epoch_guard = epoch_guard.wrapping_add(1);
-
-    // If disabled, purge stored coordinates from database
-    if !new_location.enabled {
-        sqlx::query(
-            r#"
-            UPDATE device_locations
-            SET last_latitude = NULL,
-                last_longitude = NULL,
-                last_accuracy = NULL,
-                last_source = NULL,
-                last_acquired_at = NULL
-            "#,
-        )
-        .execute(&s.pool)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("purge location: {e}"),
-            )
-        })?;
-    }
     drop(epoch_guard);
 
     audit::record(
@@ -865,6 +865,23 @@ pub async fn put_settings(
     .await;
 
     Ok(Json(new_location))
+}
+
+/// Clear every stored coordinate, keeping request status rows.
+async fn purge_coordinates(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+    let res = sqlx::query(
+        r#"
+        UPDATE device_locations
+        SET last_latitude = NULL,
+            last_longitude = NULL,
+            last_accuracy = NULL,
+            last_source = NULL,
+            last_acquired_at = NULL
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
 }
 
 /// Periodic cleanup sweep for location records whose retention window has passed.
@@ -1226,20 +1243,341 @@ mod tests {
         drop(a);
         assert!(InFlightGuard::acquire("guard-pc-a").is_some());
     }
+}
 
-    #[test]
-    fn location_routes_are_operator_gated_and_settings_admin_gated() {
-        // The router wires /location routes into the operator group and the
-        // settings route into the admin group; guard the source so a refactor
-        // cannot silently move them to the viewer-level base router.
-        let src = include_str!("mod.rs");
-        let op = src.find("let operator = Router::new()").unwrap();
-        let adm = src.find("let admin = Router::new()").unwrap();
-        let loc = src.find("location::get_location").unwrap();
-        let req = src.find("location::request_location").unwrap();
-        let set = src.find("location::get_settings").unwrap();
-        assert!(op < loc && loc < adm);
-        assert!(op < req && req < adm);
-        assert!(set > adm);
+/// Authorization and settings behaviour through the real router, the
+/// `auth::verify` middleware and a throwaway nats-server.
+#[cfg(test)]
+mod router_tests {
+    use std::process::Stdio;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    struct App {
+        router: Router,
+        pool: SqlitePool,
+        kv: async_nats::jetstream::kv::Store,
+        _server: tokio::process::Child,
+        _storage: tempfile::TempDir,
+    }
+
+    fn mint(sub: &str) -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+        let claims = Claims {
+            sub: sub.into(),
+            exp: 4_102_444_800,
+            aud: Some(crate::auth::EXPECTED_AUDIENCE.to_string()),
+            roles: Vec::new(),
+            allowed_features: None,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(crate::auth::signing_secret().as_bytes()),
+        )
+        .expect("mint")
+    }
+
+    /// Accounts: `admin`, `op` (operator), `op_loc` (operator limited to the
+    /// location page), `op_inv` (operator without it), `view` (viewer).
+    /// `PC-OFF` is registered with an overdue heartbeat.
+    async fn app() -> App {
+        let port = portpicker::pick_unused_port().expect("pick port");
+        let storage = tempfile::TempDir::new().expect("storage tempdir");
+        let server = tokio::process::Command::new("nats-server")
+            .arg("-js")
+            .arg("-p")
+            .arg(port.to_string())
+            .arg("-sd")
+            .arg(storage.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn nats-server (is it in PATH?)");
+        let url = format!("nats://127.0.0.1:{port}");
+        let mut client = None;
+        for _ in 0..50 {
+            match async_nats::connect(&url).await {
+                Ok(c) => {
+                    client = Some(c);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        let nats = client.expect("nats-server did not come up in 5s");
+        let js = async_nats::jetstream::new(nats.clone());
+        let kv = js
+            .create_key_value(async_nats::jetstream::kv::Config {
+                bucket: BUCKET_SERVER_SETTINGS.to_string(),
+                history: 5,
+                ..Default::default()
+            })
+            .await
+            .expect("create server_settings bucket");
+
+        // One long-lived connection: the in-memory database lives as long as
+        // it does, and per-connection pragmas apply to every handler query.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        for (name, role, features) in [
+            ("admin", "admin", None),
+            ("op", "operator", None),
+            ("op_loc", "operator", Some(r#"["location"]"#)),
+            ("op_inv", "operator", Some(r#"["inventory"]"#)),
+            ("view", "viewer", None),
+        ] {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, role, allowed_features) \
+                 VALUES (?, 'x', ?, ?)",
+            )
+            .bind(name)
+            .bind(role)
+            .bind(features)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let overdue = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        sqlx::query("INSERT INTO agents (pc_id, last_heartbeat) VALUES ('PC-OFF', ?)")
+            .bind(overdue)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = AppState {
+            passkeys: None,
+            pool: pool.clone(),
+            query_pool: pool.clone(),
+            commands: std::sync::Arc::new(crate::command_publisher::CommandPublisher::new(
+                nats.clone(),
+                None,
+            )),
+            nats: nats.clone(),
+            jetstream: js,
+            explode_spec_cache: Default::default(),
+            sql_view_cache: crate::api::view_sql::new_cache(),
+            group_cache: crate::api::group_sql::new_cache(),
+            mailer: None,
+            public_url: None,
+            nats_url: String::new(),
+            login_throttle: Default::default(),
+        };
+        let router = crate::api::router(state).layer(axum::middleware::from_fn_with_state(
+            pool.clone(),
+            crate::auth::verify,
+        ));
+        App {
+            router,
+            pool,
+            kv,
+            _server: server,
+            _storage: storage,
+        }
+    }
+
+    async fn call(
+        app: &App,
+        method: &str,
+        uri: &str,
+        who: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", mint(who)))
+            .header("x-kanade-source", "cli");
+        let body = match body {
+            Some(v) => {
+                req = req.header("content-type", "application/json");
+                Body::from(v.to_string())
+            }
+            None => Body::empty(),
+        };
+        let resp = app
+            .router
+            .clone()
+            .oneshot(req.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    const SETTINGS: &str = "/api/server-settings/location";
+    const LOCATION: &str = "/api/agents/PC-OFF/location";
+    const REQUEST: &str = "/api/agents/PC-OFF/location/request";
+
+    async fn put_enabled(app: &App, who: &str, enabled: bool) -> (StatusCode, String) {
+        call(
+            app,
+            "PUT",
+            SETTINGS,
+            who,
+            Some(serde_json::json!({ "enabled": enabled, "retention_days": 7 })),
+        )
+        .await
+    }
+
+    async fn view(app: &App) -> DeviceLocationResponse {
+        let (st, body) = call(app, "GET", LOCATION, "op", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    async fn seed_reading(app: &App) {
+        let now = Utc::now().to_rfc3339();
+        let fix = LocationReading {
+            latitude: 35.0,
+            longitude: 139.0,
+            accuracy_meters: 10.0,
+            acquired_at: now.clone(),
+            source: LocationSource::Wifi,
+        };
+        record_successful_reading(&app.pool, "PC-OFF", &fix, "seed", &now, &now)
+            .await
+            .unwrap();
+    }
+
+    async fn stored_latitude(app: &App) -> Option<f64> {
+        sqlx::query_scalar("SELECT last_latitude FROM device_locations WHERE pc_id = 'PC-OFF'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn location_routes_enforce_role_and_feature_gates() {
+        let app = app().await;
+
+        // Settings are admin-only.
+        for who in ["op", "view"] {
+            let (st, body) = put_enabled(&app, who, true).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{who}: {body}");
+        }
+        assert!(!load_settings(&app).await.enabled);
+        let (st, body) = put_enabled(&app, "admin", true).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(load_settings(&app).await.enabled);
+
+        // Viewers and operators without the location page are refused both
+        // the read and the collection request.
+        for who in ["view", "op_inv"] {
+            let (st, body) = call(&app, "GET", LOCATION, who, None).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "GET as {who}: {body}");
+            let (st, body) = call(&app, "POST", REQUEST, who, None).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "POST as {who}: {body}");
+        }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM device_locations")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a refused request must not record anything");
+
+        // Unrestricted operators and operators granted the page get through.
+        for who in ["op", "op_loc"] {
+            let (st, body) = call(&app, "GET", LOCATION, who, None).await;
+            assert_eq!(st, StatusCode::OK, "GET as {who}: {body}");
+        }
+        let (st, body) = call(&app, "POST", REQUEST, "op_loc", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let resp: DeviceLocationResponse = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            resp.latest_request.map(|r| r.status),
+            Some(LocationStatus::Offline)
+        );
+        assert!(resp.last_known.is_none());
+
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/api/agents/NOPE/location/request",
+            "op",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn offline_requests_are_rate_limited() {
+        let app = app().await;
+        assert_eq!(put_enabled(&app, "admin", true).await.0, StatusCode::OK);
+
+        let (st, body) = call(&app, "POST", REQUEST, "op", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let first = view(&app).await.latest_request.unwrap();
+        assert_eq!(first.status, LocationStatus::Offline);
+
+        let (st, body) = call(&app, "POST", REQUEST, "op", None).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        let after = view(&app).await.latest_request.unwrap();
+        assert_eq!(
+            after.request_id, first.request_id,
+            "row must not be rewritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_disable_purge_keeps_setting_and_reenable_purges_leftovers() {
+        let app = app().await;
+        assert_eq!(put_enabled(&app, "admin", true).await.0, StatusCode::OK);
+        seed_reading(&app).await;
+        assert!(view(&app).await.last_known.is_some());
+
+        // The purge fails: the setting must stay enabled rather than become
+        // a disabled setting with coordinates still stored behind it.
+        sqlx::query("PRAGMA query_only = ON")
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        let (st, body) = put_enabled(&app, "admin", false).await;
+        sqlx::query("PRAGMA query_only = OFF")
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(load_settings(&app).await.enabled);
+        assert!(stored_latitude(&app).await.is_some());
+
+        // A successful disable purges.
+        assert_eq!(put_enabled(&app, "admin", false).await.0, StatusCode::OK);
+        assert!(stored_latitude(&app).await.is_none());
+
+        // Coordinates left behind while disabled (an older build, a manual
+        // edit) are purged on re-enable instead of reappearing.
+        seed_reading(&app).await;
+        assert_eq!(put_enabled(&app, "admin", true).await.0, StatusCode::OK);
+        assert!(stored_latitude(&app).await.is_none());
+        let resp = view(&app).await;
+        assert!(resp.enabled);
+        assert!(resp.last_known.is_none());
+    }
+
+    async fn load_settings(app: &App) -> LocationSettings {
+        match app.kv.get(KEY_SERVER_SETTINGS).await.unwrap() {
+            Some(bytes) => serde_json::from_slice::<ServerSettings>(&bytes)
+                .unwrap()
+                .effective_location(),
+            None => LocationSettings::default(),
+        }
     }
 }

@@ -858,6 +858,19 @@ pub async fn delete(
     caller: Caller,
     Path(pc_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // Clear lost-device location state first: if this fails the agent row
+    // stays, so the operator sees the error and a retry still reaches it.
+    sqlx::query("DELETE FROM device_locations WHERE pc_id = ?")
+        .bind(&pc_id)
+        .execute(&s.pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, pc_id = %pc_id, "delete agent location");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("delete location for agent {pc_id}: {e}"),
+            )
+        })?;
     let res = sqlx::query("DELETE FROM agents WHERE pc_id = ?")
         .bind(&pc_id)
         .execute(&s.pool)
@@ -869,11 +882,6 @@ pub async fn delete(
                 format!("delete agent {pc_id}: {e}"),
             )
         })?;
-    // Also clean up any associated lost-device location state
-    let _ = sqlx::query("DELETE FROM device_locations WHERE pc_id = ?")
-        .bind(&pc_id)
-        .execute(&s.pool)
-        .await;
     // Only a real deletion is worth an info line + audit row; a no-op
     // (already gone) is a silent success.
     if res.rows_affected() > 0 {
