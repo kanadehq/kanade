@@ -54,7 +54,7 @@ verify_bin() {
   codesign -dv "$f" 2>&1 | grep -Fx "Identifier=$id" >/dev/null
   # Check the embedded leaf independently of the text in the requirement.
   rm -f "$work/leaf-0"
-  codesign -d --extract-certificates "$work/leaf-" "$f"
+  codesign -d --extract-certificates="$work/leaf-" "$f"
   actual_sha=$(openssl x509 -inform DER -in "$work/leaf-0" -noout -fingerprint -sha1)
   actual_sha=$(printf '%s' "${actual_sha#*=}" | tr -d ':' | tr 'A-F' 'a-f')
   [[ "$actual_sha" == "$sha" ]] || {

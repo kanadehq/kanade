@@ -123,7 +123,7 @@ stem="kanade-agent-$mock_target"
 (
   cd "$work/repo"
   cp "target/$mock_target/release/kanade-agent" "$stem"
-  tar czf "dist/$stem.tar.gz" "$stem"
+  COPYFILE_DISABLE=1 tar czf "dist/$stem.tar.gz" "$stem"
   rm "$stem"
 )
 (
@@ -141,7 +141,7 @@ echo "=== Test 4: Rejection of ad-hoc (unsigned / cdhash-only) binary ==="
   cd "$work/repo"
   echo 'int main(void) { return 1; }' | clang -x c - -target "$mock_target" -o "$stem"
   codesign --force -s - "$stem" # replace the linker ad-hoc signature
-  tar czf "dist/$stem.tar.gz" "$stem"
+  COPYFILE_DISABLE=1 tar czf "dist/$stem.tar.gz" "$stem"
   rm "$stem"
   export TARGET="$mock_target"
   unset MACOS_SIGN_CERT_P12_BASE64
@@ -159,7 +159,7 @@ echo "=== Test 5: Rejection of mismatched pinned SHA-1 on valid signed binary ==
   cd "$work/repo"
   # Re-package the validly signed binary
   cp "target/$mock_target/release/kanade-agent" "$stem"
-  tar czf "dist/$stem.tar.gz" "$stem"
+  COPYFILE_DISABLE=1 tar czf "dist/$stem.tar.gz" "$stem"
   rm "$stem"
   echo "0000000000000000000000000000000000000000" > deploy/macos/signing-cert.sha1
   export TARGET="$mock_target"
@@ -180,7 +180,7 @@ echo "=== Test 6: Rejection of tampered binary inside archive ==="
   cp "target/$mock_target/release/kanade-agent" "$stem"
   # Corrupt the binary slightly
   printf '\xff' >> "$stem"
-  tar czf "dist/$stem.tar.gz" "$stem"
+  COPYFILE_DISABLE=1 tar czf "dist/$stem.tar.gz" "$stem"
   rm "$stem"
   export TARGET="$mock_target"
   unset MACOS_SIGN_CERT_P12_BASE64
@@ -205,7 +205,7 @@ echo "=== Test 7: Different builds preserve the same signing identity ==="
   [[ "$before" != "$(shasum -a 256 "$binary")" ]]
   [[ "$dr" == "$(codesign -dr - "$binary" 2>&1)" ]]
   cp "$binary" "$stem"
-  tar czf "dist/$stem.tar.gz" "$stem"
+  COPYFILE_DISABLE=1 tar czf "dist/$stem.tar.gz" "$stem"
   unset MACOS_SIGN_CERT_P12_BASE64 MACOS_SIGN_CERT_PASSWORD
   bash scripts/ci/macos-codesign.sh verify-dist
 )
