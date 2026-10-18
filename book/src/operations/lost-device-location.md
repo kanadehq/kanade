@@ -1,7 +1,8 @@
 # Lost-device location
 
 Lets an authorised operator see a managed endpoint's last known position and
-ask for a fresh reading from the device detail page. It is **location
+ask for a fresh reading from the device detail page or **Device location**
+(`/location`) in the sidebar. It is **location
 visibility only** (no remote lock or wipe) and it is off by default.
 
 ## Enabling
@@ -36,6 +37,11 @@ saved; if clearing fails the save is refused and the feature stays enabled.
 Re-enabling clears coordinates again, so nothing kept while disabled can
 reappear. Deleting an endpoint clears its row. The cleanup sweep clears readings older than the
 retention window, and the API withholds them even before the sweep runs.
+
+Operators restricted to the `location` feature use `/location`: enter the
+registered `pc_id` with its exact casing, choose **Show device**, then
+**Request location**. This page uses only the location APIs and does not
+require access to the agent list or device detail page.
 
 ## Behaviour
 

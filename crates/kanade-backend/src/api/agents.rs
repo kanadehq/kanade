@@ -858,6 +858,7 @@ pub async fn delete(
     caller: Caller,
     Path(pc_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let location_guard = super::location::endpoint_deletion_guard(&pc_id).await;
     // Clear lost-device location state first: if this fails the agent row
     // stays, so the operator sees the error and a retry still reaches it.
     sqlx::query("DELETE FROM device_locations WHERE pc_id = ?")
@@ -882,6 +883,7 @@ pub async fn delete(
                 format!("delete agent {pc_id}: {e}"),
             )
         })?;
+    drop(location_guard);
     // Only a real deletion is worth an info line + audit row; a no-op
     // (already gone) is a silent success.
     if res.rows_affected() > 0 {

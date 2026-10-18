@@ -44,6 +44,7 @@ export const groups: {
     accent: 'text-amber-light',
     links: [
       { to: '/agents', labelKey: 'nav.agents' },
+      { to: '/location', labelKey: 'nav.location', feature: 'location' },
       // Fleet search lives as a tab *inside* the Inventory page
       // (/inventory/search), not a sibling nav row — it's a sub-view
       // of inventory, not a peer of it. Keeping it off the sidebar

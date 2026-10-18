@@ -87,11 +87,12 @@ static VIEW_AUDIT_WINDOWS: std::sync::LazyLock<std::sync::Mutex<ViewAuditWindows
     std::sync::LazyLock::new(Default::default);
 
 /// Endpoints with a location request currently in flight (one at a time each).
-static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
     std::sync::LazyLock::new(Default::default);
 
-// Settings updates and reply persistence share this lock. The epoch also
-// invalidates replies across disable/re-enable cycles while NATS is in flight.
+// Settings updates, endpoint deletion and reply persistence share this lock.
+// The epoch invalidates replies across disable/re-enable cycles while NATS is
+// in flight; IN_FLIGHT's validity flag invalidates replies for deleted endpoints.
 static SETTINGS_EPOCH: tokio::sync::RwLock<u64> = tokio::sync::RwLock::const_new(0);
 
 async fn reply_epoch_guard(epoch: u64) -> Option<tokio::sync::RwLockReadGuard<'static, u64>> {
@@ -113,10 +114,41 @@ struct InFlightGuard(String);
 
 impl InFlightGuard {
     fn acquire(pc_id: &str) -> Option<Self> {
-        let mut set = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        set.insert(pc_id.to_string())
-            .then(|| Self(pc_id.to_string()))
+        let mut requests = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        match requests.entry(pc_id.to_string()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(true);
+                Some(Self(pc_id.to_string()))
+            }
+            std::collections::hash_map::Entry::Occupied(_) => None,
+        }
     }
+
+    fn is_valid(&self) -> bool {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.0)
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
+/// Serialize endpoint deletion with location writes and invalidate its pending
+/// request, including when the same pc_id is registered again before the reply.
+/// Keep this guard until both location and registry rows have been deleted.
+pub(super) async fn endpoint_deletion_guard(
+    pc_id: &str,
+) -> tokio::sync::RwLockWriteGuard<'static, u64> {
+    let guard = SETTINGS_EPOCH.write().await;
+    if let Some(valid) = IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(pc_id)
+    {
+        *valid = false;
+    }
+    guard
 }
 
 impl Drop for InFlightGuard {
@@ -317,7 +349,9 @@ async fn load_location_response(
             last_request_reason,
             (SELECT last_heartbeat FROM agents WHERE agents.pc_id = device_locations.pc_id) AS heartbeat
         FROM device_locations
-        WHERE pc_id = ?
+        WHERE pc_id = ? AND EXISTS (
+            SELECT 1 FROM agents WHERE agents.pc_id = device_locations.pc_id
+        )
         "#,
     )
     .bind(pc_id)
@@ -422,7 +456,6 @@ pub async fn request_location(
     let epoch_guard = SETTINGS_EPOCH.read().await;
     let request_epoch = *epoch_guard;
     let loc_settings = load_location_settings(&s).await;
-    drop(epoch_guard);
     if !loc_settings.enabled {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -430,7 +463,9 @@ pub async fn request_location(
         ));
     }
 
-    // Check endpoint existence and heartbeat
+    // Keep the shared lock through endpoint lookup and in-flight registration
+    // (and offline persistence), so deletion cannot miss a newly started request.
+    // Check endpoint existence and heartbeat.
     let agent_row = sqlx::query("SELECT last_heartbeat FROM agents WHERE pc_id = ?")
         .bind(&pc_id)
         .fetch_optional(&s.pool)
@@ -450,7 +485,7 @@ pub async fn request_location(
         ));
     };
 
-    let Some(_in_flight) = InFlightGuard::acquire(&pc_id) else {
+    let Some(in_flight) = InFlightGuard::acquire(&pc_id) else {
         return Err((
             StatusCode::CONFLICT,
             format!("A location request for `{pc_id}` is already in progress"),
@@ -502,6 +537,7 @@ pub async fn request_location(
         )
         .await?;
 
+        drop(epoch_guard);
         audit::record(
             &s.nats,
             "operator",
@@ -518,6 +554,8 @@ pub async fn request_location(
 
         return load_location_response(&s, &pc_id).await.map(Json);
     }
+
+    drop(epoch_guard);
 
     // Prepare NATS on-demand request
     let expires_at = (Utc::now() + chrono::Duration::seconds(15)).to_rfc3339();
@@ -600,7 +638,7 @@ pub async fn request_location(
     // Serialize with disabling/purging. A request from an older settings
     // epoch must never restore data, even if location has since been enabled.
     let epoch_guard = reply_epoch_guard(request_epoch).await;
-    if epoch_guard.is_none() || !load_location_settings(&s).await.enabled {
+    if epoch_guard.is_none() || !in_flight.is_valid() || !load_location_settings(&s).await.enabled {
         drop(epoch_guard);
         audit::record(
             &s.nats,
@@ -609,12 +647,12 @@ pub async fn request_location(
             Some(&pc_id),
             Some(&caller),
             serde_json::json!({"pc_id": &pc_id, "request_id": &request_id,
-                "status": "expired", "reason": "Location settings changed during acquisition"}),
+                "status": "expired", "reason": "Location settings or endpoint changed during acquisition"}),
         )
         .await;
         return Err((
             StatusCode::CONFLICT,
-            "Location settings changed during acquisition; reading discarded".into(),
+            "Location settings or endpoint changed during acquisition; reading discarded".into(),
         ));
     }
 
@@ -1235,6 +1273,23 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn deletion_invalidates_only_the_matching_inflight_request() {
+        let request = InFlightGuard::acquire("deleted-pc").unwrap();
+        let other = InFlightGuard::acquire("surviving-pc").unwrap();
+        assert!(request.is_valid());
+        {
+            let _deletion = endpoint_deletion_guard("deleted-pc").await;
+            assert!(!request.is_valid());
+            assert!(other.is_valid());
+        }
+        // A re-registration cannot replace the pending request's invalid flag.
+        assert!(InFlightGuard::acquire("deleted-pc").is_none());
+        assert!(!request.is_valid());
+        drop(request);
+        assert!(InFlightGuard::acquire("deleted-pc").unwrap().is_valid());
+    }
+
     #[test]
     fn in_flight_guard_is_exclusive_per_endpoint() {
         let a = InFlightGuard::acquire("guard-pc-a").expect("first acquire");
@@ -1263,6 +1318,7 @@ mod router_tests {
         router: Router,
         pool: SqlitePool,
         kv: async_nats::jetstream::kv::Store,
+        nats: async_nats::Client,
         _server: tokio::process::Child,
         _storage: tempfile::TempDir,
     }
@@ -1385,6 +1441,7 @@ mod router_tests {
             router,
             pool,
             kv,
+            nats,
             _server: server,
             _storage: storage,
         }
@@ -1462,6 +1519,68 @@ mod router_tests {
             .fetch_one(&app.pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn deleted_endpoint_discards_inflight_reply_even_after_reregistration() {
+        use futures::StreamExt;
+
+        let app = app().await;
+        assert_eq!(put_enabled(&app, "admin", true).await.0, StatusCode::OK);
+        sqlx::query("UPDATE agents SET last_heartbeat = ? WHERE pc_id = 'PC-OFF'")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        let mut requests = app
+            .nats
+            .subscribe(subject::location_req("PC-OFF"))
+            .await
+            .unwrap();
+        app.nats.flush().await.unwrap();
+
+        let acquisition = async { call(&app, "POST", REQUEST, "op_loc", None).await };
+        let deletion = async {
+            let message = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .unwrap()
+                .unwrap();
+            let request: LocationRequest = serde_json::from_slice(&message.payload).unwrap();
+            assert_eq!(
+                call(&app, "DELETE", "/api/agents/PC-OFF", "admin", None)
+                    .await
+                    .0,
+                StatusCode::NO_CONTENT
+            );
+            assert!(view(&app).await.last_known.is_none());
+            sqlx::query("INSERT INTO agents (pc_id) VALUES ('PC-OFF')")
+                .execute(&app.pool)
+                .await
+                .unwrap();
+            let reply = serde_json::json!({
+                "request_id": request.request_id,
+                "status": "success",
+                "reading": {
+                    "latitude": 35.0, "longitude": 139.0, "accuracy_meters": 10.0,
+                    "source": "wifi", "acquired_at": Utc::now().to_rfc3339()
+                }
+            });
+            app.nats
+                .publish(
+                    message.reply.unwrap(),
+                    serde_json::to_vec(&reply).unwrap().into(),
+                )
+                .await
+                .unwrap();
+        };
+        let ((status, body), ()) = tokio::join!(acquisition, deletion);
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM device_locations")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(view(&app).await.last_known.is_none());
     }
 
     #[tokio::test]

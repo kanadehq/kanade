@@ -141,6 +141,7 @@
   },
   "remoteScreen": "Remote screen",
   "location": {
+    "showDevice": "Show device",
     "title": "Device location",
     "intro": "Lost-device location tracking via OS location services. Only available when enabled by an administrator.",
     "request": "Request location",
