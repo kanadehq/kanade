@@ -61,7 +61,13 @@ retention window, and the API withholds them even before the sweep runs.
   does not say) are shown, plus an OpenStreetMap link that opens only on click
   and sends the coordinates to that third party. kanade adds no IP geolocation
   and uses no paid service.
-- Views, requests and setting changes are audited. **Coordinates are never put
+- Views are audited once per caller and endpoint in each five-minute window
+  (polls and tabs are coalesced; anonymous callers share a window per endpoint).
+  Each view event includes `dedup_window_seconds`. Collection requests and
+  setting changes are audited individually; collection responses do not emit
+  extra view events. The in-memory deduplication cache is bounded to 4096
+  caller/endpoint pairs; eviction or a backend restart can produce an extra
+  view event within a window. **Coordinates are never put
   in audit records**, the normal agent API, search or export. Ad-hoc SQL and
   SQL-backed widgets/groups cannot access location records, including via views.
 

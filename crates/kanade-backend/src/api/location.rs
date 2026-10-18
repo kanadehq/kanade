@@ -8,7 +8,8 @@
 //!    max 30 days). Expired coordinates are withheld from API responses and purged by cleanup.
 //! 3. Explicit enablement: feature is disabled by default in server settings and requires
 //!    admin opt-in. Disabling the feature purges stored location coordinates.
-//! 4. Audit privacy: every view, request and settings change is audit-logged, but coordinates
+//! 4. Audit privacy: views are deduplicated per caller/endpoint window; requests and
+//!    settings changes are audited individually. Coordinates
 //!    are strictly omitted from audit logs to prevent leaking sensitive location history.
 //! 5. Separation of state: last known successful location is preserved across subsequent failed
 //!    requests, while latest request status and reason are tracked separately.
@@ -28,7 +29,8 @@ use kanade_shared::wire::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -50,6 +52,39 @@ const CURRENT_READING_MAX_AGE_SECS: i64 = 120;
 /// Tolerated clock skew between endpoint and backend when judging a reading's
 /// acquisition timestamp.
 const CLOCK_SKEW_SECS: i64 = 30;
+
+/// Polls and multiple tabs share one audit entry per caller/endpoint per window.
+const VIEW_AUDIT_WINDOW: Duration = Duration::from_secs(300);
+const MAX_VIEW_AUDIT_WINDOWS: usize = 4096;
+
+#[derive(Default)]
+struct ViewAuditWindows(HashMap<(Option<String>, String), Instant>);
+
+impl ViewAuditWindows {
+    fn should_record(&mut self, caller: &Caller, pc_id: &str, now: Instant) -> bool {
+        self.0
+            .retain(|_, start| now.duration_since(*start) < VIEW_AUDIT_WINDOW);
+        let key = (caller.sub.clone(), pc_id.to_owned());
+        if self.0.contains_key(&key) {
+            return false;
+        }
+        // Bound memory without suppressing the first access from a new caller.
+        if self.0.len() == MAX_VIEW_AUDIT_WINDOWS
+            && let Some(oldest) = self
+                .0
+                .iter()
+                .min_by_key(|(_, start)| **start)
+                .map(|(key, _)| key.clone())
+        {
+            self.0.remove(&oldest);
+        }
+        self.0.insert(key, now);
+        true
+    }
+}
+
+static VIEW_AUDIT_WINDOWS: std::sync::LazyLock<std::sync::Mutex<ViewAuditWindows>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Endpoints with a location request currently in flight (one at a time each).
 static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -234,8 +269,37 @@ pub async fn get_location(
     Path(pc_id): Path<String>,
     caller: Caller,
 ) -> Result<Json<DeviceLocationResponse>, (StatusCode, String)> {
+    let response = load_location_response(&s, &pc_id).await?;
+    let should_record = VIEW_AUDIT_WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .should_record(&caller, &pc_id, Instant::now());
+    if should_record {
+        audit::record(
+            &s.nats,
+            "operator",
+            "agent.location.view",
+            Some(&pc_id),
+            Some(&caller),
+            serde_json::json!({
+                "pc_id": &pc_id,
+                "has_last_known": response.last_known.is_some(),
+                "dedup_window_seconds": VIEW_AUDIT_WINDOW.as_secs(),
+            }),
+        )
+        .await;
+    }
+    Ok(Json(response))
+}
+
+/// Build a response without auditing a view. Collection requests already emit
+/// their own audit event and must not create an additional view event.
+async fn load_location_response(
+    s: &AppState,
+    pc_id: &str,
+) -> Result<DeviceLocationResponse, (StatusCode, String)> {
     let settings_guard = SETTINGS_EPOCH.read().await;
-    let loc_settings = load_location_settings(&s).await;
+    let loc_settings = load_location_settings(s).await;
     let retention_days = loc_settings.effective_retention_days();
 
     // Query device_locations table
@@ -256,7 +320,7 @@ pub async fn get_location(
         WHERE pc_id = ?
         "#,
     )
-    .bind(&pc_id)
+    .bind(pc_id)
     .fetch_optional(&s.pool)
     .await
     .map_err(|e| {
@@ -336,27 +400,13 @@ pub async fn get_location(
 
     drop(settings_guard);
 
-    // Audit log: record viewing access, but NEVER include coordinates
-    audit::record(
-        &s.nats,
-        "operator",
-        "agent.location.view",
-        Some(&pc_id),
-        Some(&caller),
-        serde_json::json!({
-            "pc_id": &pc_id,
-            "has_last_known": last_known.is_some(),
-        }),
-    )
-    .await;
-
-    Ok(Json(DeviceLocationResponse {
-        pc_id,
+    Ok(DeviceLocationResponse {
+        pc_id: pc_id.to_owned(),
         enabled: loc_settings.enabled,
         retention_days,
         last_known,
         latest_request,
-    }))
+    })
 }
 
 /// `POST /api/agents/{pc_id}/location/request`
@@ -434,7 +484,7 @@ pub async fn request_location(
         )
         .await;
 
-        return get_location(State(s), Path(pc_id), caller).await;
+        return load_location_response(&s, &pc_id).await.map(Json);
     }
 
     let Some(_in_flight) = InFlightGuard::acquire(&pc_id) else {
@@ -601,7 +651,7 @@ pub async fn request_location(
     )
     .await;
 
-    get_location(State(s), Path(pc_id), caller).await
+    load_location_response(&s, &pc_id).await.map(Json)
 }
 
 /// Helper to persist a successful location reading.
@@ -887,6 +937,51 @@ mod tests {
         assert_eq!(count, 0);
         let current = *SETTINGS_EPOCH.read().await;
         assert!(reply_epoch_guard(current).await.is_some());
+    }
+
+    #[test]
+    fn view_audit_coalesces_polls_and_tabs_without_sliding_the_window() {
+        let mut windows = ViewAuditWindows::default();
+        let caller = Caller {
+            sub: Some("operator-a".into()),
+            source: Some("spa".into()),
+        };
+        let start = Instant::now();
+        assert!(windows.should_record(&caller, "endpoint-a", start));
+        // Ten-second polling across tabs does not generate additional events.
+        for seconds in (10..300).step_by(10) {
+            assert!(!windows.should_record(
+                &caller,
+                "endpoint-a",
+                start + Duration::from_secs(seconds)
+            ));
+        }
+        // Polling must not keep extending the suppression window indefinitely.
+        assert!(windows.should_record(&caller, "endpoint-a", start + VIEW_AUDIT_WINDOW));
+        assert!(!windows.should_record(&caller, "endpoint-a", start + VIEW_AUDIT_WINDOW));
+    }
+
+    #[test]
+    fn view_audit_keeps_callers_and_endpoints_separate() {
+        let mut windows = ViewAuditWindows::default();
+        let a = Caller {
+            sub: Some("operator-a".into()),
+            source: None,
+        };
+        let b = Caller {
+            sub: Some("operator-b".into()),
+            source: None,
+        };
+        let now = Instant::now();
+        assert!(windows.should_record(&a, "endpoint-a", now));
+        assert!(windows.should_record(&b, "endpoint-a", now));
+        assert!(windows.should_record(&a, "endpoint-b", now));
+        // Changing client headers cannot reset the authenticated caller's window.
+        let another_tab = Caller {
+            source: Some("spa".into()),
+            ..a
+        };
+        assert!(!windows.should_record(&another_tab, "endpoint-a", now));
     }
 
     #[test]
