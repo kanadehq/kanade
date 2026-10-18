@@ -91,7 +91,7 @@ broker reports it authenticated as:
 
 | finding | when | severity |
 | --- | --- | --- |
-| `broker_open` | the broker authenticated nobody (`no-auth`), in either mode | critical |
+| `broker_open` | positive broker evidence of access without an authenticated identity (`no-auth`), in either mode | critical |
 | `token_reverted` | `users` expected, but the connection used the shared token | critical |
 | `role_user_mismatch` | `users` expected, but the user is not the announced role's (`agent`, `backend`, `breakglass` for the CLI), e.g. the backend user on an agent connection | warning |
 | `credential_unnameable` | `users` expected, but the credential could not be named | info |
@@ -109,6 +109,92 @@ recurrence is raised again). While the backend's own broker connection
 cannot prove the mode, user names read as `unknown`, so expect
 `credential_unnameable` entries until it reconnects.
 
+**Acceptance evidence and uncertainty.** A TCP connection is already visible in
+`/connz?auth=1` after INFO, before CONNECT or successful authentication. A
+server-issued cid, an empty/missing `authorized_user`, a client name, language,
+version, RTT, or elapsed time alone does not prove access without authentication.
+The projector brackets its paged connz walk with `/varz`, checking server id,
+startup/configuration timestamps and response/page metadata. A restart, reload,
+identity change, malformed/missing response or timeout invalidates the poll.
+Connection churn or an incomplete walk prevents resolution, while usable positive
+observations can still raise findings. Offset pagination is not an atomic snapshot;
+counts and monotonically assigned cids detect inconsistencies, not every possible
+race or a change immediately after the final response.
+
+With no reported identity, application message traffic (in/out messages) or a
+live subscription proves the client was allowed to use the protocol. On TCP,
+positive traffic must also be consistent with broker policy: explicit
+`auth_required: true` plus a missing identity stays unproven. Counters can predate
+a second CONNECT, whose options are overwritten before re-authentication.
+All three
+counters and the client kind/transport must be present; missing is not zero.
+An explicit TCP `auth_required: false` also proves that listener is open. The
+normally omitted false field is conservatively **unknown**, not inferred false:
+a silent open connection can remain unproven until application activity is seen.
+The backend normally has subscriptions, so an active open broker remains visible
+without waiting for a grace period. An idle authentication-required TCP connection
+within the broker's own `auth_timeout` is `auth-pending`; after that budget, or
+without enough monitoring evidence, it is `auth-unproven`. Expiry never proves
+acceptance. These are different from `unknown`, which still means a reported
+credential cannot safely be named and retains `credential_unnameable` handling.
+Pending/unproven connections do not replace an agent's last observed credential.
+
+TCP auth policy and timeouts are never applied to WebSocket connections. WS can
+have separate authorization, credentials from cookies, or `no_auth_user`.
+Positive protocol activity with no broker identity still reveals open WS access;
+a reported identity takes precedence over activity. Cookie/token auth retains
+redaction. WS user values stay `unknown` because a live TCP user login cannot
+prove that another listener's value is a username rather than a secret.
+`no_auth_user` assigns a broker identity, so this audit cannot distinguish that
+fallback from a credentialed login as the same user: it is not proof of a
+fully open broker. Idle WS authentication remains unproven. MQTT/leaf/unknown
+transports without a reported identity are also unproven. This audit trusts the
+configured monitoring endpoint to be the broker and to honor `auth=1`; it does
+not test listener reachability or actively probe production with empty credentials.
+
+Any pending/unproven observation holds existing finding resolutions; it does not
+block a new finding proven by another connection. Health reports
+`authentication_uncertain`, with `pending_connections` and `unproven_connections`
+counts (including partial-poll observations for `incomplete`). Counts are null
+when unavailable or stale. The aggregate metadata uses a JSON envelope in the
+existing audit-state TEXT field; legacy plain statuses remain readable.
+Connection evidence uses the existing retention ledger described below;
+`Observed.connection` retains broker identifiers and timestamps alongside the
+classified label. `auth-pending`/`auth-unproven` never contribute finding evidence.
+External consumers should use the health API rather than interpret that internal
+field.
+
+The unnamed critical observed on 2026-10-18 from 02:24:58.636897559 UTC to
+02:25:58.230333505 UTC after an OOM-triggered broker restart is a **likely false
+positive**. The pre-CONNECT window is reproducible on authentication-required
+NATS 2.14.3, but retained historical connection evidence cannot establish that
+this was the exact cause of that incident.
+
+The evidence rules follow NATS 2.14.3's
+[monitoring implementation](https://github.com/nats-io/nats-server/blob/v2.14.3/server/monitor.go)
+and [monitoring documentation](https://docs.nats.io/learn/monitoring/monitoring-endpoints).
+Its [protocol parser](https://github.com/nats-io/nats-server/blob/v2.14.3/server/parser.go)
+gates application operations while awaiting authentication; its
+[CONNECT handler](https://github.com/nats-io/nats-server/blob/v2.14.3/server/client.go)
+sets metadata before checking authentication, and
+[authentication implementation](https://github.com/nats-io/nats-server/blob/v2.14.3/server/auth.go)
+handles listener overrides and fallback identities.
+
+Regression checks use fixtures, local HTTP mocks and disposable brokers only:
+
+```sh
+cargo test --locked -p kanade-backend nats_auth
+cargo test --locked -p kanade-backend nats_conns
+cargo test --locked -p kanade-backend live_connz -- --ignored
+cargo make check
+```
+
+The live tests need `nats-server` on PATH and permission to bind loopback
+sockets. They exercise INFO-before-CONNECT, rejected credentialless CONNECT,
+anonymous authenticated token/user connections, reconnects, an open broker,
+WS token overrides and WS `no_auth_user`. Run against the supported broker
+version when upgrading; fixtures do not substitute for checking changed semantics.
+
 **Grace after a switch.** When you change the expected mode, new findings are
 held back for **5 minutes**. Switching re-authenticates every client, and each
 reconnects with backoff while the poll only looks once a minute, so for a few
@@ -123,9 +209,10 @@ connections covered) and `findings[]` (`kind`, `subject`, `severity`, `count`,
 `sample_hosts`, `first_seen_at`, `occurrence_id`). It does **not** change the response's
 `status` or HTTP code, so an existing monitor keeps behaving as before; a
 monitor that should alert on this must read `nats_auth.findings`. A
-`poll_status` other than `ok` means the audit could not see the whole broker
-(`incomplete`, `endpoint_unreadable`, `settings_unreadable`, `stale`), and an
-empty list is then not a clean result.
+`poll_status` other than `ok` means the audit could not judge the whole broker
+(`authentication_uncertain`, `incomplete`, `endpoint_unreadable`,
+`settings_unreadable`, `state_unreadable`, `stale`, or `pending` before its first
+poll), and an empty list is then not a clean result.
 
 **What is never shown.** The reported value of a connection may be a secret on
 some broker builds, so findings carry fixed vocabularies (kind, severity,
@@ -200,10 +287,11 @@ Old notices have no recoverable connection evidence; the UI labels absent or
 expired evidence accordingly. The identifiers lost in the 2026-10-18 incident
 cannot be reconstructed by this migration. Last observed is **not** a disconnect
 time. Connections that open and close between minute polls can be missed, and
-wiping the projection database loses these snapshots permanently. This change
-leaves classification conditions unchanged; authentication/pre-authentication
-classification is a separate change. Its integration boundary remains `Observed`,
-`Poll.complete` and the shared `evaluate_observed` adapter; the additive migration is named
+wiping the projection database loses these snapshots permanently. Retained
+evidence uses the same authentication classification as aggregate
+findings through `Observed` and the shared `evaluate_observed` adapter. Pending
+and unproven connections do not contribute finding samples or resolve existing
+occurrences. The additive evidence migration is named
 `20261018000000_nats_auth_evidence.sql`.
 
 ---

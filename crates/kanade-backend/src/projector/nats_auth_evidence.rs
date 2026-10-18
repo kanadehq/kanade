@@ -181,6 +181,8 @@ pub async fn update(
                         Reported::NoAuth => "no-auth",
                         Reported::SharedToken => "shared-token",
                         Reported::Unknown => "unknown",
+                        Reported::Pending => "auth-pending",
+                        Reported::Unproven => "auth-unproven",
                         Reported::User(_) => "user",
                     }
                     .into(),

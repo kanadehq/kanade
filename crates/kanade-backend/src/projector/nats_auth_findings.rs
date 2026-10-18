@@ -37,7 +37,9 @@ use chrono::{DateTime, Duration, Utc};
 use kanade_shared::nats_client::{NatsRole, parse_client_name};
 use kanade_shared::wire::NatsAuthMode;
 
-use super::nats_conns::{LABEL_NO_AUTH, LABEL_SHARED_TOKEN, LABEL_UNKNOWN};
+use super::nats_conns::{
+    LABEL_NO_AUTH, LABEL_PENDING, LABEL_SHARED_TOKEN, LABEL_UNKNOWN, LABEL_UNPROVEN,
+};
 
 /// How long findings are held back after the expected mode is changed.
 ///
@@ -76,8 +78,8 @@ pub enum Claimed {
     Role(NatsRole),
     /// A `kanade-` name whose role is none of ours.
     Unrecognised,
-    /// No name at all. A raw client that sets none is exactly what an open
-    /// broker lets in, so it is evaluated rather than skipped.
+    /// No name at all. Evaluate it using the broker's authentication
+    /// evidence, including anonymous authenticated and pre-CONNECT clients.
     Unnamed,
 }
 
@@ -116,6 +118,8 @@ impl Claimed {
 pub enum Reported {
     SharedToken,
     NoAuth,
+    Pending,
+    Unproven,
     Unknown,
     User(String),
 }
@@ -125,6 +129,8 @@ impl Reported {
         match label {
             LABEL_SHARED_TOKEN => Reported::SharedToken,
             LABEL_NO_AUTH => Reported::NoAuth,
+            LABEL_PENDING => Reported::Pending,
+            LABEL_UNPROVEN => Reported::Unproven,
             LABEL_UNKNOWN => Reported::Unknown,
             user => Reported::User(user.to_string()),
         }
@@ -217,6 +223,7 @@ impl Finding {
 /// |----------------|------------------|--------------------------------------|
 /// | `no-auth`      | `broker_open`    | `broker_open`                        |
 /// | `shared-token` | fine             | `token_reverted`                     |
+/// | pending/unproven | health uncertainty | health uncertainty                 |
 /// | `unknown`      | fine             | `credential_unnameable`              |
 /// | a user name    | fine             | fine only if it is the claimed role's |
 ///
@@ -228,6 +235,7 @@ impl Finding {
 pub fn evaluate(mode: NatsAuthMode, claimed: Claimed, reported: &Reported) -> Option<Finding> {
     match (mode, reported) {
         (_, Reported::NoAuth) => Finding::of(FindingKind::BrokerOpen),
+        (_, Reported::Pending | Reported::Unproven) => None,
         (NatsAuthMode::Token, _) => None,
         (NatsAuthMode::Users, Reported::SharedToken) => Finding::of(FindingKind::TokenReverted),
         (NatsAuthMode::Users, Reported::Unknown) => Finding::of(FindingKind::CredentialUnnameable),
@@ -604,5 +612,16 @@ mod tests {
     fn the_grace_window_is_short() {
         assert!(MODE_SWITCH_GRACE <= Duration::minutes(10));
         assert!(MODE_SWITCH_GRACE >= Duration::minutes(3));
+    }
+
+    #[test]
+    fn pending_and_unproven_are_neither_open_nor_unnameable_credentials() {
+        for mode in [NatsAuthMode::Token, NatsAuthMode::Users] {
+            for claimed in ROLES {
+                for label in [LABEL_PENDING, LABEL_UNPROVEN] {
+                    assert_eq!(evaluate(mode, claimed, &Reported::from_label(label)), None);
+                }
+            }
+        }
     }
 }
