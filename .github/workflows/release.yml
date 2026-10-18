@@ -266,16 +266,21 @@ jobs:
 
       # Repo-owned hook (release.yml is kata-managed; the logic lives in
       # scripts/ci/). Signs macOS bins with the stable self-signed identity
-      # when the MACOS_SIGN_* secrets exist; skipped with a notice otherwise.
-      # The upstream template needs this same hook.
+      # and requires the MACOS_SIGN_* secrets plus the pinned certificate.
+      # Not conditional on the script existing: a missing hook must fail the
+      # release instead of shipping linker ad-hoc signatures.
       - name: Sign binaries (post-build hook)
-        if: ${{ hashFiles('scripts/ci/release-post-build.sh') != '' }}
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           MACOS_SIGN_CERT_P12_BASE64: ${{ secrets.MACOS_SIGN_CERT_P12_BASE64 }}
           MACOS_SIGN_CERT_PASSWORD: ${{ secrets.MACOS_SIGN_CERT_PASSWORD }}
-        run: bash scripts/ci/release-post-build.sh sign
+        run: |
+          if [[ ! -f scripts/ci/release-post-build.sh ]]; then
+            echo "::error::scripts/ci/release-post-build.sh is missing; refusing to publish unsigned release binaries"
+            exit 1
+          fi
+          bash scripts/ci/release-post-build.sh sign
 
       - name: Stage release artifacts
         shell: bash
@@ -330,7 +335,6 @@ jobs:
           ls -la dist/
 
       - name: Verify packaged signatures (post-build hook)
-        if: ${{ hashFiles('scripts/ci/release-post-build.sh') != '' }}
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
