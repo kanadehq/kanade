@@ -167,7 +167,6 @@ pub enum FindingKind {
 }
 
 impl FindingKind {
-    #[cfg(test)]
     pub const ALL: [FindingKind; 4] = [
         FindingKind::BrokerOpen,
         FindingKind::TokenReverted,

@@ -7,7 +7,7 @@
 //! records how the poll went, so the health response can say whether "no
 //! findings" is a fresh answer or a blind spot.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -16,8 +16,10 @@ use kanade_shared::wire::ServerSettings;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-use super::nats_auth_findings::{NOTICE_PREFIX, Observed, Severity, grace_until, group, in_grace};
-use super::nats_conns::{LABEL_PENDING, LABEL_UNPROVEN};
+use super::nats_auth_findings::{
+    FindingKind, NOTICE_PREFIX, Observed, Severity, grace_until, group, in_grace,
+};
+use super::nats_conns::{EvidenceReason, LABEL_PENDING, LABEL_UNPROVEN};
 use super::notice_ledger::{self, Desired, Op, Policy, Stored};
 
 /// A recorded poll older than this is reported as `stale`: the projector
@@ -58,6 +60,8 @@ pub struct Poll<'a> {
     pub registered: &'a HashSet<String>,
     /// Every page of the connection list was read.
     pub complete: bool,
+    /// None for older callers without reason-level classification evidence.
+    pub uncertainty_reasons: Option<&'a BTreeMap<EvidenceReason, usize>>,
 }
 
 impl Poll<'_> {
@@ -97,13 +101,22 @@ pub fn plan(
             sample: g.sample_hosts,
         })
         .collect();
+    let hold_resolve_kinds: Vec<String> = if poll.judged() {
+        Vec::new()
+    } else {
+        FindingKind::ALL
+            .iter()
+            .map(|kind| kind.notice_kind())
+            .collect()
+    };
     notice_ledger::reconcile(
         stored,
         &desired,
         Policy {
             in_grace: in_grace(now, settings.nats_auth_mode_changed_at),
-            complete: poll.judged(),
+            complete: poll.complete,
             frozen_kinds: &[],
+            hold_resolve_kinds: &hold_resolve_kinds,
         },
     )
 }
@@ -167,12 +180,19 @@ pub async fn run_poll(
     } else {
         PollStatus::Ok
     };
-    record_details(pool, status, Some((pending, unproven)), now).await?;
+    record_details(
+        pool,
+        status,
+        Some((pending, unproven)),
+        poll.uncertainty_reasons,
+        now,
+    )
+    .await?;
     Ok(written)
 }
 
 pub async fn record_state(pool: &SqlitePool, status: PollStatus, now: DateTime<Utc>) -> Result<()> {
-    record_details(pool, status, None, now).await
+    record_details(pool, status, None, None, now).await
 }
 
 // Aggregate poll metadata only; connection evidence belongs to the separate
@@ -183,12 +203,15 @@ struct RecordedState {
     status: String,
     pending_connections: Option<usize>,
     unproven_connections: Option<usize>,
+    #[serde(default)]
+    uncertainty_reasons: Option<BTreeMap<EvidenceReason, usize>>,
 }
 
 async fn record_details(
     pool: &SqlitePool,
     status: PollStatus,
     counts: Option<(usize, usize)>,
+    reasons: Option<&BTreeMap<EvidenceReason, usize>>,
     now: DateTime<Utc>,
 ) -> Result<()> {
     super::nats_auth_evidence::prune(pool, now).await?;
@@ -196,6 +219,7 @@ async fn record_details(
         status: status.as_str().into(),
         pending_connections: counts.map(|c| c.0),
         unproven_connections: counts.map(|c| c.1),
+        uncertainty_reasons: reasons.cloned(),
     };
     sqlx::query(
         "INSERT INTO nats_auth_audit_state (id, status, polled_at) VALUES (1, ?, ?)
@@ -229,6 +253,8 @@ pub struct NatsAuthHealth {
     /// Counts from the last successful read; None when unavailable or stale.
     pub pending_connections: Option<usize>,
     pub unproven_connections: Option<usize>,
+    /// Safe reason counts from this poll; null when unavailable or stale.
+    pub uncertainty_reasons: Option<BTreeMap<EvidenceReason, usize>>,
     /// Connections covered by the open findings (the sum of their `count`s).
     pub open_total: i64,
     pub findings: Vec<FindingView>,
@@ -307,6 +333,7 @@ pub async fn health_block(
         .flatten();
     let mut pending_connections = None;
     let mut unproven_connections = None;
+    let mut uncertainty_reasons = None;
     let (poll_status, polled_at) = match state {
         None => ("pending".to_string(), None),
         Some(r) => {
@@ -328,10 +355,12 @@ pub async fn health_block(
                     },
                     pending_connections: None,
                     unproven_connections: None,
+                    uncertainty_reasons: None,
                 });
             if at.is_some_and(|t| now - t <= STALE_AFTER) {
                 pending_connections = recorded.pending_connections;
                 unproven_connections = recorded.unproven_connections;
+                uncertainty_reasons = recorded.uncertainty_reasons;
             }
             let status = recorded.status;
             match at {
@@ -347,6 +376,7 @@ pub async fn health_block(
         polled_at,
         pending_connections,
         unproven_connections,
+        uncertainty_reasons,
         open_total: findings.iter().map(|f| f.count).sum(),
         findings,
     }
@@ -391,6 +421,7 @@ mod tests {
             observed: o,
             registered: r,
             complete: true,
+            uncertainty_reasons: None,
         }
     }
 
@@ -593,6 +624,7 @@ mod tests {
                 "pending_connections",
                 "poll_status",
                 "polled_at",
+                "uncertainty_reasons",
                 "unproven_connections"
             ]
         );
@@ -696,20 +728,29 @@ mod tests {
         let o = [agent("PC1", LABEL_UNPROVEN)];
         let mut incomplete = poll(&o, &r);
         incomplete.complete = false;
+        let reasons = BTreeMap::from([(EvidenceReason::IncompleteMonitoring, 1)]);
+        incomplete.uncertainty_reasons = Some(&reasons);
         run_poll(&pool, Ok(s.clone()), &incomplete, t0())
             .await
             .unwrap();
         let h = health_block(&pool, Some(&s), t0()).await;
         assert_eq!(h.poll_status, "incomplete");
         assert_eq!(h.unproven_connections, Some(1));
+        assert_eq!(h.uncertainty_reasons.as_ref(), Some(&reasons));
+        assert_eq!(
+            serde_json::to_value(&h).unwrap()["uncertainty_reasons"]["incomplete_monitoring"],
+            1
+        );
         let h = health_block(&pool, Some(&s), t0() + STALE_AFTER + Duration::seconds(1)).await;
         assert_eq!(h.poll_status, "stale");
         assert_eq!(h.unproven_connections, None);
+        assert_eq!(h.uncertainty_reasons, None);
         record_state(&pool, PollStatus::EndpointUnreadable, t0())
             .await
             .unwrap();
         let h = health_block(&pool, Some(&s), t0()).await;
         assert_eq!(h.poll_status, "endpoint_unreadable");
+        assert_eq!(h.uncertainty_reasons, None);
         assert_eq!(
             (h.pending_connections, h.unproven_connections),
             (None, None)
@@ -728,6 +769,7 @@ mod tests {
                 .bind(raw).bind(t0()).execute(&pool).await.unwrap();
             let h = health_block(&pool, None, t0()).await;
             assert_eq!(h.poll_status, expected);
+            assert_eq!(h.uncertainty_reasons, None);
         }
     }
 }

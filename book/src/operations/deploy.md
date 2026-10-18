@@ -155,7 +155,14 @@ not test listener reachability or actively probe production with empty credentia
 Any pending/unproven observation holds existing finding resolutions; it does not
 block a new finding proven by another connection. Health reports
 `authentication_uncertain`, with `pending_connections` and `unproven_connections`
-counts (including partial-poll observations for `incomplete`). Counts are null
+counts (including partial-poll observations for `incomplete`). The optional
+`uncertainty_reasons` map breaks those observations down using fixed, secret-free
+`EvidenceReason` codes: `pre_connect_pending`, `incomplete_monitoring`,
+`listener_auth_unproven`, `invalid_connection_start`, `auth_policy_conflict`, and
+`acceptance_unproven`. Codes describe evidence limitations, not a proven cause.
+The notice ledger's `hold_resolve_kinds` policy preserves existing notices while
+allowing positive findings from other connections, including new critical alerts.
+Counts and reason maps are null
 when unavailable or stale. The aggregate metadata uses a JSON envelope in the
 existing audit-state TEXT field; legacy plain statuses remain readable.
 Connection evidence uses the existing retention ledger described below;

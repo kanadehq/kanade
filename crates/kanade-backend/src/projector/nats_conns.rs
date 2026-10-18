@@ -75,7 +75,7 @@
 //! impersonate anyone); closing it for good is per-agent identity, not a
 //! naming convention.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -146,22 +146,65 @@ pub const LABEL_PENDING: &str = "auth-pending";
 /// Authentication acceptance cannot be established from this observation.
 pub const LABEL_UNPROVEN: &str = "auth-unproven";
 
-#[derive(Debug, Default, Clone, Copy)]
+/// Fixed, secret-free classification vocabulary; never contains broker values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceReason {
+    BrokerOpenConfig,
+    AcceptedTrafficNoAuth,
+    PreConnectPending,
+    IncompleteMonitoring,
+    ListenerAuthUnproven,
+    InvalidConnectionStart,
+    AuthPolicyConflict,
+    AcceptanceUnproven,
+}
+
+#[derive(Debug, Clone, Copy)]
 enum Acceptance {
-    NoAuth,
+    NoAuth(EvidenceReason),
     Pending,
-    #[default]
-    Unproven,
+    Unproven(EvidenceReason),
+}
+
+impl Default for Acceptance {
+    fn default() -> Self {
+        Self::Unproven(EvidenceReason::IncompleteMonitoring)
+    }
 }
 
 impl Acceptance {
     fn label(self) -> &'static str {
         match self {
-            Self::NoAuth => LABEL_NO_AUTH,
+            Self::NoAuth(_) => LABEL_NO_AUTH,
             Self::Pending => LABEL_PENDING,
-            Self::Unproven => LABEL_UNPROVEN,
+            Self::Unproven(_) => LABEL_UNPROVEN,
         }
     }
+
+    fn reason(self) -> EvidenceReason {
+        match self {
+            Self::NoAuth(reason) | Self::Unproven(reason) => reason,
+            Self::Pending => EvidenceReason::PreConnectPending,
+        }
+    }
+}
+
+/// Aggregate only identity-less, unproven observations, without changing the
+/// companion evidence ledger's `Observed` shape.
+fn uncertainty_reasons(conns: &[ConnInfo]) -> BTreeMap<EvidenceReason, usize> {
+    let mut counts = BTreeMap::new();
+    for c in conns {
+        if Claimed::from_name(c.name.as_deref()).is_some()
+            && c.authorized_user
+                .as_deref()
+                .is_none_or(|u| u.trim().is_empty())
+            && matches!(c.acceptance, Acceptance::Pending | Acceptance::Unproven(_))
+        {
+            *counts.entry(c.acceptance.reason()).or_default() += 1;
+        }
+    }
+    counts
 }
 
 /// The subset of `/connz` this projector reads.
@@ -234,17 +277,17 @@ impl Varz {
         if c.kind.as_deref() != Some("Client")
             || !matches!(c.transport.as_deref(), Some("nats" | "websocket"))
         {
-            return Acceptance::Unproven;
+            return Acceptance::Unproven(EvidenceReason::ListenerAuthUnproven);
         }
         let Some(start) = c.start.filter(|start| *start >= self.start && *start <= at) else {
-            return Acceptance::Unproven;
+            return Acceptance::Unproven(EvidenceReason::InvalidConnectionStart);
         };
         // NATS parser gates SUB/PUB behind authentication. These counters
         // count application messages/subscriptions, not INFO, CONNECT or PING.
         // Require all fields: omitted counters are NOT zero.
         let (Some(input), Some(output), Some(subs)) = (c.in_msgs, c.out_msgs, c.subscriptions)
         else {
-            return Acceptance::Unproven;
+            return Acceptance::Unproven(EvidenceReason::IncompleteMonitoring);
         };
         if input > 0 || output > 0 || subs > 0 {
             // On an auth-required TCP listener, a missing identity conflicts
@@ -252,13 +295,13 @@ impl Varz {
             // (which overwrites options before re-authentication), so they
             // cannot prove that this missing identity was accepted.
             if c.transport.as_deref() == Some("nats") && self.auth_required == Some(true) {
-                return Acceptance::Unproven;
+                return Acceptance::Unproven(EvidenceReason::AuthPolicyConflict);
             }
-            return Acceptance::NoAuth;
+            return Acceptance::NoAuth(EvidenceReason::AcceptedTrafficNoAuth);
         }
         if c.transport.as_deref() == Some("nats") {
             if self.auth_required == Some(false) {
-                return Acceptance::NoAuth;
+                return Acceptance::NoAuth(EvidenceReason::BrokerOpenConfig);
             }
             // A deadline is explanatory only; expiry is never acceptance.
             if self.auth_required == Some(true)
@@ -271,7 +314,11 @@ impl Varz {
         }
         // TCP auth flags/timeouts cannot describe WS overrides, cookies or
         // no_auth_user. Idle WS connections stay unproven, not healthy.
-        Acceptance::Unproven
+        Acceptance::Unproven(if c.transport.as_deref() == Some("websocket") {
+            EvidenceReason::ListenerAuthUnproven
+        } else {
+            EvidenceReason::AcceptanceUnproven
+        })
     }
 }
 
@@ -633,7 +680,7 @@ async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>
         let z = fetch_page(client, base, out.len()).await?;
         let observed_at = Utc::now();
         let at = z.now.context("connz missing timestamp")?;
-        if z.server_id != before.server_id || at < last_now {
+        if z.server_id != before.server_id || at < last_now || at < before.start {
             bail!("broker identity or time changed during connz walk");
         }
         last_now = at;
@@ -689,6 +736,7 @@ async fn audit_authentication(
     js: &async_nats::jetstream::Context,
     observed: &[Observed],
     complete: bool,
+    reasons: &BTreeMap<EvidenceReason, usize>,
 ) {
     let registered = match nats_auth_audit::registered_pcs(pool).await {
         Ok(r) => r,
@@ -702,6 +750,7 @@ async fn audit_authentication(
         observed,
         registered: &registered,
         complete,
+        uncertainty_reasons: Some(reasons),
     };
     match nats_auth_audit::run_poll(pool, settings, &poll, Utc::now()).await {
         Ok(0) => {}
@@ -772,7 +821,14 @@ pub async fn run(
                     &conns,
                 );
                 let (labels, anomalies) = correlate(&conns, &probe, ev);
-                audit_authentication(&pool, &js, &observe(&conns, &probe, ev), complete).await;
+                audit_authentication(
+                    &pool,
+                    &js,
+                    &observe(&conns, &probe, ev),
+                    complete,
+                    &uncertainty_reasons(&conns),
+                )
+                .await;
                 let correlated = labels.len();
                 if anomalies != reported {
                     if !anomalies.non_agent.is_empty() {
@@ -1497,6 +1553,36 @@ mod tests {
 
     fn snapshot_fixture() -> Varz {
         serde_json::from_str(&varz_fixture()).unwrap()
+    }
+
+    #[test]
+    fn uncertainty_reasons_use_only_fixed_codes_and_ignore_authenticated_connections() {
+        let v = snapshot_fixture();
+        let mut pending = connection_fixture();
+        pending.acceptance = v.acceptance(&pending, v.now);
+        let mut missing = connection_fixture();
+        missing.in_msgs = None;
+        missing.acceptance = v.acceptance(&missing, v.now);
+        let mut ws = connection_fixture();
+        ws.transport = Some("websocket".into());
+        ws.acceptance = v.acceptance(&ws, v.now);
+        let mut expired = connection_fixture();
+        expired.acceptance = v.acceptance(&expired, v.now + chrono::Duration::seconds(5));
+        let mut authenticated = connection_fixture();
+        authenticated.authorized_user = Some("secret-must-not-escape".into());
+        let reasons = uncertainty_reasons(&[pending, missing, ws, expired, authenticated]);
+        assert_eq!(
+            reasons,
+            BTreeMap::from([
+                (EvidenceReason::PreConnectPending, 1),
+                (EvidenceReason::IncompleteMonitoring, 1),
+                (EvidenceReason::ListenerAuthUnproven, 1),
+                (EvidenceReason::AcceptanceUnproven, 1),
+            ])
+        );
+        let json = serde_json::to_string(&reasons).unwrap();
+        assert!(json.contains("pre_connect_pending"));
+        assert!(!json.contains("secret-must-not-escape"));
     }
 
     #[test]

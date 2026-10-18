@@ -261,6 +261,7 @@ mod tests {
             p,
             Ok(ServerSettings::default()),
             &Poll {
+                uncertainty_reasons: None,
                 observed: obs,
                 registered: &HashSet::new(),
                 complete,
@@ -367,6 +368,7 @@ mod tests {
             &p,
             Ok(ServerSettings::default()),
             &Poll {
+                uncertainty_reasons: None,
                 observed: &obs,
                 registered: &HashSet::from([host]),
                 complete: true,
@@ -459,6 +461,7 @@ mod tests {
             &p,
             Ok(ServerSettings::default()),
             &Poll {
+                uncertainty_reasons: None,
                 observed: &[],
                 registered: &HashSet::new(),
                 complete: true,
@@ -593,6 +596,7 @@ mod tests {
             &p,
             Ok(settings),
             &Poll {
+                uncertainty_reasons: None,
                 observed: &[o],
                 registered: &HashSet::new(),
                 complete: true,
