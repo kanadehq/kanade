@@ -192,9 +192,84 @@ async fn forget_stage(js: &Context, stage: &str) {
     }
 }
 
-async fn commit(
-    js: &Context,
-    store: &ObjectStore,
+// 保存の条件付き確定と照会を分離し、不明な応答を障害注入できるようにする。
+trait Backing: Sync {
+    fn create(&self, info: &ObjectInfo) -> impl Future<Output = Result<(), Error>> + Send;
+    fn read_info(
+        &self,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<ObjectInfo>, Error>> + Send;
+    fn discard(&self, stage: &str) -> impl Future<Output = ()> + Send;
+    fn forget(&self, stage: &str) -> impl Future<Output = ()> + Send;
+}
+
+struct NatsBacking<'a> {
+    js: &'a Context,
+    store: &'a ObjectStore,
+}
+
+impl Backing for NatsBacking<'_> {
+    async fn create(&self, info: &ObjectInfo) -> Result<(), Error> {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Nats-Expected-Last-Subject-Sequence", "0");
+        self.js
+            .publish_with_headers(
+                subject(&info.name),
+                headers,
+                serde_json::to_vec(info).map_err(internal)?.into(),
+            )
+            .await
+            .map_err(internal)?
+            .await
+            .map_err(internal)?;
+        Ok(())
+    }
+
+    async fn read_info(&self, key: &str) -> Result<Option<ObjectInfo>, Error> {
+        match self.store.info(key).await {
+            Ok(info) => Ok(Some(info)),
+            Err(e) if e.kind() == async_nats::jetstream::object_store::InfoErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(e) => Err(internal(e)),
+        }
+    }
+
+    async fn discard(&self, stage: &str) {
+        discard_stage(self.store, stage).await;
+    }
+    async fn forget(&self, stage: &str) {
+        forget_stage(self.js, stage).await;
+    }
+}
+
+fn matching(info: &ObjectInfo, publication: &Publication) -> Result<Publication, Error> {
+    let accepted = record(info)?;
+    if accepted != *publication {
+        return Err((
+            StatusCode::CONFLICT,
+            "identity already has different bytes or metadata".into(),
+        ));
+    }
+    Ok(accepted)
+}
+
+async fn verify_existing(
+    backing: &impl Backing,
+    publication: &Publication,
+    reader: &mut (impl AsyncRead + Unpin),
+) -> Result<Option<Publication>, Error> {
+    let key = publication.identity.app_package_key().map_err(invalid)?;
+    let Some(info) = backing.read_info(&key).await? else {
+        return Ok(None);
+    };
+    let accepted = matching(&info, publication)?;
+    verify(reader, &publication.integrity).await?;
+    Ok(Some(accepted))
+}
+
+async fn commit_backed(
+    backing: &impl Backing,
     stage: &str,
     mut info: ObjectInfo,
     publication: &Publication,
@@ -204,39 +279,37 @@ async fn commit(
         RECORD.into(),
         serde_json::to_string(publication).map_err(internal)?,
     );
-    let mut headers = async_nats::HeaderMap::new();
-    headers.insert("Nats-Expected-Last-Subject-Sequence", "0");
-    let result = async {
-        js.publish_with_headers(
-            subject(&info.name),
-            headers,
-            serde_json::to_vec(&info)?.into(),
-        )
-        .await?
-        .await?;
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    for _ in 0..2 {
+        if backing.create(&info).await.is_ok() {
+            backing.forget(stage).await;
+            return Ok(publication.clone());
+        }
+        // 応答喪失と競合を照会で解決する。未確定なら同じ内容で一度だけ再試行する。
+        // 照会失敗や継続的不明では、遅れて確定する可能性があるため bytes を残す。
+        if let Some(existing) = backing.read_info(&info.name).await? {
+            // 不正なレコードは参照を信用できないため回収しない。
+            record(&existing)?;
+            if existing.nuid == info.nuid {
+                backing.forget(stage).await;
+            } else {
+                backing.discard(stage).await;
+            }
+            return matching(&existing, publication);
+        }
     }
-    .await;
-    if result.is_ok() {
-        forget_stage(js, stage).await;
-        return Ok(publication.clone());
-    }
-    // Reconcile both a lost success acknowledgement and a CAS loser. If the
-    // outcome cannot be established, leave staging intact for safe retry.
-    let existing = store.info(&info.name).await.map_err(internal)?;
-    let accepted = record(&existing)?;
-    if existing.nuid == info.nuid {
-        forget_stage(js, stage).await;
-    } else {
-        discard_stage(store, stage).await;
-    }
-    if accepted != *publication {
-        return Err((
-            StatusCode::CONFLICT,
-            "identity already has different bytes or metadata".into(),
-        ));
-    }
-    Ok(accepted)
+    Err(internal(
+        "publication outcome unknown; staging retained; retry the same publication",
+    ))
+}
+
+async fn commit(
+    js: &Context,
+    store: &ObjectStore,
+    stage: &str,
+    info: ObjectInfo,
+    publication: &Publication,
+) -> Result<Publication, Error> {
+    commit_backed(&NatsBacking { js, store }, stage, info, publication).await
 }
 
 pub async fn publish(
@@ -280,44 +353,59 @@ pub async fn publish(
     if field.name() != Some("file") {
         return Err(invalid("expected file after metadata"));
     }
+    let backing = NatsBacking {
+        js: &state.jetstream,
+        store: &store,
+    };
+    let mut reader = StreamReader::new(field.map_err(std::io::Error::other))
+        .take(publication.integrity.size_bytes + 1);
+    let existing = verify_existing(&backing, &publication, &mut reader).await?;
     // Four segments cannot be addressed by the two-segment legacy API.
     let stage = format!("__uploads/app/{}/bytes", uuid::Uuid::new_v4());
-    let staged = async {
-        let mut reader = StreamReader::new(field.map_err(std::io::Error::other))
-            .take(publication.integrity.size_bytes + 1);
-        let info = store
-            .put(stage.as_str(), &mut reader)
-            .await
-            .map_err(internal)?;
-        if info.size as u64 != publication.integrity.size_bytes
-            || info.digest != Some(publication.integrity.sha256.to_object_store_digest())
-        {
-            return Err(invalid("artifact size or SHA-256 mismatch"));
+    let staged = if existing.is_some() {
+        None
+    } else {
+        let uploaded = async {
+            let info = store
+                .put(stage.as_str(), &mut reader)
+                .await
+                .map_err(internal)?;
+            if info.size as u64 != publication.integrity.size_bytes
+                || info.digest != Some(publication.integrity.sha256.to_object_store_digest())
+            {
+                return Err(invalid("artifact size or SHA-256 mismatch"));
+            }
+            let mut readback = store.get(&stage).await.map_err(internal)?;
+            verify(&mut readback, &publication.integrity).await?;
+            Ok(info)
         }
-        let mut readback = store.get(&stage).await.map_err(internal)?;
-        verify(&mut readback, &publication.integrity).await?;
-        Ok(info)
-    }
-    .await;
-    let info = match staged {
-        Ok(info) => info,
-        Err(e) => {
-            discard_stage(&store, &stage).await;
-            return Err(e);
+        .await;
+        match uploaded {
+            Ok(info) => Some(info),
+            Err(e) => {
+                discard_stage(&store, &stage).await;
+                return Err(e);
+            }
         }
     };
+    drop(reader);
     let trailing = multipart
         .next_field()
         .await
         .map(|field| field.is_some())
         .map_err(invalid);
     if trailing != Ok(false) {
-        discard_stage(&store, &stage).await;
+        if staged.is_some() {
+            discard_stage(&store, &stage).await;
+        }
         return Err(trailing
             .err()
             .unwrap_or_else(|| invalid("unexpected extra multipart field")));
     }
-    let accepted = commit(&state.jetstream, &store, &stage, info, &publication).await?;
+    let accepted = match staged {
+        Some(info) => commit(&state.jetstream, &store, &stage, info, &publication).await?,
+        None => existing.expect("既存成果物の本文検証済み"),
+    };
     audit::record(
         &state.nats,
         "operator",
@@ -454,6 +542,263 @@ mod tests {
             body,
         )
         .await
+    }
+
+    struct FakeBacking(std::sync::Mutex<FakeState>);
+
+    struct FakeState {
+        committed: Option<ObjectInfo>,
+        unapplied: usize,
+        lose_ack: bool,
+        fail_lookup: bool,
+        creates: usize,
+        stage_metadata: bool,
+        chunks: bool,
+    }
+
+    impl FakeBacking {
+        fn new(unapplied: usize, lose_ack: bool) -> Self {
+            Self(std::sync::Mutex::new(FakeState {
+                committed: None,
+                unapplied,
+                lose_ack,
+                fail_lookup: false,
+                creates: 0,
+                stage_metadata: true,
+                chunks: true,
+            }))
+        }
+    }
+
+    impl Backing for FakeBacking {
+        async fn create(&self, info: &ObjectInfo) -> Result<(), Error> {
+            let mut state = self.0.lock().unwrap();
+            state.creates += 1;
+            if state.unapplied > 0 {
+                state.unapplied -= 1;
+                return Err(internal("injected unapplied commit"));
+            }
+            if state.committed.is_some() {
+                return Err(internal("CAS conflict"));
+            }
+            state.committed = Some(info.clone());
+            if state.lose_ack {
+                return Err(internal("injected lost acknowledgement"));
+            }
+            Ok(())
+        }
+        async fn read_info(&self, _: &str) -> Result<Option<ObjectInfo>, Error> {
+            let state = self.0.lock().unwrap();
+            if state.fail_lookup {
+                return Err(internal("injected lookup failure"));
+            }
+            Ok(state.committed.clone())
+        }
+        async fn discard(&self, _: &str) {
+            let mut state = self.0.lock().unwrap();
+            state.stage_metadata = false;
+            state.chunks = false;
+        }
+        async fn forget(&self, _: &str) {
+            self.0.lock().unwrap().stage_metadata = false;
+        }
+    }
+
+    fn fake_info(p: &Publication, nuid: &str) -> ObjectInfo {
+        serde_json::from_value(serde_json::json!({
+            "name": p.identity.app_package_key().unwrap(),
+            "bucket": OBJECT_APP_PACKAGES,
+            "nuid": nuid,
+            "size": p.integrity.size_bytes,
+            "chunks": 1,
+            "digest": p.integrity.sha256.to_object_store_digest(),
+            "metadata": { RECORD: serde_json::to_string(p).unwrap() }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn lost_ack_applied_reconciles_without_deleting_committed_chunks() {
+        let backing = FakeBacking::new(0, true);
+        let p = publication("linux-x86_64-musl.tar_gz", b"payload");
+        assert_eq!(
+            commit_backed(&backing, "stage", fake_info(&p, "ours"), &p)
+                .await
+                .unwrap(),
+            p
+        );
+        let state = backing.0.lock().unwrap();
+        assert_eq!(state.creates, 1);
+        assert_eq!(record(state.committed.as_ref().unwrap()).unwrap(), p);
+        assert!(!state.stage_metadata);
+        assert!(state.chunks);
+    }
+
+    #[tokio::test]
+    async fn lost_ack_unapplied_retries_the_same_conditional_record() {
+        let backing = FakeBacking::new(1, false);
+        let p = publication("linux-x86_64-musl.tar_gz", b"payload");
+        assert_eq!(
+            commit_backed(&backing, "stage", fake_info(&p, "ours"), &p)
+                .await
+                .unwrap(),
+            p
+        );
+        let state = backing.0.lock().unwrap();
+        assert_eq!(state.creates, 2);
+        assert_eq!(state.committed.as_ref().unwrap().nuid, "ours");
+        assert!(!state.stage_metadata);
+        assert!(state.chunks);
+    }
+
+    #[tokio::test]
+    async fn persistently_unknown_commit_preserves_staging_and_allows_retry() {
+        let backing = FakeBacking::new(2, false);
+        let p = publication("linux-x86_64-musl.tar_gz", b"payload");
+        let info = fake_info(&p, "ours");
+        assert_eq!(
+            commit_backed(&backing, "stage", info.clone(), &p)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        {
+            let state = backing.0.lock().unwrap();
+            assert_eq!(state.creates, 2);
+            assert!(state.committed.is_none());
+            assert!(state.stage_metadata && state.chunks);
+        }
+        assert_eq!(commit_backed(&backing, "stage", info, &p).await.unwrap(), p);
+    }
+
+    #[tokio::test]
+    async fn lost_ack_and_failed_lookup_keep_potentially_committed_bytes() {
+        let backing = FakeBacking::new(0, true);
+        backing.0.lock().unwrap().fail_lookup = true;
+        let p = publication("linux-x86_64-musl.tar_gz", b"payload");
+        let info = fake_info(&p, "ours");
+        assert!(
+            commit_backed(&backing, "stage", info.clone(), &p)
+                .await
+                .is_err()
+        );
+        {
+            let mut state = backing.0.lock().unwrap();
+            assert!(state.stage_metadata && state.chunks);
+            assert!(state.committed.is_some());
+            state.fail_lookup = false;
+        }
+        assert_eq!(commit_backed(&backing, "stage", info, &p).await.unwrap(), p);
+        assert!(backing.0.lock().unwrap().chunks);
+    }
+
+    #[tokio::test]
+    async fn competing_record_cleans_only_loser_for_identical_and_conflicting_publications() {
+        let ours = publication("linux-x86_64-musl.tar_gz", b"ours");
+        for bytes in [b"ours".as_slice(), b"theirs"] {
+            let theirs = publication("linux-x86_64-musl.tar_gz", bytes);
+            let backing = FakeBacking::new(0, false);
+            let winner = fake_info(&theirs, "theirs");
+            backing.0.lock().unwrap().committed = Some(winner.clone());
+            let result = commit_backed(&backing, "stage", fake_info(&ours, "ours"), &ours).await;
+            if theirs == ours {
+                assert_eq!(result.unwrap(), ours);
+            } else {
+                assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+            }
+            let state = backing.0.lock().unwrap();
+            assert!(!state.stage_metadata && !state.chunks);
+            assert_eq!(state.committed.as_ref().unwrap(), &winner);
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_publication_checks_body_without_creating_or_cleaning_objects() {
+        let backing = FakeBacking::new(0, false);
+        let p = publication("linux-x86_64-musl.tar_gz", b"payload");
+        let info = fake_info(&p, "existing");
+        backing.0.lock().unwrap().committed = Some(info.clone());
+        assert_eq!(
+            verify_existing(&backing, &p, &mut &b"payload"[..])
+                .await
+                .unwrap(),
+            Some(p.clone())
+        );
+        for bytes in [b"payloa".as_slice(), b"payload!", b"corrupt"] {
+            assert_eq!(
+                verify_existing(&backing, &p, &mut &bytes[..])
+                    .await
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let different = Publication {
+            integrity: ArtifactIntegrity::of(b"different"),
+            ..p
+        };
+        assert_eq!(
+            verify_existing(&backing, &different, &mut &b"different"[..])
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        let state = backing.0.lock().unwrap();
+        assert_eq!(state.creates, 0);
+        assert!(state.stage_metadata && state.chunks);
+        assert_eq!(state.committed.as_ref().unwrap(), &info);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server and KANADE_APP_ARTIFACT_PUBLICATION=backend-exclusive"]
+    async fn identical_http_republication_does_not_write_to_object_store() {
+        let app = fixture::app().await;
+        let p = publication("linux-x86_64-musl.tar_gz", b"payload");
+        assert_eq!(
+            http_publish(&app, &p, b"payload").await.status(),
+            StatusCode::OK
+        );
+        let mut stream = app
+            .js
+            .get_stream(format!("OBJ_{OBJECT_APP_PACKAGES}"))
+            .await
+            .unwrap();
+        let before = stream.info().await.unwrap().state.clone();
+        assert_eq!(
+            http_publish(&app, &p, b"payload").await.status(),
+            StatusCode::OK
+        );
+        for bytes in [b"payloa".as_slice(), b"payload!", b"corrupt"] {
+            assert_eq!(
+                http_publish(&app, &p, bytes).await.status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let json = serde_json::to_vec(&p).unwrap();
+        let (ct, body) = fixture::multipart(&[
+            ("metadata", None, &json),
+            ("file", Some("bytes"), b"payload"),
+            ("extra", None, b"unexpected"),
+        ]);
+        assert_eq!(
+            request(
+                &app,
+                Method::POST,
+                "/api/app-artifacts",
+                Some("op"),
+                &ct,
+                body
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let after = &stream.info().await.unwrap().state;
+        assert_eq!(after.last_sequence, before.last_sequence);
+        assert_eq!(after.messages, before.messages);
+        assert_eq!(after.bytes, before.bytes);
     }
 
     #[tokio::test]

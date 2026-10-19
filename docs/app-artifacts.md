@@ -63,7 +63,10 @@ curl --fail-with-body -H "Authorization: Bearer $TOKEN" \
 ```
 
 Success returns 200 with the accepted metadata. Repeating the same identity and
-integrity is idempotent **after consuming and validating the new body**. Different
+integrity is idempotent **after consuming and validating the new body**.
+既存レコードが一致する場合も受信本文のサイズと SHA-256 を検証するが、
+追加のステージング保存や Object Store 書込みは行わない。
+Different
 bytes/accepted metadata for an existing identity return 409; mismatched declared
 size/digest or malformed multipart return 400. Storage/verification failures return
 503. Unknown identity keys return 404. No force overwrite or delete API exists;
@@ -96,6 +99,8 @@ succeed and conflicting publications fail. Only a loser's known unreferenced
 chunks are deleted. Success purges only the private staging metadata, never its
 now-committed chunks. A lost/uncertain commit acknowledgement triggers direct
 reconciliation; unresolved outcomes retain staging/chunks and return an error.
+照会で未確定と分かった場合、同じ ObjectInfo の条件付き確定を一度だけ再試行する。
+応答喪失が続く場合や照会に失敗した場合はステージングと chunks を保持して 503 を返す。
 Retry the entire request with the same metadata/bytes: a committed result becomes
 an idempotent success. Validation failures clean up staged objects best effort.
 Cancellation/crash during upload can leave chunks without metadata; cancellation
