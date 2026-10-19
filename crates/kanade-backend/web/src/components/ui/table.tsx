@@ -1317,7 +1317,6 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       sf && resizeKey ? (
         <div className="space-y-1.5">
           <div className="flex flex-wrap items-start justify-between gap-2">
-            {server?.loading && <span role="status" className="text-xs text-muted">{t('table.filter.loading')}</span>}
             <SortFilterChrome resizeKey={resizeKey} api={sf} cardMode={cards && !inTableMode} />
             {picker && (
               <div className="ml-auto">
@@ -1360,7 +1359,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         className={cn(
           cards ? 'kn-table' : 'overflow-x-auto',
           cards && wideCards && 'kn-table-wide',
-          'rounded-lg border border-border bg-card',
+          'relative rounded-lg border border-border bg-card',
           hiddenPositions.length > 0 && scopeClass,
         )}
         // Once columns are sized the card is exactly as wide as the table
@@ -1413,6 +1412,18 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
               )
               .join('')}
           </style>
+        )}
+        {server?.loading && (
+          <div
+            role="status"
+            data-testid="table-loading-overlay"
+            className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/30 backdrop-blur-[0.5px]"
+          >
+            <div className="flex items-center gap-2 rounded border border-border bg-card px-3 py-1.5 text-xs font-medium shadow-sm">
+              <span aria-hidden="true" className="size-2 animate-ping rounded-full bg-accent motion-reduce:animate-none" />
+              <span>{t('table.filter.loading')}</span>
+            </div>
+          </div>
         )}
         <table
           aria-busy={server?.loading || undefined}

@@ -282,6 +282,28 @@ test.describe('Table sort and filter in card mode', () => {
 });
 
 
+for (const viewport of [DESKTOP, NARROW]) {
+  test.describe(`Server loading overlay at ${viewport.width}px`, () => {
+    test.use({ viewport });
+    test('keeps rows visible beneath the overlay and removes it when loading ends', async ({ mount }) => {
+      const c = await mount(<ServerSortFilterTable loading />);
+      const overlay = c.getByTestId('table-loading-overlay');
+      await expect(overlay).toBeVisible();
+      await expect(overlay).toHaveAttribute('role', 'status');
+      await expect(overlay).toHaveCSS('pointer-events', 'none');
+      await expect(overlay).toHaveCSS('backdrop-filter', 'blur(0.5px)');
+      await expect(c.locator('table')).toHaveAttribute('aria-busy', 'true');
+      await expect(c.locator('tbody tr').first()).toBeVisible();
+      expect(await names(c)).toEqual(['banana', 'apple']);
+
+      await c.update(<ServerSortFilterTable />);
+      await expect(overlay).toHaveCount(0);
+      await expect(c.locator('table')).not.toHaveAttribute('aria-busy');
+      expect(await names(c)).toEqual(['banana', 'apple']);
+    });
+  });
+}
+
 test.describe('Controlled server table', () => {
   test.use({ viewport: DESKTOP });
   test('reports state while preserving supplied row order and global candidates', async ({ mount, page }) => {

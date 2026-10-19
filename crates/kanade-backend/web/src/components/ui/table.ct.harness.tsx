@@ -527,7 +527,7 @@ export function GroupedSortFilterTable() {
 }
 
 /** Simulates a page owning table state; deliberately returns unchanged rows. */
-export function ServerSortFilterTable({ overflow = false, empty = false, hiddenFilter = false }: { overflow?: boolean; empty?: boolean; hiddenFilter?: boolean }) {
+export function ServerSortFilterTable({ overflow = false, empty = false, hiddenFilter = false, loading = false }: { overflow?: boolean; empty?: boolean; hiddenFilter?: boolean; loading?: boolean }) {
   const [state, setState] = useState<import('./table-sortfilter').TableQueryState>({
     sort: null, filters: hiddenFilter ? { 'meta:site': { contains: 'Tokyo' } } : {},
   });
@@ -536,7 +536,7 @@ export function ServerSortFilterTable({ overflow = false, empty = false, hiddenF
   }), [overflow]);
   return <>
     <output data-testid="server-state">{JSON.stringify(state)}</output>
-    <Table resizeKey="ct-server" sortFilter="server" serverSortFilter={{ state, onChange: setState, loadCandidates, total: 100, loading: false }}>
+    <Table resizeKey="ct-server" sortFilter="server" serverSortFilter={{ state, onChange: setState, loadCandidates, total: 100, loading }}>
       <TableHeader><TableRow><TableHead colId="name">name</TableHead><TableHead colId="n">number</TableHead></TableRow></TableHeader>
       <TableBody>
         {!empty && <TableRow><TableCell>banana</TableCell><TableCell>10</TableCell></TableRow>}
