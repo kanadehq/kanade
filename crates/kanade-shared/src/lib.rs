@@ -1,4 +1,5 @@
 pub mod agent_metadata;
+pub mod artifact;
 pub mod bin_platform;
 pub mod boot_sentinel;
 pub mod bootstrap;

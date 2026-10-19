@@ -56,9 +56,8 @@ where
 
 /// Render a finished hasher as the NATS object-store digest string.
 fn nats_digest(hasher: Sha256) -> String {
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::URL_SAFE.encode(hasher.finalize());
-    format!("SHA-256={b64}")
+    kanade_shared::artifact::ArtifactSha256::from_bytes(hasher.finalize().into())
+        .to_object_store_digest()
 }
 
 /// Download `url` (authenticated, streamed, never buffered) and

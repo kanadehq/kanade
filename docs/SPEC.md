@@ -2774,26 +2774,32 @@ Release ワークフローの記述だけで「全環境で即座に配布可能
 #### 2.13.4.1 多元タプルによる Artifact Identity 定義
 クロス OS 環境でのパッケージ衝突を完全に防ぐため、成果物の一意性を以下の多元タプルで厳格に定義する。
 
-```rust
-pub struct ArtifactIdentity {
-    pub role: DeployRole,             // backend | client | cli | agent
-    pub version: semver::Version,     // e.g. 0.80.0
-    pub os: TargetOs,                 // windows | linux | macos
-    pub arch: TargetArch,             // x86_64 | aarch64
-    pub distro_abi: Option<String>,   // msvc | musl | ubuntu-24.04 | darwin14
-    pub format: PackageFormat,        // exe | deb | pkg | tar_gz | zip
-}
-```
+**Stage 1a 実装済み**: `kanade_shared::artifact` が identity / integrity の唯一の共有契約。`ArtifactIdentity` は非公開 fields と検証付き constructor / Deserialize を持ち、JSON fields は `role`, `version`, `os`, `arch`, `distro_abi`, `format` の順に serialize する。未知 field / enum、欠落 / null ABI、未許可の組合せは拒否する。operator OS を target の推測に使用しない。
+SemVer 構文検証は `semver` クレートを使用する。`ArtifactError` は identity と key の専用エラーを区別し、Linux aarch64 Client は `ClientLinuxAarch64Unsupported` として拒否する。
+
+| role | os / arch | 必須 distro_abi | format |
+|---|---|---|---|
+| backend / client / cli / agent | windows / x86_64 | msvc | exe / zip |
+| backend / cli / agent | linux / x86_64 または aarch64 | musl | tar_gz |
+| client | linux / x86_64 | ubuntu-24.04 | deb |
+| client | macos / aarch64 | darwin14 | pkg |
+| cli / agent | macos / aarch64 | darwin | tar_gz |
+
+これは **identity を表現できる範囲** であり、release に package が存在すること、内容の検査、署名信頼、実機対応、deployability の保証ではない。Client の GUI / session 要件は §2.11.7 を維持する。macOS Backend、Intel Mac、Windows ARM、Linux ARM Client、その他 ABI / format の新規対応は含めない。非 Client macOS の `darwin` は最低 OS 版を主張しない。Agent identity の archive 表現も既存 release / rollout 契約を変更しない。
+
+版は `ArtifactVersion` の canonical SemVer 2.0 文字列（最大128 ASCII bytes、core 3整数は u64、先頭ゼロ不可）。prerelease / build metadata は保持し、大小文字も区別する。operator 入力用 `from_input` だけ既存 Agent の `normalize_version`（前後空白と先頭 `v` 1個の除去）を再利用する。保存 JSON / key ではこの補正をしない。package revision / 再build と SemVer build metadata の業務上の対応は未決定であり、metadata を版更新や不変性検証の代用にしない。Windows の exe / zip は異なる identity として表現するが、今後の deploy がどちらを配布形式に選ぶかは未決定。
 
 #### 2.13.4.2 Object Store キー設計と Windows Bare Key 互換移行
-1. **新キー体系 (Recommended Proposal、未実装)**:
-   - bucket 名と object key は別の値である。`OBJECT_APP_PACKAGES` の bucket は `app_packages`、その内部の推奨 key は `<role>/<version>/<os>-<arch>-<distro_abi>.<format>`。role は `backend|client|cli` とし、bucket 名を key に重ねない。
+1. **新キー体系 (Stage 1a: 純粋な生成・解析のみ実装済み、保存・API は未実装)**:
+   - bucket 名と object key は別の値である。`OBJECT_APP_PACKAGES` の bucket は `app_packages`、その内部の canonical key は `<role>/<version>/<os>-<arch>-<distro_abi>.<format>`。role は `backend|client|cli` とし、bucket 名を key に重ねない。
      例: bucket=`app_packages`, key=`client/0.80.0/macos-aarch64-darwin14.pkg`。
      例: key=`client/0.80.0/linux-x86_64-ubuntu-24.04.deb`、`client/0.80.0/windows-x86_64-msvc.exe`。
-   - identity tuple から key への正規化と逆照合を Shared の一箇所で定義する。省略可能な `distro_abi` の表現、許可文字・長さ・区切りの曖昧性、package revision の扱いは **未解決の schema proposal**。異なる tuple が同じ key にならないことを試験し、確定するまで deploy publish を有効化しない。
+   - 唯一の文法は `<role>/<version>/<os>-<arch>-<distro_abi>.<format>`。各 token は上表の lowercase enum 値そのもの、ABI は省略不可。`tar_gz` は拡張子も **`.tar_gz`** とし `.tar.gz` は alias にしない。role は `backend|client|cli`、version には上記 canonical SemVer をそのまま使う。3 segment 以外、末尾 slash、case folding、URL decode、path normalization、空白補正は認めない。末尾の format を最後の `.` で分離し、OS / arch を先頭2個の `-` で取り、残り全体を ABI と照合するため `ubuntu-24.04` も一意。検証後の再生成が入力 key と byte 単位で一致することを要求する。bucket 名は key に含めない。許可表全体の往復・非衝突を試験する。
+   - canonical JSON はこの型の固定 field 順による compact serialization を指す。署名用 manifest 全体の canonicalization や任意 JSON の canonicalization を定義・実装したものではない。
    - 現行 `api/app_packages.rs` は slash-free な `name` / `version` の2 segment API で、list もその形を仮定する。この新 key は現行 API にそのまま渡せない。§2.13.4.4 の別 identity API / namespace の設計と producer / list / download / delete / CLI 全 consumer の対応が前提。具体的な namespace / API route は未確定で、新 bucket 作成の製品承認を意味しない。
    - `OBJECT_AGENT_RELEASES` の bucket は `agent_releases`。既存の `AgentPlatform::release_key` を維持する。Windows: `<version>`、Linux: `<version>-linux-<arch>`、macOS: `<version>-macos-aarch64`。app identity key をこの bucket へ適用しない。
-2. **レガシー Windows Bare Key の安全な移行**:
+2. **レガシー Windows Bare Key の安全な移行（移行自体は未実装）**:
+   - Stage 1a の `inspect_legacy_windows(role, declared_version, bytes)` は旧 key 名を入力にせず、既存 binary platform parser と object parser で PE/COFF AMD64 executable（DLL / object 不可）を確認し、利用可能な VERSIONINFO と明示版の不一致を拒否する。結果は未認証 `LegacyWindowsCandidate` に限定する。VERSIONINFO 不在は `embedded_version_verified=false` として残す。role は caller の宣言であり PE header から証明しない。SHA-256 / size が一致しても publisher provenance の証明ではない。alias 作成・snapshot・配布許可は行わない。
    - 既存の `OBJECT_APP_PACKAGES` に存在する `<name>/<version>` 形式のオブジェクトは、一律に Windows 用とみなすのではなく、バイナリの `MZ` / PE header と Machine=`AMD64` (`0x8664`)、実版・role・publisher provenance を検査し、**Windows x86_64 成果物であると明示的に確認されたもののみ**、新キー体系の Windows エイリアスとして解決する。
    - PE ヘッダを持たない非 Windows 成果物がレガシーキーに存在する場合はエラーとし、推測による上書きや他 OS への配信を行わない。
 
@@ -2823,6 +2829,7 @@ pub struct ArtifactIdentity {
 }
 ```
 
+- Stage 1a は `ArtifactIntegrity { sha256, size_bytes }` と検証付き `ArtifactSha256` を実装。JSON の SHA-256 は64文字 lowercase hex、Object Store digest は `SHA-256=` + 32 bytes の padded URL-safe base64 と明示変換する。既存 CLI の read-back digest 整形のみ共通化する。署名付き manifest / publisher registry は未実装。
 - **ハッシュ単体認証の禁止**: 単なる SHA-256 ハッシュの一致は完全性（破損していないこと）を証明するに過ぎず、発行元（Publisher）の正当性を証明しない。マニフェストには信頼された発行元鍵による電子署名を付与し、Agent は実行前に署名を検証する。
 
 #### 2.13.4.4 不変性 (Immutability) の保証と実版検出
@@ -3235,7 +3242,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 本仕様に基づく実装を、後続の開発者が安全かつインクリメンタルに進められるよう、依存関係順のタスクに細分化する。
 
 - [ ] **Task 1: 成果物 Identity & Object Store 拡張 (Shared / Backend / CLI)**
-  - `ArtifactIdentity` 型およびプラットフォーム解決ロジックの実装
+  - [x] Stage 1a: 検証付き共有 `ArtifactIdentity` / integrity、明示 target 許可表、canonical app key の純粋な生成・解析、未認証 legacy Windows 候補検査（deploy / endpoint / storage には未接続）
   - `OBJECT_APP_PACKAGES` の新キー体系 (`<role>/<version>/<os>-<arch>-<distro_abi>.<format>`) 対応
   - レガシー Windows bare key の PE 検証付き安全な移行ロジック実装
   - 新 identity API の不変性、旧 API 上書き動作の並存、CI producer 移行と alias snapshot の実装
@@ -3288,7 +3295,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 | 全 OS CLI / enrolled only / jobs / typed native / 既存 Agent rollout、Client 初期範囲 | **既存で充足**。§2.13.1 の確定判断を維持。bootstrap one-liner・独立 updater 不採用も変更しない |
 | 旧 Client updater 記述と現状調査 | **採用・修正**。§2.11.6 は履歴を残して置換済みと注記、§2.11.7 は Mac GUI と Linux shim を分離。README / book は未実装仕様への案内を加え、現行手順を維持 |
 | HTTP endpoint / SourceUrl、Agent jitter | **採用**。現行 CLI `cmd/{app,agent,exec,job}.rs` と fleet script を照合し、§2.13.1–2 / .5 と README を修正。job の15m案を Agent scope 継承へ適用しない |
-| platform family を既存 name に符号化 | **不採用（現時点）**。2 segment API を再利用できる利点はあるが family grammar / revision の恒久化を伴う。現行 identity tuple と別 API 移行を維持し、bucket / key の矛盾だけ解消。正規化・revision・namespace 詳細は未解決 |
+| platform family を既存 name に符号化 | **不採用（現時点）**。2 segment API を再利用できる利点はあるが family grammar / revision の恒久化を伴う。現行 identity tuple と別 API 移行を維持し、bucket / key の矛盾だけ解消。Stage 1a で必須 ABI / canonical grammar を確定。revision の業務対応・namespace / API は未解決 |
 | 全書込経路の不変性、競合 publish / 部分失敗 / GC 保護 | **採用 proposal**。現行 `api/app_packages.rs` は無条件 put、list は2 segment 前提。§2.13.4 の新経路だけを強化し旧 CI upload 契約を維持。旧 Windows alias は AMD64 / 実版 / provenance と immutable snapshot が必要 |
 | 通常 plan で upload / Backend 保存、dry-run だけ read-only | **不採用**。現行の全 plan read-only と apply 登録を維持。ローカル入力の publish は apply、旧案の CLI 綴り・節構成への全面置換もしない |
 | 別 wire kind / shell stub 代替、publisher trust | **既存を維持**。現行 §2.13.6 の v2 envelope 必須・preflight・鍵 fingerprint / 失効・全 dispatch 認可が具体的。旧案の別 kind や stub へ変更する必要はなく、stub fallback は採らない |
