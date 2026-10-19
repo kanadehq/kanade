@@ -40,6 +40,7 @@ pub mod script_objects;
 pub mod scripts;
 pub mod server;
 pub mod server_settings;
+mod server_table;
 pub mod sql_like;
 pub mod time_bounds;
 pub mod view_sql;
@@ -224,7 +225,7 @@ pub fn router(state: AppState) -> Router {
         // anyone. The handler does identity, role and feature itself; putting
         // it under `operator` would look like a gate while enforcing nothing.
         .route("/api/remote/{pc_id}/ws", get(remote::ws))
-        .route("/api/agents", get(agents::list))
+        .route("/api/agents", get(agents::list_or_distinct))
         // Dashboard "version distribution" card — agent-version histogram
         // for the whole fleet. Static segment, so it resolves ahead of
         // the `{pc_id}` route below.

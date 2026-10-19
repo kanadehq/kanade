@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, CalendarClock, ChevronDown, Download, History, Loader2, MonitorPlay, Play, Plus, ScrollText, Server, Settings2, Trash2, Upload, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, CalendarClock, ChevronDown, Download, History, Loader2, MonitorPlay, Play, Plus, ScrollText, Server, Settings2, Trash2, Upload, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -32,9 +32,11 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Select } from '@/components/ui/select';
+import type { ServerSortFilter, SortState, TableQueryState } from '@/components/ui/table-sortfilter';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, useTableColumns } from '@/components/ui/table';
 import { apiFetch, apiFetchPaged, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { EMPTY_TABLE_STATE, encodeTableState, parseTableState, tableUrl, useInventoryTable } from '@/lib/inventoryTable';
 import { credentialState, credentialUser } from '@/lib/credential';
 import { downloadCsv, parseCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
@@ -49,15 +51,6 @@ import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/util
 const PAGE_SIZE = 50;
 // Same debounce the other list pages use for typed filters.
 const FILTER_DEBOUNCE_MS = 300;
-// Mirrors `MAX_FETCH` in the backend's `api/agents.rs` list handler. A
-// limit-less request only hits that cap when q/user/version is set (it
-// routes through the regex prefilter, which pulls candidates into memory
-// before matching); the plain-filter fast path has no such ceiling. Used
-// here only to detect the capped case and say so — never to enforce a
-// limit client-side.
-const AGENTS_EXPORT_FETCH_CAP = 10_000;
-
-
 // #1061: metadata filter operators (mirror the backend allow-list). The
 // value-less ops (present / blank / absent) hide the value input.
 type MetaOp = 'contains' | 'eq' | 'neq' | 'starts' | 'empty' | 'set' | 'absent';
@@ -107,27 +100,56 @@ function metaParamName(c: MetaCond): string {
   return `meta.${c.key.trim()}.${c.op}`;
 }
 
-/** Validate a `?sort=` value against the SPA's sortable fields so a stale
- *  or hand-edited URL can't push a bogus sort into the very first request
- *  (the backend would 400 it). `meta:<key>` is accepted for any key. */
-function parseSortField(raw: string | null): string {
-  if (!raw) return '';
-  if (raw.startsWith('meta:') && raw.length > 'meta:'.length) return raw;
-  return Object.values(SORT_FIELDS).includes(raw) ? raw : '';
-}
-
-// #1061: server-side sortable columns → the field token the API expects.
-// (Built-in cols not listed here — status / cpu / rss — aren't sortable
-// server-side; metadata columns sort via the `meta:<key>` token.)
-const SORT_FIELDS: Record<string, string> = {
+// #1061: the `?sort=` URL token for each sortable column. The table state
+// keys columns by id; the URL keeps the original tokens so bookmarks work.
+// Metadata columns use `meta:<key>` for both.
+const SORT_TOKENS: Record<string, string> = {
+  status: 'status',
   pcId: 'pc_id',
   os: 'os_family',
   agent: 'agent_version',
   lastHeartbeat: 'last_heartbeat',
   lastLogon: 'last_logon_user',
+  credential: 'credential',
+  cpu: 'cpu',
+  rss: 'rss',
 };
 
+/** `?sort=&dir=` → sort state. An unknown token (stale or hand-edited URL)
+ *  reads as no sort rather than pushing a bogus sort into the first request. */
+function sortFromUrl(raw: string | null, dir: string | null): SortState | null {
+  if (!raw) return null;
+  const d = dir === 'desc' ? 'desc' : 'asc';
+  if (raw.startsWith('meta:') && raw.length > 'meta:'.length) return { id: raw, dir: d };
+  const id = Object.entries(SORT_TOKENS).find(([, token]) => token === raw)?.[0]
+    ?? (raw === 'os' || raw === 'agent' ? raw : null);
+  return id ? { id, dir: d } : null;
+}
 
+const LEGACY_FILTERS = { q: 'pcId', user: 'lastLogon', version: 'agent' } as const;
+type LegacyFilters = Partial<Record<keyof typeof LEGACY_FILTERS, string>>;
+
+/** Legacy regex bookmarks are displayed in the column controls. Once that
+ * column is edited, its new contains/checklist filter replaces the regex. */
+function legacyFiltersFromUrl(p: URLSearchParams): LegacyFilters {
+  const filters = parseTableState(p.get('cf')).filters;
+  return Object.fromEntries(Object.entries(LEGACY_FILTERS)
+    .filter(([param, id]) => p.get(param)?.trim() && !filters[id])
+    .map(([param]) => [param, p.get(param)!]));
+}
+
+/** Sort + column filters from the URL (`?sort=&dir=` and `?cf=`). */
+function tableStateFromUrl(p: URLSearchParams): TableQueryState {
+  const filters = { ...parseTableState(p.get('cf')).filters };
+  for (const [param, value] of Object.entries(legacyFiltersFromUrl(p))) {
+    filters[LEGACY_FILTERS[param as keyof LegacyFilters]] = { contains: value };
+  }
+  return { sort: sortFromUrl(p.get('sort'), p.get('dir')), filters };
+}
+
+function sameTableState(a: TableQueryState, b: TableQueryState): boolean {
+  return encodeTableState(a) === encodeTableState(b);
+}
 
 // Liveness filter for the list, shared with the URL `?status=` param
 // so the Dashboard's fleet-health tiles can deep-link straight to the
@@ -305,13 +327,8 @@ export function Agents() {
   // so a shared / bookmarked search reproduces exactly (mirrors the
   // Inventory search, #1049). After mount a debounced effect writes the
   // state back to the URL, one-way (state → URL).
-  const [q, setQ] = useState(() => searchParams.get('q') ?? '');
-  const [user, setUser] = useState(() => searchParams.get('user') ?? '');
-  const [version, setVersion] = useState(() => searchParams.get('version') ?? '');
+  const [legacyFilters, setLegacyFilters] = useState(() => legacyFiltersFromUrl(searchParams));
   const [offset, setOffset] = useState(0);
-  const dQ = useDebouncedValue(q, FILTER_DEBOUNCE_MS);
-  const dUser = useDebouncedValue(user, FILTER_DEBOUNCE_MS);
-  const dVersion = useDebouncedValue(version, FILTER_DEBOUNCE_MS);
   // #1061: metadata conditions — [key][op][value] rows, AND'd. Debounced
   // as a whole so typing a value doesn't fire a request per keystroke.
   const [conditions, setConditions] = useState<MetaCond[]>(() =>
@@ -321,12 +338,11 @@ export function Agents() {
   // #1061: global attribute search — matches ANY metadata value.
   const [metaAny, setMetaAny] = useState(() => searchParams.get('meta_any') ?? '');
   const dMetaAny = useDebouncedValue(metaAny, FILTER_DEBOUNCE_MS);
-  // #1061: server-side column sort. Empty field ⇒ backend default
-  // (updated_at desc); a header click sets/toggles these.
-  const [sort, setSort] = useState(() => parseSortField(searchParams.get('sort')));
-  const [dir, setDir] = useState<'asc' | 'desc'>(() =>
-    searchParams.get('dir') === 'desc' ? 'desc' : 'asc',
-  );
+  // Column sort + per-column filters. One state, owned here and applied by
+  // the server to every agent (not just the visible page): the shared Table
+  // renders the header controls, this page sends the state as `table=`.
+  // No sort ⇒ backend default (updated_at desc).
+  const [tableState, setTableState] = useState<TableQueryState>(() => tableStateFromUrl(searchParams));
   // Distinct agent_meta keys across the fleet — drives the column picker
   // and the attribute-search key dropdown. Empty ⇒ no metadata anywhere,
   // so the controls stay hidden.
@@ -371,41 +387,6 @@ export function Agents() {
     .map((c) => `&${encodeURIComponent(metaParamName(c))}=${encodeURIComponent(c.value.trim())}`)
     .join('');
 
-  // #1061: toggle sort on a header — first click asc, second desc, third
-  // clears back to the default order.
-  const toggleSort = (field: string) => {
-    setOffset(0);
-    if (sort !== field) {
-      setSort(field);
-      setDir('asc');
-    } else if (dir === 'asc') {
-      setDir('desc');
-    } else {
-      setSort('');
-      setDir('asc');
-    }
-  };
-  // A clickable, sortable column header: label + an asc/desc caret when
-  // it's the active sort field. A column's own description `tooltip` is
-  // combined with the sort hint (the button's title would otherwise
-  // shadow the parent TableHead's title, hiding the description).
-  const sortBtn = (field: string, label: React.ReactNode, tooltip?: string) => (
-    <button
-      type="button"
-      onClick={() => toggleSort(field)}
-      className="inline-flex items-center gap-1 hover:text-fg"
-      title={tooltip ? `${tooltip} — ${t('sort.hint')}` : t('sort.hint')}
-    >
-      {label}
-      {sort === field &&
-        (dir === 'asc' ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />)}
-    </button>
-  );
-  // a11y: announce the column's current sort state on the header cell.
-  const ariaSort = (field: string): 'ascending' | 'descending' | undefined =>
-    sort === field ? (dir === 'asc' ? 'ascending' : 'descending') : undefined;
-
-
   // #1061: mirror the debounced filter + sort state into the URL (one-way:
   // state → URL, `replace`). Uses the DEBOUNCED values so a fast typist
   // can't exceed Safari's replaceState rate limit. Only touches its own
@@ -415,13 +396,25 @@ export function Agents() {
     setSearchParams(
       (prev) => {
         const p = new URLSearchParams(prev);
-        setOrDelete(p, 'q', dQ);
-        setOrDelete(p, 'user', dUser);
-        setOrDelete(p, 'version', dVersion);
+        const urlFilters = { ...tableState.filters };
+        for (const param of Object.keys(LEGACY_FILTERS) as (keyof LegacyFilters)[]) {
+          setOrDelete(p, param, legacyFilters[param] ?? '');
+          if (legacyFilters[param]) delete urlFilters[LEGACY_FILTERS[param]];
+        }
         setOrDelete(p, 'meta_any', dMetaAny);
-        setOrDelete(p, 'sort', sort);
-        if (sort) p.set('dir', dir);
+        const sortToken = tableState.sort
+          ? (tableState.sort.id.startsWith('meta:') ? tableState.sort.id : SORT_TOKENS[tableState.sort.id])
+          : '';
+        setOrDelete(p, 'sort', sortToken ?? '');
+        if (sortToken) p.set('dir', tableState.sort!.dir);
         else p.delete('dir');
+        setOrDelete(
+          p,
+          'cf',
+          Object.keys(urlFilters).length
+            ? encodeTableState({ sort: null, filters: urlFilters })
+            : '',
+        );
         // Replace every meta.<key>.<op> param with the current conditions.
         for (const key of Array.from(p.keys())) {
           if (key.startsWith('meta.')) p.delete(key);
@@ -433,7 +426,7 @@ export function Agents() {
       },
       { replace: true },
     );
-  }, [dQ, dUser, dVersion, dMetaAny, sort, dir, activeConditions, setSearchParams]);
+  }, [legacyFilters, dMetaAny, tableState, activeConditions, setSearchParams]);
   // #1061: sync URL → local state for navigation that changes the query
   // externally — browser back/forward, a sidebar link back to `/agents`
   // (which clears the params), or a deep link opened while already mounted.
@@ -444,18 +437,12 @@ export function Agents() {
   // `searchParams` so it runs on URL changes, reading the latest debounced
   // values from the render closure.
   useEffect(() => {
-    const uq = searchParams.get('q') ?? '';
-    if (uq !== dQ) setQ(uq);
-    const uu = searchParams.get('user') ?? '';
-    if (uu !== dUser) setUser(uu);
-    const uv = searchParams.get('version') ?? '';
-    if (uv !== dVersion) setVersion(uv);
+    const legacy = legacyFiltersFromUrl(searchParams);
+    if (JSON.stringify(legacy) !== JSON.stringify(legacyFilters)) setLegacyFilters(legacy);
     const uany = searchParams.get('meta_any') ?? '';
     if (uany !== dMetaAny) setMetaAny(uany);
-    const usort = parseSortField(searchParams.get('sort'));
-    if (usort !== sort) setSort(usort);
-    const udir = searchParams.get('dir') === 'desc' ? 'desc' : 'asc';
-    if (udir !== dir) setDir(udir);
+    const utable = tableStateFromUrl(searchParams);
+    if (!sameTableState(utable, tableState)) setTableState(utable);
     // Compare the serialised conditions so an identical set (from our own
     // write) doesn't remount every row — `parseConditionsFromParams` mints
     // fresh ids each call, which would drop focus otherwise.
@@ -474,20 +461,14 @@ export function Agents() {
 
   const { columns: tableColumns } = useTableColumns('agents');
   // #1061: if the sorted column is hidden or removed, clear the sort back to default
+  const sortId = tableState.sort?.id;
   const sortColumnVisible =
-    !sort ||
-    sort === SORT_FIELDS.pcId ||
-    tableColumns.some(
-      (c) =>
-        c.visible &&
-        (sort.startsWith('meta:')
-          ? c.id === sort
-          : c.id === Object.entries(SORT_FIELDS).find(([, f]) => f === sort)?.[0]),
-    );
+    !sortId ||
+    sortId === 'pcId' ||
+    tableColumns.some((c) => c.visible && c.id === sortId);
   useEffect(() => {
     if (!sortColumnVisible && tableColumns.length > 0) {
-      setSort('');
-      setDir('asc');
+      setTableState((prev) => ({ ...prev, sort: null }));
     }
   }, [sortColumnVisible, tableColumns]);
 
@@ -502,40 +483,48 @@ export function Agents() {
   // CSV export (which deliberately omits them so it walks every matching
   // row, not just the 50 on screen). Keeping one builder means the two can
   // never disagree about which filters are active.
+  const tableKey = encodeTableState(tableState);
+  // Legacy regexes share the visible column state, but retain their original
+  // matching semantics until the operator replaces or clears that column.
+  const requestFilters = { ...tableState.filters };
+  for (const param of Object.keys(legacyFilters) as (keyof LegacyFilters)[]) {
+    delete requestFilters[LEGACY_FILTERS[param]];
+  }
+  const requestState = { ...tableState, filters: requestFilters };
+  const legacyParams = new URLSearchParams(legacyFilters).toString();
   const filterParams =
-    (dQ ? `&q=${encodeURIComponent(dQ)}` : '') +
-    (dUser ? `&user=${encodeURIComponent(dUser)}` : '') +
-    (dVersion ? `&version=${encodeURIComponent(dVersion)}` : '') +
+    (legacyParams ? `&${legacyParams}` : '') +
     (quarantined ? `&quarantined=${encodeURIComponent(quarantined)}` : '') +
     (statusFilter !== 'all' ? `&status=${statusFilter}` : '') +
     // #1061: metadata conditions, global attribute search, sort.
     condParams +
-    (dMetaAny ? `&meta_any=${encodeURIComponent(dMetaAny)}` : '') +
-    (sort ? `&sort=${encodeURIComponent(sort)}&dir=${dir}` : '');
-  const { data, error, isLoading, isFetching } = useQuery({
+    (dMetaAny ? `&meta_any=${encodeURIComponent(dMetaAny)}` : '');
+  // The page request and the CSV export both carry the column sort/filters
+  // as `table=`, so the export is exactly the rows the filters leave.
+  const requestUrl = tableUrl(
+    `/api/agents?limit=${PAGE_SIZE}&offset=${offset}${filterParams}`,
+    requestState,
+  );
+  const { data, error, isLoading, isFetching, isPlaceholderData } = useQuery({
     queryKey: [
       'agents',
-      dQ,
-      dUser,
-      dVersion,
+      legacyParams,
       quarantined,
       offset,
       statusFilter,
       condParams,
       dMetaAny,
-      sort,
-      dir,
+      tableKey,
     ],
     // Match the Dashboard cadence so the per-row online/offline badge
     // ages out a dropped agent within ~30s of the fleet-health tile.
     // #563: the status filter rides to the server, so the Dashboard's
     // `?status=offline` deep link pages over the whole fleet's
     // offline hosts instead of filtering the current page.
-    // #652: q/user/version are server-side regexes; quarantined is an
-    // exact version pre-filter. Each is appended only when non-empty so
-    // the no-filter request stays on the SQL fast path.
+    // Legacy regex bookmarks and the quarantine prefilter are included
+    // alongside the controlled column filters.
     queryFn: () =>
-      apiFetchPaged<AgentRow[]>(`/api/agents?limit=${PAGE_SIZE}&offset=${offset}` + filterParams),
+      apiFetchPaged<AgentRow[]>(requestUrl),
     refetchInterval: 30_000,
     // Keep the previous page rendered while a filter keystroke changes
     // the queryKey, so `isLoading` only flips true on the very first
@@ -547,6 +536,47 @@ export function Agents() {
     placeholderData: keepPreviousData,
   });
   const total = data?.total ?? 0;
+  const baseControl = useInventoryTable(
+    requestUrl,
+    tableState,
+    (next) => {
+      setOffset(0);
+      const filters = { ...next.filters };
+      const remaining = { ...legacyFilters };
+      for (const param of Object.keys(legacyFilters) as (keyof LegacyFilters)[]) {
+        const id = LEGACY_FILTERS[param];
+        if (JSON.stringify(filters[id]) !== JSON.stringify(tableState.filters[id])) {
+          // Choosing checklist values replaces the legacy regex too; the
+          // popover carries the old text along when only values change.
+          if (filters[id]?.contains === legacyFilters[param]) {
+            filters[id] = { ...filters[id], contains: undefined };
+          }
+          delete remaining[param];
+        }
+      }
+      setLegacyFilters(remaining);
+      setTableState({ ...next, filters });
+    },
+    total,
+    // Overlay only while a changed sort/filter loads, not on the 30 s poll.
+    isPlaceholderData,
+  );
+  const tableControl: ServerSortFilter = {
+    ...baseControl,
+    // The status checklist offers the same words the badge shows.
+    loadCandidates: async (id) => {
+      const page = await baseControl.loadCandidates(id);
+      if (id !== 'status') return page;
+      return {
+        ...page,
+        values: page.values.map((v) => ({ ...v, label: t(`status.${JSON.parse(v.value)}`) })),
+      };
+    },
+    valueLabel: (value) => {
+      const label = baseControl.valueLabel?.(value) ?? value;
+      return label === 'online' || label === 'offline' ? t(`status.${label}`) : label;
+    },
+  };
   const [result, setResult] = useState<ActionResult | null>(null);
   // #495 (was: one shared mutation.isPending greyed out the action
   // buttons on every row): track pending pc_ids in a Set so only the
@@ -565,24 +595,22 @@ export function Agents() {
   // the query fires, avoiding one wasted fetch at the old offset
   // (PR #559 review, gemini + claude).
   const [prevFilterKey, setPrevFilterKey] = useState({
-    dQ,
-    dUser,
-    dVersion,
+    legacyParams,
     quarantined,
     statusFilter,
     condParams,
     dMetaAny,
+    tableKey,
   });
   if (
-    prevFilterKey.dQ !== dQ ||
-    prevFilterKey.dUser !== dUser ||
-    prevFilterKey.dVersion !== dVersion ||
+    prevFilterKey.legacyParams !== legacyParams ||
     prevFilterKey.quarantined !== quarantined ||
     prevFilterKey.statusFilter !== statusFilter ||
     prevFilterKey.condParams !== condParams ||
-    prevFilterKey.dMetaAny !== dMetaAny
+    prevFilterKey.dMetaAny !== dMetaAny ||
+    prevFilterKey.tableKey !== tableKey
   ) {
-    setPrevFilterKey({ dQ, dUser, dVersion, quarantined, statusFilter, condParams, dMetaAny });
+    setPrevFilterKey({ legacyParams, quarantined, statusFilter, condParams, dMetaAny, tableKey });
     setOffset(0);
   }
 
@@ -914,30 +942,17 @@ export function Agents() {
   const doExport = async () => {
     setExporting(true);
     try {
-      // No `limit` — the endpoint then returns every filter-matching row
-      // (up to its MAX_FETCH backstop), independent of the client-side
-      // PAGE_SIZE pager. Same `filterParams` the polled table query builds,
-      // so the export always matches what's on screen.
+      // No `limit` — the endpoint then returns every filter-matching row,
+      // independent of the client-side PAGE_SIZE pager. Same filters and
+      // column sort/filter state the polled table query sends, so the export
+      // always matches what's on screen.
       const rows = await apiFetch<AgentRow[]>(
-        `/api/agents${filterParams ? `?${filterParams.replace(/^&/, '')}` : ''}`,
+        tableUrl(`/api/agents${filterParams ? `?${filterParams.replace(/^&/, '')}` : ''}`, requestState),
       );
       const cols = tableColumns.filter((c) => c.visible && c.id !== 'actions');
       const header = cols.map((c) => c.label);
       const csvRows = rows.map((a) => cols.map((c) => exportValue(c.id, a)));
       downloadCsv(exportFilename(new Date()), [header, ...csvRows]);
-      // The backend's regex prefilter — active only when pc/host, user, or
-      // version is set — silently caps at MAX_FETCH; a row count landing
-      // exactly on that cap is this request's only signal that more rows
-      // may have matched. A ledger that LOOKS complete but silently isn't
-      // is worse than a slow one, so this has to be surfaced, not just
-      // logged server-side. The plain-filter fast path (status / metadata /
-      // quarantined alone) has no such ceiling — `LIMIT -1` there really
-      // does mean unlimited — so the warning must not fire off row count
-      // alone, or a genuinely complete export of a 10k+ fleet would look
-      // suspect for no reason.
-      if ((dQ || dUser || dVersion) && rows.length >= AGENTS_EXPORT_FETCH_CAP) {
-        toast.warning(t('export.truncatedWarning', { count: rows.length }));
-      }
     } catch (e) {
       toast.error(formatError(e));
     } finally {
@@ -959,7 +974,20 @@ export function Agents() {
   // non-disruptive inline error below instead — otherwise an invalid
   // regex mid-type unmounts the inputs and the user can't backspace to
   // fix it (gemini #666).
-  if (error && !data) return <ErrorCard title={t('errorTitle')} error={error} />;
+  if (error && !data) {
+    return (
+      <>
+        <ErrorCard title={t('errorTitle')} error={error} />
+        {/* A stale bookmark's column sort/filter (e.g. a removed metadata
+            key) is a 400 on the first load; let the operator drop it. */}
+        {(tableState.sort || Object.keys(tableState.filters).length > 0) && (
+          <Button variant="secondary" className="mt-2" onClick={() => { setLegacyFilters({}); setTableState(EMPTY_TABLE_STATE); }}>
+            {t('common:table.filter.resetState')}
+          </Button>
+        )}
+      </>
+    );
+  }
   // #563: rows arrive pre-filtered from the server; the fleet-wide
   // per-status counts ride the response headers so the chips stay
   // correct whichever chip is active (previously page-local).
@@ -982,13 +1010,11 @@ export function Agents() {
   // filter / page back.
   if (
     total === 0 &&
-    !dQ &&
-    !dUser &&
-    !dVersion &&
     !quarantined &&
     statusFilter === 'all' &&
     condParams === '' &&
-    !dMetaAny
+    !dMetaAny &&
+    Object.keys(tableState.filters).length === 0
   ) {
     return (
       <Card>
@@ -1082,39 +1108,7 @@ export function Agents() {
           known" tile. Counts come from the same `isAgentOnline`
           threshold, so toggling "offline" answers "which hosts are
           the N that aren't connected?" directly. */}
-      {/* #652: three regex filters, each LABELLED like the Activity
-          page — without a label an empty box is just a mystery box. */}
       <div className="flex flex-wrap gap-3">
-        <div className="space-y-1">
-          <Label htmlFor="agents-q">{t('search.pcHostLabel')}</Label>
-          <Input
-            id="agents-q"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder={t('search.pcHost')}
-            className="h-8 w-56"
-          />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="agents-user">{t('search.userLabel')}</Label>
-          <Input
-            id="agents-user"
-            value={user}
-            onChange={(e) => setUser(e.target.value)}
-            placeholder={t('search.user')}
-            className="h-8 w-44"
-          />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="agents-version">{t('search.versionLabel')}</Label>
-          <Input
-            id="agents-version"
-            value={version}
-            onChange={(e) => setVersion(e.target.value)}
-            placeholder={t('search.version')}
-            className="h-8 w-40"
-          />
-        </div>
         {/* #1061: global attribute search — matches any metadata value.
             Only shown when metadata exists anywhere in the fleet. */}
         {metaKeys.length > 0 && (
@@ -1241,7 +1235,7 @@ export function Agents() {
           {t('errorTitle')}: {(error as Error).message}
         </p>
       )}
-      <Table resizeKey="agents" picker metaColumns sortFilter="page">
+      <Table resizeKey="agents" picker metaColumns sortFilter="server" serverSortFilter={tableControl}>
         <TableHeader>
           <TableRow>
             <TableHead colId="status">{t('columns.status')}</TableHead>
@@ -1249,23 +1243,13 @@ export function Agents() {
                 hostname column duplicated it. The hostname now rides the
                 pc_id cell, shown only when it genuinely differs. pc_id is
                 the row identity + detail link, so it's never hideable. */}
-            <TableHead colId="pcId" sortable={false} aria-sort={ariaSort(SORT_FIELDS.pcId)}>
-              {sortBtn(SORT_FIELDS.pcId, t('columns.pcId'))}
-            </TableHead>
-            <TableHead colId="os" sortable={false} aria-sort={ariaSort(SORT_FIELDS.os)}>
-              {sortBtn(SORT_FIELDS.os, t('columns.os'))}
-            </TableHead>
-            <TableHead colId="agent" sortable={false} aria-sort={ariaSort(SORT_FIELDS.agent)}>
-              {sortBtn(SORT_FIELDS.agent, t('columns.agent'))}
-            </TableHead>
-            <TableHead colId="lastHeartbeat" sortable={false} aria-sort={ariaSort(SORT_FIELDS.lastHeartbeat)}>
-              {sortBtn(SORT_FIELDS.lastHeartbeat, t('columns.lastHeartbeat'))}
-            </TableHead>
-            <TableHead colId="lastLogon" sortable={false} aria-sort={ariaSort(SORT_FIELDS.lastLogon)}>
-              {sortBtn(SORT_FIELDS.lastLogon, t('columns.lastLogon'), t('columnTitles.lastLogon'))}
-            </TableHead>
+            <TableHead colId="pcId">{t('columns.pcId')}</TableHead>
+            <TableHead colId="os">{t('columns.os')}</TableHead>
+            <TableHead colId="agent">{t('columns.agent')}</TableHead>
+            <TableHead colId="lastHeartbeat">{t('columns.lastHeartbeat')}</TableHead>
+            <TableHead colId="lastLogon" title={t('columnTitles.lastLogon')}>{t('columns.lastLogon')}</TableHead>
             <TableHead colId="signing" sortable={false} filterable={false} title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
-            <TableHead colId="credential" sortable={false} filterable={false} title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
+            <TableHead colId="credential" title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
             <TableHead colId="cpu" className="text-right" title={t('columnTitles.cpu')}>
               {t('columns.cpu')}
             </TableHead>
