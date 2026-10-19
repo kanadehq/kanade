@@ -39,6 +39,14 @@ pub struct AppArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AppSub {
+    /// Publish an immutable identity-addressed artifact and verify HTTP read-back.
+    /// Identity JSON must explicitly declare role/version/os/arch/distro_abi/format.
+    /// Integrity checking does not establish publisher trust or deploy readiness.
+    PublishArtifact {
+        #[arg(long)]
+        identity: PathBuf,
+        binary: PathBuf,
+    },
     /// Upload a binary / installer to the app_packages Object Store
     /// under `<name>/<version>`, through the backend API (needs
     /// KANADE_AUTH_TOKEN with the operator role; no NATS access).
@@ -75,6 +83,9 @@ pub enum AppSub {
 pub async fn execute(backend_url: &str, args: AppArgs) -> Result<()> {
     let base = backend_url.trim_end_matches('/');
     match args.sub {
+        AppSub::PublishArtifact { identity, binary } => {
+            publish_artifact(base, identity, binary).await
+        }
         AppSub::Publish {
             name,
             binary,
@@ -90,6 +101,93 @@ pub async fn execute(backend_url: &str, args: AppArgs) -> Result<()> {
             object_http::delete(&client, base, &BUCKET, &name, &version).await
         }
     }
+}
+
+async fn publish_artifact(base: &str, identity_path: PathBuf, binary: PathBuf) -> Result<()> {
+    use kanade_shared::artifact::{ArtifactIdentity, ArtifactIntegrity, ArtifactSha256};
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+
+    let identity: ArtifactIdentity = serde_json::from_slice(&tokio::fs::read(identity_path).await?)
+        .context("parse explicit artifact identity")?;
+    let key = identity.app_package_key()?;
+    let mut file = tokio::fs::File::open(&binary).await?;
+    let mut hash = Sha256::new();
+    let mut size = 0u64;
+    // This buffer survives an await and becomes part of the publication future.
+    // Keep it on the heap: app/dispatch embed that future even for other CLI
+    // commands, which otherwise overflow the Windows main-thread stack.
+    let mut buffer = vec![0; 128 * 1024];
+    loop {
+        let n = file.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        size = size
+            .checked_add(n as u64)
+            .context("artifact size overflow")?;
+        hash.update(&buffer[..n]);
+    }
+    if size == 0 {
+        bail!("artifact file is empty");
+    }
+    let integrity = ArtifactIntegrity {
+        sha256: ArtifactSha256::from_bytes(hash.finalize().into()),
+        size_bytes: size,
+    };
+    let metadata = serde_json::json!({ "identity": identity, "integrity": integrity });
+    let client = crate::http_client::authed_client()?;
+    let url = reqwest::Url::parse(&format!("{base}/api/app-artifacts"))?;
+    let response = client
+        .post(url.clone())
+        .multipart(
+            reqwest::multipart::Form::new()
+                .text("metadata", serde_json::to_string(&metadata)?)
+                .part("file", object_http::file_part(&binary).await?),
+        )
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        bail!(
+            "artifact publication failed ({}): {}",
+            response.status(),
+            response.text().await?
+        );
+    }
+    let accepted: serde_json::Value = response.json().await?;
+    if accepted != metadata {
+        bail!("artifact publication metadata mismatch");
+    }
+    let mut download = url;
+    download
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("invalid backend URL"))?
+        .extend(key.split('/'));
+    let mut lookup = download.clone();
+    lookup
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("invalid backend URL"))?
+        .push("metadata");
+    let stored: serde_json::Value = client
+        .get(lookup)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if stored != metadata {
+        bail!("artifact read-back metadata mismatch");
+    }
+    super::publish_verify::verify_http_readback(
+        &client,
+        &download,
+        &key,
+        Some(&integrity.sha256.to_object_store_digest()),
+        integrity.size_bytes,
+    )
+    .await?;
+    println!("Published integrity-checked artifact {key} (publisher trust not verified)");
+    Ok(())
 }
 
 async fn publish(base: &str, name: String, binary: PathBuf, version: Option<String>) -> Result<()> {
@@ -209,6 +307,49 @@ mod tests {
         let p = dir.path().join("installer.msi");
         std::fs::write(&p, bytes).unwrap();
         (dir, p)
+    }
+
+    #[test]
+    fn artifact_publication_future_does_not_embed_the_transfer_buffer() {
+        let future = publish_artifact("", PathBuf::new(), PathBuf::new());
+        assert!(
+            std::mem::size_of_val(&future) < 64 * 1024,
+            "publication future must fit comfortably within the Windows CLI stack (got {} bytes)",
+            std::mem::size_of_val(&future),
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_publication_uses_explicit_identity_and_verifies_metadata_and_bytes() {
+        export_test_token();
+        let bytes = b"artifact";
+        let identity: kanade_shared::artifact::ArtifactIdentity = serde_json::from_str(r#"{"role":"cli","version":"1.2.3+build","os":"linux","arch":"aarch64","distro_abi":"musl","format":"tar_gz"}"#).unwrap();
+        let metadata = serde_json::json!({"identity": identity, "integrity": kanade_shared::artifact::ArtifactIntegrity::of(bytes)});
+        let (base, log) = fake_backend_bytes(vec![
+            (200, serde_json::to_vec(&metadata).unwrap()),
+            (200, serde_json::to_vec(&metadata).unwrap()),
+            (200, bytes.to_vec()),
+        ])
+        .await;
+        let (_dir, binary) = file_with(bytes);
+        let identity_path = binary.with_extension("json");
+        std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        publish_artifact(&base, identity_path, binary)
+            .await
+            .unwrap();
+        let requests = seen(&log);
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].target, "/api/app-artifacts");
+        let body = String::from_utf8_lossy(&requests[0].raw);
+        assert!(body.find("name=\"metadata\"").unwrap() < body.find("name=\"file\"").unwrap());
+        assert_eq!(
+            requests[1].target,
+            "/api/app-artifacts/cli/1.2.3+build/linux-aarch64-musl.tar_gz/metadata"
+        );
+        assert_eq!(
+            requests[2].target,
+            "/api/app-artifacts/cli/1.2.3+build/linux-aarch64-musl.tar_gz"
+        );
     }
 
     #[tokio::test]

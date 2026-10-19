@@ -176,6 +176,9 @@ start http://127.0.0.1:8080
 
 ## CLI cheat sheet
 
+Identity-addressed immutable app publication is an explicit opt-in; see the
+[stage 1b API, authorization prerequisites, and recovery contract](docs/app-artifacts.md).
+
 ```text
 kanade run    <pc_id> -- <script>                # request/reply via NATS
 kanade ping   <pc_id> [--wait N]                 # ask the agent for a fresh heartbeat (via backend API)
@@ -194,6 +197,7 @@ kanade job delete <id>                           # refuses if any schedule refer
 kanade exec     <job-id>                         # fire a registered job ad-hoc (POST /api/exec/<id>)
 
 kanade app    publish <name> <file> [--version V] # upload an installer to the app-packages store (via backend API; operator role)
+kanade app    publish-artifact --identity identity.json <file> # explicit identity; integrity + HTTP read-back, no publisher trust claim
 kanade app    list | delete <name> <version>     # (via backend API)
 kanade script publish <name> <version> <file>    # upload a manifest script body, 4 MB max (via backend API; operator role)
 kanade script list | delete <name> <version>     # (via backend API)
