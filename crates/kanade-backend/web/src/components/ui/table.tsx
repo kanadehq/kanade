@@ -979,6 +979,8 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    * headers, detail rows) should not opt in.
    */
   sortFilter?: boolean | 'page' | 'server';
+  /** Lets polling views hold their snapshot while a desktop or card filter panel is open. */
+  onFilterOpenChange?: (open: boolean) => void;
   /** Controlled SQL-backed mode: rows are rendered verbatim, state belongs to the page. */
   serverSortFilter?: ServerSortFilter;
   /** The body is runs of rows separated by full-width group header rows
@@ -998,6 +1000,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       metaColumns = false,
       sortFilter = false,
       sortFilterGroups = false,
+      onFilterOpenChange,
       serverSortFilter,
       style,
       children,
@@ -1005,6 +1008,18 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     },
     ref,
   ) => {
+    const [openPanel, setOpenPanel] = useState<string | null>(null);
+    const filterOpen = openPanel !== null;
+    useLayoutEffect(() => {
+      if (filterOpen) {
+        onFilterOpenChange?.(true);
+        return;
+      }
+      // Keep polling paused across brief gaps when switching filter panels.
+      const timer = setTimeout(() => onFilterOpenChange?.(false), 60);
+      return () => clearTimeout(timer);
+    }, [filterOpen, onFilterOpenChange]);
+
     const innerRef = useRef<HTMLTableElement | null>(null);
     const setRefs = useMergedRef(innerRef, ref);
 
@@ -1257,6 +1272,9 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     const sf: SortFilterApi | null =
       sfOn && sfOut && resizeKey
         ? {
+            panelGroup: scopeClass,
+            openPanel,
+            setOpenPanel,
             sort: sfOut.sort,
             filters: sfOut.filters,
             flags: sfOut.flags,

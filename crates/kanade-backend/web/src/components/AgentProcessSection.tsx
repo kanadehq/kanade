@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, Loader2, Power, RefreshCw } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Area,
@@ -266,8 +266,22 @@ export function AgentProcessSection({ pcId }: { pcId: string }) {
     return null;
   })();
 
-  const latestAt = processesQ.data?.latest_at ?? null;
-  const rows = processesQ.data?.processes ?? [];
+  // Polling continues while a panel is open. Hold its rows, candidates and
+  // timestamp until it closes; a different host must never inherit the hold.
+  const [heldSnapshot, setHeldSnapshot] = useState<{
+    pcId: string;
+    data: ProcessesResponse | undefined;
+    error: typeof processesQ.error;
+  } | null>(null);
+  const onFilterOpenChange = useCallback((open: boolean) => {
+    setHeldSnapshot((held) => open
+      ? held?.pcId === pcId ? held : { pcId, data: processesQ.data, error: processesQ.error }
+      : null);
+  }, [pcId, processesQ.data, processesQ.error]);
+  const snapshot = heldSnapshot?.pcId === pcId ? heldSnapshot.data : processesQ.data;
+  const snapshotError = heldSnapshot?.pcId === pcId ? heldSnapshot.error : processesQ.error;
+  const latestAt = snapshot?.latest_at ?? null;
+  const rows = snapshot?.processes ?? [];
 
   return (
     <Card>
@@ -340,22 +354,22 @@ export function AgentProcessSection({ pcId }: { pcId: string }) {
             {t('process.loading')}
           </div>
         )}
-        {processesQ.error && (
-          <ErrorCard title={t('process.errorTitle')} error={processesQ.error} />
+        {snapshotError && (
+          <ErrorCard title={t('process.errorTitle')} error={snapshotError} />
         )}
-        {!processesQ.isLoading && !processesQ.error && rows.length === 0 && (
+        {!processesQ.isLoading && !snapshotError && rows.length === 0 && (
           <p className="text-muted text-sm">
             {isActive ? t('process.emptyOn') : t('process.emptyOff')}
           </p>
         )}
         {rows.length > 0 && <ProcessTimelineChart pcId={pcId} />}
-        {rows.length > 0 && (
+        {snapshot !== undefined && (
           <div className="space-y-2 mt-6">
             <div className="text-xs text-muted flex items-center gap-2">
               <Activity className="size-3" />
               {t('process.latestAt', { at: fmtIsoLocal(latestAt) })}
             </div>
-            <Table resizeKey="agent.processes" picker>
+            <Table resizeKey="agent.processes" picker sortFilter onFilterOpenChange={onFilterOpenChange}>
               <TableHeader>
                 <TableRow>
                   <TableHead className="text-right">
@@ -378,23 +392,23 @@ export function AgentProcessSection({ pcId }: { pcId: string }) {
               </TableHeader>
               <TableBody>
                 {rows.map((p) => (
-                  <TableRow key={p.pid}>
-                    <TableCell label={t('process.columns.pid')} className="text-right text-muted text-xs">
+                  <TableRow key={JSON.stringify([pcId, p.pid, p.name])}>
+                    <TableCell sortValue={p.pid} label={t('process.columns.pid')} className="text-right text-muted text-xs">
                       {p.pid}
                     </TableCell>
-                    <TableCell label={t('process.columns.name')} className="text-xs">
+                    <TableCell sortValue={p.name.toLowerCase()} label={t('process.columns.name')} className="text-xs">
                       <code>{p.name}</code>
                     </TableCell>
-                    <TableCell label={t('process.columns.cpu')} className="text-right text-xs">
+                    <TableCell sortValue={p.cpu_pct} label={t('process.columns.cpu')} className="text-right text-xs">
                       {p.cpu_pct.toFixed(1)}%
                     </TableCell>
-                    <TableCell label={t('process.columns.rss')} className="text-right text-xs">
+                    <TableCell sortValue={p.rss_bytes} label={t('process.columns.rss')} className="text-right text-xs">
                       {fmtBytes(p.rss_bytes)}
                     </TableCell>
-                    <TableCell label={t('process.columns.diskRead')} className="text-right text-muted text-xs">
+                    <TableCell sortValue={p.disk_read_bytes_per_sec ?? ''} label={t('process.columns.diskRead')} className="text-right text-muted text-xs">
                       {fmtBytesPerSec(p.disk_read_bytes_per_sec)}
                     </TableCell>
-                    <TableCell label={t('process.columns.diskWritten')} className="text-right text-muted text-xs">
+                    <TableCell sortValue={p.disk_written_bytes_per_sec ?? ''} label={t('process.columns.diskWritten')} className="text-right text-muted text-xs">
                       {fmtBytesPerSec(p.disk_written_bytes_per_sec)}
                     </TableCell>
                   </TableRow>

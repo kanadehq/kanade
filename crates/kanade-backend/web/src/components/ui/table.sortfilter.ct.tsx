@@ -346,3 +346,24 @@ test.describe('Controlled server table cards', () => {
     expect(await names(c)).toEqual(['banana', 'apple']);
   });
 });
+
+for (const [mode, viewport] of [['desktop', DESKTOP], ['cards', NARROW]] as const) {
+  test.describe(`Table filter open notifications (${mode})`, () => {
+    test.use({ viewport });
+    test('notifies opening and closing without a false during panel switches', async ({ mount, page }) => {
+      const c = await mount(<SortFilterTable trackOpen />);
+      const history = c.getByTestId('open-history');
+      await expect(history).toHaveText('[false]');
+      await c.getByRole('button', { name: mode === 'cards' ? 'Sort / filter' : 'Filter name', exact: true }).click();
+      await expect(history).toHaveText('[false,true]');
+      if (mode === 'desktop') {
+        await openFilter(c, 'size');
+        // Advance beyond the close debounce to catch a spurious close notification.
+        await page.waitForTimeout(100);
+        await expect(history).toHaveText('[false,true]');
+      }
+      await page.keyboard.press('Escape');
+      await expect(history).toHaveText('[false,true,false]');
+    });
+  });
+}

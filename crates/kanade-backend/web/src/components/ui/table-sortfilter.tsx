@@ -80,6 +80,9 @@ export interface ServerSortFilter {
 export interface SortFilterApi {
   sort: SortState | null;
   filters: Filters;
+  panelGroup: string;
+  openPanel: string | null;
+  setOpenPanel: (id: string | null) => void;
   flags: Readonly<Record<string, ColumnFlags>>;
   setSort: (id: string, dir: SortDir | null) => void;
   cycleSort: (id: string) => void;
@@ -301,11 +304,13 @@ export function processSortFilter(input: ProcessInput): ProcessResult {
  *  sticky <thead> (`z-20`) and any clipping ancestor can't cut it off. */
 function FloatingPanel({
   anchor,
+  panelGroup,
   onClose,
   label,
   children,
 }: {
   anchor: RefObject<HTMLElement | null>;
+  panelGroup: string;
   onClose: () => void;
   label: string;
   children: ReactNode;
@@ -327,6 +332,8 @@ function FloatingPanel({
     const onDown = (e: PointerEvent) => {
       const target = e.target as Node;
       if (ref.current?.contains(target) || anchor.current?.contains(target)) return;
+      // Switching columns in this table keeps the polling hold continuous.
+      if (target instanceof Element && target.closest('[data-sort-filter-trigger]')?.getAttribute('data-sort-filter-trigger') === panelGroup) return;
       onClose();
     };
     const onKey = (e: KeyboardEvent) => {
@@ -348,7 +355,7 @@ function FloatingPanel({
       window.removeEventListener('resize', onClose);
       window.removeEventListener('scroll', onScroll, true);
     };
-  }, [anchor, onClose]);
+  }, [anchor, onClose, panelGroup]);
 
   return createPortal(
     <div
@@ -487,7 +494,9 @@ export function SortFilterHeader({
   children: ReactNode;
 }) {
   const { t } = useTranslation('common');
-  const [open, setOpen] = useState(false);
+  const panelId = `header:${colId}`;
+  const open = api.openPanel === panelId;
+  const setOpen = (value: boolean) => api.setOpenPanel(value ? panelId : null);
   const anchor = useRef<HTMLButtonElement>(null);
   const flags = api.flags[colId];
   if (!flags || (!flags.sortable && !flags.filterable)) return <>{children}</>;
@@ -517,10 +526,11 @@ export function SortFilterHeader({
             ref={anchor}
             type="button"
             aria-label={t('table.filter.button', { name: label })}
+            data-sort-filter-trigger={api.panelGroup}
             aria-haspopup="dialog"
             aria-expanded={open}
             data-filter-active={filtered || undefined}
-            onClick={() => setOpen((o) => !o)}
+            onClick={() => setOpen(!open)}
             className={cn(
               'shrink-0 rounded p-0.5 hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
               filtered ? 'text-accent' : 'opacity-50 hover:opacity-100',
@@ -529,7 +539,7 @@ export function SortFilterHeader({
             {filtered ? <FilterX className="size-3.5" aria-hidden /> : <Filter className="size-3.5" aria-hidden />}
           </button>
           {open && (
-            <FloatingPanel anchor={anchor} onClose={() => setOpen(false)} label={label}>
+            <FloatingPanel panelGroup={api.panelGroup} anchor={anchor} onClose={() => setOpen(false)} label={label}>
               <ColumnPanel api={api} colId={colId} label={label} />
             </FloatingPanel>
           )}
@@ -566,7 +576,8 @@ export function SortFilterBar({
   cardMode: boolean;
 }) {
   const { t } = useTranslation('common');
-  const [open, setOpen] = useState(false);
+  const open = api.openPanel === 'cards';
+  const setOpen = (value: boolean) => api.setOpenPanel(value ? 'cards' : null);
   const [picked, setPicked] = useState<string>('');
   const anchor = useRef<HTMLButtonElement>(null);
   const active = Object.keys(api.filters);
@@ -588,16 +599,17 @@ export function SortFilterBar({
           <button
             ref={anchor}
             type="button"
+            data-sort-filter-trigger={api.panelGroup}
             aria-haspopup="dialog"
             aria-expanded={open}
-            onClick={() => setOpen((o) => !o)}
+            onClick={() => setOpen(!open)}
             className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-sm hover:bg-muted/10"
           >
             <ArrowUpDown className="size-3.5" aria-hidden />
             {t('table.filter.menu')}
           </button>
           {open && (
-            <FloatingPanel anchor={anchor} onClose={() => setOpen(false)} label={t('table.filter.menu')}>
+            <FloatingPanel panelGroup={api.panelGroup} anchor={anchor} onClose={() => setOpen(false)} label={t('table.filter.menu')}>
               <select
                 value={current}
                 aria-label={t('table.filter.column')}

@@ -453,9 +453,12 @@ const SF_ROWS = [
  * shapes that must never be sorted or filtered — a one-cell group header
  * and a row whose cell count doesn't match the header.
  */
-export function SortFilterTable({ pinned = false, page = false }: { pinned?: boolean; page?: boolean }) {
-  return (
-    <Table resizeKey="ct-sf" picker sortFilter={page ? 'page' : true}>
+export function SortFilterTable({ pinned = false, page = false, trackOpen = false }: { pinned?: boolean; page?: boolean; trackOpen?: boolean }) {
+  const [openStates, setOpenStates] = useState<boolean[]>([]);
+  const onFilterOpenChange = useCallback((open: boolean) => setOpenStates((prev) => [...prev, open]), []);
+  return (<>
+    {trackOpen && <output data-testid="open-history">{JSON.stringify(openStates)}</output>}
+    <Table resizeKey="ct-sf" picker sortFilter={page ? 'page' : true} onFilterOpenChange={trackOpen ? onFilterOpenChange : undefined}>
       <TableHeader>
         <TableRow>
           <TableHead colId="name">name</TableHead>
@@ -489,7 +492,7 @@ export function SortFilterTable({ pinned = false, page = false }: { pinned?: boo
         )}
       </TableBody>
     </Table>
-  );
+  </>);
 }
 
 const GROUPED = [
