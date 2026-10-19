@@ -3484,6 +3484,7 @@ dependencies = [
  "portpicker",
  "rustls",
  "schemars 1.2.2",
+ "semver",
  "serde",
  "serde_ignored",
  "serde_json",

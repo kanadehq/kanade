@@ -8,11 +8,51 @@ use sha2::{Digest, Sha256};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct ArtifactError(String);
+pub enum ArtifactError {
+    #[error(transparent)]
+    Identity(#[from] ArtifactIdentityError),
+    #[error(transparent)]
+    Key(#[from] AppPackageKeyError),
+    #[error("{0}")]
+    Invalid(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ArtifactIdentityError {
+    #[error("unknown {component} {value:?}; expected {expected}")]
+    UnknownComponent {
+        component: &'static str,
+        value: String,
+        expected: &'static str,
+    },
+    #[error("invalid canonical SemVer {0:?} (maximum 128 bytes)")]
+    InvalidVersion(String),
+    #[error("Client Linux aarch64 is not supported")]
+    ClientLinuxAarch64Unsupported,
+    #[error(
+        "unsupported artifact combination: role={role:?}, os={os:?}, arch={arch:?}, distro_abi={distro_abi:?}, format={format:?}"
+    )]
+    UnsupportedCombination {
+        role: ArtifactRole,
+        os: TargetOs,
+        arch: TargetArch,
+        distro_abi: DistroAbi,
+        format: PackageFormat,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AppPackageKeyError {
+    #[error("expected canonical app key <role>/<version>/<os>-<arch>-<distro_abi>.<format>")]
+    InvalidGrammar,
+    #[error("Agent uses agent_releases and its existing release_key contract")]
+    AgentRoleNotAllowed,
+    #[error("noncanonical app package key")]
+    NonCanonical,
+}
 
 fn invalid(message: impl Into<String>) -> ArtifactError {
-    ArtifactError(message.into())
+    ArtifactError::Invalid(message.into())
 }
 
 macro_rules! tokens {
@@ -28,8 +68,10 @@ macro_rules! tokens {
             type Err = ArtifactError;
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 match s { $($token => Ok(Self::$variant),)+
-                    _ => Err(invalid(format!("unknown {} {s:?}; expected {}",
-                        stringify!($name), concat!($($token, " "),+)))) }
+                    _ => Err(ArtifactIdentityError::UnknownComponent {
+                        component: stringify!($name), value: s.to_owned(),
+                        expected: concat!($($token, " "),+),
+                    }.into()) }
             }
         }
     };
@@ -42,9 +84,8 @@ tokens!(DistroAbi { Msvc => "msvc", Musl => "musl", Ubuntu2404 => "ubuntu-24.04"
 tokens!(PackageFormat { Exe => "exe", Deb => "deb", Pkg => "pkg", TarGz => "tar_gz", Zip => "zip" });
 
 /// Canonical SemVer 2.0 text, including prerelease and build metadata.
-/// No new dependency is needed: existing release input normalization is reused,
-/// while storage rejects aliases. Core numbers are bounded by u64, as in SemVer
-/// implementations used by Rust tooling. Maximum serialized length: 128 bytes.
+/// Uses `semver` for validation; storage rejects aliases. Core numbers are
+/// bounded by u64. Maximum serialized length: 128 bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ArtifactVersion(String);
@@ -64,42 +105,8 @@ impl ArtifactVersion {
 impl FromStr for ArtifactVersion {
     type Err = ArtifactError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bad = || {
-            invalid(format!(
-                "invalid canonical SemVer {s:?} (maximum 128 bytes)"
-            ))
-        };
-        if s.is_empty() || s.len() > 128 {
-            return Err(bad());
-        }
-        let (release, build) = s.split_once('+').map_or((s, None), |(a, b)| (a, Some(b)));
-        let (core, pre) = release
-            .split_once('-')
-            .map_or((release, None), |(a, b)| (a, Some(b)));
-        let number = |n: &str| {
-            !n.is_empty()
-                && n.bytes().all(|b| b.is_ascii_digit())
-                && (n.len() == 1 || !n.starts_with('0'))
-                && n.parse::<u64>().is_ok()
-        };
-        let core: Vec<_> = core.split('.').collect();
-        if core.len() != 3 || !core.into_iter().all(number) {
-            return Err(bad());
-        }
-        for (part, numeric_zero_rule) in [(pre, true), (build, false)] {
-            if let Some(part) = part {
-                for id in part.split('.') {
-                    if id.is_empty()
-                        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                        || (numeric_zero_rule
-                            && id.len() > 1
-                            && id.starts_with('0')
-                            && id.bytes().all(|b| b.is_ascii_digit()))
-                    {
-                        return Err(bad());
-                    }
-                }
-            }
+        if s.len() > 128 || semver::Version::parse(s).is_err() {
+            return Err(ArtifactIdentityError::InvalidVersion(s.to_owned()).into());
         }
         Ok(Self(s.to_owned()))
     }
@@ -148,14 +155,17 @@ impl TryFrom<IdentityFields> for ArtifactIdentity {
                 | (Cli | Agent, Macos, Aarch64, Darwin, TarGz)
         );
         if !allowed {
-            return Err(invalid(format!(
-                "unsupported artifact combination: role={}, os={}, arch={}, distro_abi={}, format={}; Client requires windows/x86_64/msvc exe|zip, linux/x86_64/ubuntu-24.04 deb, or macos/aarch64/darwin14 pkg",
-                f.role.as_str(),
-                f.os.as_str(),
-                f.arch.as_str(),
-                f.distro_abi.as_str(),
-                f.format.as_str()
-            )));
+            if (f.role, f.os, f.arch) == (Client, Linux, Aarch64) {
+                return Err(ArtifactIdentityError::ClientLinuxAarch64Unsupported.into());
+            }
+            return Err(ArtifactIdentityError::UnsupportedCombination {
+                role: f.role,
+                os: f.os,
+                arch: f.arch,
+                distro_abi: f.distro_abi,
+                format: f.format,
+            }
+            .into());
         }
         Ok(Self(f))
     }
@@ -208,9 +218,7 @@ impl ArtifactIdentity {
     /// key to the current two-segment legacy HTTP endpoints.
     pub fn app_package_key(&self) -> Result<String, ArtifactError> {
         if self.role() == ArtifactRole::Agent {
-            return Err(invalid(
-                "Agent uses agent_releases and its existing release_key contract",
-            ));
+            return Err(AppPackageKeyError::AgentRoleNotAllowed.into());
         }
         Ok(format!(
             "{}/{}/{}-{}-{}.{}",
@@ -225,9 +233,7 @@ impl ArtifactIdentity {
 
     /// Strict inverse. No URL decoding, case folding, aliasing or path cleanup.
     pub fn from_app_package_key(key: &str) -> Result<Self, ArtifactError> {
-        let bad = || {
-            invalid("expected canonical app key <role>/<version>/<os>-<arch>-<distro_abi>.<format>")
-        };
+        let bad = || ArtifactError::from(AppPackageKeyError::InvalidGrammar);
         let parts: Vec<_> = key.split('/').collect();
         if parts.len() != 3 {
             return Err(bad());
@@ -246,7 +252,7 @@ impl ArtifactIdentity {
             format.parse()?,
         )?;
         if identity.app_package_key()? != key {
-            return Err(bad());
+            return Err(AppPackageKeyError::NonCanonical.into());
         }
         Ok(identity)
     }
@@ -467,6 +473,62 @@ mod tests {
         }
         assert_eq!(accepted, 18);
         assert_eq!(keys.len(), 13);
+    }
+
+    #[test]
+    fn errors_distinguish_identity_from_key_failures() {
+        assert!(matches!(
+            identity(
+                ArtifactRole::Client,
+                TargetOs::Linux,
+                TargetArch::Aarch64,
+                DistroAbi::Ubuntu2404,
+                PackageFormat::Deb
+            ),
+            Err(ArtifactError::Identity(
+                ArtifactIdentityError::ClientLinuxAarch64Unsupported
+            ))
+        ));
+        assert!(matches!(
+            "01.2.3".parse::<ArtifactVersion>(),
+            Err(ArtifactError::Identity(
+                ArtifactIdentityError::InvalidVersion(_)
+            ))
+        ));
+        assert!(matches!(
+            ArtifactIdentity::from_app_package_key("../bad"),
+            Err(ArtifactError::Key(AppPackageKeyError::InvalidGrammar))
+        ));
+        assert!(matches!(
+            "amd64".parse::<TargetArch>(),
+            Err(ArtifactError::Identity(
+                ArtifactIdentityError::UnknownComponent { .. }
+            ))
+        ));
+        assert!(matches!(
+            identity(
+                ArtifactRole::Backend,
+                TargetOs::Macos,
+                TargetArch::Aarch64,
+                DistroAbi::Darwin,
+                PackageFormat::TarGz
+            ),
+            Err(ArtifactError::Identity(
+                ArtifactIdentityError::UnsupportedCombination { .. }
+            ))
+        ));
+        let agent = identity(
+            ArtifactRole::Agent,
+            TargetOs::Windows,
+            TargetArch::X86_64,
+            DistroAbi::Msvc,
+            PackageFormat::Exe,
+        )
+        .unwrap();
+        assert!(matches!(
+            agent.app_package_key(),
+            Err(ArtifactError::Key(AppPackageKeyError::AgentRoleNotAllowed))
+        ));
     }
 
     #[test]

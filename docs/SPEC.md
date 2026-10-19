@@ -2775,6 +2775,7 @@ Release ワークフローの記述だけで「全環境で即座に配布可能
 クロス OS 環境でのパッケージ衝突を完全に防ぐため、成果物の一意性を以下の多元タプルで厳格に定義する。
 
 **Stage 1a 実装済み**: `kanade_shared::artifact` が identity / integrity の唯一の共有契約。`ArtifactIdentity` は非公開 fields と検証付き constructor / Deserialize を持ち、JSON fields は `role`, `version`, `os`, `arch`, `distro_abi`, `format` の順に serialize する。未知 field / enum、欠落 / null ABI、未許可の組合せは拒否する。operator OS を target の推測に使用しない。
+SemVer 構文検証は `semver` クレートを使用する。`ArtifactError` は identity と key の専用エラーを区別し、Linux aarch64 Client は `ClientLinuxAarch64Unsupported` として拒否する。
 
 | role | os / arch | 必須 distro_abi | format |
 |---|---|---|---|
