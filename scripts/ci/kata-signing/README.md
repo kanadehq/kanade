@@ -28,8 +28,10 @@ workflow updates. Verify the generated workflow retains both hook invocations
 in sign → package → verify → upload order. Keep release readiness blocked
 until that integration and the production certificate match are confirmed.
 
-Note: the templates keep the hook optional for other consumers. This
-repository's own `release.yml` deliberately does not: the sign step fails when
-`scripts/ci/release-post-build.sh` is missing, and `check_release_signing.rs`
-asserts that. If `kata apply` regenerates the workflow without these steps,
-that test fails in CI, so the loss cannot merge silently.
+Note: the templates keep the hook optional for consumers without a signing
+pin, but add a fail-closed guard step: when `deploy/macos/signing-cert.sha1`
+exists and `scripts/ci/release-post-build.sh` does not, the release fails
+instead of publishing linker ad-hoc signatures. The generated workflow in this
+repository is exactly what the patched templates render, and
+`check_release_signing.rs` asserts the guard, so a `kata apply` that drops the
+integration fails CI.

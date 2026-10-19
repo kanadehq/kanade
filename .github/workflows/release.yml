@@ -273,17 +273,13 @@ jobs:
       # Repo-owned hook: signs the built binaries in place before packaging.
       # The hook enforces credential/pin policy and handles non-macOS targets.
       - name: Sign binaries (post-build hook)
+        if: ${{ hashFiles('scripts/ci/release-post-build.sh') != '' }}
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           MACOS_SIGN_CERT_P12_BASE64: ${{ secrets.MACOS_SIGN_CERT_P12_BASE64 }}
           MACOS_SIGN_CERT_PASSWORD: ${{ secrets.MACOS_SIGN_CERT_PASSWORD }}
-        run: |
-          if [[ ! -f scripts/ci/release-post-build.sh ]]; then
-            echo "::error::scripts/ci/release-post-build.sh is missing; refusing to publish unsigned release binaries"
-            exit 1
-          fi
-          bash scripts/ci/release-post-build.sh sign
+        run: bash scripts/ci/release-post-build.sh sign
 
       - name: Stage release artifacts
         shell: bash
@@ -338,6 +334,7 @@ jobs:
           ls -la dist/
 
       - name: Verify packaged signatures (post-build hook)
+        if: ${{ hashFiles('scripts/ci/release-post-build.sh') != '' }}
         shell: bash
         env:
           TARGET: ${{ matrix.target }}

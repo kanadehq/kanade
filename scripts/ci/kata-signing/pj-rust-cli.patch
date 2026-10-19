@@ -1,9 +1,17 @@
 --- a/.github/workflows/release.yml.template
 +++ b/.github/workflows/release.yml.template
-@@ -52,6 +52,16 @@
+@@ -52,6 +52,24 @@
          env:
            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
          run: cargo run --release --target ${{ matrix.target }} --example smoke
++      # Fail closed: a repo that pins a signing identity must keep its hook.
++      - name: Require post-build hook when a signing pin exists
++        if: ${{ hashFiles('deploy/macos/signing-cert.sha1') != '' && hashFiles('scripts/ci/release-post-build.sh') == '' }}
++        shell: bash
++        run: |
++          echo "::error::deploy/macos/signing-cert.sha1 pins a signing identity but scripts/ci/release-post-build.sh is missing; refusing to publish unsigned release binaries"
++          exit 1
++
 +      # Consumers own signing policy; a missing hook leaves other projects unchanged.
 +      - name: Sign binaries (post-build hook)
 +        if: ${{ hashFiles('scripts/ci/release-post-build.sh') != '' }}
@@ -17,7 +25,7 @@
        - name: package (unix)
          if: runner.os != 'Windows'
          run: |
-@@ -66,6 +76,14 @@
+@@ -66,6 +84,14 @@
            $pkg = "target/${{ matrix.target }}/release"
            Compress-Archive -Path "$pkg/$env:BIN_NAME.exe" `
              -DestinationPath "dist/$env:BIN_NAME-${{ matrix.target }}.zip"
