@@ -474,7 +474,7 @@ pub async fn rollout(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::api) mod tests {
     use super::*;
 
     #[test]
@@ -505,14 +505,15 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tower::ServiceExt;
 
-    struct App {
-        router: Router,
-        js: async_nats::jetstream::Context,
+    pub(in crate::api) struct App {
+        pub(in crate::api) router: Router,
+        pub(in crate::api) pool: sqlx::SqlitePool,
+        pub(in crate::api) js: async_nats::jetstream::Context,
         _server: tokio::process::Child,
         _storage: tempfile::TempDir,
     }
 
-    fn mint(sub: &str) -> String {
+    pub(in crate::api) fn mint(sub: &str) -> String {
         use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
         let claims = crate::auth::Claims {
             sub: sub.into(),
@@ -529,7 +530,7 @@ mod tests {
         .expect("mint")
     }
 
-    async fn app() -> App {
+    pub(in crate::api) async fn app() -> App {
         let port = portpicker::pick_unused_port().expect("pick port");
         let storage = tempfile::TempDir::new().expect("storage tempdir");
         let server = tokio::process::Command::new("nats-server")
@@ -590,18 +591,19 @@ mod tests {
             login_throttle: Default::default(),
         };
         let router = crate::api::router(state).layer(axum::middleware::from_fn_with_state(
-            pool,
+            pool.clone(),
             crate::auth::verify,
         ));
         App {
             router,
+            pool,
             js,
             _server: server,
             _storage: storage,
         }
     }
 
-    fn multipart(parts: &[(&str, Option<&str>, &[u8])]) -> (String, Vec<u8>) {
+    pub(in crate::api) fn multipart(parts: &[(&str, Option<&str>, &[u8])]) -> (String, Vec<u8>) {
         let boundary = "kanadetestboundary";
         let mut body = Vec::new();
         for (name, filename, data) in parts {

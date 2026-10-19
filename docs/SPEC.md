@@ -2790,13 +2790,13 @@ SemVer 構文検証は `semver` クレートを使用する。`ArtifactError` �
 版は `ArtifactVersion` の canonical SemVer 2.0 文字列（最大128 ASCII bytes、core 3整数は u64、先頭ゼロ不可）。prerelease / build metadata は保持し、大小文字も区別する。operator 入力用 `from_input` だけ既存 Agent の `normalize_version`（前後空白と先頭 `v` 1個の除去）を再利用する。保存 JSON / key ではこの補正をしない。package revision / 再build と SemVer build metadata の業務上の対応は未決定であり、metadata を版更新や不変性検証の代用にしない。Windows の exe / zip は異なる identity として表現するが、今後の deploy がどちらを配布形式に選ぶかは未決定。
 
 #### 2.13.4.2 Object Store キー設計と Windows Bare Key 互換移行
-1. **新キー体系 (Stage 1a: 純粋な生成・解析のみ実装済み、保存・API は未実装)**:
+1. **新キー体系 (Stage 1a 共有契約、Stage 1b 保存・API 実装済み)**:
    - bucket 名と object key は別の値である。`OBJECT_APP_PACKAGES` の bucket は `app_packages`、その内部の canonical key は `<role>/<version>/<os>-<arch>-<distro_abi>.<format>`。role は `backend|client|cli` とし、bucket 名を key に重ねない。
      例: bucket=`app_packages`, key=`client/0.80.0/macos-aarch64-darwin14.pkg`。
      例: key=`client/0.80.0/linux-x86_64-ubuntu-24.04.deb`、`client/0.80.0/windows-x86_64-msvc.exe`。
    - 唯一の文法は `<role>/<version>/<os>-<arch>-<distro_abi>.<format>`。各 token は上表の lowercase enum 値そのもの、ABI は省略不可。`tar_gz` は拡張子も **`.tar_gz`** とし `.tar.gz` は alias にしない。role は `backend|client|cli`、version には上記 canonical SemVer をそのまま使う。3 segment 以外、末尾 slash、case folding、URL decode、path normalization、空白補正は認めない。末尾の format を最後の `.` で分離し、OS / arch を先頭2個の `-` で取り、残り全体を ABI と照合するため `ubuntu-24.04` も一意。検証後の再生成が入力 key と byte 単位で一致することを要求する。bucket 名は key に含めない。許可表全体の往復・非衝突を試験する。
    - canonical JSON はこの型の固定 field 順による compact serialization を指す。署名用 manifest 全体の canonicalization や任意 JSON の canonicalization を定義・実装したものではない。
-   - 現行 `api/app_packages.rs` は slash-free な `name` / `version` の2 segment API で、list もその形を仮定する。この新 key は現行 API にそのまま渡せない。§2.13.4.4 の別 identity API / namespace の設計と producer / list / download / delete / CLI 全 consumer の対応が前提。具体的な namespace / API route は未確定で、新 bucket 作成の製品承認を意味しない。
+   - 現行 `api/app_packages.rs` は slash-free な `name` / `version` の2 segment API で、list もその形を仮定する。この新 key は現行 API にそのまま渡せない。§2.13.4.4 の別 identity API / namespace の設計と producer / list / download / delete / CLI 全 consumer の対応が前提。Stage 1b は同じ bucket の canonical key と別 `/api/app-artifacts` API を実装。既存 CLI / producer は移行しない。契約・権限前提・retry / offline cleanup は [app-artifacts.md](app-artifacts.md) を参照。
    - `OBJECT_AGENT_RELEASES` の bucket は `agent_releases`。既存の `AgentPlatform::release_key` を維持する。Windows: `<version>`、Linux: `<version>-linux-<arch>`、macOS: `<version>-macos-aarch64`。app identity key をこの bucket へ適用しない。
 2. **レガシー Windows Bare Key の安全な移行（移行自体は未実装）**:
    - Stage 1a の `inspect_legacy_windows(role, declared_version, bytes)` は旧 key 名を入力にせず、既存 binary platform parser と object parser で PE/COFF AMD64 executable（DLL / object 不可）を確認し、利用可能な VERSIONINFO と明示版の不一致を拒否する。結果は未認証 `LegacyWindowsCandidate` に限定する。VERSIONINFO 不在は `embedded_version_verified=false` として残す。role は caller の宣言であり PE header から証明しない。SHA-256 / size が一致しても publisher provenance の証明ではない。alias 作成・snapshot・配布許可は行わない。
@@ -2834,9 +2834,10 @@ SemVer 構文検証は `semver` クレートを使用する。`ArtifactError` �
 
 #### 2.13.4.4 不変性 (Immutability) の保証と実版検出
 1. **新 identity 経路の不変性と互換移行**:
+   - **Stage 1b 実装済み**: 明示 identity / integrity を先頭 metadata とする認証 multipart publication、metadata lookup、検証後 streamed download。独立 staging chunks の read-back 検証後、ObjectInfo + identity metadata を NATS expected-last-subject-sequence=0 で一度だけ確定する。並行同一 publish は冪等、異なる integrity は409。旧 list は有効な2 segment key のみ。直接 NATS writer を backend に隔離した構成だけ明示 opt-in で publication を有効化（既定無効）、保持設定も検査する。署名・publisher trust・alias snapshot・producer 移行は未実装で deploy-ready を主張しない。plan 永続化・参照追跡が未実装のため、新 namespace の変更・delete / GC は一律無効。クラッシュ残骸は全 writer 停止後の参照照合による保守回収のみ。詳細は [API と運用境界](app-artifacts.md)。
    - 新 identity API および CLI は、同一の `ArtifactIdentity` に対して、既存オブジェクトと異なるバイト列のアップロードを試みた場合、即座に `409 Conflict` を返して拒否する。
    - 同一 identity・bytes・署名 metadata の再アップロードだけを 200 OK (Idempotent no-op) とする。metadata の不一致も衝突として拒否する。
-   - **追加実装 proposal**: payload / manifest の途中失敗や並行 publish で不完全な組を公開しない。検証済み組だけを可視化する commit marker と conditional create を推奨する。HTTP / CLI / CI / direct Object Store principal を含む全書込経路で新 identity の上書きを防ぐ必要があり、read-back / Range / If-Match だけでは不変性を保証しない。権限制約と競合・中断・再試行を試験する。承認済み / 実行中 plan の参照先は delete / GC から保護し、旧 API からも新 identity を変更・削除できないよう分離する。保持期間・参照解除は実装時に確定する。
+   - **残る proposal（Stage 1b は未署名 integrity record の atomic commit のみ実装）**: payload / manifest の途中失敗や並行 publish で不完全な組を公開しない。検証済み組だけを可視化する commit marker と conditional create を推奨する。HTTP / CLI / CI / direct Object Store principal を含む全書込経路で新 identity の上書きを防ぐ必要があり、read-back / Range / If-Match だけでは不変性を保証しない。権限制約と競合・中断・再試行を試験する。承認済み / 実行中 plan の参照先は delete / GC から保護し、旧 API からも新 identity を変更・削除できないよう分離する。保持期間・参照解除は実装時に確定する。
    - 現行 app-packages API は `<name>/<version>` を上書きする。Phase 1 は別の identity API / key namespace を追加し、旧 bare-key API と `release-extras.yml` の `publish-client-to-backend` は現行動作を維持する。agent publish/rollout も既存契約のまま維持する。一律 409 への変更は禁止。
    - 旧 Windows alias は PE 検証だけで可変 object を参照せず、その時点の bytes / digest / publisher 証跡を新 identity に snapshot する。同じ版の再 build が異なる bytes なら新 identity では拒否し、新しい版を要求する（force overwrite は設けない）。旧経路の再 upload は既存 plan を変えない。
    - CI producer と operator 手順を新 publish へ移行し、旧 consumer 不在・再 upload parity を検証後に旧 write API を廃止する。期限は Phase 7 の撤去 gate。移行中も新 CLI は bare key を直接配信しない。
@@ -3296,7 +3297,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 | 旧 Client updater 記述と現状調査 | **採用・修正**。§2.11.6 は履歴を残して置換済みと注記、§2.11.7 は Mac GUI と Linux shim を分離。README / book は未実装仕様への案内を加え、現行手順を維持 |
 | HTTP endpoint / SourceUrl、Agent jitter | **採用**。現行 CLI `cmd/{app,agent,exec,job}.rs` と fleet script を照合し、§2.13.1–2 / .5 と README を修正。job の15m案を Agent scope 継承へ適用しない |
 | platform family を既存 name に符号化 | **不採用（現時点）**。2 segment API を再利用できる利点はあるが family grammar / revision の恒久化を伴う。現行 identity tuple と別 API 移行を維持し、bucket / key の矛盾だけ解消。Stage 1a で必須 ABI / canonical grammar を確定。revision の業務対応・namespace / API は未解決 |
-| 全書込経路の不変性、競合 publish / 部分失敗 / GC 保護 | **採用 proposal**。現行 `api/app_packages.rs` は無条件 put、list は2 segment 前提。§2.13.4 の新経路だけを強化し旧 CI upload 契約を維持。旧 Windows alias は AMD64 / 実版 / provenance と immutable snapshot が必要 |
+| 全書込経路の不変性、競合 publish / 部分失敗 / GC 保護 | **採用 proposal**。Stage 1b は新経路の条件付き commit / integrity API と旧 list の2 segment 限定を実装。署名 trust / plan 参照 GC 保護は未実装、新 namespace mutation は無効。旧 CI upload 契約を維持。旧 Windows alias は AMD64 / 実版 / provenance と immutable snapshot が必要 |
 | 通常 plan で upload / Backend 保存、dry-run だけ read-only | **不採用**。現行の全 plan read-only と apply 登録を維持。ローカル入力の publish は apply、旧案の CLI 綴り・節構成への全面置換もしない |
 | 別 wire kind / shell stub 代替、publisher trust | **既存を維持**。現行 §2.13.6 の v2 envelope 必須・preflight・鍵 fingerprint / 失効・全 dispatch 認可が具体的。旧案の別 kind や stub へ変更する必要はなく、stub fallback は採らない |
 | Quit / opt-out / 緊急 fallback | **採用**。§2.11.7.4 の確定契約を優先し §2.13.6.7 / 受入を整合。永続 opt-out 保存方式は未解決 |

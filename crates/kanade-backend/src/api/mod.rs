@@ -7,6 +7,7 @@ pub mod agent_meta;
 pub mod agent_releases;
 pub mod agents;
 pub mod analytics;
+pub mod app_artifacts;
 pub mod app_packages;
 pub mod audit;
 pub mod checks;
@@ -465,6 +466,14 @@ pub fn router(state: AppState) -> Router {
             "/api/agents/installer.sh",
             get(agent_installer::installer_sh),
         )
+        .route(
+            "/api/app-artifacts/{role}/{version}/{package}",
+            get(app_artifacts::download),
+        )
+        .route(
+            "/api/app-artifacts/{role}/{version}/{package}/metadata",
+            get(app_artifacts::metadata),
+        )
         .route("/api/app-packages", get(app_packages::list_packages))
         .route(
             "/api/app-packages/{name}/{version}",
@@ -600,6 +609,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/agents/publish",
             post(agent_releases::publish).layer(DefaultBodyLimit::max(PUBLISH_BODY_LIMIT)),
+        )
+        .route(
+            "/api/app-artifacts",
+            post(app_artifacts::publish).layer(DefaultBodyLimit::max(APP_PACKAGE_BODY_LIMIT)),
         )
         // Generic app-package distribution (kanade-client today;
         // third-party installers like Webex / Teams next). Distinct
@@ -833,7 +846,10 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         | "/api/agents/installer.sh" => Feature::AgentInstall,
 
         // --- Apps (app packages + script objects) ---
-        "/api/app-packages"
+        "/api/app-artifacts"
+        | "/api/app-artifacts/{role}/{version}/{package}"
+        | "/api/app-artifacts/{role}/{version}/{package}/metadata"
+        | "/api/app-packages"
         | "/api/app-packages/{name}/{version}"
         | "/api/script-objects"
         | "/api/script-objects/{name}/{version}" => Feature::Apps,

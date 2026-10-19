@@ -282,6 +282,14 @@ pub async fn publish(
     }))
 }
 
+// Only the existing two-segment namespace belongs in the legacy index.
+fn legacy_pair(key: &str) -> Option<(String, String)> {
+    let (name, version) = key.split_once('/')?;
+    validate_segment("name", name).ok()?;
+    validate_segment("version", version).ok()?;
+    Some((name.into(), version.into()))
+}
+
 // ─── GET /api/app-packages ───────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -309,16 +317,8 @@ pub async fn list_packages(
 
     let mut rows = Vec::new();
     for m in metas {
-        // Object key is `<name>/<version>` — split on the LAST
-        // slash so future packages with a slash-containing name
-        // wouldn't trip the parser (defensive; current
-        // `validate_segment` forbids slashes either way).
-        let (name, version) = match m.key.rsplit_once('/') {
-            Some((n, v)) => (n.to_string(), v.to_string()),
-            None => {
-                warn!(key = %m.key, "app_packages.list: object key has no '/' — skipping");
-                continue;
-            }
+        let Some((name, version)) = legacy_pair(&m.key) else {
+            continue;
         };
         rows.push(PackageRow {
             name,
@@ -609,6 +609,20 @@ pub async fn delete_package(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_index_excludes_canonical_and_staging_keys() {
+        assert!(legacy_pair("tool/1").is_some());
+        for key in [
+            "cli/1.2.3/windows-x86_64-msvc.exe",
+            "__uploads/app/id/bytes",
+            "tool/",
+            "tool",
+            "a/b/c",
+        ] {
+            assert!(legacy_pair(key).is_none(), "{key}");
+        }
+    }
 
     #[test]
     fn object_key_combines_name_and_version_with_slash() {
