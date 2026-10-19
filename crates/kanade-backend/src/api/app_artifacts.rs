@@ -77,7 +77,10 @@ async fn verify(
 ) -> Result<(), Error> {
     let mut hash = Sha256::new();
     let mut size = 0u64;
-    let mut buf = [0; 128 * 1024];
+    // The buffer survives reads across await points. Keep its bytes out of
+    // the future itself: nested publication calls and concurrent verification
+    // otherwise multiply the inline buffer until the thread stack overflows.
+    let mut buf = vec![0; 128 * 1024];
     loop {
         let n = read_chunk(reader, &mut buf).await.map_err(internal)?;
         if n == 0 {
@@ -799,6 +802,22 @@ mod tests {
         assert_eq!(after.last_sequence, before.last_sequence);
         assert_eq!(after.messages, before.messages);
         assert_eq!(after.bytes, before.bytes);
+    }
+
+    #[test]
+    fn concurrent_verification_futures_do_not_embed_transfer_buffers() {
+        let expected = ArtifactIntegrity::of(b"abc");
+        let mut first = b"abc".as_slice();
+        let mut second = b"abc".as_slice();
+        let first = verify(&mut first, &expected);
+        let second = verify(&mut second, &expected);
+        assert!(std::mem::size_of_val(&first) < 32 * 1024);
+        let concurrent = async { tokio::join!(first, second) };
+        assert!(
+            std::mem::size_of_val(&concurrent) < 64 * 1024,
+            "concurrent verification must not embed per-transfer buffers (got {} bytes)",
+            std::mem::size_of_val(&concurrent),
+        );
     }
 
     #[tokio::test]
