@@ -1011,7 +1011,13 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     const [openPanel, setOpenPanel] = useState<string | null>(null);
     const filterOpen = openPanel !== null;
     useLayoutEffect(() => {
-      onFilterOpenChange?.(filterOpen);
+      if (filterOpen) {
+        onFilterOpenChange?.(true);
+        return;
+      }
+      // Keep polling paused across brief gaps when switching filter panels.
+      const timer = setTimeout(() => onFilterOpenChange?.(false), 60);
+      return () => clearTimeout(timer);
     }, [filterOpen, onFilterOpenChange]);
 
     const innerRef = useRef<HTMLTableElement | null>(null);
