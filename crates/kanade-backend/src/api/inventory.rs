@@ -26,6 +26,8 @@ use crate::projector::explode::validate_ident;
 use super::AppState;
 use super::time_bounds::bounds_in_range;
 
+mod server_table;
+
 #[derive(Serialize)]
 pub struct InventoryFact {
     pub job_id: String,
@@ -99,6 +101,8 @@ pub struct ByJobParams {
     pub offset: Option<i64>,
     /// Optional pc_id substring filter (case-insensitive LIKE).
     pub q: Option<String>,
+    #[serde(flatten)]
+    pub table_params: HashMap<String, String>,
 }
 
 const BY_JOB_DEFAULT_LIMIT: i64 = 100;
@@ -108,7 +112,28 @@ pub async fn list_for_job(
     State(state): State<AppState>,
     Path(manifest_id): Path<String>,
     Query(params): Query<ByJobParams>,
-) -> Result<Json<InventoryByJob>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if server_table::enabled(&params.table_params) {
+        let hint = load_inventory_hint(&state, &manifest_id).await?;
+        let mut query = params.table_params.clone();
+        if let Some(limit) = params.limit {
+            query.insert("limit".into(), limit.to_string());
+        }
+        if let Some(offset) = params.offset {
+            query.insert("offset".into(), offset.to_string());
+        }
+        if let Some(q) = &params.q {
+            query.insert("q".into(), q.clone());
+        }
+        return server_table::run(
+            &state.pool,
+            &manifest_id,
+            server_table::Source::Fleet(&hint),
+            &query,
+        )
+        .await
+        .map(Json);
+    }
     let limit = params
         .limit
         .unwrap_or(BY_JOB_DEFAULT_LIMIT)
@@ -242,7 +267,7 @@ pub async fn list_for_job(
         })
         .collect();
 
-    Ok(Json(InventoryByJob {
+    Ok(Json(serde_json::json!(InventoryByJob {
         manifest_id,
         display,
         summary,
@@ -250,7 +275,7 @@ pub async fn list_for_job(
         total,
         limit,
         offset,
-    }))
+    })))
 }
 
 /// `GET /api/inventory/jobs` — list every inventory-tagged schedule
@@ -374,7 +399,7 @@ pub async fn search(
     State(state): State<AppState>,
     Path((manifest_id, field)): Path<(String, String)>,
     Query(filters): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<serde_json::Map<String, serde_json::Value>>>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let spec = load_explode_spec(&state, &manifest_id, &field).await?;
     // CodeRabbit #85 fix: a job registered AFTER backend startup has
     // a manifest in BUCKET_JOBS but no derived table yet (the
@@ -392,6 +417,17 @@ pub async fn search(
                 format!("ensure derived table: {e}"),
             )
         })?;
+
+    if server_table::enabled(&filters) {
+        return server_table::run(
+            &state.pool,
+            &manifest_id,
+            server_table::Source::Explode(&spec),
+            &filters,
+        )
+        .await
+        .map(Json);
+    }
 
     // Build the SELECT column list from the spec — never splice
     // operator-supplied identifiers into SQL. validate_ident
@@ -548,7 +584,7 @@ pub async fn search(
         out.push(map);
     }
     enrich_with_account(&state.pool, &mut out).await;
-    Ok(Json(out))
+    Ok(Json(serde_json::json!(out)))
 }
 
 /// Keys under which [`enrich_with_account`] injects the per-PC account
@@ -714,8 +750,18 @@ pub async fn search_scalars(
     State(state): State<AppState>,
     Path(manifest_id): Path<String>,
     Query(filters): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<serde_json::Map<String, serde_json::Value>>>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let hint = load_inventory_hint(&state, &manifest_id).await?;
+    if server_table::enabled(&filters) {
+        return server_table::run(
+            &state.pool,
+            &manifest_id,
+            server_table::Source::Scalars(&hint),
+            &filters,
+        )
+        .await
+        .map(Json);
+    }
     let scalars = scalar_columns(&hint);
     if scalars.is_empty() {
         return Err((
@@ -911,7 +957,7 @@ pub async fn search_scalars(
         out.push(map);
     }
     enrich_with_account(&state.pool, &mut out).await;
-    Ok(Json(out))
+    Ok(Json(serde_json::json!(out)))
 }
 
 /// #574: resolve a manifest's [`InventoryHint`] for the scalar search,

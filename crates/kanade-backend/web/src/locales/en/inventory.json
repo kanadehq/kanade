@@ -34,6 +34,7 @@
     "pageRange": "showing {{from}}–{{to}}",
     "filterLabel": "filter by pc_id",
     "filterPlaceholder": "filter by pc_id…",
+    "noMatches": "No PCs match these filters.",
     "filterEmpty": "No PCs match \"{{q}}\".",
     "export": {
       "button": "Export CSV"

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/experimental-ct-react';
 
-import { GroupedSortFilterTable, PlainTable, SortFilterTable } from './table.ct.harness';
+import { GroupedSortFilterTable, PlainTable, SortFilterTable, ServerSortFilterTable } from './table.ct.harness';
 
 // Excel-style sorting / filtering is opt-in (`<Table sortFilter>`). What is
 // worth asserting here only exists in a real browser: the portalled popover
@@ -278,5 +278,49 @@ test.describe('Table sort and filter in card mode', () => {
   test('a table that did not opt in has no menu', async ({ mount }) => {
     const c = await mount(<PlainTable />);
     await expect(c.getByRole('button', { name: 'Sort / filter' })).toHaveCount(0);
+  });
+});
+
+
+test.describe('Controlled server table', () => {
+  test.use({ viewport: DESKTOP });
+  test('reports state while preserving supplied row order and global candidates', async ({ mount, page }) => {
+    const c = await mount(<ServerSortFilterTable />);
+    await c.getByRole('button', { name: 'name', exact: true }).click();
+    await expect(c.getByTestId('server-state')).toContainText('"dir":"asc"');
+    expect(await names(c)).toEqual(['banana', 'apple']);
+    await openFilter(c, 'name');
+    await expect(page.getByRole('dialog').getByText('off-page', { exact: true })).toBeVisible();
+    await page.getByRole('dialog').getByRole('searchbox', { name: 'name contains' }).fill('missing');
+    await expect(c.getByTestId('server-state')).toContainText('missing');
+    expect(await names(c)).toEqual(['banana', 'apple']);
+    await expect(c.getByText(/this page only/i)).toHaveCount(0);
+  });
+  test('a URL-restored filter on an unselected metadata column remains removable', async ({ mount }) => {
+    const c = await mount(<ServerSortFilterTable hiddenFilter empty />);
+    await expect(c.getByTestId('filter-chip')).toContainText('site');
+    await c.getByRole('button', { name: 'Remove the filter on site' }).click();
+    await expect(c.getByTestId('server-state')).toContainText('"filters":{}');
+  });
+  test('overflow hides the checklist and empty results keep filter removal available', async ({ mount, page }) => {
+    const c = await mount(<ServerSortFilterTable overflow empty />);
+    await openFilter(c, 'name');
+    await expect(page.getByRole('dialog').getByText(/Too many distinct values/)).toBeVisible();
+    await expect(page.getByRole('dialog').getByRole('checkbox')).toHaveCount(0);
+    await page.getByRole('dialog').getByRole('searchbox', { name: 'name contains' }).fill('missing');
+    await page.keyboard.press('Escape');
+    await c.getByRole('button', { name: 'Clear all filters' }).click();
+    await expect(c.getByTestId('server-state')).toContainText('"filters":{}');
+  });
+});
+
+test.describe('Controlled server table cards', () => {
+  test.use({ viewport: NARROW });
+  test('card controls report sorting without changing supplied rows', async ({ mount, page }) => {
+    const c = await mount(<ServerSortFilterTable />);
+    await c.getByRole('button', { name: 'Sort / filter' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Ascending' }).click();
+    await expect(c.getByTestId('server-state')).toContainText('"dir":"asc"');
+    expect(await names(c)).toEqual(['banana', 'apple']);
   });
 });

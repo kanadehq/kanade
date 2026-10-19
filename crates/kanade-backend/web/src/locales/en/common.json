@@ -128,6 +128,9 @@
       "remove": "Remove the filter on {{name}}",
       "count": "{{shown}} / {{total}} rows",
       "noMatch": "No rows match the filters.",
+      "loading": "Loading…",
+      "tooMany": "Too many distinct values. Use contains to narrow this column.",
+      "valuesError": "Could not load values. Use contains or reopen to retry.",
       "pageOnly": "Applies to the rows on this page only.",
       "menu": "Sort / filter",
       "column": "Column"

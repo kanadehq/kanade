@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Download, Loader2, ScrollText } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useMatch, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -16,6 +16,8 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
+import type { ServerSortFilter } from '@/components/ui/table-sortfilter';
+import { encodeTableState, parseTableState, tableUrl, useInventoryTable } from '@/lib/inventoryTable';
 import { downloadCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
 import { fleetSortValue, isoSortValue } from '@/lib/inventorySort';
@@ -477,9 +479,13 @@ export function FleetTable({
   columns,
   rows,
   pickPc,
+  serverControl,
+  emptyMessage,
 }: {
   columns: DisplayField[];
   rows: InventoryRow[];
+  serverControl: ServerSortFilter;
+  emptyMessage?: ReactNode;
   pickPc: (pc: string) => void;
 }) {
   const { t } = useTranslation('inventory');
@@ -490,7 +496,8 @@ export function FleetTable({
       resizeKey="inventory.fleet"
       picker
       metaColumns
-      sortFilter="page"
+      sortFilter="server"
+      serverSortFilter={serverControl}
     >
       <TableHeader>
         <TableRow>
@@ -511,6 +518,7 @@ export function FleetTable({
         </TableRow>
       </TableHeader>
       <TableBody>
+        {rows.length === 0 && <TableRow><TableCell spanAll className="py-4 text-muted">{emptyMessage ?? t('fleet.noMatches')}</TableCell></TableRow>}
         {rows.map((r) => (
           <TableRow
             key={r.pc_id}
@@ -577,6 +585,8 @@ function FleetProbeTable({
   // #494: server-side paging — pre-fix this fetched every PC's full
   // facts_json per probe, every 30 s poll. At fleet scale that's an
   // unbounded payload and an unbounded table.
+  const [urlParams, setUrlParams] = useSearchParams();
+  const [tableState, setTableState] = useState(() => parseTableState(urlParams.get('fleetTableJob') === job.manifest_id ? urlParams.get('fleetTable') : null));
   const [offset, setOffset] = useState(0);
   // pc_id substring filter. The backend `by-job` endpoint already
   // takes `q` (case-insensitive LIKE) and folds it into `total`, so the
@@ -591,20 +601,24 @@ function FleetProbeTable({
   useEffect(() => {
     setOffset(0);
   }, [dq]);
+  const sp = new URLSearchParams({ limit: String(FLEET_PAGE_SIZE), offset: String(offset) });
+  if (dq) sp.set('q', dq);
+  const requestUrl = tableUrl(`/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}?${sp}`, tableState);
   const byJob = useQuery({
-    queryKey: ['inventory-by-job', job.manifest_id, offset, dq],
-    queryFn: () => {
-      const sp = new URLSearchParams({
-        limit: String(FLEET_PAGE_SIZE),
-        offset: String(offset),
-      });
-      if (dq) sp.set('q', dq);
-      return apiFetch<InventoryByJob>(
-        `/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}?${sp.toString()}`,
-      );
-    },
+    queryKey: ['inventory-by-job', job.manifest_id, requestUrl],
+    queryFn: () => apiFetch<InventoryByJob>(requestUrl),
+    placeholderData: (previous) => previous,
     refetchInterval: 30_000,
   });
+  const tableControl = useInventoryTable(requestUrl, tableState, (next) => {
+    setOffset(0);
+    setTableState(next);
+    setUrlParams((params) => {
+      params.set('fleetTable', encodeTableState(next));
+      params.set('fleetTableJob', job.manifest_id);
+      return params;
+    }, { replace: true });
+  }, byJob.data?.total ?? 0, byJob.isFetching);
   const total = byJob.data?.total ?? 0;
 
   const columns = job.summary ?? job.display;
@@ -644,6 +658,7 @@ function FleetProbeTable({
           offset: String(offset),
         });
         if (dq) sp.set('q', dq);
+        sp.set('table', encodeTableState(tableState));
         const page = await apiFetch<InventoryByJob>(
           `/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}?${sp.toString()}`,
         );
@@ -743,25 +758,12 @@ function FleetProbeTable({
           </div>
         ) : byJob.error ? (
           <ErrorCard title={t('fleet.errorTitle', { manifestId: job.manifest_id })} error={byJob.error} />
-        ) : (byJob.data?.rows ?? []).length === 0 ? (
-          dq ? (
-            // Filter matched nothing — distinct from "this probe has no
-            // facts at all" so the operator knows to clear the box, not
-            // to go run the job.
-            <div className="text-muted text-sm">
-              {t('fleet.filterEmpty', { q: dq })}
-            </div>
-          ) : (
-            <div className="text-muted text-sm">
-              <Trans
-                ns="inventory"
-                i18nKey="fleet.empty"
-                components={{ code: <code /> }}
-              />
-            </div>
-          )
         ) : (
-          <FleetTable columns={columns} rows={byJob.data?.rows ?? []} pickPc={pickPc} />
+          <FleetTable columns={columns} rows={byJob.data?.rows ?? []} pickPc={pickPc} serverControl={tableControl}
+            emptyMessage={dq || Object.keys(tableState.filters).length > 0
+              ? t('fleet.noMatches')
+              : <Trans ns="inventory" i18nKey="fleet.empty" components={{ code: <code /> }} />}
+          />
         )}
         {/* offset > 0 keeps the controls visible when the fleet
             shrinks under the current page, so "prev" remains the

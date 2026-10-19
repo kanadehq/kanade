@@ -36,6 +36,7 @@
     "searching": "searching…",
     "error": "Search failed",
     "empty": "No results match these filters.",
+    "showingTotal": "Showing rows {{from}}–{{to}} of {{total}}",
     "showing": "Showing rows {{from}}–{{to}}",
     "showingMore": "Showing rows {{from}}–{{to}} (page size = {{limit}}; more may be available)",
     "columns": {
