@@ -114,7 +114,10 @@ async fn publish_artifact(base: &str, identity_path: PathBuf, binary: PathBuf) -
     let mut file = tokio::fs::File::open(&binary).await?;
     let mut hash = Sha256::new();
     let mut size = 0u64;
-    let mut buffer = [0; 128 * 1024];
+    // This buffer survives an await and becomes part of the publication future.
+    // Keep it on the heap: app/dispatch embed that future even for other CLI
+    // commands, which otherwise overflow the Windows main-thread stack.
+    let mut buffer = vec![0; 128 * 1024];
     loop {
         let n = file.read(&mut buffer).await?;
         if n == 0 {
@@ -304,6 +307,16 @@ mod tests {
         let p = dir.path().join("installer.msi");
         std::fs::write(&p, bytes).unwrap();
         (dir, p)
+    }
+
+    #[test]
+    fn artifact_publication_future_does_not_embed_the_transfer_buffer() {
+        let future = publish_artifact("", PathBuf::new(), PathBuf::new());
+        assert!(
+            std::mem::size_of_val(&future) < 64 * 1024,
+            "publication future must fit comfortably within the Windows CLI stack (got {} bytes)",
+            std::mem::size_of_val(&future),
+        );
     }
 
     #[tokio::test]
