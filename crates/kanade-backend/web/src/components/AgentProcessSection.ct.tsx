@@ -77,15 +77,15 @@ test.describe('Process snapshot sorting', () => {
         await expect(names).toHaveText(['alpha', 'Bravo', 'aardvark']);
       }
     }
-    const pid = c.locator('th').filter({ has: c.getByRole('button', { name: 'pid', exact: true }) });
+    const pid = c.locator('th').filter({ has: page.getByRole('button', { name: 'pid', exact: true }) });
     const handle = pid.getByRole('separator');
     await handle.focus();
     await handle.press('ArrowRight');
     await expect.poll(() => page.evaluate(() => localStorage.getItem('kanade.table.widths.agent.processes'))).toBeTruthy();
     await c.locator('summary').click();
-    await c.getByRole('checkbox', { name: 'rss', exact: true }).uncheck();
+    await c.getByRole('checkbox', { name: /^rss\b/ }).uncheck();
     await expect(c.getByRole('button', { name: 'rss', exact: true })).toBeHidden();
-    await c.getByRole('checkbox', { name: 'rss', exact: true }).check();
+    await c.getByRole('checkbox', { name: /^rss\b/ }).check();
     await c.locator('summary').click();
     await c.locator('select').filter({ has: page.locator('option[value="10"]') }).selectOption('10');
     await expect.poll(() => api.timelineRequests.at(-1)?.searchParams.get('top')).toBe('10');
