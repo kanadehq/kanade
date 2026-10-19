@@ -19,7 +19,8 @@ import { cn } from '@/lib/utils';
 /* ------------------------------------------------------------------ *
  * Excel-style column sorting + filtering for <Table sortFilter>
  *
- * Everything here is client-side over the rows the table was handed.
+ * Client modes process the rows the table was handed. Server mode uses
+ * the same controls, with state and global candidates supplied by the page.
  * The page keeps rendering plain <TableRow>/<TableCell> children; the
  * table reads each data row's cells (in SOURCE order, before the column
  * permutation, so a stored condition keeps following its column when the
@@ -54,7 +55,25 @@ export interface ColumnFlags {
 
 export interface Candidate {
   value: string;
+  label?: string;
   count: number;
+}
+
+export interface TableQueryState {
+  sort: SortState | null;
+  filters: Filters;
+}
+export interface CandidatePage {
+  values: Candidate[];
+  overflow?: boolean;
+}
+export interface ServerSortFilter {
+  state: TableQueryState;
+  onChange: (state: TableQueryState) => void;
+  loadCandidates: (id: string) => Promise<CandidatePage>;
+  total: number;
+  loading?: boolean;
+  valueLabel?: (value: string) => string;
 }
 
 /** Everything the header controls, the chip bar and the card-mode menu need. */
@@ -73,6 +92,8 @@ export interface SortFilterApi {
   shown: number;
   /** The rows are one server page; say so next to the active filters. */
   pageOnly: boolean;
+  loadCandidates?: (id: string) => Promise<CandidatePage>;
+  valueLabel?: (value: string) => string;
 }
 
 /** Cap on checklist entries rendered at once. */
@@ -356,9 +377,20 @@ export function ColumnPanel({ api, colId, label }: { api: SortFilterApi; colId: 
   const [search, setSearch] = useState('');
   const flags = api.flags[colId] ?? { sortable: false, filterable: false };
   const filter = api.filters[colId];
-  const all = flags.filterable ? api.candidates(colId) : [];
+  const [remote, setRemote] = useState<CandidatePage | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!api.loadCandidates || !flags.filterable) return;
+    let live = true;
+    setRemote(null);
+    setFailed(false);
+    api.loadCandidates(colId).then((page) => { if (live) setRemote(page); }, () => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [api.loadCandidates, colId, flags.filterable]);
+  const all = api.loadCandidates ? (remote?.values ?? []) : flags.filterable ? api.candidates(colId) : [];
+  const checklist = !api.loadCandidates || (remote !== null && !remote.overflow && !failed);
   const needle = search.trim().toLowerCase();
-  const listed = all.filter((c) => c.value.toLowerCase().includes(needle));
+  const listed = all.filter((c) => (c.label ?? c.value).toLowerCase().includes(needle));
   const isOn = (value: string) => (filter?.values ? filter.values.includes(value) : true);
 
   const setValues = (values: string[] | undefined) => {
@@ -400,6 +432,7 @@ export function ColumnPanel({ api, colId, label }: { api: SortFilterApi; colId: 
             onChange={(e) => api.setFilter(colId, { ...filter, contains: e.target.value || undefined })}
             className={INPUT}
           />
+          {checklist ? <>
           <input
             type="search"
             value={search}
@@ -421,7 +454,7 @@ export function ColumnPanel({ api, colId, label }: { api: SortFilterApi; colId: 
               <label key={c.value} className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-muted/10">
                 <input type="checkbox" checked={isOn(c.value)} onChange={() => toggle(c.value)} />
                 <span className="flex-1 truncate" title={c.value}>
-                  {c.value === '' ? t('table.filter.blanks') : c.value}
+                  {(c.label ?? c.value) === '' ? t('table.filter.blanks') : (c.label ?? c.value)}
                 </span>
                 <span className="text-muted">{c.count}</span>
               </label>
@@ -430,6 +463,7 @@ export function ColumnPanel({ api, colId, label }: { api: SortFilterApi; colId: 
               <p className="px-1 py-0.5 text-[10px] text-muted">{t('table.filter.truncated', { n: MAX_LIST })}</p>
             )}
           </div>
+          </> : <p role="status" className="text-xs text-muted">{t(failed ? 'table.filter.valuesError' : remote?.overflow ? 'table.filter.tooMany' : 'table.filter.loading')}</p>}
           <button type="button" disabled={!filter} onClick={() => api.setFilter(colId, undefined)} className={SMALL_BTN}>
             <FilterX className="size-3" aria-hidden />
             {t('table.filter.clear')}
@@ -505,11 +539,11 @@ export function SortFilterHeader({
   );
 }
 
-function summarise(f: ColumnFilter, blanks: string): string {
+function summarise(f: ColumnFilter, blanks: string, valueLabel = (value: string) => value): string {
   const parts: string[] = [];
   if (f.contains?.trim()) parts.push(`"${f.contains.trim()}"`);
   if (f.values) {
-    const shown = f.values.slice(0, 3).map((v) => v || blanks);
+    const shown = f.values.slice(0, 3).map((v) => valueLabel(v) || blanks);
     parts.push(shown.join(', ') + (f.values.length > 3 ? ` +${f.values.length - 3}` : '') || '∅');
   }
   return parts.join(' + ');
@@ -538,8 +572,12 @@ export function SortFilterBar({
   const active = Object.keys(api.filters);
   if (!cardMode && active.length === 0) return null;
 
-  const labelOf = (id: string, i = -1) =>
-    columns.find((c) => c.id === id)?.label || t('table.columns.unnamed', { n: i + 1 });
+  const labelOf = (id: string, i = -1) => {
+    const column = columns.find((c) => c.id === id);
+    return column
+      ? column.label || t('table.columns.unnamed', { n: i + 1 })
+      : id.replace(/^(meta:|f:)/, '');
+  };
   const usable = columns.filter((c) => api.flags[c.id]?.sortable || api.flags[c.id]?.filterable);
   const current = usable.some((c) => c.id === picked) ? picked : (usable[0]?.id ?? '');
 
@@ -584,7 +622,7 @@ export function SortFilterBar({
           className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent/10 py-0.5 pl-2 pr-1"
         >
           <span className="max-w-64 truncate">
-            {labelOf(id)}: {summarise(api.filters[id], t('table.filter.blanks'))}
+            {labelOf(id)}: {summarise(api.filters[id], t('table.filter.blanks'), api.valueLabel)}
           </span>
           <button
             type="button"

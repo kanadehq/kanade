@@ -1,8 +1,9 @@
 // Host for the fleet-table component tests. Mounts the real `FleetTable`
 // (not a copy) with a recorder for row clicks, so a test can assert which
 // PC a click resolved to after the rows were re-ordered.
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 
+import type { TableQueryState } from '@/components/ui/table-sortfilter';
 import { FleetTable } from './Inventory';
 
 type Field = { field: string; label: string; type?: 'number' | 'bytes' | 'timestamp' | 'table'; columns?: never };
@@ -30,9 +31,14 @@ const ROWS: Row[] = [
 
 export function FleetHarness() {
   const [picked, setPicked] = useState('none');
+  const [state, setState] = useState<TableQueryState>({ sort: null, filters: {} });
+  const loadCandidates = useCallback(async () => ({ values: [
+    { value: 'Win10', count: 20 }, { value: 'Win11', count: 30 },
+  ] }), []);
   return (
     <div className="w-[1100px] bg-background p-4">
-      <FleetTable columns={COLUMNS} rows={ROWS} pickPc={setPicked} />
+      <FleetTable columns={COLUMNS} rows={ROWS} pickPc={setPicked} serverControl={{ state, onChange: setState, loadCandidates, total: 50 }} />
+      <output data-testid="state">{JSON.stringify(state)}</output>
       <output data-testid="picked">{picked}</output>
     </div>
   );

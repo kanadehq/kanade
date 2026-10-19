@@ -2,10 +2,7 @@ import { expect, test } from '@playwright/experimental-ct-react';
 
 import { FleetHarness } from './Inventory.fleet.harness';
 
-// The fleet table opts into per-column sort/filter. These cover what only a
-// real table shows: sort keys behind formatted cells, blanks last in both
-// directions, filtering, and that a click still resolves to the right PC
-// after the rows were re-ordered.
+// The fleet table reports query state and preserves server-provided rows.
 
 test.use({ viewport: { width: 1280, height: 720 } });
 
@@ -17,39 +14,29 @@ function head(c: { locator(s: string): { getByRole(r: 'button', o: { name: strin
   return c.locator(`th[data-col-id="${id}"]`).getByRole('button', { name, exact: true });
 }
 
-test('bytes column sorts numerically, blanks last both ways', async ({ mount }) => {
-  const c = await mount(<FleetHarness />);
-  const b = head(c, 'f:ram', 'RAM');
-  await b.click();
-  expect(await pcs(c)).toEqual(['pc-b', 'pc-a', 'pc-c', 'pc-d']);
-  await b.click();
-  expect(await pcs(c)).toEqual(['pc-c', 'pc-a', 'pc-b', 'pc-d']);
-});
+for (const [id, label] of [['f:ram', 'RAM'], ['collected', 'collected'], ['f:disks', 'Disks']]) {
+  test(`${label} requests ascending and descending server order`, async ({ mount }) => {
+    const c = await mount(<FleetHarness />);
+    const button = head(c, id, label);
+    await button.click();
+    await expect(c.getByTestId('state')).toContainText(JSON.stringify({ id, dir: 'asc' }));
+    expect(await pcs(c)).toEqual(['pc-a', 'pc-b', 'pc-c', 'pc-d']);
+    await button.click();
+    await expect(c.getByTestId('state')).toContainText(JSON.stringify({ id, dir: 'desc' }));
+  });
+}
 
-test('collected sorts chronologically', async ({ mount }) => {
-  const c = await mount(<FleetHarness />);
-  await head(c, 'collected', 'collected').click();
-  const th = c.locator('th[data-col-id="collected"]');
-  await expect(th).toHaveAttribute('aria-sort', 'ascending');
-  expect(await pcs(c)).toEqual(['pc-b', 'pc-a', 'pc-c', 'pc-d']);
-});
-
-test('nested table column sorts by row count', async ({ mount }) => {
-  const c = await mount(<FleetHarness />);
-  await head(c, 'f:disks', 'Disks').click();
-  expect(await pcs(c)).toEqual(['pc-b', 'pc-a', 'pc-c', 'pc-d']);
-});
-
-test('filtering a field column drops rows', async ({ mount, page }) => {
+test('filtering a field reports its global checklist selection', async ({ mount, page }) => {
   const c = await mount(<FleetHarness />);
   await c.getByRole('button', { name: 'Filter OS' }).click();
-  await page.getByRole('checkbox', { name: 'Win10' }).uncheck();
-  expect(await pcs(c)).toEqual(['pc-a', 'pc-c']);
+  await page.getByRole('checkbox', { name: /Win10/ }).uncheck();
+  await expect(c.getByTestId('state')).toContainText('"values":["Win11"]');
+  expect(await pcs(c)).toEqual(['pc-a', 'pc-b', 'pc-c', 'pc-d']);
 });
 
-test('clicking a row after sorting picks that PC', async ({ mount }) => {
+test('row clicks keep the server supplied identity after requesting a sort', async ({ mount }) => {
   const c = await mount(<FleetHarness />);
   await head(c, 'f:ram', 'RAM').click();
   await c.locator('tbody tr').first().click();
-  await expect(c.getByTestId('picked')).toHaveText('pc-b');
+  await expect(c.getByTestId('picked')).toHaveText('pc-a');
 });

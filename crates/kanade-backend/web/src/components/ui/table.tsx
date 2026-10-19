@@ -38,6 +38,7 @@ import {
   SortFilterBar,
   SortFilterHeader,
   type ColumnFilter,
+  type ServerSortFilter,
   type ColumnFlags,
   type Filters,
   type SortFilterApi,
@@ -961,12 +962,14 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
   metaColumns?: boolean;
   /**
    * Excel-style sorting and filtering on the column headers. Needs
-   * `resizeKey`. Works on the rows the table is given — pass `'page'` when
-   * those are one server-side page, so the filter strip says so.
+   * `resizeKey`. `true` processes all supplied rows; `'page'` keeps the
+   * legacy page-local behaviour and notice. For paginated APIs use
+   * `'server'` with `serverSortFilter`: the page owns state and fetching,
+   * and the table preserves supplied rows and requests global candidates.
    *
    * Header click cycles sort asc / desc / off; the funnel next to it opens
    * a "contains" box and a checklist of the column's values. Sort
-   * and filters persist (`kanade.table.sort.<resizeKey>`,
+   * and client-mode filters persist (`kanade.table.sort.<resizeKey>`,
    * `kanade.table.filters.<resizeKey>`).
    *
    * Reads each cell's text, so a cell whose text isn't in its children
@@ -975,7 +978,9 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    * sorted and filtered; a page that wraps rows in Fragments (group
    * headers, detail rows) should not opt in.
    */
-  sortFilter?: boolean | 'page';
+  sortFilter?: boolean | 'page' | 'server';
+  /** Controlled SQL-backed mode: rows are rendered verbatim, state belongs to the page. */
+  serverSortFilter?: ServerSortFilter;
   /** The body is runs of rows separated by full-width group header rows
    *  (flat children, no Fragments): sort inside each run, never across a
    *  header. Filtering still spans every group. */
@@ -993,6 +998,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       metaColumns = false,
       sortFilter = false,
       sortFilterGroups = false,
+      serverSortFilter,
       style,
       children,
       ...props
@@ -1029,8 +1035,11 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     const metaByPc = useAgentMeta(
       metaKeys.length ? [...pcIds, ...(sortFilter ? bodyPcIds(children) : [])] : undefined,
     );
-    const sortState = sortPref.use(resizeKey);
-    const filterState = filtersPref.use(resizeKey);
+    const savedSort = sortPref.use(resizeKey);
+    const savedFilters = filtersPref.use(resizeKey);
+    const server = sortFilter === 'server' ? serverSortFilter : undefined;
+    const sortState = server ? server.state.sort : savedSort;
+    const filterState = server ? server.state.filters : savedFilters;
     const { t, i18n } = useTranslation('common');
     const [layout, setLayout] = useState<{ order: string[]; total: number } | null>(null);
     const [hiddenPositions, setHiddenPositions] = useState<number[]>([]);
@@ -1212,15 +1221,15 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         })()
       : [];
     const perm = permutationFor(sourceIds, order);
-    const sfOn = !!sortFilter && !!resizeKey && sourceIds.length > 0;
+    const sfOn = !!sortFilter && (sortFilter !== 'server' || !!server) && !!resizeKey && sourceIds.length > 0;
     const sfOut = useMemo(() => {
       if (!sfOn) return null;
       const flags = sourceColumnFlags(children, sourceIds);
-      const filters: Filters = Object.fromEntries(
+      const filters: Filters = server ? filterState : Object.fromEntries(
         Object.entries(filterState).filter(([id]) => sourceIds.includes(id)),
       );
       const sort = sortState && flags[sortState.id]?.sortable ? sortState : null;
-      const result = processSortFilter({
+      const result = server ? { children, total: server.total, shown: server.total, candidates: () => [] } : processSortFilter({
         children,
         bodyType: TableBody,
         rowType: TableRow,
@@ -1244,27 +1253,41 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       return { result, flags, filters, sort };
       // `sourceIds` / `metaKeys` are rebuilt every render; their contents are the dependency.
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sfOn, children, sourceIds.join('\u0000'), metaKeys.join('\u0000'), metaByPc, filterState, sortState, sortFilterGroups, i18n.language, t]);
+    }, [server, sfOn, children, sourceIds.join('\u0000'), metaKeys.join('\u0000'), metaByPc, filterState, sortState, sortFilterGroups, i18n.language, t]);
     const sf: SortFilterApi | null =
       sfOn && sfOut && resizeKey
         ? {
             sort: sfOut.sort,
             filters: sfOut.filters,
             flags: sfOut.flags,
-            setSort: (id, dir) => sortPref.update(resizeKey, dir ? { id, dir } : null),
-            cycleSort: (id) =>
-              sortPref.update(resizeKey, (prev) =>
-                prev?.id !== id ? { id, dir: 'asc' } : prev.dir === 'asc' ? { id, dir: 'desc' } : null,
-              ),
-            setFilter: (id, filter: ColumnFilter | undefined) =>
-              filtersPref.update(resizeKey, (prev) => {
+            setSort: (id, dir) => {
+              const next = dir ? { id, dir } : null;
+              if (server) server.onChange({ ...server.state, sort: next });
+              else sortPref.update(resizeKey, next);
+            },
+            cycleSort: (id) => {
+              const cycle = (prev: SortState | null): SortState | null =>
+                prev?.id !== id ? { id, dir: 'asc' } : prev.dir === 'asc' ? { id, dir: 'desc' } : null;
+              if (server) server.onChange({ ...server.state, sort: cycle(sortState) });
+              else sortPref.update(resizeKey, cycle);
+            },
+            setFilter: (id, filter: ColumnFilter | undefined) => {
+              const update = (prev: Filters) => {
                 const next = { ...prev };
                 const contains = filter?.contains?.trim() ? filter.contains : undefined;
                 if (!filter || (contains === undefined && filter.values === undefined)) delete next[id];
                 else next[id] = { contains, values: filter.values };
                 return next;
-              }),
-            clearFilters: () => filtersPref.update(resizeKey, NO_FILTERS),
+              };
+              if (server) server.onChange({ ...server.state, filters: update(server.state.filters) });
+              else filtersPref.update(resizeKey, update);
+            },
+            loadCandidates: server?.loadCandidates,
+            valueLabel: server?.valueLabel,
+            clearFilters: () => {
+              if (server) server.onChange({ ...server.state, filters: {} });
+              else filtersPref.update(resizeKey, NO_FILTERS);
+            },
             candidates: sfOut.result.candidates,
             total: sfOut.result.total,
             shown: sfOut.result.shown,
@@ -1336,7 +1359,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         className={cn(
           cards ? 'kn-table' : 'overflow-x-auto',
           cards && wideCards && 'kn-table-wide',
-          'rounded-lg border border-border bg-card',
+          'relative rounded-lg border border-border bg-card',
           hiddenPositions.length > 0 && scopeClass,
         )}
         // Once columns are sized the card is exactly as wide as the table
@@ -1390,7 +1413,20 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
               .join('')}
           </style>
         )}
+        {server?.loading && (
+          <div
+            role="status"
+            data-testid="table-loading-overlay"
+            className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/30 backdrop-blur-[0.5px]"
+          >
+            <div className="flex items-center gap-2 rounded border border-border bg-card px-3 py-1.5 text-xs font-medium shadow-sm">
+              <span aria-hidden="true" className="size-2 animate-ping rounded-full bg-accent motion-reduce:animate-none" />
+              <span>{t('table.filter.loading')}</span>
+            </div>
+          </div>
+        )}
         <table
+          aria-busy={server?.loading || undefined}
           ref={setRefs}
           className={cn('w-full text-sm', className)}
           style={sized ? { ...style, tableLayout: 'fixed', width: layout.total } : style}

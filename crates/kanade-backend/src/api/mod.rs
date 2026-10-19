@@ -1416,13 +1416,15 @@ mod spa_route_tests {
                 "/api/pcs/{pc_id}/config/inherited",
             ],
         ),
-        // The history feed's URL nests a template inside an interpolation
-        // (`${qs ? `?${qs}` : ''}`), which ends a literal scan at that inner
-        // backtick.
+        // The history feed nests a template inside an interpolation;
+        // the fleet page builds its table request URL from controlled state.
         (
             "Inventory.tsx",
             "Inventory.tsx",
-            &["/api/inventory/{manifest_id}/history/pc/{pc_id}"],
+            &[
+                "/api/inventory/{manifest_id}/history/pc/{pc_id}",
+                "/api/inventory/by-job/{manifest_id}",
+            ],
         ),
         // Inventory's embedded `InventorySearch`, whose URL is the
         // search-scalars / search-{field} base plus the live filter state.
@@ -1430,6 +1432,17 @@ mod spa_route_tests {
             "Search.tsx",
             "Inventory.tsx",
             &[
+                "/api/inventory/{manifest_id}/search-scalars",
+                "/api/inventory/{manifest_id}/search/{field}",
+            ],
+        ),
+        // Global column candidates reuse the fleet / search URL with
+        // a distinct-column query parameter.
+        (
+            "inventoryTable.ts",
+            "Inventory.tsx",
+            &[
+                "/api/inventory/by-job/{manifest_id}",
                 "/api/inventory/{manifest_id}/search-scalars",
                 "/api/inventory/{manifest_id}/search/{field}",
             ],

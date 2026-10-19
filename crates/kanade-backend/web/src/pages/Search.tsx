@@ -13,6 +13,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
+import { EMPTY_TABLE_STATE, encodeTableState, parseTableState, tableUrl, useInventoryTable } from '@/lib/inventoryTable';
 import { downloadCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
 import { cn, fmtAccount, fmtIsoLocal } from '@/lib/utils';
@@ -328,6 +329,7 @@ export function InventorySearch() {
   // deriving them from the URL on every render would churn those keys
   // and steal focus mid-keystroke.
   const [search, setSearch] = useSearchParams();
+  const [tableState, setTableState] = useState(() => parseTableState(search.get('table')));
   // Gemini #116 fix: monotonic counter for filter UIDs. `Date.now() +
   // prev.length` collides when two adds happen in the same ms (e.g.
   // operator-paste of many filters or future programmatic adds).
@@ -434,6 +436,7 @@ export function InventorySearch() {
     if (prev.manifestId === manifestId && prev.field === field) return;
     prevSelectionRef.current = { manifestId, field };
     setFilters([]);
+    setTableState(EMPTY_TABLE_STATE);
     setOffset(0);
   }, [manifestId, field]);
 
@@ -469,32 +472,38 @@ export function InventorySearch() {
       if (!f.column || f.value === '') continue;
       next.append('f', filterToUrlToken(f));
     }
+    next.set('table', encodeTableState(tableState));
     if (limit !== DEFAULT_LIMIT) next.set('limit', String(limit));
     if (offset > 0) next.set('offset', String(offset));
     if (next.toString() !== search.toString()) {
       setSearch(next, { replace: true });
     }
-  }, [manifestId, field, filters, dFilters, limit, offset, search, setSearch]);
+  }, [tableState, manifestId, field, filters, dFilters, limit, offset, search, setSearch]);
 
   // Build the search query URL. `null` when not enough state to fire.
   const searchUrl = useMemo(() => {
-    if (!manifestId || !field) return null;
+    if (!manifestId || !field || prevSelectionRef.current.manifestId !== manifestId || prevSelectionRef.current.field !== field) return null;
     // Empty live filters bypass the debounce: a manifest/field switch
     // calls setFilters([]) synchronously, but dFilters would keep the
     // OLD tab's filters for 300 ms — pairing them with the new tab
     // fired one bogus request (and a flash of wrong data) before the
     // debounce settled (review PR #551, gemini).
     const activeFilters = filters.length === 0 ? filters : dFilters;
-    return buildSearchUrl({ manifestId, field, isScalar, filters: activeFilters, limit, offset });
-  }, [manifestId, field, filters, dFilters, limit, offset, isScalar]);
+    return tableUrl(buildSearchUrl({ manifestId, field, isScalar, filters: activeFilters, limit, offset }), tableState);
+  }, [tableState, manifestId, field, filters, dFilters, limit, offset, isScalar]);
 
   const searchQ = useQuery({
-    queryKey: ['inventory-search', searchUrl],
-    queryFn: () => apiFetch<ResultRow[]>(searchUrl!),
+    queryKey: ['inventory-search', manifestId, field, searchUrl],
+    queryFn: () => apiFetch<{ rows: ResultRow[]; total: number }>(searchUrl!),
+    placeholderData: (previous, query) => query?.queryKey[1] === manifestId && query?.queryKey[2] === field ? previous : undefined,
     enabled: !!searchUrl,
   });
 
-  const rows = searchQ.data ?? [];
+  const rows = searchQ.data?.rows ?? [];
+  const tableControl = useInventoryTable(searchUrl, tableState, (next) => {
+    setOffset(0);
+    setTableState(next);
+  }, searchQ.data?.total ?? 0, searchQ.isFetching);
 
   // Export every row matching the current search (not just this page).
   // Snapshot the request at click time so a mid-export UI change can't
@@ -515,6 +524,7 @@ export function InventorySearch() {
     try {
       const all = await fetchAllSearchRows((off) => {
         const sp = new URLSearchParams(snapshot.params);
+        sp.delete('format');
         sp.set('limit', String(SEARCH_EXPORT_PAGE_SIZE));
         if (off > 0) sp.set('offset', String(off));
         else sp.delete('offset');
@@ -658,6 +668,7 @@ export function InventorySearch() {
                         // looking at offset=200 of a 50-row
                         // unfiltered result set with an empty table.
                         setFilters([]);
+                        setTableState(EMPTY_TABLE_STATE);
                         setOffset(0);
                       }}
                     >
@@ -774,26 +785,24 @@ export function InventorySearch() {
                 <Loader2 className="size-4 animate-spin" /> {t('results.searching')}
               </div>
             ) : searchQ.error ? (
-              <ErrorCard title={t('results.error')} error={searchQ.error} />
-            ) : rows.length === 0 ? (
-              <div className="text-sm text-muted py-4">
-                {t('results.empty')}
-              </div>
+              <>
+                <ErrorCard title={t('results.error')} error={searchQ.error} />
+                {(tableState.sort || Object.keys(tableState.filters).length > 0) && (
+                  <Button variant="secondary" className="mt-2" onClick={() => tableControl.onChange(EMPTY_TABLE_STATE)}>
+                    {t('common:table.filter.resetState')}
+                  </Button>
+                )}
+              </>
             ) : (
               <>
                 <div className="text-xs text-muted mb-2">
-                  {rows.length === limit
-                    ? t('results.showingMore', {
-                        from: offset + 1,
-                        to: offset + rows.length,
-                        limit,
-                      })
-                    : t('results.showing', {
-                        from: offset + 1,
-                        to: offset + rows.length,
-                      })}
+                  {t('results.showingTotal', {
+                    from: rows.length ? offset + 1 : 0,
+                    to: offset + rows.length,
+                    total: searchQ.data?.total ?? 0,
+                  })}
                 </div>
-                <Table resizeKey="search" picker metaColumns>
+                <Table resizeKey="search" picker metaColumns sortFilter="server" serverSortFilter={tableControl}>
                   <TableHeader>
                     <TableRow>
                       <TableHead colId="pcId">{t('results.columns.pcId')}</TableHead>
@@ -811,6 +820,7 @@ export function InventorySearch() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
+                    {rows.length === 0 && <TableRow><TableCell spanAll className="py-4 text-muted">{t('results.empty')}</TableCell></TableRow>}
                     {rows.map((row, i) => {
                       const pcId = formatCell(row.pc_id);
                       // Gemini #116 fix: derive a row key from the
@@ -896,9 +906,9 @@ export function InventorySearch() {
                     size="sm"
                     variant="secondary"
                     onClick={() => setOffset(offset + limit)}
-                    disabled={rows.length < limit}
+                    disabled={offset + limit >= (searchQ.data?.total ?? 0)}
                     title={
-                      rows.length < limit
+                      (offset + limit >= (searchQ.data?.total ?? 0))
                         ? t('pagination.lastPage')
                         : t('pagination.nextPage')
                     }

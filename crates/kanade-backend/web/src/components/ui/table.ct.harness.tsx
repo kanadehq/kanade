@@ -1,7 +1,7 @@
 // Mount targets for table.ct.tsx. Playwright CT bundles only what the
 // test file *imports*, so a component defined inline in the spec would
 // never reach the browser — hence this file.
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import {
   resetAllTableWidths,
@@ -524,4 +524,24 @@ export function GroupedSortFilterTable() {
       </TableBody>
     </Table>
   );
+}
+
+/** Simulates a page owning table state; deliberately returns unchanged rows. */
+export function ServerSortFilterTable({ overflow = false, empty = false, hiddenFilter = false, loading = false }: { overflow?: boolean; empty?: boolean; hiddenFilter?: boolean; loading?: boolean }) {
+  const [state, setState] = useState<import('./table-sortfilter').TableQueryState>({
+    sort: null, filters: hiddenFilter ? { 'meta:site': { contains: 'Tokyo' } } : {},
+  });
+  const loadCandidates = useCallback(async () => ({
+    values: overflow ? [] : [{ value: 'off-page', count: 42 }, { value: 'banana', count: 1 }], overflow,
+  }), [overflow]);
+  return <>
+    <output data-testid="server-state">{JSON.stringify(state)}</output>
+    <Table resizeKey="ct-server" sortFilter="server" serverSortFilter={{ state, onChange: setState, loadCandidates, total: 100, loading }}>
+      <TableHeader><TableRow><TableHead colId="name">name</TableHead><TableHead colId="n">number</TableHead></TableRow></TableHeader>
+      <TableBody>
+        {!empty && <TableRow><TableCell>banana</TableCell><TableCell>10</TableCell></TableRow>}
+        {!empty && <TableRow><TableCell>apple</TableCell><TableCell>2</TableCell></TableRow>}
+      </TableBody>
+    </Table>
+  </>;
 }
