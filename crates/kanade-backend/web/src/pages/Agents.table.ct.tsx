@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/experimental-ct-react';
+import { expect, test } from '@playwright/experimental-ct-react';
+import type { Page } from 'playwright/test';
 
 import { AgentsTableHarness } from './Agents.table.harness';
 
@@ -9,8 +10,10 @@ import { AgentsTableHarness } from './Agents.table.harness';
 
 test.use({ viewport: { width: 1280, height: 900 } });
 
-type Agent = { pc_id: string; os_family: string; agent_cpu_pct: number | null; last_heartbeat: string | null };
+type Agent = { agent_version: string; last_logon_user: string; pc_id: string; os_family: string; agent_cpu_pct: number | null; last_heartbeat: string | null };
 const FLEET: Agent[] = Array.from({ length: 120 }, (_, i) => ({
+  agent_version: i % 2 === 0 ? '1.0' : '2.0',
+  last_logon_user: i % 2 === 0 ? 'alice' : 'bob',
   pc_id: `pc-${String(i).padStart(3, '0')}`,
   os_family: i % 3 === 0 ? 'linux' : 'windows',
   agent_cpu_pct: i % 10 === 9 ? null : i,
@@ -37,13 +40,19 @@ async function mockFleet(page: Page) {
       return;
     }
     const distinct = url.searchParams.get('distinct');
-    const textOf = (a: Agent, id: string) => (id === 'os' ? a.os_family : id === 'pcId' ? a.pc_id : null);
-    const matches = (a: Agent, skip?: string | null) => Object.entries(state.filters ?? {}).every(([id, f]) => {
-      if (id === skip) return true;
-      const text = textOf(a, id);
-      if (f.contains && !(text ?? '').toLowerCase().includes(f.contains.toLowerCase())) return false;
-      return !f.values || f.values.includes(text);
-    });
+    const textOf = (a: Agent, id: string) => (id === 'os' ? a.os_family : id === 'pcId' ? a.pc_id : id === 'agent' ? a.agent_version : id === 'lastLogon' ? a.last_logon_user : null);
+    const matches = (a: Agent, skip?: string | null) => {
+      for (const [param, id] of Object.entries({ q: 'pcId', user: 'lastLogon', version: 'agent' })) {
+        const pattern = url.searchParams.get(param);
+        if (id !== skip && pattern && !new RegExp(pattern).test(textOf(a, id) ?? '')) return false;
+      }
+      return Object.entries(state.filters ?? {}).every(([id, f]) => {
+        if (id === skip) return true;
+        const text = textOf(a, id);
+        if (f.contains && !(text ?? '').toLowerCase().includes(f.contains.toLowerCase())) return false;
+        return !f.values || f.values.includes(text);
+      });
+    };
     if (distinct) {
       distinctRequests.push({ url });
       const counts = new Map<string, number>();
@@ -124,6 +133,46 @@ test('legacy sort and regex URLs seed the same state and request', async ({ moun
     sort: { id: 'lastHeartbeat', dir: 'desc' },
     filters: { os: { contains: 'lin' } },
   });
+});
+
+for (const [param, column, initial, replacement, expected] of [
+  ['q', 'pcId', '^pc-00', 'pc-11', 10],
+  ['user', 'lastLogon', '^alice$', 'bob', 60],
+  ['version', 'agent', '^1.0$', '2.0', 60],
+] as const) {
+  test(`legacy ${param} is replaced and cleared through its column control`, async ({ mount, page }) => {
+    const { agentRequests } = await mockFleet(page);
+    const c = await mount(<AgentsTableHarness initial={`/agents?${param}=${encodeURIComponent(initial)}`} />);
+    await expect(c.locator('tbody tr')).toHaveCount(param === 'q' ? 10 : 50);
+    await expect(c.locator('#agents-q, #agents-user, #agents-version')).toHaveCount(0);
+    await c.locator(`th[data-col-id="${column}"] button`).last().click();
+    const input = page.getByRole('dialog').getByRole('searchbox', { name: /contains/ });
+    await expect(input).toHaveValue(initial);
+    await input.fill(replacement);
+    await expect.poll(() => agentRequests.at(-1)?.url.searchParams.has(param)).toBe(false);
+    await expect.poll(() => JSON.parse(agentRequests.at(-1)!.url.searchParams.get('table')!).filters[column])
+      .toEqual({ contains: replacement });
+    await expect.poll(() => agentRequests.at(-1)!.url.searchParams.get('offset')).toBe('0');
+    await expect(c.locator('tbody tr')).toHaveCount(Math.min(expected, 50));
+    await input.fill('');
+    await expect.poll(() => JSON.parse(agentRequests.at(-1)!.url.searchParams.get('table')!).filters)
+      .toEqual({});
+    await expect(c.getByTestId('location')).not.toContainText(`${param}=`);
+    await expect(c.locator('tbody tr')).toHaveCount(50);
+  });
+}
+
+test('a checklist replaces a legacy version regex and candidates include other versions', async ({ mount, page }) => {
+  const { agentRequests } = await mockFleet(page);
+  const c = await mount(<AgentsTableHarness initial="/agents?version=1.0" />);
+  await expect(c.locator('tbody tr')).toHaveCount(50);
+  await c.getByRole('button', { name: 'Filter agent', exact: true }).click();
+  await page.getByRole('checkbox', { name: /2.0/ }).waitFor();
+  await page.getByRole('checkbox', { name: /1.0/ }).uncheck();
+  await expect.poll(() => agentRequests.at(-1)!.url.searchParams.has('version')).toBe(false);
+  await expect.poll(() => JSON.parse(agentRequests.at(-1)!.url.searchParams.get('table')!).filters.agent.values)
+    .toEqual(['2.0']);
+  await expect.poll(async () => (await firstCells(c))[0]).toBe('pc-001');
 });
 
 test('CSV export sends the active column filters without a page limit', async ({ mount, page }) => {

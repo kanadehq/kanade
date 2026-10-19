@@ -135,7 +135,7 @@ pub struct AgentRow {
 /// All filters are optional and default to the historical "whole
 /// fleet" behaviour when omitted, so existing callers (the Agents
 /// table, the SPA's shared PcPicker, the Dashboard) keep working.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ListParams {
     /// #652: regex over `pc_id` OR `hostname` (matches if EITHER
     /// hits). Was a LIKE substring match before; now a regex to match
@@ -619,6 +619,25 @@ struct Parsed {
 }
 
 impl Parsed {
+    /// Every metadata entry point uses the same registry as controlled table
+    /// state, including legacy URLs that do not send a table parameter.
+    async fn validate_metadata(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+    ) -> Result<(), (StatusCode, String)> {
+        for condition in &self.meta_conds {
+            table::column(conn, &format!("meta:{}", condition.key)).await?;
+        }
+        if let Order::Spec(SortSpec {
+            field: SortField::Meta(key),
+            ..
+        }) = &self.order
+        {
+            table::column(conn, &format!("meta:{key}")).await?;
+        }
+        Ok(())
+    }
+
     fn has_regex(&self) -> bool {
         self.q_re.is_some() || self.user_re.is_some() || self.version_re.is_some()
     }
@@ -852,9 +871,16 @@ async fn distinct(
     params: &ListParams,
     raw: &[(String, String)],
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    let p = parse_request(params, raw)?;
+    let mut p = parse_request(params, raw)?;
+    match params.distinct.as_deref() {
+        Some("pcId") => p.q_re = None,
+        Some("lastLogon") => p.user_re = None,
+        Some("agent") => p.version_re = None,
+        _ => {}
+    }
     // One transaction: the regex prefilter and the query see one snapshot.
     let mut tx = pool.begin().await.map_err(internal("distinct agents"))?;
+    p.validate_metadata(&mut tx).await?;
     let t = table::resolve(&mut tx, params.table.as_deref()).await?;
     let col = table::column(&mut tx, params.distinct.as_deref().unwrap_or_default()).await?;
     if p.has_regex() {
@@ -909,6 +935,7 @@ pub async fn list(
     // One transaction so the regex prefilter, the count and the page read the
     // same snapshot; the connection-local match table is refilled per request.
     let mut tx = pool.begin().await.map_err(internal("list agents"))?;
+    p.validate_metadata(&mut tx).await?;
     let t = table::resolve(&mut tx, params.table.as_deref()).await?;
     if p.has_regex() {
         fill_regex_matches(&mut tx, &p).await?;
@@ -2640,6 +2667,90 @@ mod tests {
         };
         let (_, Json(rows)) = call(pool.clone(), narrow).await.unwrap();
         assert_eq!(pcids(rows), vec!["bulk10000"]);
+    }
+
+    #[tokio::test]
+    async fn legacy_metadata_keys_are_validated_for_lists_and_candidates() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("site", "Tokyo")]).await;
+        for key in ["undeclared", "x' OR 1=1 --"] {
+            let cases = [
+                (
+                    ListParams {
+                        sort: Some(format!("meta:{key}")),
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+                (
+                    ListParams {
+                        meta_key: Some(key.into()),
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+                (
+                    ListParams::default(),
+                    vec![(format!("meta.{key}.absent"), String::new())],
+                ),
+                // Even an overridden legacy sort must be validated.
+                (
+                    ListParams {
+                        sort: Some(format!("meta:{key}")),
+                        table: Some(json!({"sort": {"id": "pcId", "dir": "asc"}}).to_string()),
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+            ];
+            for (mut params, raw) in cases {
+                let err = list(
+                    State(pool.clone()),
+                    Query(params.clone()),
+                    Query(raw.clone()),
+                )
+                .await
+                .err()
+                .unwrap();
+                assert_eq!(err.0, StatusCode::BAD_REQUEST);
+                params.distinct = Some("os".into());
+                let err = distinct(&pool, &params, &raw).await.err().unwrap();
+                assert_eq!(err.0, StatusCode::BAD_REQUEST);
+            }
+        }
+        let params = ListParams {
+            sort: Some("meta:site".into()),
+            meta_key: Some("site".into()),
+            ..Default::default()
+        };
+        assert_eq!(ids_of(pool.clone(), params).await, vec!["PC001"]);
+        let (_, Json(rows)) = call_raw(
+            pool.clone(),
+            ListParams::default(),
+            &[("meta.site.absent", "")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        let params = ListParams {
+            distinct: Some("os".into()),
+            sort: Some("meta:site".into()),
+            meta_key: Some("site".into()),
+            ..Default::default()
+        };
+        assert!(distinct(&pool, &params, &[]).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn legacy_regex_does_not_narrow_its_own_column_candidates() {
+        let pool = seeded_pool().await;
+        let params = ListParams {
+            distinct: Some("pcId".into()),
+            q: Some("^PC001$".into()),
+            ..Default::default()
+        };
+        let values = distinct(&pool, &params, &[]).await.unwrap();
+        assert_eq!(values["values"].as_array().unwrap().len(), 4);
     }
 
     #[tokio::test]
