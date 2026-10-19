@@ -3335,6 +3335,7 @@ dependencies = [
  "clap",
  "dirs",
  "futures",
+ "getrandom 0.4.3",
  "glob",
  "humantime",
  "kaishin",

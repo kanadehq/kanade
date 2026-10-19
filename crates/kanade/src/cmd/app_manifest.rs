@@ -41,11 +41,8 @@ pub struct SignArgs {
     #[arg(long)]
     pub package_id: String,
     /// Minimum OS version the package requires, e.g. `14.0`.
-    #[arg(long, group = "min_os")]
-    pub min_os_version: Option<String>,
-    /// State explicitly that no minimum OS version is claimed (signed as null).
-    #[arg(long, group = "min_os")]
-    pub no_min_os_version: bool,
+    #[arg(long)]
+    pub min_os_version: String,
     /// Required agent capability; repeatable. Sorted by the CLI; duplicates rejected.
     #[arg(long = "capability")]
     pub capabilities: Vec<String>,
@@ -134,9 +131,6 @@ fn read_signing_key(from_stdin: bool) -> Result<PublisherSigningKey> {
 }
 
 pub fn sign(args: SignArgs) -> Result<()> {
-    if args.min_os_version.is_none() && !args.no_min_os_version {
-        bail!("state --min-os-version <v> or --no-min-os-version explicitly");
-    }
     let identity = read_identity(&args.identity)?;
     let mut caps = args.capabilities;
     caps.sort();
@@ -186,10 +180,7 @@ pub fn verify(args: VerifyArgs) -> Result<()> {
     println!("OFFLINE VERIFIED (signature + integrity only)");
     println!("publisher key_id: {}", ok.key_id().as_str());
     println!("package_id:       {}", c.package_id());
-    println!(
-        "min_os_version:   {}",
-        c.min_os_version().unwrap_or("(none claimed)")
-    );
+    println!("min_os_version:   {}", c.min_os_version());
     println!(
         "capabilities:     {}",
         c.required_agent_capabilities().join(", ")

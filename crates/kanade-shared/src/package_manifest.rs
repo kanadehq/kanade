@@ -35,7 +35,7 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::artifact::{ArtifactIdentity, ArtifactIntegrity, ArtifactSha256};
@@ -86,25 +86,22 @@ fn invalid(m: impl Into<String>) -> ManifestError {
 pub struct ManifestClaims {
     identity: ArtifactIdentity,
     package_id: String,
-    min_os_version: Option<String>,
+    min_os_version: String,
     required_agent_capabilities: Vec<String>,
     integrity: ArtifactIntegrity,
 }
 
 impl ManifestClaims {
-    /// `min_os_version` is required to be stated but may be `None` (signed as
-    /// JSON `null`). Capabilities must already be strictly ascending.
+    /// `min_os_version` は必須の非 null 文字列。capabilities は厳密昇順。
     pub fn new(
         identity: ArtifactIdentity,
         package_id: String,
-        min_os_version: Option<String>,
+        min_os_version: String,
         required_agent_capabilities: Vec<String>,
         integrity: ArtifactIntegrity,
     ) -> Result<Self, ManifestError> {
         validate_package_id(&package_id)?;
-        if let Some(v) = &min_os_version {
-            validate_min_os_version(v)?;
-        }
+        validate_min_os_version(&min_os_version)?;
         validate_capabilities(&required_agent_capabilities)?;
         if integrity.size_bytes == 0 {
             return Err(invalid("size_bytes must be greater than zero"));
@@ -123,8 +120,8 @@ impl ManifestClaims {
     pub fn package_id(&self) -> &str {
         &self.package_id
     }
-    pub fn min_os_version(&self) -> Option<&str> {
-        self.min_os_version.as_deref()
+    pub fn min_os_version(&self) -> &str {
+        &self.min_os_version
     }
     pub fn required_agent_capabilities(&self) -> &[String] {
         &self.required_agent_capabilities
@@ -228,9 +225,12 @@ struct TrustRecord {
 }
 
 impl TrustedPublisherKey {
-    pub fn from_verifying_key(key: VerifyingKey) -> Self {
+    pub fn from_verifying_key(key: VerifyingKey) -> Result<Self, ManifestError> {
+        if key.is_weak() {
+            return Err(ManifestError::Trust("weak publisher public key".into()));
+        }
         let key_id = PublisherKeyId::of(&key);
-        Self { key, key_id }
+        Ok(Self { key, key_id })
     }
     pub fn key_id(&self) -> &PublisherKeyId {
         &self.key_id
@@ -252,7 +252,7 @@ impl TrustedPublisherKey {
         let raw = decode_b64_exact::<32>(&r.public_key).ok_or_else(|| t("public_key"))?;
         let key =
             VerifyingKey::from_bytes(&raw).map_err(|_| t("public_key is not a valid point"))?;
-        let me = Self::from_verifying_key(key);
+        let me = Self::from_verifying_key(key)?;
         if me.key_id.0 != r.key_id {
             return Err(t("key_id does not match public_key"));
         }
@@ -300,6 +300,7 @@ impl PublisherSigningKey {
     }
     pub fn trusted_key(&self) -> TrustedPublisherKey {
         TrustedPublisherKey::from_verifying_key(self.0.verifying_key())
+            .expect("a signing key derives a non-weak public key")
     }
 }
 
@@ -320,8 +321,7 @@ struct WireManifest {
     manifest_version: String,
     identity: ArtifactIdentity,
     package_id: String,
-    #[serde(deserialize_with = "required_nullable")]
-    min_os_version: Option<String>,
+    min_os_version: String,
     required_agent_capabilities: Vec<String>,
     sha256: ArtifactSha256,
     size_bytes: u64,
@@ -342,7 +342,7 @@ struct SigningView<'a> {
     manifest_version: &'a str,
     identity: &'a ArtifactIdentity,
     package_id: &'a str,
-    min_os_version: &'a Option<String>,
+    min_os_version: &'a str,
     required_agent_capabilities: &'a [String],
     sha256: ArtifactSha256,
     size_bytes: u64,
@@ -353,12 +353,6 @@ struct SigningView<'a> {
 struct SigningPublisher<'a> {
     algorithm: &'a str,
     key_id: &'a str,
-}
-
-/// A field that must be present but may be `null` (serde would otherwise
-/// treat a missing `Option` as `None`).
-fn required_nullable<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    Option::<String>::deserialize(d)
 }
 
 /// Only used to produce a distinct error for a newer/older format before the
@@ -563,7 +557,7 @@ mod tests {
         ManifestClaims::new(
             id,
             "com.kanade.cli".into(),
-            Some("14.0".into()),
+            "14.0".into(),
             vec!["a_cap".into(), "b_cap".into()],
             ArtifactIntegrity::of(BYTES),
         )
@@ -616,20 +610,60 @@ mod tests {
     }
 
     #[test]
+    fn random_temporary_keypairs_round_trip_and_reject_wrong_key() {
+        let random_key = || {
+            let mut seed = [0u8; 32];
+            getrandom::fill(&mut seed).unwrap();
+            PublisherSigningKey::from_seed(seed)
+        };
+        let key = random_key();
+        let wrong = random_key();
+        let manifest = sign_manifest(claims_with(id()), &key).to_canonical_bytes();
+        let trust =
+            TrustedPublisherKey::from_trust_json(&key.trusted_key().to_trust_json()).unwrap();
+        let observed = ArtifactIntegrity::of(BYTES);
+        verify_offline(&manifest, &trust, &id(), &observed).unwrap();
+        assert_eq!(
+            verify_offline(&manifest, &wrong.trusted_key(), &id(), &observed).unwrap_err(),
+            ManifestError::KeyIdMismatch
+        );
+    }
+
+    #[test]
+    fn weak_trust_keys_are_rejected_even_with_matching_key_id() {
+        for raw in [[0u8; 32], {
+            let mut identity = [0u8; 32];
+            identity[0] = 1;
+            identity
+        }] {
+            let key = VerifyingKey::from_bytes(&raw).unwrap();
+            assert!(key.is_weak());
+            let record = serde_json::json!({
+                "purpose": TRUST_PURPOSE,
+                "algorithm": ALGORITHM_ED25519,
+                "key_id": PublisherKeyId::of(&key).as_str(),
+                "public_key": STANDARD.encode(raw),
+            });
+            assert_eq!(
+                TrustedPublisherKey::from_trust_json(&serde_json::to_vec(&record).unwrap())
+                    .unwrap_err(),
+                ManifestError::Trust("weak publisher public key".into())
+            );
+            assert!(TrustedPublisherKey::from_verifying_key(key).is_err());
+        }
+    }
+
+    #[test]
     fn signing_is_deterministic_and_bytes_are_pinned() {
         assert_eq!(signed(), signed());
         let k = key(7);
         let c = claims_with(id());
         let bytes = signing_bytes(&c, k.trusted_key().key_id().as_str());
-        let expect = format!(
-            "kanade/package-manifest/ed25519/v1\0{{\"manifest_version\":\"1.0\",\"identity\":{{\"role\":\"cli\",\"version\":\"1.2.3\",\"os\":\"macos\",\"arch\":\"aarch64\",\"distro_abi\":\"darwin\",\"format\":\"tar_gz\"}},\"package_id\":\"com.kanade.cli\",\"min_os_version\":\"14.0\",\"required_agent_capabilities\":[\"a_cap\",\"b_cap\"],\"sha256\":\"{}\",\"size_bytes\":13,\"publisher\":{{\"algorithm\":\"ed25519\",\"key_id\":\"{}\"}}}}",
-            String::from(c.integrity.sha256),
-            k.trusted_key().key_id().as_str()
+        let expect = concat!(
+            "kanade/package-manifest/ed25519/v1\0",
+            r#"{"manifest_version":"1.0","identity":{"role":"cli","version":"1.2.3","os":"macos","arch":"aarch64","distro_abi":"darwin","format":"tar_gz"},"package_id":"com.kanade.cli","min_os_version":"14.0","required_agent_capabilities":["a_cap","b_cap"],"sha256":"2e547448dcd0f2fcd9dbc386d33f1553369883451898177559bcf3e3b1083d16","size_bytes":13,"publisher":{"algorithm":"ed25519","key_id":"ed25519:c283f73433913d171beef378f847ac83bb4bfe58359cd7a7dd6d295b13562b87"}}"#
         );
         assert_eq!(bytes, expect.as_bytes());
-        // Golden key id for the all-0x07 seed pins the derivation.
-        assert!(k.trusted_key().key_id().as_str().starts_with("ed25519:"));
-        assert_eq!(k.trusted_key().key_id().as_str().len(), 8 + 64);
     }
 
     #[test]
@@ -673,11 +707,6 @@ mod tests {
             ("format", "\"format\":\"tar_gz\"", "\"format\":\"zip\""),
             ("package_id", "com.kanade.cli", "com.evil"),
             ("min_os", "\"14.0\"", "\"13.0\""),
-            (
-                "min_os_null",
-                "\"min_os_version\":\"14.0\"",
-                "\"min_os_version\":null",
-            ),
             ("caps", "[\"a_cap\",\"b_cap\"]", "[\"a_cap\"]"),
             ("sha256", digest.as_str(), zeros.as_str()),
             ("size", "\"size_bytes\":13", "\"size_bytes\":14"),
@@ -699,11 +728,6 @@ mod tests {
             ("version", "\"version\":\"1.2.3\"", "\"version\":\"1.2.4\""),
             ("package_id", "com.kanade.cli", "com.evil"),
             ("min_os", "\"14.0\"", "\"13.0\""),
-            (
-                "min_os_null",
-                "\"min_os_version\":\"14.0\"",
-                "\"min_os_version\":null",
-            ),
             ("caps", "[\"a_cap\",\"b_cap\"]", "[\"a_cap\"]"),
             ("sha256", digest.as_str(), zeros.as_str()),
             ("size", "\"size_bytes\":13", "\"size_bytes\":14"),
@@ -810,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_fields_including_nullable_are_rejected() {
+    fn missing_fields_and_null_min_os_are_rejected() {
         for field in [
             "manifest_version",
             "identity",
@@ -826,6 +850,13 @@ mod tests {
             });
             assert!(verify(&b).is_err(), "missing {field} accepted");
         }
+        assert!(matches!(
+            verify(&swap(
+                "\"min_os_version\":\"14.0\"",
+                "\"min_os_version\":null"
+            )),
+            Err(ManifestError::Malformed(_))
+        ));
         let b = edit(|v| {
             v["publisher"].as_object_mut().unwrap().remove("algorithm");
         });
@@ -890,28 +921,34 @@ mod tests {
 
     #[test]
     fn compatibility_fields_are_validated() {
-        let mk = |pid: &str, os: Option<&str>, caps: &[&str]| {
+        let mk = |pid: &str, os: &str, caps: &[&str]| {
             ManifestClaims::new(
                 id(),
                 pid.into(),
-                os.map(Into::into),
+                os.into(),
                 caps.iter().map(|s| s.to_string()).collect(),
                 ArtifactIntegrity::of(BYTES),
             )
         };
-        assert!(mk("com.kanade.client", Some("24.04"), &["a", "b"]).is_ok());
-        assert!(mk("com.kanade.client", None, &[]).is_ok());
+        assert!(mk("com.kanade.client", "24.04", &["a", "b"]).is_ok());
+        assert!(mk("com.kanade.client", "", &[]).is_err());
         for pid in ["", "Com.x", ".x", "a b", "a/b", &"a".repeat(129)] {
-            assert!(mk(pid, None, &[]).is_err(), "{pid:?}");
+            assert!(mk(pid, "14.0", &[]).is_err(), "{pid:?}");
         }
         for os in ["", "14.", ".14", "14.x", "1.2.3.4.5", "1234567890", "v14"] {
-            assert!(mk("x", Some(os), &[]).is_err(), "{os:?}");
+            assert!(mk("x", os, &[]).is_err(), "{os:?}");
         }
-        assert!(mk("x", None, &["b", "a"]).is_err());
-        assert!(mk("x", None, &["a", "a"]).is_err());
-        assert!(mk("x", None, &["A"]).is_err());
-        assert!(mk("x", None, &[""]).is_err());
-        let empty = ManifestClaims::new(id(), "x".into(), None, vec![], ArtifactIntegrity::of(b""));
+        assert!(mk("x", "14.0", &["b", "a"]).is_err());
+        assert!(mk("x", "14.0", &["a", "a"]).is_err());
+        assert!(mk("x", "14.0", &["A"]).is_err());
+        assert!(mk("x", "14.0", &[""]).is_err());
+        let empty = ManifestClaims::new(
+            id(),
+            "x".into(),
+            "14.0".into(),
+            vec![],
+            ArtifactIntegrity::of(b""),
+        );
         assert!(empty.is_err());
     }
 

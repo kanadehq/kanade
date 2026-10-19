@@ -11,8 +11,10 @@ use base64::Engine;
 const IDENTITY: &str = r#"{"role":"cli","version":"1.2.3","os":"linux","arch":"aarch64","distro_abi":"musl","format":"tar_gz"}"#;
 const OTHER_IDENTITY: &str = r#"{"role":"cli","version":"1.2.4","os":"linux","arch":"aarch64","distro_abi":"musl","format":"tar_gz"}"#;
 
-fn seed(n: u8) -> String {
-    base64::engine::general_purpose::STANDARD.encode([n; 32])
+fn seed() -> String {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(seed)
 }
 
 fn run(args: &[&str], stdin: Option<&str>) -> Output {
@@ -72,7 +74,8 @@ impl Fixture {
                 &self.p("identity.json"),
                 "--package-id",
                 "com.kanade.cli",
-                "--no-min-os-version",
+                "--min-os-version",
+                "1.0",
                 "--capability",
                 "b_cap",
                 "--capability",
@@ -109,7 +112,7 @@ fn text(b: &[u8]) -> String {
 #[test]
 fn sign_then_verify_round_trip_is_offline_only_and_leaks_no_secret() {
     let f = Fixture::new();
-    let secret = seed(5);
+    let secret = seed();
     f.trust("trust.json", &secret);
     let s = f.sign(&secret, "m.json");
     assert!(s.status.success(), "{}", text(&s.stderr));
@@ -117,7 +120,7 @@ fn sign_then_verify_round_trip_is_offline_only_and_leaks_no_secret() {
     let manifest = std::fs::read_to_string(f.p("m.json")).unwrap();
     assert!(!manifest.contains(&secret));
     assert!(manifest.contains(r#""required_agent_capabilities":["a_cap","b_cap"]"#));
-    assert!(manifest.contains(r#""min_os_version":null"#));
+    assert!(manifest.contains(r#""min_os_version":"1.0""#));
 
     let v = f.verify("trust.json", "identity.json", "m.json", "pkg.tar.gz");
     assert!(v.status.success(), "{}", text(&v.stderr));
@@ -128,11 +131,11 @@ fn sign_then_verify_round_trip_is_offline_only_and_leaks_no_secret() {
 }
 
 #[test]
-fn sign_refuses_to_overwrite_and_requires_explicit_min_os_choice() {
+fn sign_refuses_to_overwrite_and_requires_min_os_version() {
     let f = Fixture::new();
-    assert!(f.sign(&seed(5), "m.json").status.success());
+    assert!(f.sign(&seed(), "m.json").status.success());
     let before = std::fs::read(f.p("m.json")).unwrap();
-    let again = f.sign(&seed(6), "m.json");
+    let again = f.sign(&seed(), "m.json");
     assert_eq!(again.status.code(), Some(1));
     assert_eq!(std::fs::read(f.p("m.json")).unwrap(), before);
 
@@ -149,18 +152,19 @@ fn sign_refuses_to_overwrite_and_requires_explicit_min_os_choice() {
             "--secret-stdin",
             &f.p("pkg.tar.gz"),
         ],
-        Some(&format!("{}\n", seed(5))),
+        Some(&format!("{}\n", seed())),
     );
-    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(o.status.code(), Some(2));
     assert!(!Path::new(&f.p("n.json")).exists());
 }
 
 #[test]
 fn verification_failures_exit_nonzero_with_no_success_banner() {
     let f = Fixture::new();
-    f.trust("trust.json", &seed(5));
-    f.trust("wrong.json", &seed(6));
-    assert!(f.sign(&seed(5), "m.json").status.success());
+    let secret = seed();
+    f.trust("trust.json", &secret);
+    f.trust("wrong.json", &seed());
+    assert!(f.sign(&secret, "m.json").status.success());
 
     // wrong trusted key, other expected identity, tampered artifact
     std::fs::write(f.p("bad.bin"), b"artifact bytez").unwrap();
@@ -183,7 +187,18 @@ fn verification_failures_exit_nonzero_with_no_success_banner() {
     let i = tampered.windows(5).position(|w| w == b"1.2.3").unwrap();
     tampered[i + 4] = b'4';
     std::fs::write(f.p("tamper.json"), tampered).unwrap();
-    for m in ["trunc.json", "tamper.json"] {
+    let good_text = std::str::from_utf8(&good).unwrap();
+    for (name, replacement) in [
+        ("null.json", "\"min_os_version\":null,"),
+        ("missing.json", ""),
+    ] {
+        std::fs::write(
+            f.p(name),
+            good_text.replace("\"min_os_version\":\"1.0\",", replacement),
+        )
+        .unwrap();
+    }
+    for m in ["trunc.json", "tamper.json", "null.json", "missing.json"] {
         let o = f.verify("trust.json", "identity.json", m, "pkg.tar.gz");
         assert_eq!(o.status.code(), Some(1), "{m}");
     }
@@ -193,7 +208,7 @@ fn verification_failures_exit_nonzero_with_no_success_banner() {
 fn a_trust_record_embedded_in_the_manifest_is_never_used_and_bad_keys_are_rejected() {
     let f = Fixture::new();
     // Not a trust record at all: a manifest passed as --trusted-key.
-    assert!(f.sign(&seed(5), "m.json").status.success());
+    assert!(f.sign(&seed(), "m.json").status.success());
     let o = f.verify("m.json", "identity.json", "m.json", "pkg.tar.gz");
     assert_eq!(o.status.code(), Some(1));
 
@@ -203,6 +218,31 @@ fn a_trust_record_embedded_in_the_manifest_is_never_used_and_bad_keys_are_reject
     );
     assert_eq!(o.status.code(), Some(1));
     assert!(!text(&o.stderr).contains("hunter2") && !text(&o.stdout).contains("hunter2"));
+}
+
+#[test]
+fn weak_trusted_public_key_fails_before_signature_verification() {
+    use sha2::{Digest, Sha256};
+
+    let f = Fixture::new();
+    let mut raw = [0u8; 32];
+    raw[0] = 1;
+    let mut hash = Sha256::new();
+    hash.update(b"kanade/package-publisher-key-id/v1\0");
+    hash.update(raw);
+    let fingerprint: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let trust = serde_json::json!({
+        "purpose": "kanade-package-publisher-key-v1",
+        "algorithm": "ed25519",
+        "key_id": format!("ed25519:{fingerprint}"),
+        "public_key": base64::engine::general_purpose::STANDARD.encode(raw),
+    });
+    std::fs::write(f.p("weak.json"), serde_json::to_vec(&trust).unwrap()).unwrap();
+    assert!(f.sign(&seed(), "m.json").status.success());
+    let o = f.verify("weak.json", "identity.json", "m.json", "pkg.tar.gz");
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("weak publisher public key"));
+    assert!(!text(&o.stdout).contains("OFFLINE VERIFIED"));
 }
 
 #[test]
