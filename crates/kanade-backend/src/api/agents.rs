@@ -2549,6 +2549,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pc_id_column_sort_preserves_legacy_case_order_across_pages() {
+        let pool = seeded_pool().await;
+        for (dir, expected) in [
+            ("asc", vec!["PC001", "PC002", "WS-9", "web%01"]),
+            ("desc", vec!["web%01", "WS-9", "PC002", "PC001"]),
+        ] {
+            let legacy = ids_of(
+                pool.clone(),
+                ListParams {
+                    sort: Some("pc_id".into()),
+                    dir: Some(dir.into()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert_eq!(legacy, expected);
+            let (controlled, total) =
+                pages(&pool, json!({"sort": {"id": "pcId", "dir": dir}}), 1).await;
+            assert_eq!(controlled, legacy);
+            assert_eq!(total, 4);
+        }
+    }
+
+    #[tokio::test]
     async fn status_uses_instants_across_timestamp_formats() {
         let pool = seeded_pool().await;
         let now = chrono::Utc::now();

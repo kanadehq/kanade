@@ -341,7 +341,9 @@ pub(super) fn push_order(
         qb.push(" IS NULL, ");
     }
     order_expr(qb);
-    if col.kind() == Kind::Text {
+    // Keep the identifier's historical sort=pc_id order, including case.
+    // Other text cells use a case-insensitive display ordering.
+    if col.kind() == Kind::Text && !matches!(col, Col::Builtin(b) if b.id == "pcId") {
         qb.push(" COLLATE NOCASE");
     }
     qb.push(dir).push(", pc_id ASC");
