@@ -40,6 +40,7 @@ pub mod script_objects;
 pub mod scripts;
 pub mod server;
 pub mod server_settings;
+mod server_table;
 pub mod sql_like;
 pub mod time_bounds;
 pub mod view_sql;

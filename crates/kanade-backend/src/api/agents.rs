@@ -788,14 +788,12 @@ async fn fill_regex_matches(
         })
         .filter_map(|r| r.try_get::<String, _>("pc_id").ok())
         .collect();
-    for chunk in ids.chunks(META_IN_CHUNK) {
-        let mut ins: QueryBuilder<Sqlite> =
-            QueryBuilder::new(format!("INSERT OR IGNORE INTO {RX_TABLE} (pc_id) "));
-        ins.push_values(chunk, |mut b, id| {
-            b.push_bind(id.clone());
-        });
-        ins.build().execute(&mut *conn).await.map_err(&err)?;
-    }
+    // One bound JSON array avoids a parameter per match, regardless of fleet size.
+    sqlx::query("INSERT OR IGNORE INTO kn_rx_match (pc_id) SELECT value FROM json_each(?)")
+        .bind(serde_json::to_string(&ids).expect("pc ids serialize as JSON"))
+        .execute(&mut *conn)
+        .await
+        .map_err(&err)?;
     Ok(())
 }
 
@@ -820,14 +818,15 @@ fn push_status(qb: &mut QueryBuilder<Sqlite>, started: &mut bool, p: &Parsed) {
     match p.status.as_deref() {
         Some("online") => {
             qb.push(sep(started))
-                .push("last_heartbeat IS NOT NULL AND last_heartbeat >= ")
-                .push_bind(p.cutoff);
+                .push("julianday(last_heartbeat) >= julianday(")
+                .push_bind(p.cutoff)
+                .push(")");
         }
         Some("offline") => {
             qb.push(sep(started))
-                .push("(last_heartbeat IS NULL OR last_heartbeat < ")
+                .push("(last_heartbeat IS NULL OR julianday(last_heartbeat) < julianday(")
                 .push_bind(p.cutoff)
-                .push(")");
+                .push("))");
         }
         _ => {}
     }
@@ -908,7 +907,7 @@ pub async fn list(
     let offset = params.offset.map(i64::from).unwrap_or(0);
 
     // One transaction so the regex prefilter, the count and the page read the
-    // same snapshot (and the temp table disappears with it).
+    // same snapshot; the connection-local match table is refilled per request.
     let mut tx = pool.begin().await.map_err(internal("list agents"))?;
     let t = table::resolve(&mut tx, params.table.as_deref()).await?;
     if p.has_regex() {
@@ -922,10 +921,10 @@ pub async fn list(
     } else {
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
             "SELECT COUNT(*) AS matched, CAST(COALESCE(SUM(CASE WHEN \
-             last_heartbeat IS NOT NULL AND last_heartbeat >= ",
+             julianday(last_heartbeat) >= julianday(",
         );
         qb.push_bind(p.cutoff)
-            .push(" THEN 1 ELSE 0 END), 0) AS INTEGER) AS online FROM agents");
+            .push(") THEN 1 ELSE 0 END), 0) AS INTEGER) AS online FROM agents");
         let mut started = false;
         push_base(&mut qb, &mut started, &p, &t, None);
         let row = qb
@@ -2523,6 +2522,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_uses_instants_across_timestamp_formats() {
+        let pool = seeded_pool().await;
+        let now = chrono::Utc::now();
+        for (pc, instant, offset) in [
+            ("PC001", now, -9 * 3600),
+            ("PC002", now - chrono::Duration::hours(1), 9 * 3600),
+        ] {
+            let stamp = instant
+                .with_timezone(&chrono::FixedOffset::east_opt(offset).unwrap())
+                .to_rfc3339();
+            sqlx::query("UPDATE agents SET last_heartbeat = ? WHERE pc_id = ?")
+                .bind(stamp)
+                .bind(pc)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for status in ["online", "offline"] {
+            let expected = if status == "online" {
+                vec!["PC001"]
+            } else {
+                vec!["PC002", "WS-9", "web%01"]
+            };
+            let p = ListParams {
+                status: Some(status.into()),
+                sort: Some("pc_id".into()),
+                dir: Some("asc".into()),
+                limit: Some(10),
+                ..Default::default()
+            };
+            let (h, Json(rows)) = call(pool.clone(), p).await.unwrap();
+            assert_eq!(get_header(&h, "X-Online-Count"), 1);
+            assert_eq!(get_header(&h, "X-Offline-Count"), 3);
+            assert_eq!(pcids(rows), expected);
+            let p = table_params(
+                json!({"sort":{"id":"pcId","dir":"asc"},"filters":{"status":{"values":[status]}}}),
+                10,
+                0,
+            );
+            let (_, Json(rows)) = call(pool.clone(), p).await.unwrap();
+            assert_eq!(pcids(rows), expected);
+        }
+        let p = ListParams {
+            distinct: Some("status".into()),
+            ..Default::default()
+        };
+        let values = distinct(&pool, &p, &[]).await.unwrap();
+        assert_eq!(
+            values,
+            json!({"values":[{"value":"offline","count":3},{"value":"online","count":1}],"overflow":false})
+        );
+    }
+
+    #[tokio::test]
     async fn table_filters_compose_with_regex_and_status_chip_counts() {
         let pool = seeded_pool().await;
         for pc in ["PC001", "PC002", "WS-9"] {
@@ -2541,7 +2594,7 @@ mod tests {
     async fn regex_search_is_not_capped_by_the_old_prefilter_window() {
         let pool = seeded_pool().await;
         let mut tx = pool.begin().await.unwrap();
-        for i in 0..1200 {
+        for i in 0..10001 {
             sqlx::query(
                 "INSERT INTO agents (pc_id, hostname, agent_cpu_pct) VALUES (?, 'bulk', ?)",
             )
@@ -2552,11 +2605,41 @@ mod tests {
             .unwrap();
         }
         tx.commit().await.unwrap();
-        let mut p = table_params(json!({"sort": {"id": "cpu", "dir": "desc"}}), 2, 1198);
+        let mut p = table_params(json!({"sort": {"id": "cpu", "dir": "desc"}}), 2, 9999);
         p.q = Some("^bulk".into());
         let (h, Json(rows)) = call(pool.clone(), p).await.unwrap();
-        assert_eq!(get_header(&h, "X-Total-Count"), 1200);
+        assert_eq!(get_header(&h, "X-Total-Count"), 10001);
         assert_eq!(pcids(rows), vec!["bulk00001", "bulk00000"]);
+        // CSV export requests the same match set without a page limit.
+        let mut export = table_params(
+            json!({
+                "sort": {"id": "cpu", "dir": "asc"},
+                "filters": {"pcId": {"contains": "00"}}
+            }),
+            1,
+            0,
+        );
+        export.q = Some("^bulk".into());
+        export.limit = None;
+        let (h, Json(rows)) = call(pool.clone(), export).await.unwrap();
+        let expected: Vec<_> = (0..10001)
+            .map(|i| format!("bulk{i:05}"))
+            .filter(|id| id.contains("00"))
+            .collect();
+        assert_eq!(get_header(&h, "X-Total-Count"), expected.len() as i64);
+        assert_eq!(pcids(rows), expected);
+        let export = ListParams {
+            q: Some("^bulk".into()),
+            ..Default::default()
+        };
+        let (_, Json(rows)) = call(pool.clone(), export).await.unwrap();
+        assert_eq!(rows.len(), 10001);
+        let narrow = ListParams {
+            q: Some("^bulk10000$".into()),
+            ..Default::default()
+        };
+        let (_, Json(rows)) = call(pool.clone(), narrow).await.unwrap();
+        assert_eq!(pcids(rows), vec!["bulk10000"]);
     }
 
     #[tokio::test]

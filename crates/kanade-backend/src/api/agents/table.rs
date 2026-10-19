@@ -10,13 +10,11 @@
 //!
 //! Ordering: NULLs sort last in both directions; the tiebreaker is always
 //! `pc_id ASC` (added by the caller) so pages never overlap or skip.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
+use super::super::server_table::{Filter, MAX_VALUES, TableState};
 use axum::http::StatusCode;
-use serde::Deserialize;
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
-
-use super::super::sql_like::contains_like;
 
 pub(super) type ApiError = (StatusCode, String);
 
@@ -24,35 +22,10 @@ fn bad(message: impl Into<String>) -> ApiError {
     (StatusCode::BAD_REQUEST, message.into())
 }
 
-/// Most checklist values one filter may carry (matches the Inventory cap).
-const MAX_VALUES: usize = 200;
 /// Distinct values returned before the checklist gives way to a text box.
 pub(super) const MAX_CANDIDATES: usize = 200;
 const MAX_META_COLUMNS: usize = 32;
 const MAX_STATE_BYTES: usize = 64 * 1024;
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawState {
-    sort: Option<RawSort>,
-    #[serde(default)]
-    filters: HashMap<String, Filter>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSort {
-    id: String,
-    dir: String,
-}
-
-#[derive(Default, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Filter {
-    contains: Option<String>,
-    // JSON null stands for "no value", distinct from "" and from "null".
-    values: Option<Vec<Option<String>>>,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -193,9 +166,9 @@ fn push_expr(
     let text = val == Val::Text;
     match col {
         Col::Builtin(b) if b.kind == Kind::Status => {
-            qb.push("CASE WHEN last_heartbeat IS NOT NULL AND last_heartbeat >= ")
+            qb.push("CASE WHEN julianday(last_heartbeat) >= julianday(")
                 .push_bind(cutoff)
-                .push(" THEN 'online' ELSE 'offline' END");
+                .push(") THEN 'online' ELSE 'offline' END");
         }
         Col::Builtin(b) => {
             if text {
@@ -211,6 +184,28 @@ fn push_expr(
             qb.push("(SELECT value FROM agent_meta WHERE pc_id = agents.pc_id AND key = ")
                 .push_bind(key.clone())
                 .push(")");
+        }
+    }
+}
+
+/// The request's fixed liveness cutoff accompanies the validated column.
+struct ColumnAt<'a> {
+    col: &'a Col,
+    cutoff: chrono::DateTime<chrono::Utc>,
+}
+impl super::super::server_table::Column for ColumnAt<'_> {
+    fn expression(&self, qb: &mut QueryBuilder<Sqlite>, text: bool) {
+        push_expr(
+            qb,
+            self.col,
+            if text { Val::Text } else { Val::Raw },
+            self.cutoff,
+        );
+    }
+    fn secondary(&self) -> Option<&str> {
+        match self.col {
+            Col::Builtin(b) => b.also,
+            Col::Meta(_) => None,
         }
     }
 }
@@ -262,7 +257,7 @@ pub(super) async fn resolve(
     if raw.len() > MAX_STATE_BYTES {
         return Err(bad("table state is too large"));
     }
-    let state: RawState = serde_json::from_str(raw).map_err(|_| bad("invalid table state"))?;
+    let state: TableState = serde_json::from_str(raw).map_err(|_| bad("invalid table state"))?;
     let metas: BTreeSet<&str> = state
         .filters
         .keys()
@@ -314,45 +309,8 @@ pub(super) fn push_conditions(
         if skip == Some(col.id().as_str()) {
             continue;
         }
-        if let Some(contains) = filter
-            .contains
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            qb.push(super::sep(started)).push("(");
-            push_expr(qb, col, Val::Text, cutoff);
-            qb.push(" LIKE ")
-                .push_bind(contains_like(contains))
-                .push(" ESCAPE '\\'");
-            if let Col::Builtin(Builtin {
-                also: Some(also), ..
-            }) = col
-            {
-                qb.push(format!(" OR CAST({also} AS TEXT) LIKE "))
-                    .push_bind(contains_like(contains))
-                    .push(" ESCAPE '\\'");
-            }
-            qb.push(")");
-        }
-        if let Some(values) = &filter.values {
-            qb.push(super::sep(started)).push("(0");
-            for value in values {
-                match value {
-                    Some(v) => {
-                        qb.push(" OR ");
-                        push_expr(qb, col, Val::Text, cutoff);
-                        qb.push(" = ").push_bind(v.clone());
-                    }
-                    None => {
-                        qb.push(" OR ");
-                        push_expr(qb, col, Val::Raw, cutoff);
-                        qb.push(" IS NULL");
-                    }
-                }
-            }
-            qb.push(")");
-        }
+        super::super::server_table::conditions(qb, started, filter, &ColumnAt { col, cutoff })
+            .expect("resolved filters have bounded checklist values");
     }
 }
 

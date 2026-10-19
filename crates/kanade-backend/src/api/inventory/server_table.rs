@@ -7,8 +7,8 @@
 //! `format=page` opts search into `{rows,total}`; legacy array clients remain
 //! unchanged. `distinct=<id>` returns `{values:[{value,count}],overflow}`
 //! over the complete match set, excluding that column's table filter.
+use super::super::server_table::{TableState, TypedColumn as Column, ValueKind};
 use super::*;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
@@ -19,79 +19,6 @@ fn bad(message: impl Into<String>) -> ApiError {
 fn db(error: sqlx::Error) -> ApiError {
     warn!(%error, "inventory table query");
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-}
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TableState {
-    sort: Option<Sort>,
-    #[serde(default)]
-    filters: HashMap<String, Filter>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Sort {
-    id: String,
-    dir: String,
-}
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Filter {
-    contains: Option<String>,
-    // JSON null represents missing values without colliding with any string.
-    values: Option<Vec<Option<String>>>,
-}
-
-#[derive(Clone, Copy)]
-enum ValueKind {
-    Text,
-    Number,
-    Timestamp,
-    Array,
-}
-struct Column {
-    id: String,
-    raw: String,
-    order: String,
-    kind: ValueKind,
-}
-impl Column {
-    fn new(id: impl Into<String>, raw: impl Into<String>, kind: Option<&str>) -> Self {
-        let raw = raw.into();
-        let kind = match kind {
-            Some("number" | "bytes" | "integer" | "real") => ValueKind::Number,
-            Some("timestamp") => ValueKind::Timestamp,
-            Some("table") => ValueKind::Array,
-            _ => ValueKind::Text,
-        };
-        let order = match kind {
-            ValueKind::Number => format!(
-                "CASE WHEN typeof({raw}) IN ('integer','real') THEN CAST({raw} AS REAL) \
-                 WHEN json_valid({raw}) THEN CASE WHEN json_type({raw}) IN ('integer','real') \
-                 THEN CAST({raw} AS REAL) END END"
-            ),
-            ValueKind::Timestamp => format!("julianday({raw})"),
-            ValueKind::Array => format!(
-                "CASE WHEN json_valid({raw}) THEN CASE WHEN json_type({raw}) = 'array' THEN json_array_length({raw}) END END"
-            ),
-            ValueKind::Text => format!("CAST({raw} AS TEXT) COLLATE NOCASE"),
-        };
-        Self {
-            id: id.into(),
-            raw,
-            order,
-            kind,
-        }
-    }
-    fn text(&self) -> String {
-        match self.kind {
-            ValueKind::Timestamp => format!(
-                "CASE WHEN {} IS NOT NULL THEN CAST({} AS TEXT) END",
-                self.order, self.raw
-            ),
-            _ => format!("CAST({} AS TEXT)", self.order),
-        }
-    }
 }
 
 pub(super) enum Source<'a> {
@@ -200,32 +127,7 @@ fn conditions(
         if Some(id.as_str()) == skip {
             continue;
         }
-        let text = column.text();
-        if let Some(contains) = filter.contains.as_deref().filter(|s| !s.trim().is_empty()) {
-            let escaped = contains
-                .trim()
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            q.push(format!(" AND {text} LIKE "))
-                .push_bind(format!("%{escaped}%"))
-                .push(" ESCAPE '\\'");
-        }
-        if let Some(values) = &filter.values {
-            if values.len() > 200 {
-                return Err(bad("too many checklist values"));
-            }
-            q.push(" AND (");
-            q.push("0");
-            for value in values {
-                if let Some(value) = value {
-                    q.push(format!(" OR {text} = ")).push_bind(value.clone());
-                } else {
-                    q.push(format!(" OR {} IS NULL", column.order));
-                }
-            }
-            q.push(")");
-        }
+        super::super::server_table::conditions(q, &mut true, filter, column)?;
     }
     Ok(())
 }
