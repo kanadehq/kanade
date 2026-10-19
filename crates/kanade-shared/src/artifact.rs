@@ -666,6 +666,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn integrity_metadata_deserializes_canonical_hex_and_size() {
+        for (bytes, hex) in [
+            (
+                &b""[..],
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                &b"abc"[..],
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            let json = format!(r#"{{"sha256":"{hex}","size_bytes":{}}}"#, bytes.len());
+            let restored: ArtifactIntegrity = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, ArtifactIntegrity::of(bytes));
+            assert_eq!(serde_json::to_string(&restored).unwrap(), json);
+            assert_eq!(
+                ArtifactSha256::try_from(hex.to_owned()).unwrap(),
+                restored.sha256
+            );
+        }
+    }
+
     // A real VERSIONINFO resource tree in a synthetic PE. No execution or
     // checked-in binary fixture is needed to exercise the production extractor.
     fn pe_with_version(version: &str) -> Vec<u8> {
@@ -734,6 +757,14 @@ mod tests {
         let candidate = inspect_legacy_windows(ArtifactRole::Cli, "v1.2.3", &pe).unwrap();
         assert!(candidate.embedded_version_verified);
         let err = inspect_legacy_windows(ArtifactRole::Cli, "1.2.4", &pe).unwrap_err();
+        assert!(err.to_string().contains("version mismatch"));
+        let prerelease = "1.2.3-rc.1+build.42";
+        let pe = pe_with_version(prerelease);
+        let candidate = inspect_legacy_windows(ArtifactRole::Cli, prerelease, &pe).unwrap();
+        assert!(candidate.embedded_version_verified);
+        assert_eq!(candidate.identity.version().as_str(), prerelease);
+        let err =
+            inspect_legacy_windows(ArtifactRole::Cli, "1.2.3-rc.1+build.43", &pe).unwrap_err();
         assert!(err.to_string().contains("version mismatch"));
         let bad_version = pe_with_version("1.2");
         assert!(inspect_legacy_windows(ArtifactRole::Cli, "1.2.3", &bad_version).is_err());
