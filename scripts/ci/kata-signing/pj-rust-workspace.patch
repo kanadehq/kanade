@@ -11,10 +11,18 @@
  # SBOM generation, …) write a SEPARATE sibling workflow at
  # `.github/workflows/release-extras.yml` (or any name that isn't
  # `release.yml`) with `on: push: tags: ["v*.*.*"]` — that workflow
-@@ -263,6 +265,16 @@
+@@ -263,6 +265,24 @@
              echo "::error::$still_missing bin(s) could not be produced; failing the build step"
              exit 1
            fi
++
++      # Fail closed: a repo that pins a signing identity must keep its hook.
++      - name: Require post-build hook when a signing pin exists
++        if: ${{ hashFiles('deploy/macos/signing-cert.sha1') != '' && hashFiles('scripts/ci/release-post-build.sh') == '' }}
++        shell: bash
++        run: |
++          echo "::error::deploy/macos/signing-cert.sha1 pins a signing identity but scripts/ci/release-post-build.sh is missing; refusing to publish unsigned release binaries"
++          exit 1
 +
 +      # Consumers own signing policy; a missing hook leaves other projects unchanged.
 +      - name: Sign binaries (post-build hook)
@@ -28,7 +36,7 @@
  
        - name: Stage release artifacts
          shell: bash
-@@ -316,6 +328,14 @@
+@@ -316,6 +336,14 @@
            done
            ls -la dist/
  

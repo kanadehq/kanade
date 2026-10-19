@@ -68,18 +68,27 @@ fn release_workflow_contains_signing_hooks_in_order() {
             && root.join("scripts/ci/macos-codesign.sh").is_file(),
         "release hook scripts must exist"
     );
+    // The hook steps may be conditional on the script (that is what the
+    // upstream templates generate), but only together with a guard that fails
+    // when the pin exists and the hook does not.
+    let guard_idx = content
+        .find("Require post-build hook when a signing pin exists")
+        .expect("release.yml must fail closed when the hook script is missing");
+    let guard_block = &content[guard_idx..];
     assert!(
-        !content.contains("hashFiles('scripts/ci/release-post-build.sh')"),
-        "signing hook steps must not be skipped when the hook script is missing"
-    );
-    assert!(
-        content.contains("release-post-build.sh is missing"),
-        "sign step must fail explicitly when the hook script is missing"
+        guard_block.contains("hashFiles('deploy/macos/signing-cert.sha1') != ''")
+            && guard_block.contains("hashFiles('scripts/ci/release-post-build.sh') == ''")
+            && guard_block.contains("exit 1"),
+        "guard must exit 1 when the pin exists but the hook script is missing"
     );
 
     let sign_idx = content
         .find("scripts/ci/release-post-build.sh sign")
         .expect("release.yml must invoke `release-post-build.sh sign`");
+    assert!(
+        guard_idx < sign_idx,
+        "missing-hook guard must run BEFORE the sign hook (guard_idx={guard_idx}, sign_idx={sign_idx})"
+    );
     let stage_idx = content
         .find("Stage release artifacts")
         .expect("release.yml must have a `Stage release artifacts` step");
