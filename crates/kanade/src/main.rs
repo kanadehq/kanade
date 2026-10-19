@@ -132,7 +132,10 @@ async fn main() -> Result<()> {
 
     // Background update check (notify by default; see cli_config).
     // Skipped for `self-update` itself — it IS the update path.
-    let update_handle = updater::maybe_spawn(matches!(command, SubCmd::SelfUpdate(_)));
+    let update_handle = updater::maybe_spawn(
+        matches!(command, SubCmd::SelfUpdate(_))
+            || matches!(&command, SubCmd::App(a) if a.sub.is_offline()),
+    );
     let result = dispatch(server, backend_url, command).await;
     updater::finalize(update_handle).await;
     result

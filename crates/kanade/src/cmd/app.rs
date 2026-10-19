@@ -39,6 +39,17 @@ pub struct AppArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AppSub {
+    /// Offline: build and Ed25519-sign `package.manifest.json` for a local
+    /// artifact. The private key comes from a hidden prompt or `--secret-stdin`,
+    /// never argv/env. Publishes nothing.
+    SignArtifact(super::app_manifest::SignArgs),
+    /// Offline: verify a manifest + artifact against an independently supplied
+    /// trusted publisher key and expected identity. Signature + integrity only;
+    /// not publisher authorization, freshness or revocation.
+    VerifyArtifact(super::app_manifest::VerifyArgs),
+    /// Offline: print the public trust record (no secret) for a publisher
+    /// private key, to be distributed to verifiers out of band.
+    PublisherTrust(super::app_manifest::TrustArgs),
     /// Publish an immutable identity-addressed artifact and verify HTTP read-back.
     /// Identity JSON must explicitly declare role/version/os/arch/distro_abi/format.
     /// Integrity checking does not establish publisher trust or deploy readiness.
@@ -80,9 +91,22 @@ pub enum AppSub {
     Delete { name: String, version: String },
 }
 
+impl AppSub {
+    /// Local-only operations: no backend, no NATS, no background update check.
+    pub fn is_offline(&self) -> bool {
+        matches!(
+            self,
+            Self::SignArtifact(_) | Self::VerifyArtifact(_) | Self::PublisherTrust(_)
+        )
+    }
+}
+
 pub async fn execute(backend_url: &str, args: AppArgs) -> Result<()> {
     let base = backend_url.trim_end_matches('/');
     match args.sub {
+        AppSub::SignArtifact(a) => super::app_manifest::sign(a),
+        AppSub::VerifyArtifact(a) => super::app_manifest::verify(a),
+        AppSub::PublisherTrust(a) => super::app_manifest::publisher_trust(a),
         AppSub::PublishArtifact { identity, binary } => {
             publish_artifact(base, identity, binary).await
         }
