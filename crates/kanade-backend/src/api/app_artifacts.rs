@@ -315,17 +315,9 @@ async fn commit(
     commit_backed(&NatsBacking { js, store }, stage, info, publication).await
 }
 
-pub async fn publish(
-    State(state): State<AppState>,
-    caller: Caller,
-    mut multipart: Multipart,
-) -> Result<Json<Publication>, Error> {
-    if std::env::var(ENABLE).as_deref() != Ok("backend-exclusive") {
-        return Err(internal(
-            "identity publication disabled; backend-exclusive broker authorization must be provisioned first",
-        ));
-    }
-    let store = store(&state.jetstream).await?;
+// The parser permits only one live field at a time. Returning from this
+// function releases the metadata field before publication asks for the file.
+async fn read_publication(multipart: &mut Multipart) -> Result<Publication, Error> {
     let mut metadata = multipart
         .next_field()
         .await
@@ -341,7 +333,21 @@ pub async fn publish(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let publication: Publication = serde_json::from_slice(&bytes).map_err(invalid)?;
+    serde_json::from_slice(&bytes).map_err(invalid)
+}
+
+pub async fn publish(
+    State(state): State<AppState>,
+    caller: Caller,
+    mut multipart: Multipart,
+) -> Result<Json<Publication>, Error> {
+    if std::env::var(ENABLE).as_deref() != Ok("backend-exclusive") {
+        return Err(internal(
+            "identity publication disabled; backend-exclusive broker authorization must be provisioned first",
+        ));
+    }
+    let store = store(&state.jetstream).await?;
+    let publication = read_publication(&mut multipart).await?;
     let key = publication.identity.app_package_key().map_err(invalid)?;
     if publication.integrity.size_bytes == 0
         || publication.integrity.size_bytes > super::APP_PACKAGE_BODY_LIMIT as u64
@@ -802,6 +808,28 @@ mod tests {
         assert_eq!(after.last_sequence, before.last_sequence);
         assert_eq!(after.messages, before.messages);
         assert_eq!(after.bytes, before.bytes);
+    }
+
+    #[tokio::test]
+    async fn metadata_parsing_releases_the_field_before_reading_the_file() {
+        use axum::extract::FromRequest;
+
+        let publication = publication("linux-x86_64-musl.tar_gz", b"payload");
+        let json = serde_json::to_vec(&publication).unwrap();
+        let (content_type, body) = fixture::multipart(&[
+            ("metadata", None, &json),
+            ("file", Some("package"), b"payload"),
+        ]);
+        let request = Request::builder()
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let mut multipart = Multipart::from_request(request, &()).await.unwrap();
+        assert_eq!(read_publication(&mut multipart).await.unwrap(), publication);
+        let file = multipart.next_field().await.unwrap().unwrap();
+        assert_eq!(file.name(), Some("file"));
+        assert_eq!(file.bytes().await.unwrap().as_ref(), b"payload");
+        assert!(multipart.next_field().await.unwrap().is_none());
     }
 
     #[test]
