@@ -124,6 +124,7 @@
       "blanks": "(空白)",
       "truncated": "先頭 {{n}} 件のみ表示中。検索で絞り込めます",
       "clear": "絞り込みを解除",
+      "resetState": "列の並び順とフィルターをリセット",
       "clearAll": "すべての絞り込みを解除",
       "remove": "{{name}} の絞り込みを解除",
       "count": "{{shown}} / {{total}} 件",

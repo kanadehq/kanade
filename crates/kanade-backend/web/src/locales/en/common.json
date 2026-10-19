@@ -124,6 +124,7 @@
       "blanks": "(blanks)",
       "truncated": "Showing the first {{n}} values — search to narrow",
       "clear": "Clear filter",
+      "resetState": "Reset column sorting and filters",
       "clearAll": "Clear all filters",
       "remove": "Remove the filter on {{name}}",
       "count": "{{shown}} / {{total}} rows",

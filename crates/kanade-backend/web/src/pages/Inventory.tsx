@@ -17,7 +17,7 @@ import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
 import type { ServerSortFilter } from '@/components/ui/table-sortfilter';
-import { encodeTableState, parseTableState, tableUrl, useInventoryTable } from '@/lib/inventoryTable';
+import { EMPTY_TABLE_STATE, encodeTableState, parseTableState, tableUrl, useInventoryTable } from '@/lib/inventoryTable';
 import { downloadCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
 import { fleetSortValue, isoSortValue } from '@/lib/inventorySort';
@@ -757,7 +757,14 @@ function FleetProbeTable({
             <Loader2 className="size-4 animate-spin" />{t('fleet.loading')}
           </div>
         ) : byJob.error ? (
-          <ErrorCard title={t('fleet.errorTitle', { manifestId: job.manifest_id })} error={byJob.error} />
+          <>
+            <ErrorCard title={t('fleet.errorTitle', { manifestId: job.manifest_id })} error={byJob.error} />
+            {(tableState.sort || Object.keys(tableState.filters).length > 0) && (
+              <Button variant="secondary" className="mt-2" onClick={() => tableControl.onChange(EMPTY_TABLE_STATE)}>
+                {t('common:table.filter.resetState')}
+              </Button>
+            )}
+          </>
         ) : (
           <FleetTable columns={columns} rows={byJob.data?.rows ?? []} pickPc={pickPc} serverControl={tableControl}
             emptyMessage={dq || Object.keys(tableState.filters).length > 0

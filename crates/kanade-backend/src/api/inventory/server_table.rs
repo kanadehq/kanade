@@ -412,7 +412,9 @@ pub(super) async fn run(
             format!("{} AS value, COUNT(*) AS n", column.text()),
             Some(id),
         )?;
-        q.push(" GROUP BY value ORDER BY value IS NULL, value LIMIT 201");
+        // Position 1 always names the projected candidate, even when a
+        // manifest or metadata join also has an input column named value.
+        q.push(" GROUP BY 1 ORDER BY 1 NULLS LAST LIMIT 201");
         let rows = q.build().fetch_all(&mut *tx).await.map_err(db)?;
         let overflow = rows.len() > 200;
         let values: Vec<Value> = if overflow {
@@ -823,6 +825,33 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(pcs(&page), [expected]);
+        }
+    }
+    #[tokio::test]
+    async fn metadata_conditions_do_not_capture_distinct_projection_aliases() {
+        let (pool, hint) = fixture().await;
+        sqlx::query("UPDATE agent_meta SET value='Tokyo' WHERE key='site'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO agent_meta VALUES ('a','team','Red'),('b','team','Blue'),('c','team','Red')").execute(&pool).await.unwrap();
+        let mut query = params(json!({"filters":{"meta:site":{"values":["Tokyo"]}}}));
+        query.insert("limit".into(), "1".into());
+        for (column, expected) in [
+            (
+                "pcId",
+                json!([{"value":"a","count":1},{"value":"b","count":1}]),
+            ),
+            (
+                "meta:team",
+                json!([{"value":"Blue","count":1},{"value":"Red","count":1}]),
+            ),
+        ] {
+            query.insert("distinct".into(), column.into());
+            let result = run(&pool, "job", Source::Fleet(&hint), &query)
+                .await
+                .unwrap();
+            assert_eq!(result, json!({"values":expected,"overflow":false}));
         }
     }
 }

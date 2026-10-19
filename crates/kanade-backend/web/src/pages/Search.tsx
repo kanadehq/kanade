@@ -785,7 +785,14 @@ export function InventorySearch() {
                 <Loader2 className="size-4 animate-spin" /> {t('results.searching')}
               </div>
             ) : searchQ.error ? (
-              <ErrorCard title={t('results.error')} error={searchQ.error} />
+              <>
+                <ErrorCard title={t('results.error')} error={searchQ.error} />
+                {(tableState.sort || Object.keys(tableState.filters).length > 0) && (
+                  <Button variant="secondary" className="mt-2" onClick={() => tableControl.onChange(EMPTY_TABLE_STATE)}>
+                    {t('common:table.filter.resetState')}
+                  </Button>
+                )}
+              </>
             ) : (
               <>
                 <div className="text-xs text-muted mb-2">
