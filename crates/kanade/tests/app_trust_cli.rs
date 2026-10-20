@@ -120,6 +120,7 @@ impl Fx {
             Some(&format!("{}\n", self.root_secret)),
         )
     }
+    #[cfg(unix)]
     fn apply(&self, name: &str) -> Output {
         run(
             &[
@@ -133,6 +134,7 @@ impl Fx {
             None,
         )
     }
+    #[cfg(unix)]
     fn status(&self) -> String {
         let o = run(&["app", "trust-store-status", "--dir", &self.store()], None);
         assert!(o.status.success());
@@ -140,6 +142,28 @@ impl Fx {
     }
 }
 
+#[cfg(not(unix))]
+#[test]
+fn unsupported_store_provision_fails_without_creating_storage() {
+    let fx = Fx::new();
+    fx.root_record();
+    let output = run(
+        &[
+            "app",
+            "trust-store-provision",
+            "--dir",
+            &fx.store(),
+            "--root-record",
+            &fx.p("root.json"),
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(text(&output.stderr).contains("unsupported on this platform"));
+    assert!(!std::path::Path::new(&fx.store()).exists());
+}
+
+#[cfg(unix)]
 #[test]
 fn provision_apply_status_and_rollback_refusal() {
     let fx = Fx::new();

@@ -194,22 +194,30 @@ pub fn admit_package(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(unix)]
     use std::time::Duration;
 
     use super::*;
     use crate::artifact::{ArtifactRole, DistroAbi, PackageFormat};
     use crate::package_manifest::{PublisherSigningKey, sign_manifest};
+    #[cfg(unix)]
     use crate::publisher_trust::{
         PublisherEntry, TrustRoot, TrustStateClaims, WallClock, sign_trust_state,
     };
 
+    #[cfg(unix)]
     const T0: u64 = 1_800_000_000;
+    #[cfg(unix)]
     const DAY: u64 = 86_400;
     const BYTES: &[u8] = b"package bytes";
 
+    #[cfg(unix)]
     struct Clock(AtomicU64);
+    #[cfg(unix)]
     impl WallClock for Clock {
         fn unix_now(&self) -> u64 {
             self.0.load(Ordering::SeqCst)
@@ -259,6 +267,7 @@ mod tests {
         sign_manifest(claims, k).to_canonical_bytes()
     }
 
+    #[cfg(unix)]
     struct Env {
         _dir: tempfile::TempDir,
         store: PublisherTrustStore,
@@ -266,6 +275,7 @@ mod tests {
         publisher: PublisherSigningKey,
     }
 
+    #[cfg(unix)]
     impl Env {
         /// A store with a pinned root and a state activating `publisher`.
         fn new() -> Self {
@@ -329,6 +339,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn authorized_publisher_with_matching_everything_is_admitted() {
         let env = Env::new();
@@ -354,6 +365,7 @@ mod tests {
         assert_eq!(a.publisher(), env.publisher.trusted_key().key_id());
     }
 
+    #[cfg(unix)]
     #[test]
     fn self_signed_unknown_publisher_cannot_establish_its_own_trust() {
         let env = Env::new();
@@ -367,6 +379,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn command_style_or_root_keys_signing_a_manifest_are_not_publishers() {
         // The root key is a different authority from any publisher: a manifest
@@ -381,6 +394,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn revocation_and_rotation_take_effect_for_new_admissions() {
         let env = Env::new();
@@ -427,6 +441,7 @@ mod tests {
         assert_eq!(err, AdmissionError::Trust(TrustError::NoRoot));
     }
 
+    #[cfg(unix)]
     #[test]
     fn tampered_identity_content_package_and_expectations_are_rejected() {
         let env = Env::new();
@@ -476,6 +491,7 @@ mod tests {
         assert_eq!(r.unwrap_err(), AdmissionError::PackageIdMismatch);
     }
 
+    #[cfg(unix)]
     #[test]
     fn compatibility_policy_is_enforced() {
         let env = Env::new();

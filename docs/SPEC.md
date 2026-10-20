@@ -2804,6 +2804,13 @@ SemVer 構文検証は `semver` クレートを使用する。`ArtifactError` �
    - PE ヘッダを持たない非 Windows 成果物がレガシーキーに存在する場合はエラーとし、推測による上書きや他 OS への配信を行わない。
 
 #### 2.13.4.3 署名付きマニフェスト (`package.manifest.json`)
+
+stage 2b の publisher trust 永続化は Unix のみ対応する。Windows を含む非 Unix は
+owner／DACL／祖先の保護・プロセス間排他・耐久性のある原子的置換の実装待ちであり、
+root provisioning は保存先作成前に拒否し、既存 trust の読込・state 更新・新規 package
+admission も fail closed とする。手動 ACL 設定や管理操作の直列化では有効化できない。
+未設定の Agent の既存処理は継続する。詳細と管理手順は `docs/package-manifest.md`。
+
 成果物の配布時には、バイナリ本体と対になる署名付きメタデータマニフェストを Object Store に併せて格納する。
 
 ```json

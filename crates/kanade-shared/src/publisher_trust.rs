@@ -62,6 +62,12 @@
 //! Delivery is out of scope here: any channel may carry a signed state to
 //! [`PublisherTrustStore::apply`], because authenticity comes only from the
 //! pinned root. No management transport is wired to it yet.
+//!
+//! Storage is supported only on Unix. Other platforms (including Windows)
+//! reject provisioning and existing storage before reading or writing trust
+//! records: ownership/ACL validation, interprocess locking and durable atomic
+//! replacement have not been implemented there. Unconfigured agents continue
+//! operating, but cannot admit packages.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -719,6 +725,7 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 thread_local! {
+    static UNSUPPORTED_STORAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static INTERRUPT_STORAGE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
@@ -1105,15 +1112,36 @@ fn lock_directory(dir: &Path) -> Result<std::fs::File, TrustError> {
 }
 
 #[cfg(not(unix))]
-struct LocalOnlyLock;
+fn lock_directory(_: &Path) -> Result<std::fs::File, TrustError> {
+    Err(unsupported_storage())
+}
 
-#[cfg(not(unix))]
-fn lock_directory(_: &Path) -> Result<LocalOnlyLock, TrustError> {
-    // Preserve the existing non-Unix adapter; Unix hardening uses flock.
-    Ok(LocalOnlyLock)
+#[cfg(any(test, not(unix)))]
+fn unsupported_storage() -> TrustError {
+    TrustError::Broken(
+        "publisher trust storage is unsupported on this platform: private ownership/ACLs, \
+         interprocess locking and durable replacement are required"
+            .into(),
+    )
+}
+
+fn require_supported_storage() -> Result<(), TrustError> {
+    #[cfg(test)]
+    if UNSUPPORTED_STORAGE.with(|c| c.get()) {
+        return Err(unsupported_storage());
+    }
+    #[cfg(not(unix))]
+    {
+        Err(unsupported_storage())
+    }
+    #[cfg(unix)]
+    {
+        Ok(())
+    }
 }
 
 fn ensure_private_dir(dir: &Path) -> Result<(), TrustError> {
+    require_supported_storage()?;
     match std::fs::symlink_metadata(dir) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1131,8 +1159,9 @@ fn ensure_private_dir(dir: &Path) -> Result<(), TrustError> {
     check_trust_directory(dir)
 }
 
-/// Reject symlinks / reparse points and (unix) group/world access.
+/// Reject unsupported storage, symlinks and group/world access.
 fn check_private(path: &Path, dir: bool) -> Result<(), TrustError> {
+    require_supported_storage()?;
     no_extended_acl(path)?;
     let md = std::fs::symlink_metadata(path).map_err(|e| storage("stat", e))?;
     if md.file_type().is_symlink() {
@@ -1142,16 +1171,6 @@ fn check_private(path: &Path, dir: bool) -> Result<(), TrustError> {
         )));
     }
     check_private_metadata(&md, dir)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if md.file_attributes() & 0x400 != 0 {
-            return Err(TrustError::Broken(format!(
-                "{} is a reparse point",
-                path.display()
-            )));
-        }
-    }
     Ok(())
 }
 
@@ -1264,11 +1283,13 @@ mod tests {
             })
         }
         /// Real time passing: both clocks move.
+        #[cfg(unix)]
         fn advance(&self, secs: u64) {
             self.wall.fetch_add(secs, Ordering::SeqCst);
             self.mono.fetch_add(secs, Ordering::SeqCst);
         }
         /// A clock fault: only the wall clock moves.
+        #[cfg(unix)]
         fn set_wall(&self, wall: u64) {
             self.wall.store(wall, Ordering::SeqCst);
         }
@@ -1340,6 +1361,7 @@ mod tests {
         fn store(&self) -> PublisherTrustStore {
             PublisherTrustStore::open(&self.path, self.clock.clone())
         }
+        #[cfg(unix)]
         fn provisioned(&self) -> PublisherTrustStore {
             let s = self.store();
             s.provision_root(&TrustRoot::from_signing_key(&self.root).to_root_json())
@@ -1356,6 +1378,31 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_storage_refuses_provision_reads_updates_and_locks() {
+        let env = Env::new();
+        let store = env.store();
+        UNSUPPORTED_STORAGE.with(|c| c.set(true));
+        let root = TrustRoot::from_signing_key(&env.root).to_root_json();
+        let state = env.sign(&claims(1, T0, vec![], &[]));
+        let expected = unsupported_storage();
+        assert_eq!(store.provision_root(&root).unwrap_err(), expected);
+        assert!(!env.path.exists(), "refusal must not create storage");
+        // Even an externally created store with a valid root cannot be trusted.
+        std::fs::create_dir(&env.path).unwrap();
+        std::fs::write(env.path.join(ROOT_FILE), &root).unwrap();
+        std::fs::write(env.path.join(STATE_FILE), &state).unwrap();
+        assert_eq!(store.load_root().unwrap_err(), expected);
+        assert_eq!(store.apply(&state).unwrap_err(), expected);
+        assert_eq!(store.authorize(&kid(&random_key())).unwrap_err(), expected);
+        assert_eq!(store.status().health, "broken");
+        assert_eq!(lock_directory(&env.path).unwrap_err(), expected);
+        assert_eq!(std::fs::read(env.path.join(ROOT_FILE)).unwrap(), root);
+        assert_eq!(std::fs::read(env.path.join(STATE_FILE)).unwrap(), state);
+        assert_eq!(std::fs::read_dir(&env.path).unwrap().count(), 2);
+        UNSUPPORTED_STORAGE.with(|c| c.set(false));
+    }
+
+    #[test]
     fn unpinned_store_refuses_everything_and_never_learns_a_root() {
         let env = Env::new();
         let s = env.store();
@@ -1367,6 +1414,7 @@ mod tests {
         assert!(!env.path.join(ROOT_FILE).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn provisioned_root_without_state_fails_closed_for_authorize() {
         let env = Env::new();
@@ -1378,6 +1426,7 @@ mod tests {
         assert_eq!(s.status().health, "no-state");
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_cannot_be_replaced_and_purpose_is_enforced() {
         let env = Env::new();
@@ -1401,6 +1450,7 @@ mod tests {
         assert!(TrustedPublisherKey::from_trust_json(&root_rec).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn active_key_is_authorized_unknown_and_outside_window_are_not() {
         let env = Env::new();
@@ -1436,6 +1486,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn rotation_overlap_then_permanent_revocation() {
         let env = Env::new();
@@ -1494,6 +1545,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn replay_downgrade_and_same_sequence_conflict() {
         let env = Env::new();
@@ -1527,6 +1579,7 @@ mod tests {
         assert_eq!(s.status().state.unwrap().sequence, 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn unauthenticated_states_are_rejected_before_persisting() {
         let env = Env::new();
@@ -1574,6 +1627,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn manifest_signing_domain_cannot_stand_in_for_a_state() {
         // A publisher-domain signature over the same JSON does not verify.
@@ -1589,6 +1643,7 @@ mod tests {
         assert_eq!(s.apply(&bytes).unwrap_err(), TrustError::SignatureInvalid);
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_key_must_not_double_as_a_publisher() {
         let env = Env::new();
@@ -1632,6 +1687,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn stale_and_future_states_are_refused() {
         let env = Env::new();
@@ -1663,6 +1719,7 @@ mod tests {
         assert_eq!(s.status().health, "expired");
     }
 
+    #[cfg(unix)]
     #[test]
     fn restart_reloads_state_and_keeps_revocation() {
         let env = Env::new();
@@ -1706,6 +1763,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn interrupted_persistence_leaves_the_old_state_intact() {
         let env = Env::new();
@@ -1738,6 +1796,7 @@ mod tests {
         restarted.authorize(&kid(&b)).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn interrupted_after_rename_reloads_new_state_and_refuses_rollback() {
         let env = Env::new();
@@ -1874,6 +1933,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn corrupt_or_tampered_record_fails_closed_without_reset() {
         let env = Env::new();
@@ -1918,6 +1978,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn clock_going_backwards_or_jumping_blocks_admission() {
         let env = Env::new();
@@ -1962,6 +2023,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn unpersistable_high_water_mark_blocks_admission() {
         let env = Env::new();
