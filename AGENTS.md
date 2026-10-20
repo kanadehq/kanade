@@ -738,10 +738,18 @@ not that CI or review did not run.
   / `app_trust_cli` integration tests). Check that each reports a positive
   `passed` count and `0 ignored`; an `--ignored` run that matches nothing
   passes vacuously.
+- `verify.e2e` は `python3 scripts/ci/magi-e2e.py` 経由で上記のコマンドを
+  実行する。成功件数が 0、ignored が残る、または harness ごとの実行件数と
+  成功件数が一致しなければ失敗する。stage 2a/2b のフィルタは
+  `package_manifest::tests::`、`publisher_trust::tests::`、
+  `package_admission::tests::` を個別に指定する。Python 3 が必要。
 - **Prerequisites**: `nats-server` on `PATH` (CI pins the version in
   `NATS_SERVER_VERSION` of `integration.yml`) and permission to bind
   loopback sockets. A missing broker makes the e2e step fail; do not
   replace it with a skip.
+- e2e は起動前に `nats-server --version` を `integration.yml` のピンと
+  照合し、不一致を失敗にする。原因の run/base 記録と、ホストで代替できない
+  CI 範囲は [ローカル検証の補足](docs/local-verification.md) を参照。
 - **Not covered locally**: the editorconfig and coverage jobs (tools not in
   the local toolchain), and the Windows/Linux/macOS matrix legs other than
   the host OS (`check`, `test`, `clippy`, `offline-boot` and the rest of

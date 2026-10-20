@@ -26,9 +26,7 @@ gate = [
 # package manifest, publisher trust and admission tests plus their CLI tests
 # with real temporary keys and directories.
 e2e = [
-  "env KANADE_APP_ARTIFACT_PUBLICATION=backend-exclusive cargo test -p kanade-backend -- api::agent_releases api::app_artifacts --ignored",
-  "cargo test -p kanade-shared --lib -- package_manifest publisher_trust package_admission",
-  "cargo test -p kanade --test app_manifest_cli --test app_trust_cli",
+  "python3 scripts/ci/magi-e2e.py",
 ]
 
 [merge]
