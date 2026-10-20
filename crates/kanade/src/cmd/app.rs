@@ -50,6 +50,21 @@ pub enum AppSub {
     /// Offline: print the public trust record (no secret) for a publisher
     /// private key, to be distributed to verifiers out of band.
     PublisherTrust(super::app_manifest::TrustArgs),
+    /// Offline: print the public trust-root record for a trust-root private
+    /// key (hidden prompt / `--secret-stdin`). The root key is distinct from
+    /// every publisher and command-signing key.
+    TrustRootRecord(super::app_trust::SecretArgs),
+    /// Offline: sign a publisher trust-state snapshot (active/revoked keys,
+    /// sequence, expiry) with the trust-root key. Writes nothing live.
+    TrustStateSign(super::app_trust::StateSignArgs),
+    /// Local, explicit administrator step: pin the trust root in the agent's
+    /// trust directory. Refuses to replace a different pinned root.
+    TrustStoreProvision(super::app_trust::ProvisionArgs),
+    /// Local: verify a signed trust state against the pinned root and
+    /// persist it atomically (rejects stale, rollback, unauthenticated).
+    TrustStoreApply(super::app_trust::ApplyArgs),
+    /// Local: show the pinned root, applied state and health (public data only).
+    TrustStoreStatus(super::app_trust::StatusArgs),
     /// Publish an immutable identity-addressed artifact and verify HTTP read-back.
     /// Identity JSON must explicitly declare role/version/os/arch/distro_abi/format.
     /// Integrity checking does not establish publisher trust or deploy readiness.
@@ -96,7 +111,14 @@ impl AppSub {
     pub fn is_offline(&self) -> bool {
         matches!(
             self,
-            Self::SignArtifact(_) | Self::VerifyArtifact(_) | Self::PublisherTrust(_)
+            Self::SignArtifact(_)
+                | Self::VerifyArtifact(_)
+                | Self::PublisherTrust(_)
+                | Self::TrustRootRecord(_)
+                | Self::TrustStateSign(_)
+                | Self::TrustStoreProvision(_)
+                | Self::TrustStoreApply(_)
+                | Self::TrustStoreStatus(_)
         )
     }
 }
@@ -107,6 +129,11 @@ pub async fn execute(backend_url: &str, args: AppArgs) -> Result<()> {
         AppSub::SignArtifact(a) => super::app_manifest::sign(a),
         AppSub::VerifyArtifact(a) => super::app_manifest::verify(a),
         AppSub::PublisherTrust(a) => super::app_manifest::publisher_trust(a),
+        AppSub::TrustRootRecord(a) => super::app_trust::root_record(a),
+        AppSub::TrustStateSign(a) => super::app_trust::state_sign(a),
+        AppSub::TrustStoreProvision(a) => super::app_trust::provision(a),
+        AppSub::TrustStoreApply(a) => super::app_trust::apply(a),
+        AppSub::TrustStoreStatus(a) => super::app_trust::status(a),
         AppSub::PublishArtifact { identity, binary } => {
             publish_artifact(base, identity, binary).await
         }

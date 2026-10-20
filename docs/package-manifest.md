@@ -85,60 +85,150 @@ trust record の export は署名側で行い、検証側には独立した認�
 `--min-os-version` の欠落は 2、null や改ざん manifest の検証は 1。
 成功表示 `OFFLINE VERIFIED (signature + integrity only)` は限定された結果を表す。
 
-## 実装境界と残る判断
+## Stage 2b: 管理された publisher 信頼と admission
 
-管理された publisher 信頼配布、rotation・失効・鮮度、Agent の実検証は Stage 2b。
-Stage 1b の immutable API、metadata、atomicity、旧 publish・agent rollout は変更しない。
-署名付き publication は未統合。署名 metadata を artifact と同じ不可分な公開点で
-確定し、冪等／衝突比較にも含める限定的な統合が必要である。可変 sidecar の追加や
-確定済み unsigned record の書換えでは代用できない。既存 unsigned record の移行と
-鍵 rotation 時の再署名の不変性、OS ごとの最低版の意味、package ID／capability
-registry、初回鍵の生成・保管方法は明示的な判断が必要。
+実装は `kanade_shared::publisher_trust`（信頼状態・永続化）と
+`kanade_shared::package_admission`（admission）。manifest 契約は変更しない。
 
-## 検証記録
+### 信頼モデル
 
-launcher の取得済み base は `07c7a7260fd1470b6a56b1749d46fdda8556ef3d`。
-今回の変更は既存実装 `51eda3e2` に追加した。tracked `magi.toml` は存在しない。
-`.github/workflows/ci.yml` は全 target の check・test・clippy・locked check、
-rustfmt、editorconfig と coverage を実行する。ローカル集約は `cargo make check`。
-全 suite・review loop・最終 gate と修正後の再実行は親 run の責任であり、この
-作業で実行した focused test を最終 gate の成功とは扱わない。
+1. 管理者が trust root（専用の Ed25519 公開鍵、`purpose =
+   kanade-package-trust-root-v1`）を `trust-store-provision` で各ホストに pin する。
+   これだけが信頼の起点で、NATS・Object Store・package・manifest の鍵から
+   初回信頼（first-use）することはない。`apply` は root を変更せず、異なる root の
+   provision は `RootAlreadyPinned` で拒否する（同一 root の再実行は冪等）。
+   root が無いホストは何も受理しない。
+2. root 鍵の保持者が trust state を署名する。署名 bytes は
+   ASCII `kanade/package-trust-state/ed25519/v1`＋NUL＋固定順 compact JSON。
+   manifest の domain と異なるので相互に流用できない。root 鍵・publisher 鍵・
+   command 署名鍵は別権限。root 鍵を publisher として列挙する state は拒否する。
+3. Agent は state を pin 済み root でのみ検証し、manifest の `key_id` で
+   管理下の鍵を選び、既存の `verify_offline` で manifest を検証する。
 
-今回の実行結果（2026-10-20）:
+### trust state（`state_version` 1.0）
+
+```json
+{"state_version":"1.0","trust_set_id":"fleet","sequence":3,"issued_at":1800000000,"not_after":1802592000,"root_key_id":"ed25519:…","publishers":[{"key_id":"ed25519:…","public_key":"<base64>","not_before":1799990000,"not_after":1801000000}],"revoked":["ed25519:…"],"signature":"<base64>"}
+```
+
+時刻は unix 秒。`publishers` と `revoked` は `key_id` の厳密昇順（重複不可）、
+`publishers` は最大 16、`revoked` は最大 256。`key_id` は公開鍵から再計算して照合する。
+`not_after − issued_at` は最大 90 日。`sequence` は 1 以上。空白・順序・escape の
+別表記、未知／重複 field は拒否する。
+
+更新規則（永続化の前に検査）:
+
+* `trust_set_id` は保存済みと同一。`sequence` が大きいときだけ前進する。
+  同一 sequence・同一 bytes は冪等な no-op、低い sequence は rollback、
+  同一 sequence で内容が異なれば conflict。`issued_at` は後退不可。
+* revoked は累積。後継 state は先行 state の revoked をすべて含む。
+  失効した鍵の復活は不可（新しい鍵へ rotation する）。
+* rotation: 新旧鍵の期間を重ねた state を配り、全ホストへ反映した後に
+  旧鍵を revoked に入れた state を配る。
+* 既に `not_after` を過ぎた state、未来（許容 5 分超）に発行された state は適用不可。
+
+admission 時の publisher 認可は、state が未失効の `not_after` 前であり、鍵が
+active・非失効・自身の `[not_before, not_after)` 内であること。
+
+### 永続化と時計の不確実性
+
+trust directory（既定 `<data_dir>/package-trust`）に `root.json` と
+`state.json` を置く。`state.json` は署名済み state と時刻 high-water を持つ
+1 レコードで、private な一時ファイル→fsync→rename→ディレクトリ fsync により
+原子的に置換する（クラッシュ時は旧／新のどちらか、残った一時ファイルは無視）。
+保存アダプターは Unix のみ対応。作成時は 0700/0600。読込時に symlink・group/other
+アクセスを拒否する。Unix では実行ユーザー所有・通常ファイル・リンク数1を確認し、
+`O_NOFOLLOW` で開いた descriptor の属性も検査する。trust directory は
+相対成分・symlink を含まない絶対パスを指定する。祖先は root または実行ユーザー
+所有とし、他者が書ける祖先は sticky bit が必要。macOS では保存先・祖先の
+extended ACL も拒否する。Unix の root pin・state 適用・high-water 更新は
+同じ `write.lock` の `flock` でプロセス間も直列化する（このファイルは削除しない）。
+Windows を含む非 Unix では、owner／DACL／祖先の保護・プロセス間排他・耐久性のある
+原子的置換を保証できる保存アダプターが未実装のため、provision はディレクトリ作成前に
+拒否する。既存の root/state があっても読込・適用・admission を `Broken` で拒否し、
+status は `broken` を返す。未設定時は `no-root` のまま、既存の Agent 動作は維持する。
+手動 ACL 設定や管理操作の直列実行でこの制限を解除することはできない。
+各操作で毎回読み直し、pin 済み root で再検証するため、
+失効は再起動なしで反映される。破損・改ざん・別 root 署名のレコードは
+`Broken` として fail closed し、初期状態へ黙って戻さない。復旧は管理者が
+調査して明示的に行う（root が必要な場合は provision をやり直す）。
+
+admission は以下で拒否する（既存の Agent 動作には影響しない）:
+wall clock が high-water より 5 分超遅れる、monotonic clock との乖離が 5 分超、
+high-water（1 時間以上進んだとき永続化）を保存できない、state の期限切れ。
+再起動直後は monotonic 基準が新しいため、永続 high-water が時計後退の検出を担う。
+時計を正しい値へ戻すか、新しい state を適用すれば再開する。
+
+保証しない範囲: 管理者／root 権限者による trust directory 全体の巻戻し
+（sequence と high-water も一緒に戻る）、時計と files の同時改変、manifest 自体の鮮度
+（manifest は署名時刻を
+持たない。古い版への巻戻しは呼び出し側が期待する identity／version で防ぎ、鍵の
+危殆化は失効で止める）。
+
+### admission API
+
+`admit_package(store, AdmissionRequest)` は次をすべて要求する: 外部指定の
+digest／size と artifact bytes の一致、現在有効な publisher 認可、
+外部指定の完全な `ArtifactIdentity` に対する `verify_offline`、期待 `package_id`、
+`CompatibilityPolicy`（platform、数値比較の OS 下限、必要 capability）。
+結果の `AdmittedPackage` は identity・artifact digest・検証した manifest bytes の
+SHA-256・trust sequence に束縛された証拠で、
+`OfflineVerified` から作れず、install 権限ではない。typed handler は自前の特権確認を
+別途行う。
+
+### 管理 CLI（ローカル専用、`kanade app`）
+
+| コマンド | 役割 |
+| --- | --- |
+| `trust-root-record` | root 秘密鍵（非表示 prompt／`--secret-stdin`）から公開 root record を出力 |
+| `trust-state-sign --draft --out` | draft（`trust_set_id`・`sequence`・時刻・publishers・revoked）を root 鍵で署名。既存ファイルは上書きしない |
+| `trust-store-provision --root-record [--dir]` | 管理者が root を pin する明示操作 |
+| `trust-store-apply --state [--dir]` | pin 済み root で検証し、規則を満たす場合のみ原子的に保存 |
+| `trust-store-status [--dir]` | root／state／健全性（`ok`・`no-root`・`no-state`・`expired`・`clock-uncertain`・`broken`）を公開識別子と時刻のみで表示 |
+
+秘密鍵は argv・環境変数・job・ログに出さない。live key は自動変更しない。
+
+運用手順（管理者）: ① root 鍵を publisher 鍵・command 署名鍵とは別に生成・保管し
+`trust-root-record` で公開 record を得る。② 認証された独立経路で各ホストへ渡し、
+key_id を確認して `trust-store-provision`。③ publisher の `publisher-trust` 出力から
+draft を作り `trust-state-sign`、各ホストで `trust-store-apply`。④ 期限前に
+sequence を上げた state を再署名・適用。⑤ rotation／失効は上記規則に従う。
+
+### 実装境界と残る判断
+
+* **配送は blocked**: 既存の管理経路（command 鍵 provisioning と NATS KV）には、
+  pin 済み root とは独立に認証された trust state の配送口が無い。本変更は暗黙の
+  bootstrap を作らず、ローカルの provision／apply／status と検証境界のみを実装した。
+  state は root 署名自体で認証されるため将来 NATS 等で運んでも信頼は増減しないが、
+  Agent 常駐処理への組込み・自動 apply・heartbeat 報告は別タスク。
+* 特権配備、typed command 配送、job 実行、install／update、Agent self-update、
+  CI 署名秘密、app artifact の publication は変更しない。既存の artifact
+  publication は既定無効のまま。
+* 署名付き publication は未統合。署名 metadata を artifact と同じ不可分な公開点で
+  確定し、冪等／衝突比較にも含める限定的な統合が必要である。可変 sidecar の追加や
+  確定済み unsigned record の書換えでは代用できない。既存 unsigned record の移行と
+  鍵 rotation 時の再署名の不変性、OS ごとの最低版の意味、package ID／capability
+  registry、初回鍵の生成・保管方法は明示的な判断が必要。
+
+## 検証記録（Stage 2b）
+
+launcher が固定した base は `dc437d63618bdafc74e40ccb9680e1e7fac1a2ae`。
+repo-owned の `magi.toml` を追加し、`verify.gate` を `.github/workflows/ci.yml` の
+check・test（`--all-targets` と `--doc`）・rustfmt・clippy・locked check と一致させた
+（editorconfig と coverage は CI 側の専用ツールのため含めない）。`verify.e2e` は
+本機能の focused テストを実行する。NATS を要する `integration.yml` の `--ignored`
+テストは opt-in のままでここには含めない。kata 管理の workflow は変更していない。
+
+この作業で実行した focused コマンド（すべて実テスト実行。コンパイルのみではない）:
 
 | コマンド | 結果 |
 | --- | --- |
-| `cargo test --offline -p kanade-shared --lib package_manifest::tests` | 18 件成功（golden bytes、乱数鍵、弱い鍵、null／欠落の拒否を含む） |
-| `cargo test --offline --locked -p kanade --test app_manifest_cli` | 6 件成功（乱数鍵、誤鍵、改ざん、弱い鍵、終了コード） |
-| `cargo test --offline --locked -p kanade-shared --lib artifact::tests` | 既存 9 件成功 |
+| `cargo test --offline -p kanade-shared --lib -- publisher_trust package_admission package_manifest` | 43 件成功（trust 17、admission 8、manifest 18） |
+| `cargo test --offline --locked -p kanade-shared --lib` | 733 件成功、6 件 ignored（既存） |
+| `cargo test --offline -p kanade --test app_trust_cli --test app_manifest_cli` | 2 件＋6 件成功 |
+| `cargo test --offline --locked -p kanade --bin kanade` | 145 件成功 |
 | `cargo clippy --offline --locked -p kanade-shared -p kanade --all-targets -- -D warnings` | 成功 |
-| `CARGO_NET_OFFLINE=true cargo make notices` | 成功、生成ファイルの差分なし |
-| 変更した Rust 3 ファイルへの `rustfmt --edition 2024 --check`、`git diff --check` | 成功 |
 
-macOS の SDK／linker は sandbox 内の一時ディレクトリ照会に関する警告を出したが、
-上記テストは実際に実行され成功した。最初の shared テストは追加 dev dependency の
-既存 lockfile への反映を伴い、その後は `--locked` を使用した。
-backend は bin crate であり、最初の `--lib` 指定はテストを実行せず失敗したため、
-`--bin kanade-backend` に修正した。
-
-`cargo test --offline --locked -p kanade-backend --bin kanade-backend api::app_artifacts::tests`
-はテスト binary の link 時に exit 101 で失敗した。
-`clang: error: unable to make temporary file: Operation not permitted` のため
-API テスト本体は未実行であり、回帰テスト成功とは扱わない。backend のビルドは
-空の `web/dist` に placeholder を生成したため、実 SPA の検証も含まない。
-launcher の一時ファイル作成を許可された環境への修復が必要で、同じ環境での
-再試行や権限変更・sandbox 回避は行っていない。
-
-参考として、移植元の既存記録では非ネットワーク app-artifacts 9 件が成功し、
-次の明示的な broker 統合テストは `api/agent_releases.rs` の fixture の
-`pick port` assertion で起動前に失敗していた（成功 0・失敗 1）。
-
-```sh
-cargo test --offline --locked -p kanade-backend \
-  api::app_artifacts::tests::platforms_formats_and_standard_object_store_reads_are_isolated \
-  -- --ignored
-```
-
-これは過去の実測であり、今回の再実行結果ではない。今回は link の段階で
-阻害されたため統合テストも未実行。実行環境の修復時には一時ファイル作成に加え、
-使い捨て broker 用のローカルポート確保も必要になる。最終 gate は親 run が担う。
+socket／sandbox の阻害はこれらの実行では発生しなかった（テストは実 socket を使わない）。
+全 suite・review loop・最終 gate と修正後の再実行は親 run の責任であり、上記を
+最終 gate の成功とは扱わない。

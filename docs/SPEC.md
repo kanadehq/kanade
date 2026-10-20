@@ -2804,6 +2804,13 @@ SemVer 構文検証は `semver` クレートを使用する。`ArtifactError` �
    - PE ヘッダを持たない非 Windows 成果物がレガシーキーに存在する場合はエラーとし、推測による上書きや他 OS への配信を行わない。
 
 #### 2.13.4.3 署名付きマニフェスト (`package.manifest.json`)
+
+stage 2b の publisher trust 永続化は Unix のみ対応する。Windows を含む非 Unix は
+owner／DACL／祖先の保護・プロセス間排他・耐久性のある原子的置換の実装待ちであり、
+root provisioning は保存先作成前に拒否し、既存 trust の読込・state 更新・新規 package
+admission も fail closed とする。手動 ACL 設定や管理操作の直列化では有効化できない。
+未設定の Agent の既存処理は継続する。詳細と管理手順は `docs/package-manifest.md`。
+
 成果物の配布時には、バイナリ本体と対になる署名付きメタデータマニフェストを Object Store に併せて格納する。
 
 ```json
@@ -2837,7 +2844,15 @@ SemVer 構文検証は `semver` クレートを使用する。`ArtifactError` �
   - **鍵と権限の分離**: publisher 鍵は command 署名鍵（`signing`）と別権限。`Signer` / `KeyRing` は使わず、domain prefix で署名 bytes を分離する。ただし同一秘密鍵を両用途に使い回すこと自体は暗号的に検出できないため、用途別の鍵を運用で分けること。`key_id` は `ed25519:` + 公開鍵 32 byte に domain prefix を付けた SHA-256 全体の lowercase hex（上例の `ed25519:kanade-rel-2026` は例示で、v1 の `key_id` ではない）。
   - **信頼入力**: 検証は manifest / package に埋め込まれた鍵を使わず、独立に取得した trust record（`purpose = kanade-package-publisher-key-v1`、`algorithm`、`key_id`、base64 公開鍵。厳密 parse で弱い公開鍵を拒否し `key_id` を再計算照合）のみを信頼する。検証者は期待する完全な `ArtifactIdentity` も別入力として渡し、正しく署名された別 role / version / platform の manifest への差替えを拒否する。
   - **CLI**: すべてローカル完結（backend / NATS / Object Store 不使用、自動更新確認も抑止）。秘密鍵（32 byte seed の padded base64）は非表示 prompt か明示的な `--secret-stdin` のみ。argv・環境変数は不可、manifest・trust record・出力・エラーに出さない。ファイルから stdin に流す場合はその鍵ファイルを所有者のみ（mode 0600 / owner-only ACL）にし、共有・同期領域に置かない。`sign-artifact --out` は既存ファイルを上書きしない。`--min-os-version <v>` が必須。終了コード: 成功 0、操作・検証失敗 1、clap 引数不備 2。
-  - **意味の限界**: 成功出力は `OFFLINE VERIFIED (signature + integrity only)` であり、現在の publisher 認可・鮮度・失効は **未確認**。`OfflineVerified` に deploy-ready / privileged install への変換は無く、このコマンドの結果だけで配備や特権導入を許可してはならない。鍵の生成・配布・rotation・失効・freshness、Agent 側検証、managed trust は Stage 2b。
+  - **意味の限界**: 成功出力は `OFFLINE VERIFIED (signature + integrity only)` であり、現在の publisher 認可・鮮度・失効は **未確認**。`OfflineVerified` に deploy-ready / privileged install への変換は無く、このコマンドの結果だけで配備や特権導入を許可してはならない。managed trust・rotation・失効・freshness と Agent 側 admission 検証は下の Stage 2b。
+  - **Stage 2b: 管理された publisher 信頼と admission 検証（実装済み・配送は blocked）**: 詳細は [package-manifest.md](package-manifest.md)。
+    - **信頼の起点**: 管理者が明示的に pin する専用 trust root 公開鍵（`purpose = kanade-package-trust-root-v1`、`trust-store-provision`）のみ。NATS・store・package・manifest から first-use で学習せず、`apply` は root を変更せず、異なる root での再 provision は拒否する。root 鍵は publisher 鍵・command 署名鍵と別権限で、署名 domain も別（`kanade/package-trust-state/ed25519/v1\0`）。state が root 鍵を publisher として列挙すれば拒否する。
+    - **trust state v1**: `trust_set_id`、単調増加 `sequence`、`issued_at`/`not_after`（unix 秒、有効期間は最大 90 日）、期間付き active publisher、累積 revoked key id。固定順 compact JSON を root が署名（`TrustedPublisherKey` と `verify_strict` を再利用）。未知／重複 field、重複鍵、active と revoked の衝突、不正期間は拒否。同一 sequence の同一内容のみ冪等、低 sequence は rollback、同 sequence 別内容と失効の取消しは conflict。rotation は active 期間を重ねた state の後に旧鍵を恒久失効させる。
+    - **永続化**: 署名検証と後継規則の確認後にのみ、private な一時ファイル→fsync→rename→dir fsync で `state.json`（署名済み state と時刻 high-water を 1 レコード）を置換する。毎回再読込・再検証し、破損・改ざん・権限過大・symlink は `Broken` で fail closed（初期状態へ自動復旧しない）。
+    - **admission**: `package_admission::admit_package` は外部指定の完全な `ArtifactIdentity`・digest/size・package_id・互換性 policy（platform、数値の OS 下限、capability）と、現在有効な publisher 認可（鮮度・active・非失効・期間内・時計確実）をすべて要求する。結果 `AdmittedPackage` は identity・digest・trust sequence に束縛された証拠で、`OfflineVerified` からは作れず、install 権限ではない。trust 未設定の Agent でも既存動作は不変で、新規 package admission のみが拒否される。
+    - **時計と再起動**: wall clock が永続 high-water より 5 分超遅い、monotonic との乖離が 5 分超、high-water を保存できない場合は admission を拒否。state が `not_after` を過ぎても同様。管理者によるディスク全体の巻戻しは防げない。
+    - **管理 CLI**（すべてローカル、秘密は非表示 prompt／`--secret-stdin`）: `trust-root-record`、`trust-state-sign`、`trust-store-provision`、`trust-store-apply`、`trust-store-status`（公開識別子・時刻・健全性のみ出力）。live key は自動変更しない。
+    - **未実装（blocked）**: 既存の管理配送（command 鍵 provisioning／NATS KV）に、root とは独立に認証された trust state の配送口は無く、本 Stage は配送を接続しない。state は root 署名自体で認証されるため将来任意経路で運べるが、Agent 常駐処理への組込み、型付き handler 接続、署名付き publication 統合は別タスク。
   - **署名付き publication は未統合**: Stage 1b の `/api/app-artifacts` は署名 manifest を保存・返却しない。署名を確定 metadata と冪等比較へ原子的に結合する（manifest を ObjectInfo と同じ expected-last-subject-sequence=0 の commit に含める、または別 object なら公開順序と競合を設計する）統合は、Stage 1b の metadata / atomicity を変更しない別の限定タスクとして残す。可変な署名 metadata は許容しない。
   - **未決事項（製品判断）**: (1) `min_os_version` の identity 別の意味と互換性判定方針。(2) `package_id` の正規 registry と role / identity との対応。(3) capability 名の registry と上限。(4) 初回 publisher 鍵の生成・保管手段（本 Stage は生成コマンドを持たない）。
 - **ハッシュ単体認証の禁止**: 単なる SHA-256 ハッシュの一致は完全性（破損していないこと）を証明するに過ぎず、発行元（Publisher）の正当性を証明しない。マニフェストには信頼された発行元鍵による電子署名を付与し、Agent は実行前に署名を検証する。
@@ -3259,7 +3274,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
   - 新 identity API の不変性、旧 API 上書き動作の並存、CI producer 移行と alias snapshot の実装
 - [ ] **Task 2: 署名付きマニフェスト生成と Publisher 検証 (Shared / CLI / Agent)**
   - [x] Stage 2a: `package.manifest.json` のスキーマ定義、決定的署名 bytes、`kanade app sign-artifact` / `verify-artifact` / `publisher-trust` のオフライン実装（§2.13.4.3。managed trust・Agent 検証・署名付き publication 統合は未実装）
-  - ed25519 署名生成、既存管理経路での用途別 publisher 鍵配布・rotation・失効・freshness と Agent 検証の実装
+  - [x] Stage 2b: 管理者 pin の trust root、署名付き trust state（active/revoked/rotation/freshness/anti-rollback）、原子的永続化、Agent 側 admission 検証（§2.13.4.3）。管理配送の統合、typed handler 接続、署名付き publication は未実装
 - [ ] **Task 3: Command Wire Protocol 拡張 & Typed Native Operations 定義 (Shared)**
   - `Command` struct への `command_kind` および `TypedOperation` フィールド追加
   - Manifest.execute の互換 union・CLI/API/read validation・typed source resolver 分岐・Command 変換を実装（Task 4 の gate 接続前に定義）。既存署名 v2 envelope 必須化と ledger/outbox 接続、旧 Agent の v2 拒否を検証

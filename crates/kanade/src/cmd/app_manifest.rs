@@ -76,7 +76,7 @@ pub struct TrustArgs {
     pub secret_stdin: bool,
 }
 
-fn read_small(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn read_small(path: &Path) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     std::fs::File::open(path)
         .with_context(|| format!("open {}", path.display()))?
@@ -118,7 +118,7 @@ fn measure(path: &Path) -> Result<ArtifactIntegrity> {
     })
 }
 
-fn read_signing_key(from_stdin: bool) -> Result<PublisherSigningKey> {
+pub(super) fn read_signing_key(from_stdin: bool) -> Result<PublisherSigningKey> {
     let mut secret =
         super::login::read_password("Publisher private key (input hidden): ", from_stdin)?
             .into_bytes();
