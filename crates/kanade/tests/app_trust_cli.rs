@@ -62,7 +62,13 @@ impl Fx {
         }
     }
     fn p(&self, name: &str) -> String {
-        self.dir.path().join(name).to_string_lossy().into_owned()
+        self.dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
     }
     fn store(&self) -> String {
         self.p("store")

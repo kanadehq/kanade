@@ -17,9 +17,9 @@
 //! 5. the host satisfies the signed compatibility claims: platform, numeric
 //!    minimum OS version, and required agent capabilities.
 //!
-//! The result, [`AdmittedPackage`], is evidence bound to that identity, digest
-//! and trust sequence. It is **not** an install authorisation: nothing here
-//! installs, stages or executes anything, and typed handlers still need their
+//! The result, [`AdmittedPackage`], is evidence bound to that identity, artifact
+//! and manifest digests, and trust sequence. It is **not** an install
+//! authorisation: nothing here installs, stages or executes anything, and typed handlers still need their
 //! own privilege checks. It cannot be built from [`OfflineVerified`]
 //! (signature + integrity only) or from any other type.
 //!
@@ -27,6 +27,8 @@
 //! rollback to an older signed package is prevented by the caller's expected
 //! identity (including version), and a compromised publisher key is cut off by
 //! revocation in the trust state, not by anything in the manifest.
+
+use sha2::{Digest, Sha256};
 
 use crate::artifact::{ArtifactIdentity, ArtifactIntegrity, TargetArch, TargetOs};
 use crate::package_manifest::{
@@ -120,17 +122,21 @@ pub struct AdmissionRequest<'a> {
     pub policy: &'a CompatibilityPolicy,
 }
 
-/// Evidence that one exact artifact passed admission under one trust
-/// sequence. No public constructor; not an install authorisation.
+/// Evidence binding one exact artifact and manifest to one trust sequence. No public constructor; not an install authorisation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedPackage {
     claims: ManifestClaims,
     publisher: PublisherKeyId,
     trust_set_id: String,
     trust_sequence: u64,
+    manifest_sha256: [u8; 32],
 }
 
 impl AdmittedPackage {
+    /// SHA-256 of the exact manifest bytes checked during admission.
+    pub fn manifest_sha256(&self) -> &[u8; 32] {
+        &self.manifest_sha256
+    }
     pub fn claims(&self) -> &ManifestClaims {
         &self.claims
     }
@@ -178,6 +184,7 @@ pub fn admit_package(
     }
     req.policy.check(ok.claims())?;
     Ok(AdmittedPackage {
+        manifest_sha256: Sha256::digest(req.manifest_bytes).into(),
         claims: ok.claims().clone(),
         publisher: ok.key_id().clone(),
         trust_set_id: authorized.trust_set_id().to_owned(),
@@ -266,7 +273,7 @@ mod tests {
             let root = key();
             let publisher = key();
             let store = PublisherTrustStore::open(
-                dir.path().join("trust"),
+                dir.path().canonicalize().unwrap().join("trust"),
                 Arc::new(Clock(AtomicU64::new(T0))),
             );
             store
@@ -330,6 +337,18 @@ mod tests {
         let a = env
             .admit(&m, BYTES, &id, &policy("14.2.1", &["a_cap", "z"]))
             .unwrap();
+        assert_eq!(a.manifest_sha256(), &<[u8; 32]>::from(Sha256::digest(&m)));
+        let without_newline = m.strip_suffix(b"\n").unwrap();
+        let other = env
+            .admit(
+                without_newline,
+                BYTES,
+                &id,
+                &policy("14.2.1", &["a_cap", "z"]),
+            )
+            .unwrap();
+        assert_eq!(a.claims(), other.claims());
+        assert_ne!(a.manifest_sha256(), other.manifest_sha256());
         assert_eq!(a.identity(), &id);
         assert_eq!(a.trust_sequence(), 1);
         assert_eq!(a.publisher(), env.publisher.trusted_key().key_id());

@@ -137,7 +137,13 @@ trust directory（既定 `<data_dir>/package-trust`）に `root.json` と
 1 レコードで、private な一時ファイル→fsync→rename→ディレクトリ fsync により
 原子的に置換する（クラッシュ時は旧／新のどちらか、残った一時ファイルは無視）。
 作成時は Unix で 0700/0600。読込時に symlink・reparse point・group/other
-アクセスを拒否する。各操作で毎回読み直し、pin 済み root で再検証するため、
+アクセスを拒否する。Unix では実行ユーザー所有・通常ファイル・リンク数1を確認し、
+`O_NOFOLLOW` で開いた descriptor の属性も検査する。trust directory は
+相対成分・symlink を含まない絶対パスを指定する。祖先は root または実行ユーザー
+所有とし、他者が書ける祖先は sticky bit が必要。macOS では保存先・祖先の
+extended ACL も拒否する。Unix の root pin・state 適用・high-water 更新は
+同じ `write.lock` の `flock` でプロセス間も直列化する（このファイルは削除しない）。
+各操作で毎回読み直し、pin 済み root で再検証するため、
 失効は再起動なしで反映される。破損・改ざん・別 root 署名のレコードは
 `Broken` として fail closed し、初期状態へ黙って戻さない。復旧は管理者が
 調査して明示的に行う（root が必要な場合は provision をやり直す）。
@@ -149,8 +155,9 @@ high-water（1 時間以上進んだとき永続化）を保存できない、st
 時計を正しい値へ戻すか、新しい state を適用すれば再開する。
 
 保証しない範囲: 管理者／root 権限者による trust directory 全体の巻戻し
-（sequence と high-water も一緒に戻る）、時計と files の同時改変、複数の
-管理操作の同時実行（直列化すること）、manifest 自体の鮮度（manifest は署名時刻を
+（sequence と high-water も一緒に戻る）、時計と files の同時改変、Unix 以外での
+複数プロセスによる管理操作の同時実行（直列化すること）、manifest 自体の鮮度
+（manifest は署名時刻を
 持たない。古い版への巻戻しは呼び出し側が期待する identity／version で防ぎ、鍵の
 危殆化は失効で止める）。
 
@@ -160,7 +167,8 @@ high-water（1 時間以上進んだとき永続化）を保存できない、st
 digest／size と artifact bytes の一致、現在有効な publisher 認可、
 外部指定の完全な `ArtifactIdentity` に対する `verify_offline`、期待 `package_id`、
 `CompatibilityPolicy`（platform、数値比較の OS 下限、必要 capability）。
-結果の `AdmittedPackage` は identity・digest・trust sequence に束縛された証拠で、
+結果の `AdmittedPackage` は identity・artifact digest・検証した manifest bytes の
+SHA-256・trust sequence に束縛された証拠で、
 `OfflineVerified` から作れず、install 権限ではない。typed handler は自前の特権確認を
 別途行う。
 

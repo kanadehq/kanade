@@ -719,7 +719,7 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 thread_local! {
-    static CRASH_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static INTERRUPT_STORAGE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
 /// Directory-backed managed publisher trust. Holds no secrets; every call
@@ -779,6 +779,7 @@ impl PublisherTrustStore {
         let root = TrustRoot::from_root_json(root_json)?;
         let _g = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         ensure_private_dir(&self.dir)?;
+        let _process_lock = lock_directory(&self.dir)?;
         let path = self.dir.join(ROOT_FILE);
         if path.exists() {
             let existing = self.load_root()?;
@@ -840,6 +841,9 @@ impl PublisherTrustStore {
     /// Nothing is written unless every check passes.
     pub fn apply(&self, state_bytes: &[u8]) -> Result<ApplyOutcome, TrustError> {
         let _g = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Preserve the unconfigured-store error without creating storage.
+        self.load_root()?;
+        let _process_lock = lock_directory(&self.dir)?;
         let root = self.load_root()?;
         let new = verify_trust_state(state_bytes, &root)?;
         let current = self.load(&root)?;
@@ -867,6 +871,7 @@ impl PublisherTrustStore {
         let now = self.checked_now(loaded.high_water)?;
         if now >= loaded.high_water.saturating_add(HIGH_WATER_PERSIST_SECS) {
             let _g = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let _process_lock = lock_directory(&self.dir)?;
             // Re-read under the lock so a concurrent apply is not clobbered.
             let again = self.load(&root)?.ok_or(TrustError::NoState)?;
             if now > again.high_water {
@@ -949,6 +954,165 @@ impl PublisherTrustStore {
 
 // ------------------------------------------------------- private storage
 
+// Linux POSIX ACL effective permissions are bounded by the group mode mask.
+#[cfg(not(target_os = "macos"))]
+fn no_extended_acl(_: &Path) -> Result<(), TrustError> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn no_extended_acl(path: &Path) -> Result<(), TrustError> {
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn acl_get_file(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
+        fn acl_get_entry(
+            acl: *mut libc::c_void,
+            entry_id: libc::c_int,
+            entry: *mut *mut libc::c_void,
+        ) -> libc::c_int;
+        fn acl_free(object: *mut libc::c_void) -> libc::c_int;
+    }
+    let path =
+        std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|e| storage("ACL path", e))?;
+    // SAFETY: NUL-terminated path, platform ACL_TYPE_EXTENDED; owned ACL freed below.
+    let acl = unsafe { acl_get_file(path.as_ptr(), 0x100) };
+    if acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        // Darwin filesec reports ENOENT when an existing inode has no ACL property.
+        if error.raw_os_error() == Some(libc::ENOENT)
+            && std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(path.to_bytes())).is_ok()
+        {
+            return Ok(());
+        }
+        return Err(storage("inspect ACL", error));
+    }
+    let mut entry = std::ptr::null_mut();
+    // SAFETY: valid ACL, ACL_FIRST_ENTRY and writable entry pointer.
+    let count = unsafe { acl_get_entry(acl, 0, &mut entry) };
+    let entry_error = std::io::Error::last_os_error();
+    // SAFETY: ACL returned by acl_get_file, no references survive.
+    unsafe {
+        acl_free(acl);
+    }
+    // macOS returns 0 for a found entry, -1 + EINVAL for no entry.
+    if count == 0 {
+        return Err(TrustError::Broken(
+            "publisher trust storage must have no extended ACL".into(),
+        ));
+    }
+    if entry_error.raw_os_error() != Some(libc::EINVAL) {
+        return Err(TrustError::Broken(
+            "cannot inspect publisher trust storage ACL".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn storage_checkpoint(stage: u8) -> Result<(), TrustError> {
+    #[cfg(test)]
+    if INTERRUPT_STORAGE.with(|c| c.get() == stage) {
+        return Err(TrustError::Storage(format!(
+            "simulated storage interruption at stage {stage}"
+        )));
+    }
+    let _ = stage;
+    Ok(())
+}
+
+fn check_private_metadata(md: &std::fs::Metadata, dir: bool) -> Result<(), TrustError> {
+    if (dir && !md.is_dir()) || (!dir && !md.is_file()) {
+        return Err(TrustError::Broken("wrong storage file type".into()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        if md.uid() != uid || md.mode() & 0o077 != 0 || (!dir && md.nlink() != 1) {
+            return Err(TrustError::Broken(
+                "trust storage requires private, owned, singly linked files".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_trust_directory(dir: &Path) -> Result<(), TrustError> {
+    check_private(dir, true)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !dir.is_absolute()
+            || dir.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(TrustError::Broken(
+                "trust directory must be absolute without relative components".into(),
+            ));
+        }
+        // SAFETY: geteuid has no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        for parent in dir.ancestors().skip(1) {
+            no_extended_acl(parent)?;
+            let md = std::fs::symlink_metadata(parent).map_err(|e| storage("stat ancestor", e))?;
+            // Sticky shared directories protect owned children against replacement.
+            if !md.is_dir()
+                || md.file_type().is_symlink()
+                || (md.uid() != 0 && md.uid() != uid)
+                || (md.mode() & 0o022 != 0 && md.mode() & 0o1000 == 0)
+            {
+                return Err(TrustError::Broken("unsafe trust directory ancestor".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The descriptor owns the advisory lock until drop. All state writers use it,
+/// including admission's high-water update; the existing Mutex covers threads.
+#[cfg(unix)]
+fn lock_directory(dir: &Path) -> Result<std::fs::File, TrustError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    check_trust_directory(dir)?;
+    let path = dir.join("write.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .map_err(|e| storage("open lock", e))?;
+    check_private(&path, false)?;
+    check_private_metadata(
+        &file.metadata().map_err(|e| storage("fstat lock", e))?,
+        false,
+    )?;
+    // SAFETY: file owns a valid descriptor; closing it releases the lock.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(storage(
+            "lock trust directory",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+struct LocalOnlyLock;
+
+#[cfg(not(unix))]
+fn lock_directory(_: &Path) -> Result<LocalOnlyLock, TrustError> {
+    // Preserve the existing non-Unix adapter; Unix hardening uses flock.
+    Ok(LocalOnlyLock)
+}
+
 fn ensure_private_dir(dir: &Path) -> Result<(), TrustError> {
     match std::fs::symlink_metadata(dir) {
         Ok(_) => {}
@@ -964,11 +1128,12 @@ fn ensure_private_dir(dir: &Path) -> Result<(), TrustError> {
         }
         Err(e) => return Err(storage("stat trust dir", e)),
     }
-    check_private(dir, true)
+    check_trust_directory(dir)
 }
 
 /// Reject symlinks / reparse points and (unix) group/world access.
 fn check_private(path: &Path, dir: bool) -> Result<(), TrustError> {
+    no_extended_acl(path)?;
     let md = std::fs::symlink_metadata(path).map_err(|e| storage("stat", e))?;
     if md.file_type().is_symlink() {
         return Err(TrustError::Broken(format!(
@@ -976,22 +1141,7 @@ fn check_private(path: &Path, dir: bool) -> Result<(), TrustError> {
             path.display()
         )));
     }
-    if dir != md.is_dir() {
-        return Err(TrustError::Broken(format!(
-            "{} has the wrong file type",
-            path.display()
-        )));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if md.permissions().mode() & 0o077 != 0 {
-            return Err(TrustError::Broken(format!(
-                "{} is accessible to group/others (require owner-only)",
-                path.display()
-            )));
-        }
-    }
+    check_private_metadata(&md, dir)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -1013,13 +1163,20 @@ fn read_private(path: &Path) -> Result<Option<Vec<u8>>, TrustError> {
         Err(e) => return Err(storage("stat", e)),
     }
     if let Some(parent) = path.parent() {
-        check_private(parent, true)?;
+        check_trust_directory(parent)?;
     }
     check_private(path, false)?;
     let mut buf = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|e| storage("open", e))?
-        .take(MAX_FILE_BYTES + 1)
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = opts.open(path).map_err(|e| storage("open", e))?;
+    check_private_metadata(&file.metadata().map_err(|e| storage("fstat", e))?, false)?;
+    file.take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut buf)
         .map_err(|e| storage("read", e))?;
     if buf.len() as u64 > MAX_FILE_BYTES {
@@ -1042,7 +1199,7 @@ fn write_tmp(tmp: &Path, bytes: &[u8]) -> Result<(), TrustError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let mut f = opts.open(tmp).map_err(|e| storage("create temp file", e))?;
     f.write_all(bytes).and_then(|()| f.sync_all()).map_err(|e| {
@@ -1067,14 +1224,12 @@ fn sync_dir(path: &Path) -> Result<(), TrustError> {
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), TrustError> {
     let tmp = temp_path(path)?;
     write_tmp(&tmp, bytes)?;
-    #[cfg(test)]
-    if CRASH_BEFORE_RENAME.with(|c| c.get()) {
-        return Err(TrustError::Storage("simulated crash before rename".into()));
-    }
+    storage_checkpoint(1)?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         storage("replace file", e)
     })?;
+    storage_checkpoint(2)?;
     sync_dir(path)
 }
 
@@ -1174,7 +1329,7 @@ mod tests {
     impl Env {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("package-trust");
+            let path = dir.path().canonicalize().unwrap().join("package-trust");
             Self {
                 _dir: dir,
                 path,
@@ -1569,9 +1724,9 @@ mod tests {
             vec![entry(&b, T0 - DAY, T0 + 10 * DAY)],
             &[],
         ));
-        CRASH_BEFORE_RENAME.with(|c| c.set(true));
+        INTERRUPT_STORAGE.with(|c| c.set(1));
         assert!(matches!(s.apply(&s2).unwrap_err(), TrustError::Storage(_)));
-        CRASH_BEFORE_RENAME.with(|c| c.set(false));
+        INTERRUPT_STORAGE.with(|c| c.set(0));
         // The orphaned temp file is ignored; the old state is still in force.
         let restarted = env.store();
         restarted.authorize(&kid(&a)).unwrap();
@@ -1581,6 +1736,142 @@ mod tests {
         );
         assert_eq!(restarted.apply(&s2).unwrap(), ApplyOutcome::Advanced);
         restarted.authorize(&kid(&b)).unwrap();
+    }
+
+    #[test]
+    fn interrupted_after_rename_reloads_new_state_and_refuses_rollback() {
+        let env = Env::new();
+        let s = env.provisioned();
+        let a = random_key();
+        let old = env.sign(&claims(1, T0, vec![entry(&a, T0 - DAY, T0 + DAY)], &[]));
+        let new = env.sign(&claims(2, T0 + 1, vec![], &[&a]));
+        s.apply(&old).unwrap();
+        INTERRUPT_STORAGE.with(|c| c.set(2));
+        let result = s.apply(&new);
+        INTERRUPT_STORAGE.with(|c| c.set(0));
+        assert!(matches!(result, Err(TrustError::Storage(_))));
+        // Rename completed but directory fsync did not: an error must never
+        // lead to resetting or ignoring the newer complete record on restart.
+        let restarted = env.store();
+        assert_eq!(
+            restarted.authorize(&kid(&a)).unwrap_err(),
+            TrustError::PublisherRevoked
+        );
+        assert_eq!(restarted.apply(&new).unwrap(), ApplyOutcome::Unchanged);
+        assert!(matches!(
+            restarted.apply(&old),
+            Err(TrustError::Rollback(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_lock_probe() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let Some(path) = std::env::var_os("KANADE_TRUST_LOCK_PROBE") else {
+            return;
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .unwrap();
+        // SAFETY: the probe owns a valid descriptor; this never blocks.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if std::env::var_os("KANADE_TRUST_EXPECT_BLOCKED").is_some() {
+            assert_eq!(result, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EWOULDBLOCK)
+            );
+        } else {
+            assert_eq!(result, 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_lock_excludes_another_process_and_releases_on_drop() {
+        let env = Env::new();
+        env.provisioned();
+        let guard = lock_directory(&env.path).unwrap();
+        let probe = |blocked: bool| {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "publisher_trust::tests::process_lock_probe",
+                    "--nocapture",
+                ])
+                .env("KANADE_TRUST_LOCK_PROBE", env.path.join("write.lock"))
+                .env_remove("KANADE_TRUST_EXPECT_BLOCKED");
+            if blocked {
+                command.env("KANADE_TRUST_EXPECT_BLOCKED", "1");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        };
+        probe(true);
+        drop(guard);
+        probe(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_links_and_unsafe_ancestors_are_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = Env::new();
+        let s = env.provisioned();
+        let extra = env.path.join("root-copy");
+        std::fs::hard_link(env.path.join(ROOT_FILE), &extra).unwrap();
+        assert!(matches!(s.load_root(), Err(TrustError::Broken(_))));
+        std::fs::remove_file(extra).unwrap();
+        let ancestor = env.path.parent().unwrap();
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(s.load_root(), Err(TrustError::Broken(_))));
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        s.load_root().unwrap();
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let linked = ancestor.join("linked-trust");
+        std::os::unix::fs::symlink(&env.path, &linked).unwrap();
+        assert!(matches!(
+            PublisherTrustStore::open_system(linked).load_root(),
+            Err(TrustError::Broken(_))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extended_acls_on_storage_and_ancestors_are_rejected() {
+        let env = Env::new();
+        let s = env.provisioned();
+        for path in [
+            env.path.join(ROOT_FILE),
+            env.path.clone(),
+            env.path.parent().unwrap().to_path_buf(),
+        ] {
+            let status = std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow read"])
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let rejected = s.load_root();
+            let status = std::process::Command::new("/bin/chmod")
+                .args(["-a", "everyone allow read"])
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert!(matches!(rejected, Err(TrustError::Broken(_))));
+            s.load_root().unwrap();
+        }
     }
 
     #[test]
@@ -1684,9 +1975,9 @@ mod tests {
         )))
         .unwrap();
         env.clock.advance(2 * HIGH_WATER_PERSIST_SECS);
-        CRASH_BEFORE_RENAME.with(|c| c.set(true));
+        INTERRUPT_STORAGE.with(|c| c.set(1));
         let err = s.authorize(&kid(&a)).unwrap_err();
-        CRASH_BEFORE_RENAME.with(|c| c.set(false));
+        INTERRUPT_STORAGE.with(|c| c.set(0));
         assert!(matches!(err, TrustError::ClockUncertain(_)), "{err:?}");
         s.authorize(&kid(&a)).unwrap();
     }
