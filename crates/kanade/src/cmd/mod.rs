@@ -2,6 +2,7 @@ pub mod account;
 pub mod agent;
 pub mod app;
 pub mod app_manifest;
+pub mod app_trust;
 pub mod bulk;
 
 /// Recover a version label when VERSIONINFO extraction off a binary

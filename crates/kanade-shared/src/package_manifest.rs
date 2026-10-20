@@ -9,7 +9,8 @@
 //! What it does **not** prove: that the key is currently authorised to
 //! publish, that the manifest is fresh, or that the key is not revoked. Managed
 //! trust distribution, rotation, revocation, freshness and agent-side
-//! verification are stage 2b. [`OfflineVerified`] therefore deliberately has no
+//! verification are stage 2b (`publisher_trust`, `package_admission`).
+//! [`OfflineVerified`] therefore deliberately has no
 //! conversion into any "deployable" or "trusted" state.
 //!
 //! # Key separation
@@ -149,7 +150,7 @@ fn validate_package_id(s: &str) -> Result<(), ManifestError> {
 }
 
 /// 1-4 dot-separated groups of 1-9 ASCII digits (e.g. `14.0`, `24.04`).
-fn validate_min_os_version(s: &str) -> Result<(), ManifestError> {
+pub(crate) fn validate_min_os_version(s: &str) -> Result<(), ManifestError> {
     let parts: Vec<&str> = s.split('.').collect();
     let ok = (1..=4).contains(&parts.len())
         && parts
@@ -236,15 +237,42 @@ impl TrustedPublisherKey {
         &self.key_id
     }
 
+    pub(crate) fn public_key_b64(&self) -> String {
+        STANDARD.encode(self.key.as_bytes())
+    }
+
+    /// Canonical padded base64 of a 32-byte, non-weak, valid public key.
+    pub(crate) fn from_public_key_b64(s: &str) -> Result<Self, ManifestError> {
+        let t = |m: &str| ManifestError::Trust(m.to_owned());
+        let raw = decode_b64_exact::<32>(s).ok_or_else(|| t("public_key"))?;
+        let key =
+            VerifyingKey::from_bytes(&raw).map_err(|_| t("public_key is not a valid point"))?;
+        Self::from_verifying_key(key)
+    }
+
+    /// Strict Ed25519 verification of `msg` (callers add their own domain).
+    pub(crate) fn verify_strict_bytes(&self, msg: &[u8], sig: &[u8; 64]) -> bool {
+        self.key
+            .verify_strict(msg, &Signature::from_bytes(sig))
+            .is_ok()
+    }
+
     /// Strict parse of the trust-input file: exact purpose, algorithm, a
     /// canonical base64 32-byte public key, and a `key_id` that must equal the
     /// one derived from that key.
     pub fn from_trust_json(bytes: &[u8]) -> Result<Self, ManifestError> {
+        Self::from_record_json(bytes, TRUST_PURPOSE)
+    }
+
+    /// Same strict parse for any key record with an exact, caller-chosen
+    /// `purpose` (the trust root of the managed publisher set reuses it, so a
+    /// record minted for one role never parses as another).
+    pub(crate) fn from_record_json(bytes: &[u8], purpose: &str) -> Result<Self, ManifestError> {
         let t = |m: &str| ManifestError::Trust(m.to_owned());
         let r: TrustRecord = serde_json::from_slice(bytes)
             .map_err(|e| ManifestError::Trust(format!("not a valid trust record: {e}")))?;
-        if r.purpose != TRUST_PURPOSE {
-            return Err(t("purpose is not a package-publisher key"));
+        if r.purpose != purpose {
+            return Err(t("record purpose does not match the expected key role"));
         }
         if r.algorithm != ALGORITHM_ED25519 {
             return Err(ManifestError::UnsupportedAlgorithm(r.algorithm));
@@ -261,8 +289,12 @@ impl TrustedPublisherKey {
 
     /// The trust-input file for this key (public material only).
     pub fn to_trust_json(&self) -> Vec<u8> {
+        self.to_record_json(TRUST_PURPOSE)
+    }
+
+    pub(crate) fn to_record_json(&self, purpose: &str) -> Vec<u8> {
         let rec = TrustRecord {
-            purpose: TRUST_PURPOSE.to_owned(),
+            purpose: purpose.to_owned(),
             algorithm: ALGORITHM_ED25519.to_owned(),
             key_id: self.key_id.0.clone(),
             public_key: STANDARD.encode(self.key.as_bytes()),
@@ -298,6 +330,10 @@ impl PublisherSigningKey {
                 )
             })
     }
+    /// Raw signature over caller-domain-separated bytes.
+    pub(crate) fn sign_bytes(&self, msg: &[u8]) -> [u8; 64] {
+        self.0.sign(msg).to_bytes()
+    }
     pub fn trusted_key(&self) -> TrustedPublisherKey {
         TrustedPublisherKey::from_verifying_key(self.0.verifying_key())
             .expect("a signing key derives a non-weak public key")
@@ -305,7 +341,7 @@ impl PublisherSigningKey {
 }
 
 /// Decode canonical padded base64 into exactly `N` bytes.
-fn decode_b64_exact<const N: usize>(s: &str) -> Option<[u8; N]> {
+pub(crate) fn decode_b64_exact<const N: usize>(s: &str) -> Option<[u8; N]> {
     let bytes = STANDARD.decode(s).ok()?;
     if STANDARD.encode(&bytes) != s {
         return None;
@@ -473,6 +509,13 @@ fn parse_strict(bytes: &[u8]) -> Result<(ManifestClaims, String, [u8; 64]), Mani
         return Err(ManifestError::NonCanonical);
     }
     Ok((candidate.claims, wire.publisher.key_id, signature))
+}
+
+/// The `publisher.key_id` a manifest *claims*, without verifying anything.
+/// Only for selecting which managed trusted key to verify against; the claim
+/// confers no trust and `verify_offline` still checks it against that key.
+pub fn claimed_key_id(manifest_bytes: &[u8]) -> Result<String, ManifestError> {
+    parse_strict(manifest_bytes).map(|(_, key_id, _)| key_id)
 }
 
 // ----------------------------------------------------------------- verify
