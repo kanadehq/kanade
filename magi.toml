@@ -2,24 +2,31 @@
 # repository lives here; roster and run shape live at the machine layer.
 
 [verify]
-# The final gate mirrors the required jobs in .github/workflows/ci.yml, in
-# order: check, test (all targets, then doc tests), rustfmt, clippy and the
-# locked check. The editorconfig and coverage jobs need tools that are not part
-# of the local toolchain and stay with CI.
+# The final gate mirrors the Rust jobs of .github/workflows/ci.yml, in order:
+# check, test (all targets), rustfmt, clippy and the locked check. No frontend
+# step is needed: CI does not build the SPA either, because the backend
+# build.rs seeds a placeholder web/dist. `cargo test --doc` is deliberately
+# absent: CI gates it on a root `src/lib.rs`, which this workspace does not
+# have, so it is not a CI check. The editorconfig and coverage jobs need tools
+# outside the local toolchain and stay with CI, as do the Windows and Linux
+# legs of the check/test/clippy matrices; a run here covers the host OS only.
 gate = [
   "cargo check --all-targets",
   "cargo test --all-targets",
-  "cargo test --doc",
   "cargo fmt --all -- --check",
   "cargo clippy --all-targets -- -D warnings",
   "cargo check --locked --all-targets",
 ]
 
-# Focused end-to-end checks of the signed package manifest / managed publisher
-# trust path with real temporary keys and directories. The NATS-backed
-# `--ignored` tests of .github/workflows/integration.yml are opt-in there (they
-# need nats-server and local sockets) and are not part of this local run.
+# Focused end-to-end checks of what recent deploy stages added. Stage 1b runs
+# the `--ignored` backend publication/store tests of
+# .github/workflows/integration.yml against real temporary NATS JetStream
+# Object Stores, so `nats-server` must be on PATH (CI pins 2.14.1); the run
+# fails, it does not skip, when it is missing. Stage 2a/2b run the signed
+# package manifest, publisher trust and admission tests plus their CLI tests
+# with real temporary keys and directories.
 e2e = [
+  "env KANADE_APP_ARTIFACT_PUBLICATION=backend-exclusive cargo test -p kanade-backend -- api::agent_releases api::app_artifacts --ignored",
   "cargo test -p kanade-shared --lib -- package_manifest publisher_trust package_admission",
   "cargo test -p kanade --test app_manifest_cli --test app_trust_cli",
 ]

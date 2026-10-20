@@ -715,3 +715,34 @@ Widening either allow list is a licensing decision, not a build fix.
   decimal `cid`. Client role claims are untrusted. Raw names, reported users,
   credentials and peer addresses must not enter this history. Keep its API
   admin-only and its expiry active even when monitoring polls fail.
+
+## Local magi verification (`magi.toml`)
+
+`magi.toml` is repo-owned and is read from the repo layer that magi
+extracts from the pinned base commit, so a change only takes effect for
+runs started from a base that already contains it. An empty `verify.gate`
+in a run's effective configuration means the base had no `magi.toml` yet,
+not that CI or review did not run.
+
+- **`verify.gate`** is the Rust part of `.github/workflows/ci.yml`:
+  `cargo check --all-targets`, `cargo test --all-targets`,
+  `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`
+  and `cargo check --locked --all-targets`. No frontend install is needed;
+  the backend `build.rs` seeds a placeholder `web/dist`. `cargo test --doc`
+  is not run because CI only runs it when a root `src/lib.rs` exists.
+- **`verify.e2e`** runs the stage 1b publication/store tests
+  (`cargo test -p kanade-backend -- api::agent_releases api::app_artifacts --ignored`
+  with `KANADE_APP_ARTIFACT_PUBLICATION=backend-exclusive`, against real
+  temporary NATS JetStream), then the stage 2a/2b manifest, trust and
+  admission tests (`kanade-shared --lib` filters and the `app_manifest_cli`
+  / `app_trust_cli` integration tests). Check that each reports a positive
+  `passed` count and `0 ignored`; an `--ignored` run that matches nothing
+  passes vacuously.
+- **Prerequisites**: `nats-server` on `PATH` (CI pins the version in
+  `NATS_SERVER_VERSION` of `integration.yml`) and permission to bind
+  loopback sockets. A missing broker makes the e2e step fail; do not
+  replace it with a skip.
+- **Not covered locally**: the editorconfig and coverage jobs (tools not in
+  the local toolchain), and the Windows/Linux/macOS matrix legs other than
+  the host OS (`check`, `test`, `clippy`, `offline-boot` and the rest of
+  `integration.yml`). Those are verified by CI only.
