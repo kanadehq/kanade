@@ -5,8 +5,13 @@ and canonical keys in the existing `app_packages` Object Store. It does **not**
 authenticate a publisher, verify a package's embedded identity, or admit an artifact
 for deployment. All identity fields and version are explicit declarations. No host
 platform inference, legacy-key promotion, or PE version fallback is performed.
-Signed manifests, publisher trust provisioning, alias snapshots, CI producer
-transition, and deploy plan/apply/status remain unimplemented.
+Publisher trust provisioning, alias snapshots, CI producer
+transition, and deploy plan/apply/status remain unimplemented. An offline signed
+manifest contract and CLI exist (SPEC §2.13.4.3, stage 2a) but are **not** integrated
+into this API: it neither stores nor returns signed manifests, and signing must
+never be added as mutable metadata beside the immutable record. Binding a signature
+into the committed metadata and idempotency comparison is a separate, narrowly
+scoped integration.
 
 ## Authorization and enabling publication
 
