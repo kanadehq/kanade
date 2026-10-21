@@ -1008,7 +1008,7 @@ mod tests {
              type: deploy_cli\n    spec:\n      \
              artifact_identity: {{role: cli, version: 0.80.0, os: linux, arch: x86_64, distro_abi: musl, format: tar_gz}}\n      \
              package_object_key: cli/0.80.0/linux-x86_64-musl.tar_gz\n      \
-             artifact_sha256: {d}\n      manifest_sha256: {d}\n"
+             artifact_sha256: {d}\n      artifact_size_bytes: 21\n      package_id: com.kanade.package\n      manifest_sha256: {d}\n"
         ))
         .unwrap();
         let v =

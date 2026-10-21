@@ -179,7 +179,63 @@ struct CommandFields {
 }
 impl<'de> Deserialize<'de> for Command {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        CommandFields::deserialize(crate::strict::UniqueDeserializer(de))
+        struct ShellVisitor;
+        impl<'de> serde::de::Visitor<'de> for ShellVisitor {
+            type Value = Command;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a shell command without typed-operation fields")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Command, M::Error> {
+                CommandFields::deserialize(serde::de::value::MapAccessDeserializer::new(
+                    ShellCommandMap(map),
+                ))
+            }
+        }
+        serde::Deserializer::deserialize_map(crate::strict::UniqueDeserializer(de), ShellVisitor)
+    }
+}
+
+// Reject these keys by presence, including null or malformed values, before
+// serde can ignore them and default command_kind to shell. Other future shell
+// fields remain tolerant, and the original deserializer retains its scalar
+// conversions and duplicate-key checks.
+struct ShellCommandMap<M>(M);
+
+impl<'de, M: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for ShellCommandMap<M> {
+    type Error = M::Error;
+
+    fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        let Some(key) = self.0.next_key::<String>()? else {
+            return Ok(None);
+        };
+        if matches!(
+            key.as_str(),
+            "payload_version" | "operation" | "deploy_authorization"
+        ) {
+            return Err(serde::de::Error::custom(format!(
+                "typed-only field {key} is forbidden in a shell command"
+            )));
+        }
+        seed.deserialize(serde::de::value::StringDeserializer::<Self::Error>::new(
+            key,
+        ))
+        .map(Some)
+    }
+
+    fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.0.next_value_seed(seed)
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.0.size_hint()
     }
 }
 
@@ -313,6 +369,37 @@ pub enum RunAs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_commands_reject_typed_only_keys_but_accept_future_shell_fields() {
+        let shell = serde_json::to_value(sample_command()).unwrap();
+        for kind in [None, Some("shell")] {
+            for key in ["payload_version", "operation", "deploy_authorization"] {
+                for value in [
+                    serde_json::Value::Null,
+                    serde_json::json!("shell"),
+                    serde_json::json!(1),
+                    serde_json::json!({"type": "unknown", "spec": {}}),
+                ] {
+                    let mut mixed = shell.clone();
+                    if let Some(kind) = kind {
+                        mixed["command_kind"] = kind.into();
+                    }
+                    mixed[key] = value;
+                    assert!(
+                        serde_json::from_value::<Command>(mixed.clone()).is_err(),
+                        "{mixed}"
+                    );
+                    let yaml = serde_yaml::to_string(&mixed).unwrap();
+                    assert!(serde_yaml::from_str::<Command>(&yaml).is_err(), "{yaml}");
+                }
+            }
+        }
+        let mut future = shell;
+        future["future_shell_field"] = serde_json::json!({"enabled": true});
+        let decoded: Command = serde_json::from_value(future).unwrap();
+        assert_eq!(decoded.script, sample_command().script);
+    }
 
     fn sample_command() -> Command {
         Command {

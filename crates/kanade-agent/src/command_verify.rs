@@ -3115,6 +3115,48 @@ mod tests {
             assert_eq!(last(&v), None);
         }
 
+        #[test]
+        fn typed_only_keys_never_run_as_shell_in_bare_or_v2_commands() {
+            for enforcing in [false, true] {
+                for kind in [None, Some("shell")] {
+                    for (key, value) in [
+                        ("payload_version", serde_json::json!(1)),
+                        (
+                            "operation",
+                            serde_json::json!({"type": "unknown", "spec": {}}),
+                        ),
+                        ("deploy_authorization", serde_json::Value::Null),
+                    ] {
+                        let (v, s) = setup(enforcing);
+                        let mut mixed = serde_json::to_value(command()).unwrap();
+                        if let Some(kind) = kind {
+                            mixed["command_kind"] = kind.into();
+                        }
+                        mixed[key] = value;
+                        let bare = serde_json::to_vec(&mixed).unwrap();
+                        let envelope = serde_json::to_vec(&serde_json::json!({
+                            "kind": "kanade.command.v2",
+                            "target_pc_id": "PC1",
+                            "expires_at": t(3600),
+                            "command": mixed
+                        }))
+                        .unwrap();
+                        for body in [bare, envelope] {
+                            for h in [
+                                SigHeaders::default(),
+                                s.headers(&body, t(0).timestamp_millis()),
+                            ] {
+                                assert!(
+                                    !matches!(admit(&v, &body, &h, t(5)), Admission::Run { .. }),
+                                    "enforcing={enforcing}, kind={kind:?}, key={key}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         fn typed_command() -> kanade_shared::wire::TypedCommand {
             let d = "1".repeat(64);
             serde_json::from_value(serde_json::json!({
@@ -3129,7 +3171,8 @@ mod tests {
                     "artifact_identity": {"role": "cli", "version": "0.80.0", "os": "linux",
                         "arch": "x86_64", "distro_abi": "musl", "format": "tar_gz"},
                     "package_object_key": "cli/0.80.0/linux-x86_64-musl.tar_gz",
-                    "artifact_sha256": d, "manifest_sha256": d
+                    "artifact_sha256": d, "artifact_size_bytes": 21,
+                    "package_id": "com.kanade.package", "manifest_sha256": d
                 }},
                 "deploy_authorization": {"plan_id": "p1", "plan_digest": d, "manifest_digest": d}
             }))
