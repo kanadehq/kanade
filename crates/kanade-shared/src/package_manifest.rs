@@ -133,7 +133,7 @@ impl ManifestClaims {
 }
 
 /// 1..=128 bytes of `[a-z0-9._-]`, starting with `[a-z0-9]`.
-fn validate_package_id(s: &str) -> Result<(), ManifestError> {
+pub(crate) fn validate_package_id(s: &str) -> Result<(), ManifestError> {
     let ok = !s.is_empty()
         && s.len() <= 128
         && s.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())

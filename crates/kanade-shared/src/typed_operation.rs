@@ -93,6 +93,8 @@ pub struct DeployBackendSpec {
     pub artifact_identity: ArtifactIdentity,
     pub package_object_key: String,
     pub artifact_sha256: ArtifactSha256,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: ArtifactSha256,
     pub preserve_config: bool,
     pub wipe_db: bool,
@@ -112,6 +114,8 @@ pub struct DeployClientSpec {
     pub artifact_identity: ArtifactIdentity,
     pub package_object_key: String,
     pub artifact_sha256: ArtifactSha256,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: ArtifactSha256,
     pub opt_out_policy: OptOutPolicy,
     pub restart_gui_session_only: bool,
@@ -123,6 +127,8 @@ pub struct DeployCliSpec {
     pub artifact_identity: ArtifactIdentity,
     pub package_object_key: String,
     pub artifact_sha256: ArtifactSha256,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: ArtifactSha256,
     /// Explicit adoption of the fixed macOS location only; never a path.
     #[serde(default)]
@@ -166,6 +172,37 @@ impl TypedOperation {
         }
     }
 
+    pub fn artifact_size_bytes(&self) -> u64 {
+        match self {
+            Self::DeployBackend(s) => s.artifact_size_bytes,
+            Self::DeployClient(s) => s.artifact_size_bytes,
+            Self::DeployCli(s) => s.artifact_size_bytes,
+        }
+    }
+    pub fn package_id(&self) -> &str {
+        match self {
+            Self::DeployBackend(s) => &s.package_id,
+            Self::DeployClient(s) => &s.package_id,
+            Self::DeployCli(s) => &s.package_id,
+        }
+    }
+    /// Admission is evidence for this exact binding, never installer authorization.
+    pub fn check_admission(
+        &self,
+        admitted: &crate::package_admission::AdmittedPackage,
+    ) -> Result<(), String> {
+        self.validate()?;
+        self.verify_binding(&ExpectedArtifact {
+            identity: admitted.identity(),
+            integrity: admitted.integrity(),
+            manifest_sha256: &ArtifactSha256::from_bytes(*admitted.manifest_sha256()),
+        })?;
+        if self.package_id() != admitted.claims().package_id() {
+            return Err("admitted package_id differs from deployment binding".into());
+        }
+        Ok(())
+    }
+
     pub fn manifest_sha256(&self) -> &ArtifactSha256 {
         match self {
             Self::DeployBackend(s) => &s.manifest_sha256,
@@ -186,6 +223,11 @@ impl TypedOperation {
     /// Self-contained checks: role match, canonical object key, and the
     /// role-specific parameters. Does not need (or grant) any authorisation.
     pub fn validate(&self) -> Result<(), String> {
+        crate::package_manifest::validate_package_id(self.package_id())
+            .map_err(|e| e.to_string())?;
+        if self.artifact_size_bytes() == 0 {
+            return Err("artifact_size_bytes must be positive".into());
+        }
         let id = self.artifact_identity();
         if id.role() != self.expected_role() {
             return Err(format!(
@@ -237,7 +279,9 @@ impl TypedOperation {
         if self.artifact_identity() != expected.identity {
             return Err("artifact_identity does not match the expected artifact identity".into());
         }
-        if *self.artifact_sha256() != expected.integrity.sha256 {
+        if *self.artifact_sha256() != expected.integrity.sha256
+            || self.artifact_size_bytes() != expected.integrity.size_bytes
+        {
             return Err("artifact_sha256 does not match the expected artifact integrity".into());
         }
         if self.manifest_sha256() != expected.manifest_sha256 {
@@ -719,6 +763,8 @@ execute:
       artifact_identity: {{role: backend, version: 0.80.0, os: linux, arch: aarch64, distro_abi: musl, format: tar_gz}}
       package_object_key: backend/0.80.0/linux-aarch64-musl.tar_gz
       artifact_sha256: {artifact}
+      artifact_size_bytes: 21
+      package_id: com.kanade.package
       manifest_sha256: {manifest}
       preserve_config: true
       require_db_backup: true
@@ -843,6 +889,8 @@ execute:
       artifact_identity: {{role: client, version: 0.80.0, os: macos, arch: aarch64, distro_abi: darwin14, format: pkg}}
       package_object_key: client/0.80.0/macos-aarch64-darwin14.pkg
       artifact_sha256: {a}
+      artifact_size_bytes: 21
+      package_id: com.kanade.package
       manifest_sha256: {m}
       opt_out_policy: respect
       restart_gui_session_only: true
@@ -868,6 +916,8 @@ execute:
       artifact_identity: {{role: cli, version: 0.80.0, os: linux, arch: x86_64, distro_abi: musl, format: tar_gz}}
       package_object_key: cli/0.80.0/linux-x86_64-musl.tar_gz
       artifact_sha256: {a}
+      artifact_size_bytes: 21
+      package_id: com.kanade.package
       manifest_sha256: {m}
       adopt_existing_cli: true
 "#,
@@ -890,7 +940,7 @@ execute:
     #[test]
     fn discriminator_omission_never_reads_typed_fields_as_shell() {
         // No kind, but typed-only fields: refused, not treated as shell.
-        let y = typed_with("kind: typed_operation\n", "");
+        let y = typed_with("  kind: typed_operation\n", "");
         let err = parse(&y).unwrap_err();
         assert!(err.contains("without `kind"), "{err}");
         let y = "id: j\nversion: 1\nexecute:\n  shell: sh\n  script: x\n  timeout: 5s\n  operation: {}\n";
@@ -898,7 +948,7 @@ execute:
         let y = "id: j\nversion: 1\nexecute:\n  shell: sh\n  script: x\n  timeout: 5s\n  payload_version: 1\n";
         assert!(parse(y).is_err());
         // No kind and nothing else shell-like: missing `shell`, never a default shell.
-        let y = typed_with("kind: typed_operation\n", "");
+        let y = typed_with("  kind: typed_operation\n", "");
         assert!(parse(&y).is_err());
     }
 

@@ -30,7 +30,7 @@ pub enum TypedCommandKind {
     TypedOperation,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TypedCommand {
     pub command_kind: TypedCommandKind,
@@ -46,6 +46,30 @@ pub struct TypedCommand {
     pub run_as: RunAs,
     pub operation: TypedOperation,
     pub deploy_authorization: DeployAuthorization,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(remote = "TypedCommand")]
+struct TypedCommandFields {
+    pub command_kind: TypedCommandKind,
+    pub payload_version: u32,
+    pub id: String,
+    pub version: String,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_id: Option<String>,
+    pub timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<DateTime<Utc>>,
+    pub run_as: RunAs,
+    pub operation: TypedOperation,
+    pub deploy_authorization: DeployAuthorization,
+}
+impl<'de> Deserialize<'de> for TypedCommand {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        TypedCommandFields::deserialize(crate::strict::UniqueDeserializer(de))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

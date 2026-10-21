@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::Staleness;
 use crate::manifest::{CheckHint, CollectHint, EmitConfig};
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+#[derive(Serialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Command {
     /// Command discriminator. Only `shell` exists on this type and it is
     /// never written (historical bytes are unchanged); any other value —
@@ -138,6 +138,51 @@ pub struct Command {
     pub finalize: Option<FinalizeCommand>,
 }
 
+#[derive(Deserialize)]
+#[serde(remote = "Command")]
+struct CommandFields {
+    #[serde(default, skip_serializing_if = "CommandKind::is_shell")]
+    pub command_kind: CommandKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypass_local_limit: bool,
+    pub id: String,
+    pub version: String,
+    pub request_id: String,
+    #[serde(alias = "job_id")]
+    pub exec_id: Option<String>,
+    pub shell: Shell,
+    pub script: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_object: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_object_sha256: Option<String>,
+    pub timeout_secs: u64,
+    pub jitter_secs: Option<u64>,
+    #[serde(default)]
+    pub run_as: RunAs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub staleness: Staleness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit: Option<EmitConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<CollectHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetrySpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize: Option<FinalizeCommand>,
+}
+impl<'de> Deserialize<'de> for Command {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        CommandFields::deserialize(crate::strict::UniqueDeserializer(de))
+    }
+}
+
 /// See [`Command::command_kind`].
 #[derive(
     Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
@@ -151,6 +196,16 @@ pub enum CommandKind {
 impl CommandKind {
     pub fn is_shell(&self) -> bool {
         matches!(self, CommandKind::Shell)
+    }
+}
+
+impl Command {
+    /// Final process/publication boundary. Typed commands are a separate type;
+    /// extending this discriminator must also extend this execution decision.
+    pub fn ensure_execution_enabled(&self) -> Result<(), String> {
+        match self.command_kind {
+            CommandKind::Shell => Ok(()),
+        }
     }
 }
 

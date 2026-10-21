@@ -357,6 +357,7 @@ pub async fn run_command_with_start_deadline(
     live: Option<Arc<LiveTail>>,
     start_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ExecOutcome> {
+    cmd.ensure_execution_enabled().map_err(anyhow::Error::msg)?;
     // v0.21: on Windows, run_as: user / system_gui take a separate Win32
     // path (CreateProcessAsUserW). System (default) stays on tokio::process
     // — backward-compatible for every pre-v0.21 manifest in the wild. macOS
@@ -1199,6 +1200,21 @@ mod process_tree_tests {
 
     use super::{ExecOutcome, run_command_with_kill};
     use crate::kill::{KillSwitch, trigger_local};
+
+    #[test]
+    fn native_payload_cannot_enter_the_process_command_type() {
+        mod deploy_fixture {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../kanade-shared/tests/fixtures/deploy.rs"
+            ));
+        }
+        let command = deploy_fixture::command();
+        command.validate().unwrap();
+        let payload = serde_json::to_value(command).unwrap();
+        assert!(serde_json::from_value::<kanade_shared::wire::Command>(payload).is_err());
+        sh_job("echo ok", 5).ensure_execution_enabled().unwrap();
+    }
 
     fn sh_job(script: &str, timeout_secs: u64) -> kanade_shared::wire::Command {
         serde_json::from_value(serde_json::json!({

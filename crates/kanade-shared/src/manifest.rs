@@ -21,7 +21,7 @@ use crate::wire::{FinalizeCommand, RunAs, Shell, Staleness};
 /// keys with their full paths. The wire rule: new fields always get
 /// `#[serde(default)]` (+ `skip_serializing_if` while old readers
 /// may still be strict).
-#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+#[derive(Serialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Manifest {
     pub id: String,
     pub version: String,
@@ -206,6 +206,49 @@ pub struct Manifest {
     /// rule (`default` + `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "Manifest")]
+struct ManifestFields {
+    pub id: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub execute: crate::typed_operation::ManifestExecute,
+    #[serde(default)]
+    pub require_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_authorization: Option<crate::typed_operation::DeployAuthorizationRef>,
+    #[serde(default)]
+    pub inventory: Option<InventoryHint>,
+    #[serde(default)]
+    pub emit: Option<EmitConfig>,
+    #[serde(default)]
+    pub check: Option<CheckHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<CollectHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<Vec<AggregateWidget>>,
+    #[serde(default)]
+    pub staleness: Staleness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<ClientHint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RepoOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize: Option<FinalizeSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feed: Vec<FeedSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+}
+impl<'de> Deserialize<'de> for Manifest {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        ManifestFields::deserialize(crate::strict::UniqueDeserializer(de))
+    }
 }
 
 /// Execution tier for a [`Manifest`] — see [`Manifest::tier`]. `endpoint`

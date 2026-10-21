@@ -74,7 +74,7 @@ pub fn supported_command_protocols() -> Vec<String> {
 }
 
 /// The network form of a v2 command.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CommandEnvelope<C = Command> {
     pub kind: String,
@@ -85,6 +85,27 @@ pub struct CommandEnvelope<C = Command> {
     /// to kill a process that is already running.
     pub expires_at: DateTime<Utc>,
     pub command: C,
+}
+
+impl<'de, C: serde::de::DeserializeOwned> Deserialize<'de> for CommandEnvelope<C> {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields<C> {
+            kind: String,
+            target_pc_id: String,
+            expires_at: DateTime<Utc>,
+            command: C,
+        }
+        let raw = crate::strict::UniqueValue::deserialize(de)?.0;
+        let fields: Fields<C> = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            kind: fields.kind,
+            target_pc_id: fields.target_pc_id,
+            expires_at: fields.expires_at,
+            command: fields.command,
+        })
+    }
 }
 
 /// Why an envelope was not accepted. Each variant is a distinct operational
@@ -368,8 +389,9 @@ fn verify_envelope_with<C>(
 ) -> Result<(C, DateTime<Utc>, String), EnvelopeError> {
     let auth = signing::verify_signature(ring, body, headers).map_err(EnvelopeError::Signature)?;
 
-    let value: serde_json::Value =
-        serde_json::from_slice(body).map_err(|e| EnvelopeError::Malformed(e.to_string()))?;
+    let value = serde_json::from_slice::<crate::strict::UniqueValue>(body)
+        .map_err(|e| EnvelopeError::Malformed(e.to_string()))?
+        .0;
     let obj = value
         .as_object()
         .ok_or_else(|| EnvelopeError::Malformed("not a JSON object".into()))?;

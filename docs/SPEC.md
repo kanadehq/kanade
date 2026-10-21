@@ -2968,6 +2968,8 @@ execute:
       artifact_identity: {role: backend, version: 0.80.0, os: linux, arch: aarch64, distro_abi: musl, format: tar_gz}
       package_object_key: backend/0.80.0/linux-aarch64-musl.tar_gz
       artifact_sha256: <sha256>
+      artifact_size_bytes: <positive-byte-count>
+      package_id: com.kanade.backend
       manifest_sha256: <signed-manifest-sha256>
       preserve_config: true
       require_db_backup: true
@@ -2983,7 +2985,7 @@ deploy_authorization:
 
 - **Stage 3 実装済み（schema・検証・変換のみ。配送・実行は無効）**: `kanade_shared::typed_operation`（`ManifestExecute` / `TypedOperation` / `DeployAuthorizationRef`）と `wire::TypedCommand`。上の例との差分を明記する。
   - **判別子**: `execute.kind` 省略は従来 shell（保存済み record・直列化 bytes は不変で、shell は `kind` を出力しない）。`kind: shell` も同じ shell。typed は `kind: typed_operation` 必須。判別子が null / 未知 / 非文字列、判別子省略で typed 専用 field（`payload_version` / `operation`）が存在、typed に shell 系 field（`shell` / `script*` / `cwd` / `bypass_local_limit`、null 値を含む）が混在、typed 内の未知 field、重複 key はすべて拒否し、shell へ fallback しない。shell 側の読込は従来どおり未知 field を許容する（write 境界の `strict` は維持）。
-  - **payload**: `execute.payload_version`（現在 `1` のみ。0・未来版・欠落・null は拒否）、`timeout`（1s〜1h）、`run_as`（`system` のみ）、`operation: {type, spec}`（`deploy_backend` / `deploy_client` / `deploy_cli`、spec は未知 field 拒否）。`spec` は上例の field に加え、`artifact_sha256` / `manifest_sha256` は小文字 hex 64 桁、`package_object_key` は `artifact_identity` の canonical key と完全一致、identity の role は操作と一致が必要。backend は `preserve_config` / `require_db_backup` が true 必須、`firewall: managed_port` は非 0、client は `opt_out_policy: respect` と `restart_gui_session_only: true`、cli の `adopt_existing_cli` は macOS identity のみ。executable・path・argv を表す field は存在しない。job 直下は `require_approval: true` と `deploy_authorization: {plan_id, plan_digest}` が必須（shell job に付けると拒否）、typed は `inventory` / `emit` / `check` / `collect` / `finalize` / `feed` / `client` を持てない。`plan_id` は `[A-Za-z0-9._-]` 1–128 文字。
+  - **payload**: `execute.payload_version`（現在 `1` のみ。0・未来版・欠落・null は拒否）、`timeout`（1s〜1h）、`run_as`（`system` のみ）、`operation: {type, spec}`（`deploy_backend` / `deploy_client` / `deploy_cli`、spec は未知 field 拒否）。`spec` は上例の field に加え、`artifact_sha256` / `manifest_sha256` は小文字 hex 64 桁、`artifact_size_bytes` は正の byte 数、`package_id` は署名済み package manifest の ID である。`check_admission` は実際の `AdmittedPackage` と identity・SHA-256・サイズ・package ID・manifest bytes digest を完全照合するが、実行権限は付与しない。`package_object_key` は `artifact_identity` の canonical key と完全一致、identity の role は操作と一致が必要。backend は `preserve_config` / `require_db_backup` が true 必須、`firewall: managed_port` は非 0、client は `opt_out_policy: respect` と `restart_gui_session_only: true`、cli の `adopt_existing_cli` は macOS identity のみ。executable・path・argv を表す field は存在しない。job 直下は `require_approval: true` と `deploy_authorization: {plan_id, plan_digest}` が必須（shell job に付けると拒否）、typed は `inventory` / `emit` / `check` / `collect` / `finalize` / `feed` / `client` を持てない。`plan_id` は `[A-Za-z0-9._-]` 1–128 文字。
   - **外部期待値との束縛**: `TypedOperation::verify_binding` が、呼出側が artifact store / plan から渡す期待 `ArtifactIdentity` / `ArtifactIntegrity.sha256` / 署名済み package manifest の SHA-256 と完全一致を要求する。job の値を自分自身と比較しない。署名済み package manifest の digest（`manifest_sha256`）と job manifest の digest（Command の `deploy_authorization.manifest_digest`）は別物として扱う。
   - **Command**: `TypedCommand` は `Command` と別型で、`command_kind: typed_operation`（必須・リテラル）、`payload_version`、`deploy_authorization {plan_id, plan_digest, manifest_digest}` を持ち、`shell` / `script` / `script_object` / `cwd` を**出力しない**。そのため旧 Agent の `Command` decoder は必須 field 欠落で拒否し、新 Agent の `Command` は `command_kind` が `shell` 以外（`typed_operation`・未知・null）なら decode 自体を拒否するので、shell 実行へ既定化できない。`Command.command_kind` は `shell` の場合 serialize しないため既存 shell の署名 bytes・replay・ledger・outbox の契約は不変。`TypedCommand::from_manifest` は副作用のない検証付き変換であり、承認・capability・trust は参照しない。
   - **署名**: typed は既存 `kanade.command.v2` envelope・command-signing keyring・domain の中だけで構成し、`sign_typed_envelope` / `verify_typed_envelope`（署名 → 宛先 → 期限 → key age の順は shell と共通実装）。未署名・legacy（bare）署名 Command は typed を運べない（`kind` 不在で拒否、`Command` としても decode 不能）。shell 用 `verify_envelope` は typed envelope を署名検証後に `UnsupportedCommandKind` で拒否し、Agent は `EnvelopeRejected` として受信拒否する。別の署名方式は作らない。
@@ -3049,6 +3051,8 @@ pub struct DeployBackendSpec {
     // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
     pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: String,
     pub package_object_key: String,
     pub preserve_config: bool, // true 必須
@@ -3064,6 +3068,8 @@ pub struct DeployClientSpec {
     // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
     pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: String,
     pub package_object_key: String,
     pub opt_out_policy: OptOutPolicy, // Respect のみ
@@ -3075,6 +3081,8 @@ pub struct DeployCliSpec {
     // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
     pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: String,
     pub package_object_key: String,
     pub adopt_existing_cli: bool, // false が既定、macOS 固定配置先の明示採用のみ
