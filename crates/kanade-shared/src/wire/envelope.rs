@@ -43,7 +43,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::Command;
+use super::{Command, TypedCommand};
 use crate::signing::{self, KeyRing, SigHeaders, Signer, VerifyError};
 
 /// The `kind` discriminator of the v2 envelope.
@@ -76,7 +76,7 @@ pub fn supported_command_protocols() -> Vec<String> {
 /// The network form of a v2 command.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct CommandEnvelope {
+pub struct CommandEnvelope<C = Command> {
     pub kind: String,
     /// The exact registered pc_id of the one host allowed to run this; case is
     /// preserved and compared byte for byte.
@@ -84,7 +84,7 @@ pub struct CommandEnvelope {
     /// Absolute UTC deadline for **starting** the command. Not an instruction
     /// to kill a process that is already running.
     pub expires_at: DateTime<Utc>,
-    pub command: Command,
+    pub command: C,
 }
 
 /// Why an envelope was not accepted. Each variant is a distinct operational
@@ -97,6 +97,10 @@ pub enum EnvelopeError {
     UnknownKind(String),
     /// The body is not a well-formed envelope.
     Malformed(String),
+    /// The command names a `command_kind` other than `shell` (a typed
+    /// operation, or one this build does not know). The shell verifier never
+    /// reinterprets it as a shell command; typed deployment is not enabled.
+    UnsupportedCommandKind(String),
     /// No `target_pc_id`.
     MissingRecipient,
     /// Addressed to a different host.
@@ -141,6 +145,10 @@ impl std::fmt::Display for EnvelopeError {
             EnvelopeError::Signature(e) => write!(f, "{e}"),
             EnvelopeError::UnknownKind(k) => write!(f, "unrecognised command kind {k:?}"),
             EnvelopeError::Malformed(e) => write!(f, "malformed command envelope: {e}"),
+            EnvelopeError::UnsupportedCommandKind(k) => write!(
+                f,
+                "command kind {k:?} is not executable here (typed native deployment is disabled)"
+            ),
             EnvelopeError::MissingRecipient => write!(f, "envelope names no recipient"),
             EnvelopeError::Misaddressed { target } => {
                 write!(f, "envelope is addressed to {target:?}, not this host")
@@ -206,6 +214,32 @@ pub fn sign_envelope(
     command: Command,
     now: DateTime<Utc>,
 ) -> Result<(Vec<u8>, SigHeaders), EnvelopeError> {
+    sign_envelope_of(signer, target_pc_id, expires_at, command, now)
+}
+
+/// Sign a typed native-deployment command in the same v2 envelope, under the
+/// same command-signing keys and domain. The command is validated first. No
+/// delivery path calls this while typed deployment is disabled.
+pub fn sign_typed_envelope(
+    signer: &Signer,
+    target_pc_id: &str,
+    expires_at: DateTime<Utc>,
+    command: TypedCommand,
+    now: DateTime<Utc>,
+) -> Result<(Vec<u8>, SigHeaders), EnvelopeError> {
+    command
+        .validate()
+        .map_err(|e| EnvelopeError::Malformed(e.to_string()))?;
+    sign_envelope_of(signer, target_pc_id, expires_at, command, now)
+}
+
+fn sign_envelope_of<C: Serialize>(
+    signer: &Signer,
+    target_pc_id: &str,
+    expires_at: DateTime<Utc>,
+    command: C,
+    now: DateTime<Utc>,
+) -> Result<(Vec<u8>, SigHeaders), EnvelopeError> {
     if target_pc_id.is_empty() {
         return Err(EnvelopeError::MissingRecipient);
     }
@@ -218,7 +252,7 @@ pub fn sign_envelope(
             validity_ms: validity,
         });
     }
-    let envelope = CommandEnvelope {
+    let envelope = CommandEnvelope::<C> {
         kind: ENVELOPE_KIND_V2.to_owned(),
         target_pc_id: target_pc_id.to_owned(),
         expires_at,
@@ -244,6 +278,94 @@ pub fn verify_envelope(
     my_pc_id: &str,
     now: DateTime<Utc>,
 ) -> Result<VerifiedEnvelope, EnvelopeError> {
+    let (command, start_deadline, kid) = verify_envelope_with(
+        ring,
+        body,
+        headers,
+        my_pc_id,
+        now,
+        |value| {
+            // A `command_kind` other than the literal `shell` (typed, unknown,
+            // null, wrong type) is refused by name, before `Command` could be
+            // decoded from a body that also happens to carry shell fields.
+            if let Some(kind) = value.get("command_kind")
+                && kind.as_str() != Some("shell")
+            {
+                return Err(EnvelopeError::UnsupportedCommandKind(kind.to_string()));
+            }
+            serde_json::from_value::<Command>(value)
+                .map_err(|e| EnvelopeError::Malformed(e.to_string()))
+        },
+        |c| c.deadline_at,
+    )?;
+    Ok(VerifiedEnvelope {
+        command,
+        start_deadline,
+        kid,
+    })
+}
+
+/// A typed envelope that passed every check. Verification is not
+/// authorisation: approval, capability and handler gates are separate and
+/// absent, and no agent entry point consumes this yet.
+#[derive(Debug, Clone)]
+pub struct VerifiedTypedEnvelope {
+    pub command: TypedCommand,
+    pub start_deadline: DateTime<Utc>,
+    pub kid: String,
+}
+
+/// Verify a typed envelope: the same signature, recipient, expiry and key-age
+/// checks as [`verify_envelope`], then a strict typed decode. A body without
+/// the literal `command_kind: typed_operation` is refused, so a shell command
+/// cannot be passed through this path either.
+pub fn verify_typed_envelope(
+    ring: &KeyRing,
+    body: &[u8],
+    headers: &SigHeaders,
+    my_pc_id: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedTypedEnvelope, EnvelopeError> {
+    let (command, start_deadline, kid) = verify_envelope_with(
+        ring,
+        body,
+        headers,
+        my_pc_id,
+        now,
+        |value| {
+            let typed = value
+                .as_object()
+                .is_some_and(super::typed_command::names_typed);
+            if !typed {
+                return Err(EnvelopeError::Malformed(
+                    "not a typed_operation command".into(),
+                ));
+            }
+            let command = serde_json::from_value::<TypedCommand>(value)
+                .map_err(|e| EnvelopeError::Malformed(e.to_string()))?;
+            command
+                .validate()
+                .map_err(|e| EnvelopeError::Malformed(e.to_string()))?;
+            Ok(command)
+        },
+        |c| c.deadline_at,
+    )?;
+    Ok(VerifiedTypedEnvelope {
+        command,
+        start_deadline,
+        kid,
+    })
+}
+
+fn verify_envelope_with<C>(
+    ring: &KeyRing,
+    body: &[u8],
+    headers: &SigHeaders,
+    my_pc_id: &str,
+    now: DateTime<Utc>,
+    decode: impl FnOnce(serde_json::Value) -> Result<C, EnvelopeError>,
+    deadline_of: impl Fn(&C) -> Option<DateTime<Utc>>,
+) -> Result<(C, DateTime<Utc>, String), EnvelopeError> {
     let auth = signing::verify_signature(ring, body, headers).map_err(EnvelopeError::Signature)?;
 
     let value: serde_json::Value =
@@ -289,12 +411,11 @@ pub fn verify_envelope(
             ));
         }
     };
-    let command: Command = serde_json::from_value(
+    let command = decode(
         obj.get("command")
             .cloned()
             .ok_or_else(|| EnvelopeError::Malformed("missing command".into()))?,
-    )
-    .map_err(|e| EnvelopeError::Malformed(e.to_string()))?;
+    )?;
 
     // Wide integers throughout: the signing time is attacker-influenced only
     // through a genuine signature, but the subtraction must not wrap either way.
@@ -314,9 +435,7 @@ pub fn verify_envelope(
         return Err(EnvelopeError::OverCeiling { validity_ms });
     }
 
-    let start_deadline = command
-        .deadline_at
-        .map_or(expires_at, |d| d.min(expires_at));
+    let start_deadline = deadline_of(&command).map_or(expires_at, |d| d.min(expires_at));
     if start_deadline_passed(start_deadline, now) {
         return Err(EnvelopeError::Expired {
             deadline: start_deadline,
@@ -335,11 +454,7 @@ pub fn verify_envelope(
         }
     }
 
-    Ok(VerifiedEnvelope {
-        command,
-        start_deadline,
-        kid: auth.kid.to_owned(),
-    })
+    Ok((command, start_deadline, auth.kid.to_owned()))
 }
 
 #[cfg(test)]
@@ -355,6 +470,7 @@ mod tests {
 
     fn command() -> Command {
         Command {
+            command_kind: crate::wire::CommandKind::Shell,
             id: "echo".into(),
             version: "1.0.0".into(),
             request_id: "req-1".into(),
@@ -625,5 +741,216 @@ mod tests {
             supported_command_protocols(),
             vec!["legacy".to_owned(), "kanade.command.v2".to_owned()]
         );
+    }
+
+    // ---- typed native-deployment commands in the v2 envelope ----
+
+    use crate::typed_operation::fixtures as fx;
+    use crate::wire::TypedCommand;
+    use crate::wire::typed_command::tests_support::typed_command;
+
+    fn typed_signed(s: &Signer, expires: i64) -> (Vec<u8>, SigHeaders) {
+        sign_typed_envelope(s, "PC-A", t(expires), typed_command(), t(0)).unwrap()
+    }
+
+    #[test]
+    fn typed_envelope_round_trips_under_the_same_v2_kind_and_keys() {
+        let s = signer();
+        let (body, h) = typed_signed(&s, 3600);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["kind"], ENVELOPE_KIND_V2);
+        assert_eq!(v["command"]["command_kind"], "typed_operation");
+        let verified =
+            verify_typed_envelope(&ring(&s, KeyPolicy::backend("b")), &body, &h, "PC-A", t(10))
+                .unwrap();
+        assert_eq!(verified.command, typed_command());
+        assert_eq!(verified.kid, "backend-1");
+        assert_eq!(verified.start_deadline, t(3600));
+        // Recipient and expiry are enforced exactly as for shell commands.
+        let r = ring(&s, KeyPolicy::backend("b"));
+        assert!(matches!(
+            verify_typed_envelope(&r, &body, &h, "PC-B", t(10)),
+            Err(EnvelopeError::Misaddressed { .. })
+        ));
+        assert!(matches!(
+            verify_typed_envelope(&r, &body, &h, "PC-A", t(7200)),
+            Err(EnvelopeError::Expired { .. })
+        ));
+    }
+
+    #[test]
+    fn the_shell_verifier_refuses_a_valid_typed_envelope_by_name() {
+        let s = signer();
+        let (body, h) = typed_signed(&s, 3600);
+        let err = verify_envelope(&ring(&s, KeyPolicy::backend("b")), &body, &h, "PC-A", t(10))
+            .unwrap_err();
+        assert!(
+            matches!(err, EnvelopeError::UnsupportedCommandKind(_)),
+            "{err}"
+        );
+        assert!(!err.is_clock());
+    }
+
+    #[test]
+    fn the_typed_verifier_never_passes_a_shell_command_through() {
+        let s = signer();
+        let (body, h) = signed(&s, 3600);
+        let err =
+            verify_typed_envelope(&ring(&s, KeyPolicy::backend("b")), &body, &h, "PC-A", t(10))
+                .unwrap_err();
+        assert!(matches!(err, EnvelopeError::Malformed(_)), "{err}");
+    }
+
+    #[test]
+    fn unsigned_or_wrongly_signed_typed_envelopes_never_verify() {
+        let s = signer();
+        let (body, _) = typed_signed(&s, 3600);
+        let r = ring(&s, KeyPolicy::backend("b"));
+        let unsigned = SigHeaders::default();
+        assert!(matches!(
+            verify_typed_envelope(&r, &body, &unsigned, "PC-A", t(10)),
+            Err(EnvelopeError::Signature(VerifyError::Unsigned))
+        ));
+        // Signed by a key the agent does not hold.
+        let other = signer();
+        let (b2, h2) = typed_signed(&Signer::new(generate_keypair().unwrap(), "other"), 3600);
+        let _ = other;
+        assert!(matches!(
+            verify_typed_envelope(&r, &b2, &h2, "PC-A", t(10)),
+            Err(EnvelopeError::Signature(_))
+        ));
+    }
+
+    #[test]
+    fn a_bare_or_legacy_signed_typed_command_is_not_an_envelope() {
+        let s = signer();
+        let r = ring(&s, KeyPolicy::backend("b"));
+        // The legacy form signs the bare command. A typed one, even with a
+        // genuine signature, has no `kind` and so is no v2 envelope.
+        let bare = serde_json::to_vec(&typed_command()).unwrap();
+        let h = s.headers(&bare, t(0).timestamp_millis());
+        assert!(matches!(
+            verify_typed_envelope(&r, &bare, &h, "PC-A", t(10)),
+            Err(EnvelopeError::UnknownKind(_))
+        ));
+        assert!(matches!(
+            verify_envelope(&r, &bare, &h, "PC-A", t(10)),
+            Err(EnvelopeError::UnknownKind(_))
+        ));
+        // ... and the legacy decoder cannot read it as a shell command.
+        assert!(serde_json::from_slice::<Command>(&bare).is_err());
+    }
+
+    #[test]
+    fn tampering_with_any_typed_field_fails_the_signature() {
+        let s = signer();
+        let r = ring(&s, KeyPolicy::backend("b"));
+        let (body, h) = typed_signed(&s, 3600);
+        let text = String::from_utf8(body).unwrap();
+        let artifact = fx::hex(&fx::integrity().sha256);
+        for (from, to) in [
+            ("deploy_backend", "deploy_client"),
+            ("plan-1", "plan-2"),
+            ("\"wipe_db\":false", "\"wipe_db\":true"),
+            ("0.80.0", "0.81.0"),
+            (artifact.as_str(), &"0".repeat(64)),
+            ("PC-A", "PC-B"),
+        ] {
+            assert!(text.contains(from), "fixture lacks {from}");
+            let tampered = text.replace(from, to);
+            let err =
+                verify_typed_envelope(&r, tampered.as_bytes(), &h, "PC-B", t(10)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    EnvelopeError::Signature(VerifyError::BadSignature { .. })
+                ),
+                "{from}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_command_injected_into_a_signed_body_is_validated_after_the_signature() {
+        let s = signer();
+        let r = ring(&s, KeyPolicy::backend("b"));
+        // A genuine signature over a typed body that carries shell fields.
+        let mut v: serde_json::Value = serde_json::from_slice(&typed_signed(&s, 3600).0).unwrap();
+        v["command"]["shell"] = serde_json::json!("sh");
+        v["command"]["script"] = serde_json::json!("rm -rf /");
+        let (b, h) = resign(&s, &v.to_string(), 0);
+        assert!(matches!(
+            verify_typed_envelope(&r, &b, &h, "PC-A", t(10)),
+            Err(EnvelopeError::Malformed(_))
+        ));
+        assert!(matches!(
+            verify_envelope(&r, &b, &h, "PC-A", t(10)),
+            Err(EnvelopeError::UnsupportedCommandKind(_))
+        ));
+        // Same for a shell body that claims a typed kind or an unknown one.
+        for kind in ["typed_operation", "future_kind"] {
+            let mut v: serde_json::Value = serde_json::from_slice(&signed(&s, 3600).0).unwrap();
+            v["command"]["command_kind"] = serde_json::json!(kind);
+            let (b, h) = resign(&s, &v.to_string(), 0);
+            assert!(
+                matches!(
+                    verify_envelope(&r, &b, &h, "PC-A", t(10)),
+                    Err(EnvelopeError::UnsupportedCommandKind(_))
+                ),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_signer_refuses_to_sign_an_invalid_typed_command() {
+        let s = signer();
+        let mut c: TypedCommand = typed_command();
+        c.timeout_secs = 0;
+        assert!(sign_typed_envelope(&s, "PC-A", t(3600), c, t(0)).is_err());
+    }
+
+    #[test]
+    fn shell_envelope_bytes_are_unchanged_by_the_discriminator() {
+        let s = signer();
+        let (body, _) = signed(&s, 3600);
+        let text = String::from_utf8(body).unwrap();
+        assert!(!text.contains("command_kind"), "{text}");
+    }
+
+    /// The v2 envelope decoder exactly as agents shipped it before typed
+    /// commands: the body's `command` must decode as a shell command.
+    #[derive(Deserialize, Debug)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct FrozenEnvelope {
+        kind: String,
+        target_pc_id: String,
+        expires_at: DateTime<Utc>,
+        command: FrozenCommand,
+    }
+
+    #[derive(Deserialize, Debug)]
+    #[allow(dead_code)]
+    struct FrozenCommand {
+        id: String,
+        version: String,
+        request_id: String,
+        exec_id: Option<String>,
+        shell: crate::wire::Shell,
+        script: String,
+        timeout_secs: u64,
+        jitter_secs: Option<u64>,
+    }
+
+    #[test]
+    fn an_agent_that_predates_typed_commands_rejects_the_typed_envelope() {
+        let s = signer();
+        let (typed, _) = typed_signed(&s, 3600);
+        let err = serde_json::from_slice::<FrozenEnvelope>(&typed).unwrap_err();
+        assert!(err.to_string().contains("missing field"), "{err}");
+        // The same frozen decoder still accepts every shell envelope.
+        let (shell, _) = signed(&s, 3600);
+        serde_json::from_slice::<FrozenEnvelope>(&shell).unwrap();
     }
 }

@@ -52,6 +52,17 @@
         }
       ]
     },
+    "deploy_authorization": {
+      "description": "Plan reference of a typed native-deployment job. Required for (and\nonly valid on) `kind: typed_operation`. A reference is not an approval:\nthe shared approval gate does not exist yet.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DeployAuthorizationRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "description": {
       "type": [
         "string",
@@ -72,7 +83,8 @@
       "default": null
     },
     "execute": {
-      "$ref": "#/$defs/Execute"
+      "description": "Shell form (no `kind`, the historical record) or a typed native\noperation (`kind: typed_operation`, [`crate::typed_operation`]).",
+      "$ref": "#/$defs/ManifestExecute"
     },
     "feed": {
       "title": "vuln-roadmap: declarative **external-data feeds**. Each entry fetches",
@@ -764,6 +776,24 @@
         }
       }
     },
+    "DeployAuthorizationRef": {
+      "type": "object",
+      "properties": {
+        "plan_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "plan_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "plan_digest"
+      ]
+    },
     "DisplayField": {
       "type": "object",
       "properties": {
@@ -1080,6 +1110,59 @@
       },
       "required": [
         "display"
+      ]
+    },
+    "ManifestExecute": {
+      "description": "Either the shell form (no `kind`) or `kind: typed_operation`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Execute"
+        },
+        {
+          "description": "Typed native operation. Delivery is disabled until the shared approval/capability gates exist; no shell, script or cwd fields are allowed.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "typed_operation"
+            },
+            "operation": {
+              "type": "object",
+              "properties": {
+                "spec": {
+                  "type": "object"
+                },
+                "type": {
+                  "enum": [
+                    "deploy_backend",
+                    "deploy_client",
+                    "deploy_cli"
+                  ]
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "spec"
+              ]
+            },
+            "payload_version": {
+              "const": 1
+            },
+            "run_as": {
+              "const": "system"
+            },
+            "timeout": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload_version",
+            "timeout",
+            "operation"
+          ]
+        }
       ]
     },
     "NotificationPriority": {

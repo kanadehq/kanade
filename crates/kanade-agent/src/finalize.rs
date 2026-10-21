@@ -126,6 +126,7 @@ pub async fn run_finalize(
     // carrying NO hints (no recursion into collect/finalize) — the hook
     // is a plain script run.
     let fin_cmd = Command {
+        command_kind: kanade_shared::wire::CommandKind::Shell,
         id: format!("{}__finalize", parent.id),
         version: parent.version.clone(),
         request_id: parent.request_id.clone(),
@@ -312,6 +313,7 @@ mod tests {
     /// derives from; everything else is default/None.
     fn parent_fixture(id: &str, request_id: &str) -> Command {
         Command {
+            command_kind: kanade_shared::wire::CommandKind::Shell,
             id: id.into(),
             version: "1".into(),
             request_id: request_id.into(),

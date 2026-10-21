@@ -324,6 +324,10 @@ pub fn build_job_list(
 /// guaranteed present by serde at parse time, so this is a
 /// straight field-for-field projection — no defaulting needed.
 fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
+    // A typed deployment is never offered to the local catalog.
+    if m.execute.is_typed() {
+        return None;
+    }
     let client = m.client.as_ref()?;
     Some(UserInvokableJob {
         id: m.id.clone(),
@@ -343,7 +347,7 @@ fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
         // back to its fixed watchdog) rather than dropping the row —
         // `Manifest::validate` already rejects a bad timeout at write
         // time, so this only fails on a pre-validation legacy entry.
-        timeout_secs: humantime::parse_duration(&m.execute.timeout)
+        timeout_secs: humantime::parse_duration(m.execute.timeout())
             .ok()
             .map(|d| d.as_secs().max(1)), // truncates sub-second; floors < 1s to 1
         // Surface the operator's confirmation-dialog config so the Client
@@ -517,13 +521,31 @@ async fn fetch_manifest(client: &async_nats::Client, id: &str) -> Result<Manifes
             )
         })?
         .ok_or_else(|| RpcError::new(ErrorKind::NotFound, format!("job '{id}' not found")))?;
-    serde_json::from_slice::<Manifest>(&bytes).map_err(|e| {
+    let manifest = serde_json::from_slice::<Manifest>(&bytes).map_err(|e| {
         warn!(key = %id, error = %e, "jobs.execute: manifest decode failed");
         RpcError::new(
             ErrorKind::InternalError,
             format!("jobs.execute: decode job '{id}': {e}"),
         )
-    })
+    })?;
+    // Typed native deployment is never started from the local KLP path: it
+    // would need a Backend-approved signed envelope, which this path cannot
+    // obtain, and the local Command must not be built to bypass that.
+    if manifest.execute.is_typed() {
+        return Err(typed_refusal(id));
+    }
+    Ok(manifest)
+}
+
+fn typed_refusal(id: &str) -> RpcError {
+    warn!(job_id = %id, "KLP: typed_operation job refused; typed deployment is disabled");
+    RpcError::new(
+        ErrorKind::Unauthorized,
+        format!(
+            "job '{id}' is a typed deployment and cannot be started locally: {}",
+            kanade_shared::typed_operation::TYPED_DEPLOY_DISABLED
+        ),
+    )
 }
 
 /// `true` if `id` is a legal manifest id / NATS KV key: a non-empty
@@ -550,7 +572,11 @@ pub fn build_command(
     run_id: &str,
     request_id: &str,
 ) -> Result<Command, RpcError> {
-    if manifest.execute.script_object.is_some() {
+    let execute = manifest
+        .execute
+        .require_shell()
+        .map_err(|_| typed_refusal(&manifest.id))?;
+    if execute.script_object.is_some() {
         return Err(RpcError::new(
             ErrorKind::InvalidParams,
             format!(
@@ -559,8 +585,7 @@ pub fn build_command(
             ),
         ));
     }
-    let script = manifest
-        .execute
+    let script = execute
         .script
         .as_deref()
         .filter(|s| !s.is_empty())
@@ -576,7 +601,7 @@ pub fn build_command(
     // path (no-timeout vs immediate-timeout). Floor any positive
     // duration at 1s — a user-invokable action measured in milliseconds
     // is not a real config.
-    let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
+    let timeout_secs = humantime::parse_duration(&execute.timeout)
         .map_err(|e| {
             RpcError::new(
                 ErrorKind::InvalidParams,
@@ -586,6 +611,7 @@ pub fn build_command(
         .as_secs()
         .max(1);
     Ok(Command {
+        command_kind: kanade_shared::wire::CommandKind::Shell,
         id: manifest.id.clone(),
         version: manifest.version.clone(),
         request_id: request_id.to_string(),
@@ -594,15 +620,15 @@ pub fn build_command(
         // KLP Client runs bypass admission by choosing the direct run_job
         // path below, regardless of the manifest's automation setting.
         bypass_local_limit: false,
-        shell: manifest.execute.shell.into(),
+        shell: execute.shell.into(),
         script,
         script_object: None,
         script_object_sha256: None,
         timeout_secs,
         // User-fired one-shot — no fan-out, so no jitter / deadline.
         jitter_secs: None,
-        run_as: manifest.execute.run_as,
-        cwd: manifest.execute.cwd.clone(),
+        run_as: execute.run_as,
+        cwd: execute.cwd.clone(),
         deadline_at: None,
         staleness: manifest.staleness.clone(),
         // A user-invokable action's stdout drives the progress display.
@@ -1178,7 +1204,7 @@ mod tests {
             id: id.into(),
             version: "1.0.0".into(),
             description: None,
-            execute: Execute {
+            execute: kanade_shared::typed_operation::ManifestExecute::Shell(Execute {
                 bypass_local_limit: false,
                 shell: ExecuteShell::Powershell,
                 script: Some("echo hi".into()),
@@ -1187,8 +1213,9 @@ mod tests {
                 timeout: "30s".into(),
                 run_as: RunAs::default(),
                 cwd: None,
-            },
+            }),
             require_approval: false,
+            deploy_authorization: None,
             inventory: None,
             emit: None,
             check: None,
@@ -1474,9 +1501,9 @@ mod tests {
         // to 1s (same convention as build_command) so the client never
         // sees an ambiguous 0.
         let mut long = manifest("office-repair", Some(("Office 修復", "troubleshoot")));
-        long.execute.timeout = "1h".into();
+        long.execute.shell_mut().unwrap().timeout = "1h".into();
         let mut sub = manifest("blip", Some(("Blip", "catalog")));
-        sub.execute.timeout = "500ms".into();
+        sub.execute.shell_mut().unwrap().timeout = "500ms".into();
         let result = build_job_list(&[long, sub], None, "PC1", &[], &no_checks(), &all_locked);
         let by_id = |id: &str| {
             result
@@ -1505,14 +1532,44 @@ mod tests {
         assert_eq!(names, ["Apple", "Mango", "Zebra"]);
     }
 
+    // ---------- typed native deployment is never run locally ----------
+
+    fn typed_manifest() -> Manifest {
+        let d = "1".repeat(64);
+        kanade_shared::strict::from_yaml_str(&format!(
+            "id: deploy-cli\nversion: 1.0.0\nrequire_approval: true\n\
+             deploy_authorization: {{plan_id: p1, plan_digest: {d}}}\n\
+             execute:\n  kind: typed_operation\n  payload_version: 1\n  timeout: 5m\n  operation:\n    \
+             type: deploy_cli\n    spec:\n      \
+             artifact_identity: {{role: cli, version: 0.80.0, os: linux, arch: x86_64, distro_abi: musl, format: tar_gz}}\n      \
+             package_object_key: cli/0.80.0/linux-x86_64-musl.tar_gz\n      \
+             artifact_sha256: {d}\n      manifest_sha256: {d}\n"
+        ))
+        .expect("typed manifest")
+    }
+
+    #[test]
+    fn build_command_refuses_a_typed_job_instead_of_building_a_shell_command() {
+        let m = typed_manifest();
+        let err = build_command(&m, "run-1", "req-1").unwrap_err();
+        assert_eq!(err.code, ErrorKind::Unauthorized.code(), "{err:?}");
+    }
+
+    #[test]
+    fn a_typed_job_is_never_offered_in_the_local_catalog() {
+        let mut m = typed_manifest();
+        m.client = manifest("x", Some(("n", "c"))).client;
+        assert!(manifest_to_job(&m).is_none());
+    }
+
     // ---------- build_command ----------
 
     #[test]
     fn build_command_maps_manifest_fields() {
         let mut m = manifest("fix-teams", Some(("Teams 修復", "troubleshoot")));
-        m.execute.run_as = RunAs::User;
-        m.execute.cwd = Some("C:/temp".into());
-        m.execute.timeout = "90s".into();
+        m.execute.shell_mut().unwrap().run_as = RunAs::User;
+        m.execute.shell_mut().unwrap().cwd = Some("C:/temp".into());
+        m.execute.shell_mut().unwrap().timeout = "90s".into();
         let cmd = build_command(&m, "run-123", "req-9").expect("build");
         assert_eq!(cmd.id, "fix-teams");
         assert_eq!(cmd.version, "1.0.0");
@@ -1561,8 +1618,8 @@ mod tests {
     #[test]
     fn build_command_rejects_script_object() {
         let mut m = manifest("obj-job", Some(("Obj", "catalog")));
-        m.execute.script = None;
-        m.execute.script_object = Some("cleanup/1.0.0".into());
+        m.execute.shell_mut().unwrap().script = None;
+        m.execute.shell_mut().unwrap().script_object = Some("cleanup/1.0.0".into());
         let err = build_command(&m, "r1", "req-1").expect_err("script_object unsupported");
         assert_eq!(err.data.unwrap().kind, ErrorKind::InvalidParams);
     }
@@ -1570,7 +1627,7 @@ mod tests {
     #[test]
     fn build_command_rejects_missing_inline_script() {
         let mut m = manifest("empty", Some(("Empty", "catalog")));
-        m.execute.script = None;
+        m.execute.shell_mut().unwrap().script = None;
         let err = build_command(&m, "r1", "req-1").expect_err("no script");
         let data = err.data.unwrap();
         assert_eq!(data.kind, ErrorKind::InvalidParams);
@@ -1580,7 +1637,7 @@ mod tests {
     #[test]
     fn build_command_rejects_bad_timeout() {
         let mut m = manifest("bad", Some(("Bad", "catalog")));
-        m.execute.timeout = "not-a-duration".into();
+        m.execute.shell_mut().unwrap().timeout = "not-a-duration".into();
         let err = build_command(&m, "r1", "req-1").expect_err("bad timeout");
         let data = err.data.unwrap();
         assert_eq!(data.kind, ErrorKind::InvalidParams);
@@ -1592,7 +1649,7 @@ mod tests {
         // `500ms`.as_secs() == 0, which is an ambiguous timeout to the
         // run path — floor any positive duration at 1s.
         let mut m = manifest("ms", Some(("Ms", "catalog")));
-        m.execute.timeout = "500ms".into();
+        m.execute.shell_mut().unwrap().timeout = "500ms".into();
         let cmd = build_command(&m, "r1", "req-1").expect("build");
         assert_eq!(cmd.timeout_secs, 1);
     }

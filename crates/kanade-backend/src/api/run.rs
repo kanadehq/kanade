@@ -87,6 +87,7 @@ pub async fn run(
 
     let request_id = Uuid::new_v4().to_string();
     let cmd = Command {
+        command_kind: kanade_shared::wire::CommandKind::Shell,
         id: "adhoc-run".to_string(),
         version: "0.0.0".to_string(),
         request_id: request_id.clone(),

@@ -6,6 +6,13 @@ use crate::manifest::{CheckHint, CollectHint, EmitConfig};
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Command {
+    /// Command discriminator. Only `shell` exists on this type and it is
+    /// never written (historical bytes are unchanged); any other value —
+    /// `typed_operation`, an unknown kind, `null` — fails to decode instead
+    /// of being ignored and run as a shell command. Typed operations use
+    /// [`super::TypedCommand`].
+    #[serde(default, skip_serializing_if = "CommandKind::is_shell")]
+    pub command_kind: CommandKind,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bypass_local_limit: bool,
     pub id: String,
@@ -131,6 +138,22 @@ pub struct Command {
     pub finalize: Option<FinalizeCommand>,
 }
 
+/// See [`Command::command_kind`].
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandKind {
+    #[default]
+    Shell,
+}
+
+impl CommandKind {
+    pub fn is_shell(&self) -> bool {
+        matches!(self, CommandKind::Shell)
+    }
+}
+
 /// Lowered, engine-vocabulary form of [`crate::manifest::FinalizeSpec`]
 /// — the post-step hook stamped onto a [`Command`]. The operator-facing
 /// humantime `timeout` is reduced to whole seconds at build time
@@ -238,6 +261,7 @@ mod tests {
 
     fn sample_command() -> Command {
         Command {
+            command_kind: CommandKind::Shell,
             id: "echo-test".into(),
             version: "1.0.0".into(),
             request_id: "req-1".into(),

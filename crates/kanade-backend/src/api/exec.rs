@@ -5,7 +5,8 @@ use base64::Engine as _;
 use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, OBJECT_SCRIPTS};
 use kanade_shared::manifest::{FanoutPlan, Manifest, Target};
 use kanade_shared::subject;
-use kanade_shared::wire::Command;
+use kanade_shared::typed_operation::TypedDeployDisabled;
+use kanade_shared::wire::{Command, CommandKind};
 use serde::Serialize;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -22,6 +23,11 @@ pub struct ExecResponse {
     pub version: String,
     pub target_count: u32,
     pub subjects: Vec<String>,
+}
+
+/// The HTTP form of the typed-deployment refusal.
+pub(crate) fn typed_refusal(e: TypedDeployDisabled) -> (StatusCode, String) {
+    (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
 }
 
 /// Core exec pipeline used by both the HTTP handler (actor = "operator")
@@ -50,6 +56,15 @@ pub async fn exec_manifest(
     // passes `schedule.on_failure.lowered_retry()`.
     retry: Option<kanade_shared::wire::RetrySpec>,
 ) -> Result<ExecResponse, (StatusCode, String)> {
+    // Typed native deployment is not deliverable until the shared approval
+    // and capability gates exist: refuse before anything is resolved,
+    // recorded or published. Every direct exec and scheduler fire passes
+    // through here, and the shell builder below only ever sees an `Execute`.
+    let shell_exec = manifest
+        .execute
+        .require_shell()
+        .map_err(typed_refusal)?
+        .clone();
     let has_rollout = plan
         .rollout
         .as_ref()
@@ -158,7 +173,7 @@ pub async fn exec_manifest(
     // as an unresolved alternative.
     let (inline_script, script_object_ref) = resolve_script_source(s, &manifest).await?;
 
-    let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
+    let timeout_secs = humantime::parse_duration(&shell_exec.timeout)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid timeout: {e}")))?
         .as_secs();
     let jitter_secs = plan
@@ -177,15 +192,16 @@ pub async fn exec_manifest(
         version: manifest.version.clone(),
         request_id: Uuid::new_v4().to_string(),
         exec_id: Some(exec_id.clone()),
-        bypass_local_limit: manifest.execute.bypass_local_limit,
-        shell: manifest.execute.shell.into(),
+        command_kind: CommandKind::Shell,
+        bypass_local_limit: shell_exec.bypass_local_limit,
+        shell: shell_exec.shell.into(),
         script: inline_script.clone(),
         script_object: script_object_ref.as_ref().map(|(k, _)| k.clone()),
         script_object_sha256: script_object_ref.as_ref().map(|(_, d)| d.clone()),
         timeout_secs,
         jitter_secs,
-        run_as: manifest.execute.run_as,
-        cwd: manifest.execute.cwd.clone(),
+        run_as: shell_exec.run_as,
+        cwd: shell_exec.cwd.clone(),
         deadline_at,
         // v0.26: forward Layer 2 staleness policy to every emitted
         // Command so the agent can apply it whether it sees the live
@@ -481,11 +497,12 @@ async fn resolve_script_source(
     s: &AppState,
     manifest: &Manifest,
 ) -> Result<(String, Option<(String, String)>), (StatusCode, String)> {
-    if let Some(inline) = manifest.execute.script.as_deref().filter(|s| !s.is_empty()) {
+    let execute = manifest.execute.require_shell().map_err(typed_refusal)?;
+    if let Some(inline) = execute.script.as_deref().filter(|s| !s.is_empty()) {
         return Ok((inline.to_owned(), None));
     }
 
-    let key = manifest.execute.script_object.as_deref().ok_or((
+    let key = execute.script_object.as_deref().ok_or((
         StatusCode::BAD_REQUEST,
         "execute: one of `script` or `script_object` must be set \
          (Manifest::validate() should have caught this earlier)"
@@ -673,5 +690,218 @@ mod tests {
         let resolved = expected_target_for(&p);
         assert!(!resolved.all && resolved.groups.is_empty() && resolved.pcs.is_empty());
         assert_eq!(fallback_subject_count(&p), 0);
+    }
+
+    #[test]
+    fn typed_deployment_is_refused_as_unprocessable() {
+        let (status, msg) = typed_refusal(TypedDeployDisabled);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(msg.contains("not enabled"), "{msg}");
+    }
+}
+
+/// Real-broker proof that a typed native-deployment job reaches no delivery
+/// path of the backend: every call is refused before anything is published,
+/// recorded or stored, while ordinary shell jobs are unaffected. Like the
+/// other live suites these spawn a throwaway `nats-server -js` and run with
+///
+/// ```text
+/// cargo test -p kanade-backend api::exec::typed_gate_e2e -- --ignored
+/// ```
+#[cfg(test)]
+mod typed_gate_e2e {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use futures::StreamExt;
+    use kanade_shared::kv::BUCKET_JOBS;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    const SHELL_JOB: &str =
+        "id: shell-job\nversion: 1.0.0\nexecute:\n  shell: sh\n  script: echo hi\n  timeout: 30s\n";
+
+    fn typed_job_yaml() -> String {
+        let d = "1".repeat(64);
+        format!(
+            "id: deploy-cli\nversion: 1.0.0\nrequire_approval: true\n\
+             deploy_authorization: {{plan_id: p1, plan_digest: {d}}}\n\
+             execute:\n  kind: typed_operation\n  payload_version: 1\n  timeout: 5m\n  operation:\n    \
+             type: deploy_cli\n    spec:\n      \
+             artifact_identity: {{role: cli, version: 0.80.0, os: linux, arch: x86_64, distro_abi: musl, format: tar_gz}}\n      \
+             package_object_key: cli/0.80.0/linux-x86_64-musl.tar_gz\n      \
+             artifact_sha256: {d}\n      manifest_sha256: {d}\n"
+        )
+    }
+
+    struct App {
+        router: axum::Router,
+        state: AppState,
+        _server: tokio::process::Child,
+        _storage: tempfile::TempDir,
+    }
+
+    async fn app() -> App {
+        let port = portpicker::pick_unused_port().expect("pick port");
+        let storage = tempfile::TempDir::new().expect("storage tempdir");
+        let server = tokio::process::Command::new("nats-server")
+            .arg("-js")
+            .arg("-p")
+            .arg(port.to_string())
+            .arg("-sd")
+            .arg(storage.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn nats-server (is it in PATH?)");
+        let url = format!("nats://127.0.0.1:{port}");
+        let mut client = None;
+        for _ in 0..50 {
+            match async_nats::connect(&url).await {
+                Ok(c) => {
+                    client = Some(c);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        let nats = client.expect("nats-server did not come up in 5s");
+        let js = async_nats::jetstream::new(nats.clone());
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, role, allowed_features) \
+             VALUES ('op', 'x', 'operator', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = AppState {
+            passkeys: None,
+            pool: pool.clone(),
+            query_pool: pool.clone(),
+            commands: std::sync::Arc::new(crate::command_publisher::CommandPublisher::new(
+                nats.clone(),
+                None,
+            )),
+            nats,
+            jetstream: js,
+            explode_spec_cache: Default::default(),
+            sql_view_cache: crate::api::view_sql::new_cache(),
+            group_cache: crate::api::group_sql::new_cache(),
+            mailer: None,
+            public_url: None,
+            nats_url: String::new(),
+            login_throttle: Default::default(),
+        };
+        let router = crate::api::router(state.clone()).layer(axum::middleware::from_fn_with_state(
+            pool,
+            crate::auth::verify,
+        ));
+        App {
+            router,
+            state,
+            _server: server,
+            _storage: storage,
+        }
+    }
+
+    fn token() -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+        let claims = crate::auth::Claims {
+            sub: "op".into(),
+            exp: 4_102_444_800,
+            aud: Some(crate::auth::EXPECTED_AUDIENCE.to_string()),
+            roles: Vec::new(),
+            allowed_features: None,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(crate::auth::signing_secret().as_bytes()),
+        )
+        .expect("mint")
+    }
+
+    async fn call(app: &App, uri: &str, content_type: &str, body: String) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", token()))
+            .header("x-kanade-source", "cli")
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn typed_jobs_are_not_storable_dispatchable_or_schedulable() {
+        let app = app().await;
+        let mut commands = app.state.nats.subscribe("commands.>").await.unwrap();
+        app.state.nats.flush().await.unwrap();
+
+        // Create/update: the definition is not publishable to the catalog.
+        let (status, body) = call(&app, "/api/jobs", "application/yaml", typed_job_yaml()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("not enabled"), "{body}");
+        let stored = match app.state.jetstream.get_key_value(BUCKET_JOBS).await {
+            Ok(kv) => kv.get("deploy-cli").await.unwrap(),
+            Err(_) => None,
+        };
+        assert!(stored.is_none(), "a rejected typed job must not be stored");
+
+        // Ordinary shell jobs are untouched by the new gate.
+        let (status, body) = call(&app, "/api/jobs", "application/yaml", SHELL_JOB.into()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // A hand-poked typed record (direct KV write, bypassing the API) is
+        // still refused by the direct exec path.
+        let kv = app
+            .state
+            .jetstream
+            .get_key_value(BUCKET_JOBS)
+            .await
+            .unwrap();
+        let typed: Manifest = kanade_shared::strict::from_yaml_str(&typed_job_yaml()).unwrap();
+        kv.put("deploy-cli", serde_json::to_vec(&typed).unwrap().into())
+            .await
+            .unwrap();
+        let plan = serde_json::json!({"target": {"pcs": ["PC1"]}}).to_string();
+        let (status, body) = call(
+            &app,
+            "/api/exec/deploy-cli",
+            "application/json",
+            plan.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("not enabled"), "{body}");
+
+        // The shared dispatch boundary (also the scheduler's) refuses it too.
+        let fan: FanoutPlan = serde_json::from_str(&plan).unwrap();
+        match exec_manifest(&app.state, typed, fan, "scheduler", None, None).await {
+            Err((status, _)) => assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY),
+            Ok(_) => panic!("exec_manifest dispatched a typed job"),
+        }
+
+        // Nothing was recorded and nothing reached any command subject.
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM executions")
+            .fetch_one(&app.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        let got = tokio::time::timeout(Duration::from_millis(500), commands.next()).await;
+        assert!(got.is_err(), "a command was published for a typed job");
     }
 }

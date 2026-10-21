@@ -13,10 +13,19 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def commands():
     yield ["cargo", "test", "-p", "kanade-backend", "--",
-           "api::agent_releases", "api::app_artifacts", "--ignored"]
-    for module in ("package_manifest", "publisher_trust", "package_admission"):
+           "api::agent_releases", "api::app_artifacts",
+           "api::exec::typed_gate_e2e", "--ignored"]
+    for module in ("package_manifest", "publisher_trust", "package_admission",
+                   "typed_operation", "wire::typed_command", "wire::envelope",
+                   "wire::command"):
         yield ["cargo", "test", "-p", "kanade-shared", "--lib", "--",
                module + "::tests::"]
+    # Stage 3: typed deployment is schema-only; every delivery path refuses it.
+    yield ["cargo", "test", "-p", "kanade-backend", "--bins", "--",
+           "api::exec::tests::typed_deployment_is_refused",
+           "api::jobs::tests::job_list_row_for_a_typed"]
+    yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--", "typed"]
+    yield ["cargo", "test", "-p", "kanade", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--test", "app_manifest_cli",
            "--test", "app_trust_cli"]
 

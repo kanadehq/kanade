@@ -1450,6 +1450,7 @@ mod tests {
     #[test]
     fn not_now_results_are_skipped_but_a_refusal_or_queued_kill_is_not() {
         let cmd = Command {
+            command_kind: kanade_shared::wire::CommandKind::Shell,
             id: "job".into(),
             version: "1".into(),
             request_id: "req-1".into(),

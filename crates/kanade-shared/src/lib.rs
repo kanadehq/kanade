@@ -21,6 +21,7 @@ pub mod secrets;
 pub mod signing;
 pub mod strict;
 pub mod subject;
+pub mod typed_operation;
 pub mod wire;
 
 pub use wire::{

@@ -27,9 +27,16 @@ pub struct Manifest {
     pub version: String,
     #[serde(default)]
     pub description: Option<String>,
-    pub execute: Execute,
+    /// Shell form (no `kind`, the historical record) or a typed native
+    /// operation (`kind: typed_operation`, [`crate::typed_operation`]).
+    pub execute: crate::typed_operation::ManifestExecute,
     #[serde(default)]
     pub require_approval: bool,
+    /// Plan reference of a typed native-deployment job. Required for (and
+    /// only valid on) `kind: typed_operation`. A reference is not an approval:
+    /// the shared approval gate does not exist yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_authorization: Option<crate::typed_operation::DeployAuthorizationRef>,
     /// Opt-in marker that this job produces a JSON inventory fact
     /// payload on stdout. When present, the backend's results
     /// projector parses `ExecResult.stdout` as JSON and upserts an
@@ -2586,12 +2593,50 @@ impl FinalizeSpec {
 }
 
 impl Manifest {
+    /// The job-level half of the typed-operation contract (the `execute`
+    /// block itself is checked by `ManifestExecute::validate`).
+    fn validate_typed_job(&self) -> Result<(), String> {
+        if !self.execute.is_typed() {
+            if self.deploy_authorization.is_some() {
+                return Err(
+                    "deploy_authorization is only valid on a `kind: typed_operation` job".into(),
+                );
+            }
+            return Ok(());
+        }
+        if !self.require_approval {
+            return Err("a typed_operation job must set require_approval: true".into());
+        }
+        let Some(auth) = &self.deploy_authorization else {
+            return Err("a typed_operation job requires deploy_authorization".into());
+        };
+        auth.validate()?;
+        // A typed operation runs no script, so none of the stdout-driven or
+        // end-user-launch features can apply to it.
+        let hints = [
+            ("inventory", self.inventory.is_some()),
+            ("emit", self.emit.is_some()),
+            ("check", self.check.is_some()),
+            ("collect", self.collect.is_some()),
+            ("finalize", self.finalize.is_some()),
+            ("feed", !self.feed.is_empty()),
+            ("client", self.client.is_some()),
+        ];
+        if let Some((name, _)) = hints.iter().find(|(_, set)| *set) {
+            return Err(format!(
+                "a typed_operation job must not set `{name}` (it runs no script)"
+            ));
+        }
+        Ok(())
+    }
+
     /// Cross-field semantic checks that don't fit into pure serde
     /// derive. Currently delegates to
     /// [`Execute::validate_script_source`] — see that method's
     /// docs for the rationale on which call sites should run this.
     pub fn validate(&self) -> Result<(), String> {
-        self.execute.validate_script_source()?;
+        self.execute.validate()?;
+        self.validate_typed_job()?;
         // Fail CLOSED on an unrecognised execution tier. `#[serde(other)]`
         // turns a typo (`tier: controler`) or a future tier into
         // `Tier::Unknown`; without this check the controller gate would
@@ -3125,7 +3170,7 @@ done!
             // these particular checks, NOT of the `check:` contract — a
             // check probing user-session state could run_as user.
             assert_eq!(
-                m.execute.run_as,
+                m.execute.run_as(),
                 RunAs::System,
                 "{name} should run_as system"
             );
@@ -3399,14 +3444,17 @@ execute:
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(m.id, "echo-test");
         assert_eq!(m.version, "0.0.1");
-        assert!(matches!(m.execute.shell, ExecuteShell::Powershell));
+        assert!(matches!(
+            m.execute.shell().unwrap().shell,
+            ExecuteShell::Powershell
+        ));
         assert_eq!(
-            m.execute.script.as_deref().map(str::trim),
+            m.execute.shell().unwrap().script.as_deref().map(str::trim),
             Some("echo 'kanade'")
         );
-        assert!(m.execute.script_file.is_none());
-        assert!(m.execute.script_object.is_none());
-        assert_eq!(m.execute.timeout, "30s");
+        assert!(m.execute.shell().unwrap().script_file.is_none());
+        assert!(m.execute.shell().unwrap().script_object.is_none());
+        assert_eq!(m.execute.timeout(), "30s");
         assert!(!m.require_approval);
         m.validate()
             .expect("inline-script manifest passes validation");
@@ -5388,10 +5436,10 @@ execute:
 "#;
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(
-            m.execute.script_object.as_deref(),
+            m.execute.shell().unwrap().script_object.as_deref(),
             Some("cleanup-disk-temp/1.0.1")
         );
-        assert!(m.execute.script.is_none());
+        assert!(m.execute.shell().unwrap().script.is_none());
         m.validate()
             .expect("script_object-only manifest passes validation");
     }
@@ -7641,7 +7689,7 @@ runs_on: agent
                 "id: x\nversion: 1.0.0\nexecute:\n  shell: {yaml_shell}\n  script: \"echo\"\n  timeout: 1s\n"
             );
             let m: Manifest = serde_yaml::from_str(&yaml).expect("parse");
-            assert_eq!(m.execute.shell, want, "shell {yaml_shell}");
+            assert_eq!(m.execute.shell().unwrap().shell, want, "shell {yaml_shell}");
         }
     }
 

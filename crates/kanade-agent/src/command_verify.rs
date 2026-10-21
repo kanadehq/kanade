@@ -1450,6 +1450,7 @@ fn envelope_outcome(e: &EnvelopeError) -> Outcome {
         EnvelopeError::Expired { .. } | EnvelopeError::KeyAgeExceeded { .. } => Outcome::Expired,
         EnvelopeError::Misaddressed { .. } => Outcome::Misaddressed,
         EnvelopeError::UnknownKind(_)
+        | EnvelopeError::UnsupportedCommandKind(_)
         | EnvelopeError::Malformed(_)
         | EnvelopeError::MissingRecipient
         | EnvelopeError::MissingExpiry
@@ -2987,6 +2988,7 @@ mod tests {
 
         fn command() -> Command {
             Command {
+                command_kind: kanade_shared::wire::CommandKind::Shell,
                 id: "echo".into(),
                 version: "1.0.0".into(),
                 request_id: "req-1".into(),
@@ -3111,6 +3113,87 @@ mod tests {
             // Refusing a kind is not a signing-state report: it is reachable by
             // anyone who can put bytes on the subject.
             assert_eq!(last(&v), None);
+        }
+
+        fn typed_command() -> kanade_shared::wire::TypedCommand {
+            let d = "1".repeat(64);
+            serde_json::from_value(serde_json::json!({
+                "command_kind": "typed_operation",
+                "payload_version": 1,
+                "id": "deploy-cli",
+                "version": "1.0.0",
+                "request_id": "req-typed",
+                "timeout_secs": 600,
+                "run_as": "system",
+                "operation": {"type": "deploy_cli", "spec": {
+                    "artifact_identity": {"role": "cli", "version": "0.80.0", "os": "linux",
+                        "arch": "x86_64", "distro_abi": "musl", "format": "tar_gz"},
+                    "package_object_key": "cli/0.80.0/linux-x86_64-musl.tar_gz",
+                    "artifact_sha256": d, "manifest_sha256": d
+                }},
+                "deploy_authorization": {"plan_id": "p1", "plan_digest": d, "manifest_digest": d}
+            }))
+            .expect("valid typed command")
+        }
+
+        #[test]
+        fn a_signed_typed_envelope_is_refused_in_either_mode_and_never_runs() {
+            for enforcing in [false, true] {
+                let (v, s) = setup(enforcing);
+                let (body, h) = kanade_shared::wire::sign_typed_envelope(
+                    &s,
+                    "PC1",
+                    t(3600),
+                    typed_command(),
+                    t(0),
+                )
+                .unwrap();
+                assert!(
+                    matches!(admit(&v, &body, &h, t(5)), Admission::Refused),
+                    "enforcing={enforcing}"
+                );
+                assert_eq!(last(&v), Some(Outcome::EnvelopeRejected));
+            }
+        }
+
+        #[test]
+        fn an_unsigned_typed_envelope_is_refused_even_when_not_enforcing() {
+            let (v, s) = setup(false);
+            let (body, _) =
+                kanade_shared::wire::sign_typed_envelope(&s, "PC1", t(3600), typed_command(), t(0))
+                    .unwrap();
+            assert!(matches!(
+                admit(&v, &body, &SigHeaders::default(), t(5)),
+                Admission::Refused
+            ));
+        }
+
+        #[test]
+        fn a_bare_typed_command_cannot_be_decoded_as_a_legacy_shell_command() {
+            let body = serde_json::to_vec(&typed_command()).unwrap();
+            for enforcing in [false, true] {
+                let (v, s) = setup(enforcing);
+                let signed = s.headers(&body, t(0).timestamp_millis());
+                for h in [SigHeaders::default(), signed] {
+                    assert!(
+                        matches!(admit(&v, &body, &h, t(5)), Admission::Undecodable(_)),
+                        "enforcing={enforcing}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn a_signed_shell_command_that_claims_a_typed_kind_does_not_run_as_shell() {
+            let (v, s) = setup(false);
+            let mut obj = serde_json::to_value(command()).unwrap();
+            obj["command_kind"] = serde_json::json!("typed_operation");
+            let body = serde_json::to_vec(&obj).unwrap();
+            let h = s.headers(&body, t(0).timestamp_millis());
+            assert!(matches!(
+                admit(&v, &body, &h, t(5)),
+                Admission::Undecodable(_)
+            ));
         }
 
         #[test]
