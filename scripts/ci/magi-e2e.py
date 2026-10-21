@@ -2,11 +2,17 @@
 """既存の focused e2e を実行し、空振りと CI の NATS ピンのずれを拒否する。"""
 
 import os
+import platform
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
+import urllib.request
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,22 +66,93 @@ def run(command, env):
     return 0
 
 
-def check_nats():
+def nats_version():
     workflow = (ROOT / ".github/workflows/integration.yml").read_text()
-    version = re.search(r'^  NATS_SERVER_VERSION: "([^"]+)"$', workflow,
+    version = re.search(r'^  NATS_SERVER_VERSION: "(\d+\.\d+\.\d+)"$', workflow,
                         re.MULTILINE)
     if version is None:
         raise ValueError("integration.yml の NATS ピンを確認できません。")
-    expected = "nats-server: v" + version[1]
-    result = subprocess.run(["nats-server", "--version"], text=True,
+    return version[1]
+
+
+def check_nats(binary="nats-server", version=None, env=None):
+    expected = "nats-server: v" + (version or nats_version())
+    result = subprocess.run([str(binary), "--version"], env=env, text=True,
                             capture_output=True, check=True)
     if result.stdout.strip() != expected:
         raise ValueError(f"NATS バージョン不一致: expected {expected}, got {result.stdout.strip()}")
 
 
+def nats_platform():
+    system = platform.system().lower()
+    arch = {"aarch64": "arm64", "arm64": "arm64",
+            "x86_64": "amd64", "amd64": "amd64"}.get(platform.machine().lower())
+    if system not in ("darwin", "linux", "windows") or arch is None:
+        raise ValueError("このホスト用の NATS 配布物は未対応です。")
+    return f"{system}-{arch}"
+
+
+def download_nats(version, host, destination):
+    archive = f"nats-server-v{version}-{host}"
+    suffix = ".zip" if host.startswith("windows-") else ".tar.gz"
+    url = f"https://github.com/nats-io/nats-server/releases/download/v{version}/{archive}{suffix}"
+    bundle = destination.parent / ("nats" + suffix)
+    print(f"NATS 検証用ツールを取得: {url}", flush=True)
+    with urllib.request.urlopen(url, timeout=30) as response, bundle.open("wb") as out:
+        shutil.copyfileobj(response, out)
+    member = f"{archive}/{destination.name}"
+    if suffix == ".zip":
+        with zipfile.ZipFile(bundle) as package, package.open(member) as source:
+            with destination.open("wb") as out:
+                shutil.copyfileobj(source, out)
+    else:
+        with tarfile.open(bundle) as package:
+            entry = package.getmember(member)
+            if not entry.isfile():
+                raise ValueError("NATS 配布物の実行ファイルが通常ファイルではありません。")
+            with package.extractfile(entry) as source, destination.open("wb") as out:
+                shutil.copyfileobj(source, out)
+        destination.chmod(0o755)
+
+
+def prepare_nats(env):
+    version = nats_version()
+    host = nats_platform()
+    name = "nats-server.exe" if host.startswith("windows-") else "nats-server"
+    bin_dir = ROOT / "target" / "magi-tools" / "nats" / version / host / "bin"
+    binary = bin_dir / name
+    source = env.get("KANADE_TEST_NATS_SERVER")
+    if source:
+        source = Path(source).resolve(strict=True)
+        check_nats(source, version, env)
+    elif binary.is_file():
+        check_nats(binary, version, env)
+    else:
+        source = shutil.which("nats-server", path=env.get("PATH", ""))
+        if source:
+            try:
+                check_nats(source, version, env)
+            except (ValueError, subprocess.SubprocessError):
+                source = None
+    if source or not binary.is_file():
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=bin_dir.parent) as staging:
+            staged = Path(staging) / name
+            if source:
+                shutil.copy2(source, staged)
+            else:
+                download_nats(version, host, staged)
+            check_nats(staged, version, env)
+            staged.replace(binary)
+    env = env.copy()
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    # Rust fixture と同じ PATH 解決でも固定版を選ぶことを起動前に検査する。
+    check_nats(version=version, env=env)
+    return env
+
+
 def main():
-    check_nats()
-    env = os.environ.copy()
+    env = prepare_nats(os.environ.copy())
     env["KANADE_APP_ARTIFACT_PUBLICATION"] = "backend-exclusive"
     env["CARGO_TERM_COLOR"] = "never"
     for command in commands():
@@ -88,6 +165,7 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, subprocess.SubprocessError,
+            tarfile.TarError, zipfile.BadZipFile) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(1)

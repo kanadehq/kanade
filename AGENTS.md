@@ -743,11 +743,13 @@ not that CI or review did not run.
   成功件数が一致しなければ失敗する。stage 2a/2b のフィルタは
   `package_manifest::tests::`、`publisher_trust::tests::`、
   `package_admission::tests::` を個別に指定する。Python 3 が必要。
-- **Prerequisites**: `nats-server` on `PATH` (CI pins the version in
-  `NATS_SERVER_VERSION` of `integration.yml`) and permission to bind
-  loopback sockets. A missing broker makes the e2e step fail; do not
-  replace it with a skip.
-- e2e は起動前に `nats-server --version` を `integration.yml` のピンと
+- **Prerequisites**: loopback の bind 権限と、`integration.yml` の
+  `NATS_SERVER_VERSION` に一致する broker が必要。e2e runner は同版の
+  PATH 上のバイナリをコピーするか、公式リリースから取得して
+  `target/magi-tools` にキャッシュする。オフラインでは
+  `KANADE_TEST_NATS_SERVER` で取得済みの固定版を指定する。
+  PATH の変更は子テストだけに適用し、準備失敗をスキップには置き換えない。
+- e2e は起動前にキャッシュも含め `nats-server --version` を CI のピンと
   照合し、不一致を失敗にする。原因の run/base 記録と、ホストで代替できない
   CI 範囲は [ローカル検証の補足](docs/local-verification.md) を参照。
 - **Not covered locally**: the editorconfig and coverage jobs (tools not in

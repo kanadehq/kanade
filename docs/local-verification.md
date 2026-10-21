@@ -8,8 +8,24 @@ trust/admission、CLI テストを実行する。stage 2a/2b は各
 broker は既存 fixture が一時的に起動し、実 fleet には接続しない。
 `KANADE_APP_ARTIFACT_PUBLICATION=backend-exclusive` は子プロセスに設定する。
 
-runner は `integration.yml` の `NATS_SERVER_VERSION` を読み、実行版との
-不一致を失敗にする。各コマンドの `running N tests` と
+runner は `integration.yml` の `NATS_SERVER_VERSION` を読み、その版の
+broker を `target/magi-tools/nats/<version>/<platform>/bin` に準備する。
+一致する PATH 上の既存バイナリをコピーするか、GitHub の公式リリースから
+固定版を取得する。グローバルにインストールされた別の版は変更しない。
+キャッシュは版・OS・arch ごとに分離し、子テストの PATH の先頭にだけ追加する。
+既存キャッシュも取得直後のバイナリも実行版を照合し、不一致は失敗にする。
+取得失敗、未対応ホストも失敗であり、テストのスキップには置き換えない。
+
+ネットワークが制限された環境では、事前取得した同版のバイナリを指定する。
+指定ファイルも固定版との一致が必須で、不正なら別の取得先へフォールバックしない。
+
+```sh
+KANADE_TEST_NATS_SERVER=/path/to/pinned/nats-server python3 scripts/ci/magi-e2e.py
+```
+
+初回準備後は、通常の `python3 scripts/ci/magi-e2e.py` がキャッシュを使う。
+loopback の bind/connect 権限は引き続き必要。
+各コマンドの `running N tests` と
 `test result: ok. N passed` を集計し、成功が 0 件、ignored が残る、
 harness ごとの件数が一致しない場合も失敗にする。Cargo の終了コードが
 非ゼロなら、その失敗を保持する。次の回帰テストは外部サービス不要。
