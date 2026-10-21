@@ -144,71 +144,6 @@ fn reject_ignored(mut ignored: Vec<String>) -> Result<(), String> {
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::manifest::Manifest;
-
-    const MINIMAL: &str = r#"
-id: echo-test
-version: 0.0.1
-execute:
-  shell: powershell
-  script: "echo 'kanade'"
-  timeout: 30s
-"#;
-
-    #[test]
-    fn strict_accepts_clean_manifest() {
-        let m: Manifest = super::from_yaml_str(MINIMAL).expect("clean yaml parses");
-        assert_eq!(m.id, "echo-test");
-    }
-
-    #[test]
-    fn strict_rejects_top_level_typo_with_path() {
-        let yaml = format!("{MINIMAL}staleness_polcy: warn\n");
-        let err = super::from_yaml_str::<Manifest>(&yaml).unwrap_err();
-        assert!(err.contains("staleness_polcy"), "{err}");
-    }
-
-    #[test]
-    fn strict_rejects_nested_typo_with_path() {
-        let yaml = r#"
-id: echo-test
-version: 0.0.1
-execute:
-  shell: powershell
-  script_objectt: foo
-  timeout: 30s
-"#;
-        let err = super::from_yaml_str::<Manifest>(yaml).unwrap_err();
-        // serde_ignored reports the full path, e.g. `execute.script_objectt`.
-        assert!(err.contains("execute.script_objectt"), "{err}");
-    }
-
-    #[test]
-    fn tolerant_read_accepts_future_fields() {
-        // #492: the READ path (plain serde) must accept payloads from
-        // a newer writer — this is the gradual-upgrade contract that
-        // deny_unknown_fields used to break fleet-wide.
-        let yaml = format!("{MINIMAL}field_from_the_future: 42\n");
-        let m: Manifest = serde_yaml::from_str(&yaml).expect("tolerant read");
-        assert_eq!(m.id, "echo-test");
-    }
-
-    #[test]
-    fn strict_json_rejects_typo() {
-        let json = serde_json::json!({
-            "id": "echo-test",
-            "version": "0.0.1",
-            "execute": { "shell": "powershell", "script": "echo", "timeout": "30s" },
-            "tyypo": true,
-        });
-        let err =
-            super::from_json_slice::<Manifest>(&serde_json::to_vec(&json).unwrap()).unwrap_err();
-        assert!(err.contains("tyypo"), "{err}");
-    }
-}
-
 /// Buffer a discriminator without losing duplicate keys, including nested
 /// identities/specs. Never deserialize into Value before this visitor runs.
 pub(crate) struct UniqueValue(pub serde_json::Value);
@@ -670,5 +605,70 @@ impl<'de, A: serde::de::VariantAccess<'de>> serde::de::VariantAccess<'de> for Un
         visitor: V,
     ) -> Result<V::Value, Self::Error> {
         self.0.struct_variant(fields, UniqueVisitor(visitor))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::manifest::Manifest;
+
+    const MINIMAL: &str = r#"
+id: echo-test
+version: 0.0.1
+execute:
+  shell: powershell
+  script: "echo 'kanade'"
+  timeout: 30s
+"#;
+
+    #[test]
+    fn strict_accepts_clean_manifest() {
+        let m: Manifest = super::from_yaml_str(MINIMAL).expect("clean yaml parses");
+        assert_eq!(m.id, "echo-test");
+    }
+
+    #[test]
+    fn strict_rejects_top_level_typo_with_path() {
+        let yaml = format!("{MINIMAL}staleness_polcy: warn\n");
+        let err = super::from_yaml_str::<Manifest>(&yaml).unwrap_err();
+        assert!(err.contains("staleness_polcy"), "{err}");
+    }
+
+    #[test]
+    fn strict_rejects_nested_typo_with_path() {
+        let yaml = r#"
+id: echo-test
+version: 0.0.1
+execute:
+  shell: powershell
+  script_objectt: foo
+  timeout: 30s
+"#;
+        let err = super::from_yaml_str::<Manifest>(yaml).unwrap_err();
+        // serde_ignored reports the full path, e.g. `execute.script_objectt`.
+        assert!(err.contains("execute.script_objectt"), "{err}");
+    }
+
+    #[test]
+    fn tolerant_read_accepts_future_fields() {
+        // #492: the READ path (plain serde) must accept payloads from
+        // a newer writer — this is the gradual-upgrade contract that
+        // deny_unknown_fields used to break fleet-wide.
+        let yaml = format!("{MINIMAL}field_from_the_future: 42\n");
+        let m: Manifest = serde_yaml::from_str(&yaml).expect("tolerant read");
+        assert_eq!(m.id, "echo-test");
+    }
+
+    #[test]
+    fn strict_json_rejects_typo() {
+        let json = serde_json::json!({
+            "id": "echo-test",
+            "version": "0.0.1",
+            "execute": { "shell": "powershell", "script": "echo", "timeout": "30s" },
+            "tyypo": true,
+        });
+        let err =
+            super::from_json_slice::<Manifest>(&serde_json::to_vec(&json).unwrap()).unwrap_err();
+        assert!(err.contains("tyypo"), "{err}");
     }
 }
