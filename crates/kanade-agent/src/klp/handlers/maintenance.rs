@@ -354,7 +354,7 @@ mod tests {
             id: id.into(),
             version: "1.0.0".into(),
             description: None,
-            execute: Execute {
+            execute: kanade_shared::typed_operation::ManifestExecute::Shell(Execute {
                 bypass_local_limit: false,
                 shell: ExecuteShell::Powershell,
                 script: Some("echo hi".into()),
@@ -363,8 +363,9 @@ mod tests {
                 timeout: "30s".into(),
                 run_as: RunAs::default(),
                 cwd: None,
-            },
+            }),
             require_approval: false,
+            deploy_authorization: None,
             inventory: None,
             emit: None,
             check: None,

@@ -168,6 +168,15 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
     if let Err(e) = job.validate() {
         anyhow::bail!("{yaml:?}: {e}");
     }
+    // A typed native-deployment definition validates but is not
+    // publishable: the approval/capability gates and handlers do not exist,
+    // so `create` must not store it in the catalog.
+    if job.execute.is_typed() {
+        anyhow::bail!(
+            "{yaml:?}: {}",
+            kanade_shared::typed_operation::TYPED_DEPLOY_DISABLED
+        );
+    }
 
     // SPEC §2.4.1 / #210: `script_file:` is operator-side sugar that
     // points at a repo-local file the CLI inlines into `execute.script`
@@ -192,14 +201,13 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
     // resolve the script_file to its absolute path up front so the
     // shared detector can record it repo-relative (#695 extracted the
     // detection into `cmd::provenance` for schedules to reuse).
-    let script_file_abs = job
-        .execute
-        .script_file
+    let script_file = job.execute.shell().and_then(|e| e.script_file.clone());
+    let script_file_abs = script_file
         .as_deref()
         .map(|p| resolve_script_file_path(yaml, p));
     let origin = detect_repo_origin(yaml, script_file_abs.as_deref());
 
-    let (body, sent_raw) = if let Some(path) = job.execute.script_file.as_deref() {
+    let (body, sent_raw) = if let Some(path) = script_file.as_deref() {
         let file_path = resolve_script_file_path(yaml, path);
         let script_body = std::fs::read_to_string(&file_path).with_context(|| {
             format!(
@@ -212,8 +220,12 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
             size = script_body.len(),
             "inlined script_file into execute.script",
         );
-        job.execute.script = Some(script_body);
-        job.execute.script_file = None;
+        let shell_exec = job
+            .execute
+            .shell_mut()
+            .expect("typed jobs are rejected above");
+        shell_exec.script = Some(script_body);
+        shell_exec.script_file = None;
         job.origin = origin;
         // Re-serialize so the backend stores the resolved form. Comments
         // / formatting of the original `execute:` block are still lost
@@ -375,7 +387,7 @@ fn validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
     // or a directory satisfies `exists()` but `create`'s
     // `read_to_string` would still choke on it — so green-lighting it
     // here would diverge from what `create` accepts (gemini / CodeRabbit).
-    if let Some(path) = job.execute.script_file.as_deref() {
+    if let Some(path) = job.execute.shell().and_then(|e| e.script_file.as_deref()) {
         let file_path = resolve_script_file_path(yaml, path);
         if !file_path.is_file() {
             anyhow::bail!(
@@ -384,8 +396,15 @@ fn validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
             );
         }
     }
+    // Schema acceptance is not deployment authorisation: say so for a typed
+    // definition instead of printing a bare "valid".
+    let note = if job.execute.is_typed() {
+        " — typed deployment schema only; delivery and execution are disabled"
+    } else {
+        ""
+    };
     println!(
-        "✓ {} → job '{}' v{} (valid)",
+        "✓ {} → job '{}' v{} (valid{note})",
         yaml.display(),
         job.id,
         job.version,
@@ -426,12 +445,14 @@ fn manifest_to_block_scalar_yaml(job: &Manifest) -> Result<String> {
     // here keeps stray `\r` bytes out of the YAML mirror the SPA shows.
     let body = job
         .execute
-        .script
-        .clone()
+        .shell()
+        .and_then(|e| e.script.clone())
         .unwrap_or_default()
         .replace("\r\n", "\n");
     let mut stub = job.clone();
-    stub.execute.script = Some(SENTINEL.to_string());
+    if let Some(e) = stub.execute.shell_mut() {
+        e.script = Some(SENTINEL.to_string());
+    }
     let serialized = serde_yaml::to_string(&stub).context("serialize manifest")?;
 
     let mut out = String::with_capacity(serialized.len() + body.len());
@@ -590,7 +611,7 @@ execute:
         // unreadable). And it must round-trip back to the exact body.
         let mut m = inline_manifest();
         let script = "#requires -Version 5.1\nWrite-Output 'hi'\n\nGet-Date\n";
-        m.execute.script = Some(script.to_string());
+        m.execute.shell_mut().unwrap().script = Some(script.to_string());
         m.origin = Some(kanade_shared::manifest::RepoOrigin {
             path: "configs/jobs/j.yaml".into(),
             repo: Some("git@github.com:o/r.git".into()),
@@ -606,7 +627,10 @@ execute:
             "script must be a block scalar, not a quoted blob:\n{yaml}"
         );
         let back: Manifest = serde_yaml::from_str(&yaml).expect("re-parse");
-        assert_eq!(back.execute.script.as_deref(), Some(script));
+        assert_eq!(
+            back.execute.shell().unwrap().script.as_deref(),
+            Some(script)
+        );
         assert_eq!(
             back.origin.as_ref().map(|o| o.path.as_str()),
             Some("configs/jobs/j.yaml"),
@@ -620,14 +644,17 @@ execute:
         // don't fabricate one on round-trip.
         let mut m = inline_manifest();
         let script = "line1\nline2";
-        m.execute.script = Some(script.to_string());
+        m.execute.shell_mut().unwrap().script = Some(script.to_string());
         let yaml = manifest_to_block_scalar_yaml(&m).expect("serialize");
         assert!(
             yaml.contains("script: |-"),
             "expected strip-chomp block, got:\n{yaml}"
         );
         let back: Manifest = serde_yaml::from_str(&yaml).expect("re-parse");
-        assert_eq!(back.execute.script.as_deref(), Some(script));
+        assert_eq!(
+            back.execute.shell().unwrap().script.as_deref(),
+            Some(script)
+        );
     }
 
     /// Repo root two levels up from `crates/kanade` — shared by the
@@ -693,6 +720,58 @@ execute:
         );
     }
 
+    fn typed_yaml() -> String {
+        let d = "1".repeat(64);
+        format!(
+            "id: deploy-cli\nversion: 1.0.0\nrequire_approval: true\n\
+             deploy_authorization: {{plan_id: p1, plan_digest: {d}}}\n\
+             execute:\n  kind: typed_operation\n  payload_version: 1\n  timeout: 5m\n  operation:\n    \
+             type: deploy_cli\n    spec:\n      \
+             artifact_identity: {{role: cli, version: 0.80.0, os: linux, arch: x86_64, distro_abi: musl, format: tar_gz}}\n      \
+             package_object_key: cli/0.80.0/linux-x86_64-musl.tar_gz\n      \
+             artifact_sha256: {d}\n      artifact_size_bytes: 21\n      package_id: com.kanade.package\n      manifest_sha256: {d}\n"
+        )
+    }
+
+    #[test]
+    fn validate_accepts_a_typed_definition_as_schema_only() {
+        let dir = tempfile::tempdir().expect("mk temp dir");
+        let yaml_path = dir.path().join("typed.yaml");
+        std::fs::write(&yaml_path, typed_yaml()).expect("write");
+        validate_one(&yaml_path).expect("a well-formed typed definition validates");
+    }
+
+    #[test]
+    fn validate_rejects_mixed_unknown_and_unversioned_typed_definitions() {
+        let dir = tempfile::tempdir().expect("mk temp dir");
+        let yaml_path = dir.path().join("typed.yaml");
+        for bad in [
+            typed_yaml().replace("  timeout: 5m\n", "  timeout: 5m\n  script: echo hi\n"),
+            typed_yaml().replace("kind: typed_operation", "kind: typed_operatoin"),
+            typed_yaml().replace("payload_version: 1", "payload_version: 9"),
+            typed_yaml().replace("deploy_cli", "deploy_everything"),
+        ] {
+            std::fs::write(&yaml_path, bad).expect("write");
+            assert!(validate_one(&yaml_path).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_typed_definition_before_any_request() {
+        // The base URL is unroutable: the refusal must come from the local
+        // check, not from a failed connection.
+        let dir = tempfile::tempdir().expect("mk temp dir");
+        let yaml_path = dir.path().join("typed.yaml");
+        let raw = typed_yaml();
+        std::fs::write(&yaml_path, &raw).expect("write");
+        let err = create_one_doc("http://127.0.0.1:1", &yaml_path, &raw)
+            .await
+            .expect_err("typed create must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not enabled"), "{msg}");
+        assert!(!msg.to_lowercase().contains("connect"), "{msg}");
+    }
+
     #[test]
     fn install_kanade_client_yaml_renders_clean() {
         // End-to-end on the real artifact (#678): take the actual
@@ -713,8 +792,8 @@ execute:
         let raw = std::fs::read_to_string(&yaml_path).expect("read manifest");
         let mut job: Manifest = kanade_shared::strict::from_yaml_str(&raw).expect("parse manifest");
         let body = std::fs::read_to_string(&ps1_path).expect("read script");
-        job.execute.script = Some(body.clone());
-        job.execute.script_file = None;
+        job.execute.shell_mut().unwrap().script = Some(body.clone());
+        job.execute.shell_mut().unwrap().script_file = None;
         let out = manifest_to_block_scalar_yaml(&job).expect("serialize");
         assert!(out.contains("script: |"), "expected block scalar:\n{out}");
         // The blob regression is `script: "...\n..."` (a quoted scalar);
@@ -729,7 +808,7 @@ execute:
         // Block scalars normalise CRLF → LF; this .ps1 is a Windows
         // (CRLF) file, so compare against the LF-normalised body.
         assert_eq!(
-            back.execute.script.as_deref(),
+            back.execute.shell().unwrap().script.as_deref(),
             Some(body.replace("\r\n", "\n").as_str()),
         );
         back.validate()

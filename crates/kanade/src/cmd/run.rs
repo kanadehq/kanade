@@ -257,6 +257,7 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         other => anyhow::bail!("unknown run_as {other:?} (use system, user, or system_gui)"),
     };
     let cmd = Command {
+        command_kind: kanade_shared::wire::CommandKind::Shell,
         id: "adhoc-run".to_string(),
         version: "0.0.0".to_string(),
         request_id: request_id.clone(),

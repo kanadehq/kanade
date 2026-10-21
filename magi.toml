@@ -21,8 +21,10 @@ gate = [
 # Focused end-to-end checks of what recent deploy stages added. Stage 1b runs
 # the `--ignored` backend publication/store tests of
 # .github/workflows/integration.yml against real temporary NATS JetStream
-# Object Stores, so `nats-server` must be on PATH (CI pins 2.14.1); the run
-# fails, it does not skip, when it is missing. Stage 2a/2b run the signed
+# Object Stores. runner は CI の固定版 NATS を target/magi-tools に準備し、
+# 子テストの PATH にだけ追加する。準備失敗ではスキップせず失敗する。
+# オフラインでは KANADE_TEST_NATS_SERVER で取得済みの固定版を指定する。
+# Stage 2a/2b run the signed
 # package manifest, publisher trust and admission tests plus their CLI tests
 # with real temporary keys and directories.
 e2e = [

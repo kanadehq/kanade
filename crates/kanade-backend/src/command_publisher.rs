@@ -148,6 +148,9 @@ impl CommandPublisher {
 
     /// Publish a serialized `Command` to `subject`, signed if possible.
     pub async fn publish(&self, subject: String, payload: Bytes) -> Result<(), PublishError> {
+        validate_delivery_payload(&payload).map_err(|e| {
+            PublishError::with_source(async_nats::client::PublishErrorKind::Send, e)
+        })?;
         match headers_for(
             self.signer.as_ref(),
             &payload,
@@ -161,6 +164,30 @@ impl CommandPublisher {
             None => self.nats.publish(subject, payload).await,
         }
     }
+}
+
+/// Validate before signing or sending, including callers bypassing exec_manifest.
+fn validate_delivery_payload(payload: &[u8]) -> Result<(), String> {
+    use kanade_shared::wire::{Command, CommandEnvelope};
+    let raw: serde_json::Value = serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+    let object = raw.get("command").unwrap_or(&raw);
+    if ["operation", "payload_version", "deploy_authorization"]
+        .iter()
+        .any(|k| object.get(k).is_some())
+    {
+        return Err(kanade_shared::typed_operation::TYPED_DEPLOY_DISABLED.into());
+    }
+    let command = if raw.get("kind").is_some() {
+        let envelope: CommandEnvelope =
+            serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+        if envelope.kind != kanade_shared::wire::ENVELOPE_KIND_V2 {
+            return Err("unsupported command envelope".into());
+        }
+        envelope.command
+    } else {
+        serde_json::from_slice::<Command>(payload).map_err(|e| e.to_string())?
+    };
+    command.ensure_execution_enabled()
 }
 
 /// The `kid:fingerprint` form, matching what an agent puts in `command_keys`.
@@ -315,6 +342,39 @@ fn choose(
 mod tests {
     use super::*;
     use kanade_shared::signing::{KeyPolicy, KeyRing, SigHeaders, VerifyError, verify};
+
+    #[test]
+    fn delivery_payload_rejects_native_mixed_unknown_and_duplicate_commands() {
+        mod deploy_fixture {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../kanade-shared/tests/fixtures/deploy.rs"
+            ));
+        }
+        let command = deploy_fixture::command();
+        command.validate().unwrap();
+        let typed = serde_json::to_value(command).unwrap();
+        for payload in [
+            typed.clone(),
+            serde_json::json!({"kind":"kanade.command.v2", "command":typed}),
+        ] {
+            assert!(
+                validate_delivery_payload(&serde_json::to_vec(&payload).unwrap())
+                    .unwrap_err()
+                    .contains("not enabled")
+            );
+        }
+        let shell = br#"{"id":"j","version":"1","request_id":"r","shell":"sh","script":"echo ok","timeout_secs":30}"#;
+        assert!(validate_delivery_payload(shell).is_ok());
+        let mut mixed: serde_json::Value = serde_json::from_slice(shell).unwrap();
+        mixed["operation"] = serde_json::Value::Null;
+        assert!(validate_delivery_payload(&serde_json::to_vec(&mixed).unwrap()).is_err());
+        assert!(validate_delivery_payload(br#"{"command_kind":"future"}"#).is_err());
+        let duplicate = String::from_utf8(shell.to_vec())
+            .unwrap()
+            .replace("\"id\":", "\"future\":1,\"future\":2,\"id\":");
+        assert!(validate_delivery_payload(duplicate.as_bytes()).is_err());
+    }
 
     fn secret() -> String {
         signing::encode_secret(&signing::generate_keypair().unwrap())

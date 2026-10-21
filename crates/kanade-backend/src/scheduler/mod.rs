@@ -545,6 +545,18 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
         }
     };
 
+    // A typed native-deployment job is never fired by a schedule: the
+    // approval/capability gates do not exist, and a schedule must not mint a
+    // repeating deploy. Skip before any dedup state or dispatch mark is read
+    // or written (exec_manifest refuses it again as the last line).
+    if manifest.execute.is_typed() {
+        warn!(
+            %schedule_id, %job_id,
+            "scheduler fire skipped: typed_operation jobs cannot be scheduled",
+        );
+        return;
+    }
+
     // v0.22: stamp deadline_at = now + starting_deadline onto every
     // Command this tick emits. Agents that receive the Command after
     // this absolute time publish a synthetic skipped-result instead
@@ -959,7 +971,7 @@ fn suppress_window(schedule: &Schedule, manifest: &Manifest) -> ChronoDuration {
         .as_deref()
         .and_then(parse)
         .unwrap_or_else(ChronoDuration::zero);
-    let timeout = parse(&manifest.execute.timeout).unwrap_or_else(|| {
+    let timeout = parse(manifest.execute.timeout()).unwrap_or_else(|| {
         // `execute.timeout` is validated at job-create time, so this is
         // effectively unreachable — but a malformed value silently
         // collapsing the window to `jitter + margin` could let a
@@ -967,7 +979,7 @@ fn suppress_window(schedule: &Schedule, manifest: &Manifest) -> ChronoDuration {
         // instead of failing quietly (claude #444).
         warn!(
             job_id = %manifest.id,
-            raw = %manifest.execute.timeout,
+            raw = %manifest.execute.timeout(),
             "suppress_window: unparseable timeout; treating as zero",
         );
         ChronoDuration::zero()

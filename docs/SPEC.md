@@ -2569,7 +2569,7 @@ pub struct JobProgress {
 
 本節は、Windows / Linux / macOS の全 operator 環境から利用可能な統一 CLI `kanade deploy` と、登録済み Agent 上で安全に動作する型付き操作（Typed Native Operations）の設計仕様である。現行の PowerShell / Bash による個別フリートデプロイスクリプト（`scripts/fleet-deploy.ps1`, `deploy/linux/fleet-deploy.sh` 等）を置き換え、プラットフォーム間の不整合や平文シークレットの漏洩リスク、バージョン/成果物のキー衝突を解消する。
 
-本節の新 deploy CLI / typed operation / identity API は **設計のみ・未実装**。既存運用は移行 gate 完了まで継続する。以下の具体的 schema / option / timeout / policy は、§2.13.1.2 の確定製品判断を除き技術 proposal である。
+本節の新 deploy CLI / typed operation / identity API は **設計が中心で、実装済みなのは Task 1–2 と Task 3 Stage 3 の schema・検証・変換のみ**（§2.13.8.4）。typed の配送・承認・capability・handler は未実装で、既存運用は移行 gate 完了まで継続する。以下の具体的 schema / option / timeout / policy は、§2.13.1.2 の確定製品判断を除き技術 proposal である。
 
 ### 2.13.1 背景・スコープ・確定判断と技術 proposal
 
@@ -2959,14 +2959,17 @@ kanade deploy status <plan-id | exec-id>
 ```yaml
 execute:
   kind: typed_operation
+  payload_version: 1
   timeout: 10m
   run_as: system
   operation:
     type: deploy_backend
     spec:
       artifact_identity: {role: backend, version: 0.80.0, os: linux, arch: aarch64, distro_abi: musl, format: tar_gz}
-      package_object_key: <immutable-key>
+      package_object_key: backend/0.80.0/linux-aarch64-musl.tar_gz
       artifact_sha256: <sha256>
+      artifact_size_bytes: <positive-byte-count>
+      package_id: com.kanade.backend
       manifest_sha256: <signed-manifest-sha256>
       preserve_config: true
       require_db_backup: true
@@ -2979,6 +2982,15 @@ deploy_authorization:
   plan_id: <id>
   plan_digest: <digest>
 ```
+
+- **Stage 3 実装済み（schema・検証・変換のみ。配送・実行は無効）**: `kanade_shared::typed_operation`（`ManifestExecute` / `TypedOperation` / `DeployAuthorizationRef`）と `wire::TypedCommand`。上の例との差分を明記する。
+  - **判別子**: `execute.kind` 省略は従来 shell（保存済み record・直列化 bytes は不変で、shell は `kind` を出力しない）。`kind: shell` も同じ shell。typed は `kind: typed_operation` 必須。判別子が null / 未知 / 非文字列、判別子省略で typed 専用 field（`payload_version` / `operation`）が存在、typed に shell 系 field（`shell` / `script*` / `cwd` / `bypass_local_limit`、null 値を含む）が混在、typed 内の未知 field、重複 key はすべて拒否し、shell へ fallback しない。shell 側の読込は従来どおり未知 field を許容する（write 境界の `strict` は維持）。
+  - **payload**: `execute.payload_version`（現在 `1` のみ。0・未来版・欠落・null は拒否）、`timeout`（1s〜1h）、`run_as`（`system` のみ）、`operation: {type, spec}`（`deploy_backend` / `deploy_client` / `deploy_cli`、spec は未知 field 拒否）。`spec` は上例の field に加え、`artifact_sha256` / `manifest_sha256` は小文字 hex 64 桁、`artifact_size_bytes` は正の byte 数、`package_id` は署名済み package manifest の ID である。`check_admission` は実際の `AdmittedPackage` と identity・SHA-256・サイズ・package ID・manifest bytes digest を完全照合するが、実行権限は付与しない。`package_object_key` は `artifact_identity` の canonical key と完全一致、identity の role は操作と一致が必要。backend は `preserve_config` / `require_db_backup` が true 必須、`firewall: managed_port` は非 0、client は `opt_out_policy: respect` と `restart_gui_session_only: true`、cli の `adopt_existing_cli` は macOS identity のみ。executable・path・argv を表す field は存在しない。job 直下は `require_approval: true` と `deploy_authorization: {plan_id, plan_digest}` が必須（shell job に付けると拒否）、typed は `inventory` / `emit` / `check` / `collect` / `finalize` / `feed` / `client` を持てない。`plan_id` は `[A-Za-z0-9._-]` 1–128 文字。
+  - **外部期待値との束縛**: `TypedOperation::verify_binding` が、呼出側が artifact store / plan から渡す期待 `ArtifactIdentity` / `ArtifactIntegrity.sha256` / 署名済み package manifest の SHA-256 と完全一致を要求する。job の値を自分自身と比較しない。署名済み package manifest の digest（`manifest_sha256`）と job manifest の digest（Command の `deploy_authorization.manifest_digest`）は別物として扱う。
+  - **Command**: `TypedCommand` は `Command` と別型で、`command_kind: typed_operation`（必須・リテラル）、`payload_version`、`deploy_authorization {plan_id, plan_digest, manifest_digest}` を持ち、`shell` / `script` / `script_object` / `cwd` を**出力しない**。そのため旧 Agent の `Command` decoder は必須 field 欠落で拒否し、新 Agent の `Command` は `command_kind` が `shell` 以外（`typed_operation`・未知・null）なら decode 自体を拒否するので、shell 実行へ既定化できない。`Command.command_kind` は `shell` の場合 serialize しないため既存 shell の署名 bytes・replay・ledger・outbox の契約は不変。`TypedCommand::from_manifest` は副作用のない検証付き変換であり、承認・capability・trust は参照しない。
+  - **署名**: typed は既存 `kanade.command.v2` envelope・command-signing keyring・domain の中だけで構成し、`sign_typed_envelope` / `verify_typed_envelope`（署名 → 宛先 → 期限 → key age の順は shell と共通実装）。未署名・legacy（bare）署名 Command は typed を運べない（`kind` 不在で拒否、`Command` としても decode 不能）。shell 用 `verify_envelope` は typed envelope を署名検証後に `UnsupportedCommandKind` で拒否し、Agent は `EnvelopeRejected` として受信拒否する。別の署名方式は作らない。
+  - **入口の遮断**: schema 受理は配備認可ではない。`kanade job validate` と保存済み定義の読込は typed を受理するが、`kanade job create` / `POST /api/jobs`（作成・更新）、`POST /api/exec/{job_id}` と Scheduler が共有する `exec_manifest`、backend Scheduler の発火、Agent の local scheduler（jobs watch・resync・tick）、KLP `jobs.list` / `jobs.execute` は typed を明示的に拒否または無視する。shell script resolver と shell Command builder は `ManifestExecute::require_shell()` 経由でのみ `Execute` を得るので typed に到達しない。mock 成功 handler や `typed_deploy_v1` capability の広告は追加していない。
+  - **未実装（Task 4 以降）**: plan の登録・承認 API と digest 検証、`deploy_capabilities` の heartbeat／preflight、通常 exec・Scheduler・KLP 共通の承認 gate、Agent の `verify_typed_envelope` 接続と OS handler、trust 鍵配送、CLI の `deploy plan/apply/status`。これらが揃うまで typed を有効化しない。
 
 - typed branch は shell / script / script_file / script_object / cwd / 任意 install_path を禁止し、未知 field・enum、role/identity 不一致を拒否する。system 実行のみ、timeout と deadline は上限を検査。型別 spec は共通の完全な identity・artifact / manifest digest に加え、backend は上記安全設定、client は `opt_out_policy: respect` と `restart_gui_session_only: true`、cli は管理済み固定配置先を持つ。後掲 Rust は Command 内の概念スケッチであり、この必須 job validation を省略しない。Force opt-out は deploy では許可しない。
 - `kanade job validate/create`、`POST /api/jobs`、更新 API、保存済み manifest の読込で union の排他検証を共有する。typed の script source resolver は呼ばない。schema だけを受理して実行 gate 未実装の状態を release しない。
@@ -3039,6 +3051,8 @@ pub struct DeployBackendSpec {
     // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
     pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: String,
     pub package_object_key: String,
     pub preserve_config: bool, // true 必須
@@ -3054,6 +3068,8 @@ pub struct DeployClientSpec {
     // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
     pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: String,
     pub package_object_key: String,
     pub opt_out_policy: OptOutPolicy, // Respect のみ
@@ -3065,6 +3081,8 @@ pub struct DeployCliSpec {
     // 各 spec の共通必須 fields（job と同じ、target_version 単独では識別しない）
     pub artifact_identity: ArtifactIdentity,
     pub artifact_sha256: String,
+    pub artifact_size_bytes: u64,
+    pub package_id: String,
     pub manifest_sha256: String,
     pub package_object_key: String,
     pub adopt_existing_cli: bool, // false が既定、macOS 固定配置先の明示採用のみ
@@ -3276,6 +3294,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
   - [x] Stage 2a: `package.manifest.json` のスキーマ定義、決定的署名 bytes、`kanade app sign-artifact` / `verify-artifact` / `publisher-trust` のオフライン実装（§2.13.4.3。managed trust・Agent 検証・署名付き publication 統合は未実装）
   - [x] Stage 2b: 管理者 pin の trust root、署名付き trust state（active/revoked/rotation/freshness/anti-rollback）、原子的永続化、Agent 側 admission 検証（§2.13.4.3）。管理配送の統合、typed handler 接続、署名付き publication は未実装
 - [ ] **Task 3: Command Wire Protocol 拡張 & Typed Native Operations 定義 (Shared)**
+  - [x] Stage 3: typed job / command の schema・検証・変換、Manifest.execute 互換 union、v2 envelope 内の署名・旧 Agent 拒否、全 manifest 読込・CLI・backend・Agent の入口での typed 明示拒否（§2.13.6.2。配送・実行は無効のまま。plan 承認・capability・handler・trust 配送は Task 4 以降）
   - `Command` struct への `command_kind` および `TypedOperation` フィールド追加
   - Manifest.execute の互換 union・CLI/API/read validation・typed source resolver 分岐・Command 変換を実装（Task 4 の gate 接続前に定義）。既存署名 v2 envelope 必須化と ledger/outbox 接続、旧 Agent の v2 拒否を検証
 - [ ] **Task 4: Backend 実行ゲート & Capability Preflight 実装 (Backend)**

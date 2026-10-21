@@ -23,6 +23,7 @@ use kanade_shared::kv::{
 };
 use kanade_shared::manifest::{ExecuteShell, InventoryHint, Manifest, RepoOrigin, Schedule};
 use kanade_shared::subject;
+use kanade_shared::typed_operation::ManifestExecute;
 use kanade_shared::wire::RunAs;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
@@ -145,7 +146,12 @@ pub struct JobLiveCounts {
 /// `GET /api/jobs/{id}/yaml` instead.
 #[derive(Serialize)]
 pub struct ExecuteSummary {
-    pub shell: ExecuteShell,
+    /// `typed_operation` for a typed native-deployment definition (which
+    /// has no shell); omitted for the historical shell rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ExecuteShell>,
     pub timeout: String,
     pub run_as: RunAs,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,11 +191,21 @@ impl JobListRow {
             id: m.id,
             version: m.version,
             description: m.description,
-            execute: ExecuteSummary {
-                shell: m.execute.shell,
-                timeout: m.execute.timeout,
-                run_as: m.execute.run_as,
-                cwd: m.execute.cwd,
+            execute: match m.execute {
+                ManifestExecute::Shell(e) => ExecuteSummary {
+                    kind: None,
+                    shell: Some(e.shell),
+                    timeout: e.timeout,
+                    run_as: e.run_as,
+                    cwd: e.cwd,
+                },
+                ManifestExecute::Typed(t) => ExecuteSummary {
+                    kind: Some(kanade_shared::typed_operation::KIND_TYPED_OPERATION),
+                    shell: None,
+                    timeout: t.timeout,
+                    run_as: t.run_as,
+                    cwd: None,
+                },
             },
             inventory: m.inventory,
             tags: m.tags,
@@ -366,6 +382,14 @@ pub async fn create(
     // script_object must be set. Enforce at the write boundary
     // so the JOBS KV never stores ambiguous manifests.
     job.validate().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // A typed native-deployment definition validates (`kanade job validate`
+    // accepts it) but is not publishable: storing it in the catalog would
+    // make it a runnable job before the approval/capability gates exist.
+    let Some(shell_exec) = job.execute.shell() else {
+        return Err(crate::api::exec::typed_refusal(
+            kanade_shared::typed_operation::TypedDeployDisabled,
+        ));
+    };
     // #918: `script_file` is CLI-side sugar — `kanade job create`
     // reads the repo-local file and inlines it into `script` before
     // POSTing, so a manifest that reaches this handler still carrying
@@ -374,7 +398,7 @@ pub async fn create(
     // every exec (`resolve_script_source`), so reject it here with an
     // actionable message rather than accepting a job that can never
     // run.
-    if job.execute.script_file.is_some() {
+    if shell_exec.script_file.is_some() {
         return Err((
             StatusCode::BAD_REQUEST,
             "execute.script_file is resolved CLI-side by `kanade job create` and cannot be \
@@ -970,6 +994,27 @@ mod tests {
         assert!(v["execute"].get("script").is_none());
         assert!(v["execute"].get("script_file").is_none());
         assert!(v["execute"].get("script_object").is_none());
+    }
+
+    /// A typed definition read back from the catalog has no shell: its
+    /// list row says so instead of inventing one.
+    #[test]
+    fn job_list_row_for_a_typed_definition_has_no_shell() {
+        let d = "1".repeat(64);
+        let m: Manifest = serde_yaml::from_str(&format!(
+            "id: deploy-cli\nversion: 1.0.0\nrequire_approval: true\n\
+             deploy_authorization: {{plan_id: p1, plan_digest: {d}}}\n\
+             execute:\n  kind: typed_operation\n  payload_version: 1\n  timeout: 5m\n  operation:\n    \
+             type: deploy_cli\n    spec:\n      \
+             artifact_identity: {{role: cli, version: 0.80.0, os: linux, arch: x86_64, distro_abi: musl, format: tar_gz}}\n      \
+             package_object_key: cli/0.80.0/linux-x86_64-musl.tar_gz\n      \
+             artifact_sha256: {d}\n      artifact_size_bytes: 21\n      package_id: com.kanade.package\n      manifest_sha256: {d}\n"
+        ))
+        .unwrap();
+        let v =
+            serde_json::to_value(JobListRow::from_manifest(m, JobLiveCounts::default())).unwrap();
+        assert_eq!(v["execute"]["kind"], "typed_operation");
+        assert!(v["execute"].get("shell").is_none());
     }
 
     /// The migration-failure body must say the catalog WAS saved and

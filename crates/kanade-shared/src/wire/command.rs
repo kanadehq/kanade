@@ -4,8 +4,15 @@ use serde::{Deserialize, Serialize};
 use super::Staleness;
 use crate::manifest::{CheckHint, CollectHint, EmitConfig};
 
-#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+#[derive(Serialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Command {
+    /// Command discriminator. Only `shell` exists on this type and it is
+    /// never written (historical bytes are unchanged); any other value —
+    /// `typed_operation`, an unknown kind, `null` — fails to decode instead
+    /// of being ignored and run as a shell command. Typed operations use
+    /// [`super::TypedCommand`].
+    #[serde(default, skip_serializing_if = "CommandKind::is_shell")]
+    pub command_kind: CommandKind,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bypass_local_limit: bool,
     pub id: String,
@@ -131,6 +138,133 @@ pub struct Command {
     pub finalize: Option<FinalizeCommand>,
 }
 
+#[derive(Deserialize)]
+#[serde(remote = "Command")]
+struct CommandFields {
+    #[serde(default, skip_serializing_if = "CommandKind::is_shell")]
+    pub command_kind: CommandKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypass_local_limit: bool,
+    pub id: String,
+    pub version: String,
+    pub request_id: String,
+    #[serde(alias = "job_id")]
+    pub exec_id: Option<String>,
+    pub shell: Shell,
+    pub script: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_object: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_object_sha256: Option<String>,
+    pub timeout_secs: u64,
+    pub jitter_secs: Option<u64>,
+    #[serde(default)]
+    pub run_as: RunAs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub staleness: Staleness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit: Option<EmitConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<CollectHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetrySpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize: Option<FinalizeCommand>,
+}
+impl<'de> Deserialize<'de> for Command {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct ShellVisitor;
+        impl<'de> serde::de::Visitor<'de> for ShellVisitor {
+            type Value = Command;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a shell command without typed-operation fields")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Command, M::Error> {
+                CommandFields::deserialize(serde::de::value::MapAccessDeserializer::new(
+                    ShellCommandMap(map),
+                ))
+            }
+        }
+        serde::Deserializer::deserialize_map(crate::strict::UniqueDeserializer(de), ShellVisitor)
+    }
+}
+
+// Reject these keys by presence, including null or malformed values, before
+// serde can ignore them and default command_kind to shell. Other future shell
+// fields remain tolerant, and the original deserializer retains its scalar
+// conversions and duplicate-key checks.
+struct ShellCommandMap<M>(M);
+
+impl<'de, M: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for ShellCommandMap<M> {
+    type Error = M::Error;
+
+    fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Self::Error> {
+        let Some(key) = self.0.next_key::<String>()? else {
+            return Ok(None);
+        };
+        if matches!(
+            key.as_str(),
+            "payload_version" | "operation" | "deploy_authorization"
+        ) {
+            return Err(serde::de::Error::custom(format!(
+                "typed-only field {key} is forbidden in a shell command"
+            )));
+        }
+        seed.deserialize(serde::de::value::StringDeserializer::<Self::Error>::new(
+            key,
+        ))
+        .map(Some)
+    }
+
+    fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.0.next_value_seed(seed)
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.0.size_hint()
+    }
+}
+
+/// See [`Command::command_kind`].
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandKind {
+    #[default]
+    Shell,
+}
+
+impl CommandKind {
+    pub fn is_shell(&self) -> bool {
+        matches!(self, CommandKind::Shell)
+    }
+}
+
+impl Command {
+    /// Final process/publication boundary. Typed commands are a separate type;
+    /// extending this discriminator must also extend this execution decision.
+    pub fn ensure_execution_enabled(&self) -> Result<(), String> {
+        match self.command_kind {
+            CommandKind::Shell => Ok(()),
+        }
+    }
+}
+
 /// Lowered, engine-vocabulary form of [`crate::manifest::FinalizeSpec`]
 /// — the post-step hook stamped onto a [`Command`]. The operator-facing
 /// humantime `timeout` is reduced to whole seconds at build time
@@ -236,8 +370,40 @@ pub enum RunAs {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shell_commands_reject_typed_only_keys_but_accept_future_shell_fields() {
+        let shell = serde_json::to_value(sample_command()).unwrap();
+        for kind in [None, Some("shell")] {
+            for key in ["payload_version", "operation", "deploy_authorization"] {
+                for value in [
+                    serde_json::Value::Null,
+                    serde_json::json!("shell"),
+                    serde_json::json!(1),
+                    serde_json::json!({"type": "unknown", "spec": {}}),
+                ] {
+                    let mut mixed = shell.clone();
+                    if let Some(kind) = kind {
+                        mixed["command_kind"] = kind.into();
+                    }
+                    mixed[key] = value;
+                    assert!(
+                        serde_json::from_value::<Command>(mixed.clone()).is_err(),
+                        "{mixed}"
+                    );
+                    let yaml = serde_yaml::to_string(&mixed).unwrap();
+                    assert!(serde_yaml::from_str::<Command>(&yaml).is_err(), "{yaml}");
+                }
+            }
+        }
+        let mut future = shell;
+        future["future_shell_field"] = serde_json::json!({"enabled": true});
+        let decoded: Command = serde_json::from_value(future).unwrap();
+        assert_eq!(decoded.script, sample_command().script);
+    }
+
     fn sample_command() -> Command {
         Command {
+            command_kind: CommandKind::Shell,
             id: "echo-test".into(),
             version: "1.0.0".into(),
             request_id: "req-1".into(),

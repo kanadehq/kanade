@@ -419,6 +419,52 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn typed_binding_checks_real_admission_and_every_external_reference() {
+        use crate::artifact::ArtifactSha256;
+        use crate::typed_operation::{DeployCliSpec, TypedOperation};
+        let env = Env::new();
+        let id = identity("1.2.3");
+        let bytes = manifest(&env.publisher, id.clone(), BYTES);
+        let admitted = env
+            .admit(&bytes, BYTES, &id, &policy("14.0", &["a_cap"]))
+            .unwrap();
+        let spec = DeployCliSpec {
+            package_object_key: id.app_package_key().unwrap(),
+            artifact_identity: id,
+            artifact_sha256: admitted.integrity().sha256,
+            artifact_size_bytes: admitted.integrity().size_bytes,
+            package_id: "com.kanade.cli".into(),
+            manifest_sha256: ArtifactSha256::of(&bytes),
+            adopt_existing_cli: false,
+        };
+        TypedOperation::DeployCli(spec.clone())
+            .check_admission(&admitted)
+            .unwrap();
+        for field in ["size", "sha", "package_id", "manifest", "identity", "key"] {
+            let mut bad = spec.clone();
+            match field {
+                "size" => bad.artifact_size_bytes += 1,
+                "sha" => bad.artifact_sha256 = ArtifactSha256::of(b"different"),
+                "package_id" => bad.package_id = "com.other.cli".into(),
+                "manifest" => bad.manifest_sha256 = ArtifactSha256::of(b"different"),
+                "identity" => {
+                    bad.artifact_identity = identity("1.2.4");
+                    bad.package_object_key = bad.artifact_identity.app_package_key().unwrap();
+                }
+                "key" => bad.package_object_key = "wrong/key".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                TypedOperation::DeployCli(bad)
+                    .check_admission(&admitted)
+                    .is_err(),
+                "{field}"
+            );
+        }
+    }
+
     #[test]
     fn no_trust_configured_refuses_admission() {
         let dir = tempfile::tempdir().unwrap();

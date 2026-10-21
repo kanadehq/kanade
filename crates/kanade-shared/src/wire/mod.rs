@@ -16,15 +16,17 @@ mod remote;
 mod result;
 mod server_settings;
 mod staleness;
+mod typed_command;
 
 pub use agent_config::{ConfigScope, EffectiveConfig, ResolutionWarning, resolve};
 pub use agent_groups::AgentGroups;
 pub use agent_meta::{AgentMeta, MetaEntry, MetaUpdate};
-pub use command::{Command, FinalizeCommand, RetrySpec, RunAs, Shell};
+pub use command::{Command, CommandKind, FinalizeCommand, RetrySpec, RunAs, Shell};
 pub use envelope::{
     CommandEnvelope, ENVELOPE_KIND_V2, EnvelopeError, FUTURE_SKEW_ALLOWANCE, MAX_ENVELOPE_VALIDITY,
-    PROTOCOL_LEGACY, PROTOCOL_V2, VerifiedEnvelope, sign_envelope, start_deadline_passed,
-    supported_command_protocols, verify_envelope,
+    PROTOCOL_LEGACY, PROTOCOL_V2, VerifiedEnvelope, VerifiedTypedEnvelope, sign_envelope,
+    sign_typed_envelope, start_deadline_passed, supported_command_protocols, verify_envelope,
+    verify_typed_envelope,
 };
 pub use event::EventStarted;
 pub use group_contacts::GroupContacts;
@@ -55,3 +57,4 @@ pub use server_settings::{
     SupportCodesProjection,
 };
 pub use staleness::Staleness;
+pub use typed_command::{TypedCommand, TypedCommandError, TypedCommandKind, TypedCommandRequest};

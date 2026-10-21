@@ -75,7 +75,7 @@ async fn resolve_expires_at(
     recorded_at: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     let manifest = cache.manifest(manifest_id).await?;
-    let timeout = humantime::parse_duration(&manifest.execute.timeout).ok()?;
+    let timeout = humantime::parse_duration(manifest.execute.timeout()).ok()?;
     Some(reap_deadline(timeout, recorded_at))
 }
 

@@ -1,0 +1,38 @@
+{
+  "id": "deploy-backend",
+  "version": "1.0.0",
+  "require_approval": true,
+  "deploy_authorization": {
+    "plan_id": "plan-1",
+    "plan_digest": "64879f7d6b960a01909762d911a32d4582c20010c5641ee90278b644a9e3b525"
+  },
+  "execute": {
+    "kind": "typed_operation",
+    "payload_version": 1,
+    "timeout": "10m",
+    "run_as": "system",
+    "operation": {
+      "type": "deploy_backend",
+      "spec": {
+        "artifact_identity": {
+          "role": "backend",
+          "version": "0.80.0",
+          "os": "linux",
+          "arch": "aarch64",
+          "distro_abi": "musl",
+          "format": "tar_gz"
+        },
+        "package_object_key": "backend/0.80.0/linux-aarch64-musl.tar_gz",
+        "artifact_sha256": "a3a92c0ee6d28383ced7bb48825c5cfc7d73e971fa8f677add5bcfe88ecb8164",
+        "artifact_size_bytes": 21,
+        "package_id": "com.kanade.package",
+        "manifest_sha256": "b0d46cde2e2d18c6d83d5771ed2d9bcb043c95bfa1f1e488531a360b94b626aa",
+        "preserve_config": true,
+        "require_db_backup": true,
+        "wipe_db": false,
+        "start_policy": "preserve",
+        "firewall": "preserve"
+      }
+    }
+  }
+}

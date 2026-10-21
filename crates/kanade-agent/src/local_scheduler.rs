@@ -42,7 +42,7 @@ use kanade_shared::kv::{
 use kanade_shared::manifest::{
     ExecMode, Freeze, Manifest, OnTrigger, RunsOn, Schedule, ScheduleTz, When,
 };
-use kanade_shared::wire::{Command, EXIT_SKIP_UNSUPPORTED};
+use kanade_shared::wire::{Command, CommandKind, EXIT_SKIP_UNSUPPORTED};
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{debug, info, warn};
@@ -729,13 +729,22 @@ async fn run(
                                 warn!(key = %entry.key, "local_scheduler: parse Manifest from jobs watch");
                                 continue;
                             };
+                            // Typed native deployment is not executable here
+                            // (no gates / handlers yet): never cache it, and
+                            // drop any earlier shell version of the same id.
+                            if m.execute.is_typed() {
+                                warn!(key = %entry.key, "local_scheduler: typed_operation job ignored; typed deployment is disabled");
+                                let mut s = state.lock().await;
+                                s.jobs.remove(&entry.key);
+                                continue;
+                            }
                             // Resolve digest BEFORE taking the lock —
                             // the call is a NATS round-trip and we
                             // don't want `local_tick` blocked behind
                             // it. Falls back to None on broker
                             // failure (tick skips that job until the
                             // next watch event succeeds).
-                            let sha = match m.execute.script_object.as_deref() {
+                            let sha = match m.execute.shell().and_then(|e| e.script_object.as_deref()) {
                                 Some(key) => match script_cache.digest_of(key).await {
                                     Ok(d) => Some(d),
                                     Err(e) => {
@@ -930,10 +939,23 @@ async fn apply_resync(
     // MED) so a fleet with many `script_object:` manifests doesn't
     // serialize N round-trips. Inline-only manifests skip the
     // network entirely — the async branch returns immediately.
-    let resolve_futs = new_jobs.into_iter().map(|(id, manifest)| {
+    let resolve_futs = new_jobs
+        .into_iter()
+        .filter(|(id, manifest)| {
+            // Typed native deployment is never cached for local execution.
+            if manifest.execute.is_typed() {
+                warn!(job_id = %id, "apply_resync: typed_operation job ignored; typed deployment is disabled");
+            }
+            !manifest.execute.is_typed()
+        })
+        .map(|(id, manifest)| {
         let script_cache = script_cache.clone();
         async move {
-            let script_object_sha256 = match manifest.execute.script_object.as_deref() {
+            let script_object_sha256 = match manifest
+                .execute
+                .shell()
+                .and_then(|e| e.script_object.as_deref())
+            {
                 Some(key) => match script_cache.digest_of(key).await {
                     Ok(d) => Some(d),
                     Err(e) => {
@@ -1954,6 +1976,16 @@ async fn local_tick(
         manifest,
         script_object_sha256: cached_digest,
     } = resolved;
+    // Last line of defence: the caches never admit a typed job, but if one
+    // got here it is refused before dedup state or any Command is touched.
+    let Ok(shell_exec) = manifest.execute.require_shell().cloned() else {
+        warn!(
+            schedule_id = %schedule.id,
+            job_id = %manifest.id,
+            "local_scheduler: typed_operation job refused; typed deployment is disabled",
+        );
+        return;
+    };
 
     // 2) Mode-based dedup against local_completions.
     let now = Utc::now();
@@ -2062,8 +2094,8 @@ async fn local_tick(
     // script_object jobs during broker outages from the last
     // successful resync's cache.
     let (script_body, script_object_ref) = match (
-        manifest.execute.script.as_deref().filter(|s| !s.is_empty()),
-        manifest.execute.script_object.as_deref(),
+        shell_exec.script.as_deref().filter(|s| !s.is_empty()),
+        shell_exec.script_object.as_deref(),
         cached_digest,
     ) {
         (Some(inline), _, _) => (inline.to_owned(), None),
@@ -2087,7 +2119,7 @@ async fn local_tick(
             return;
         }
     };
-    let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
+    let timeout_secs = humantime::parse_duration(&shell_exec.timeout)
         .ok()
         .map(|d| d.as_secs())
         .unwrap_or(60);
@@ -2110,15 +2142,16 @@ async fn local_tick(
         version: manifest.version.clone(),
         request_id: Uuid::new_v4().to_string(),
         exec_id: Some(exec_id),
-        bypass_local_limit: manifest.execute.bypass_local_limit,
-        shell: manifest.execute.shell.into(),
+        command_kind: CommandKind::Shell,
+        bypass_local_limit: shell_exec.bypass_local_limit,
+        shell: shell_exec.shell.into(),
         script: script_body,
         script_object: script_object_ref.as_ref().map(|(k, _)| k.clone()),
         script_object_sha256: script_object_ref.as_ref().map(|(_, d)| d.clone()),
         timeout_secs,
         jitter_secs,
-        run_as: manifest.execute.run_as,
-        cwd: manifest.execute.cwd.clone(),
+        run_as: shell_exec.run_as,
+        cwd: shell_exec.cwd.clone(),
         deadline_at,
         // v0.26: forward the Manifest's Layer 2 staleness policy so
         // `handle_command` evaluates it against the agent's current
