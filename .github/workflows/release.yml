@@ -264,6 +264,26 @@ jobs:
             exit 1
           fi
 
+      # Fail closed: a repo that pins a signing identity must keep its hook.
+      - name: Require post-build hook when a signing pin exists
+        if: ${{ hashFiles('deploy/macos/signing-cert.sha1') != '' && hashFiles('scripts/ci/release-post-build.sh') == '' }}
+        shell: bash
+        run: |
+          echo "::error::deploy/macos/signing-cert.sha1 pins a signing identity but scripts/ci/release-post-build.sh is missing; refusing to publish unsigned release binaries"
+          exit 1
+
+      # Repo-owned hook (release.yml is kata-managed; the logic lives in
+      # scripts/ci/). Signs macOS bins with the stable self-signed identity
+      # and requires the MACOS_SIGN_* secrets plus the pinned certificate.
+      - name: Sign binaries (post-build hook)
+        if: ${{ hashFiles('scripts/ci/release-post-build.sh') != '' }}
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          MACOS_SIGN_CERT_P12_BASE64: ${{ secrets.MACOS_SIGN_CERT_P12_BASE64 }}
+          MACOS_SIGN_CERT_PASSWORD: ${{ secrets.MACOS_SIGN_CERT_PASSWORD }}
+        run: bash scripts/ci/release-post-build.sh sign
+
       - name: Stage release artifacts
         shell: bash
         env:
@@ -310,11 +330,18 @@ jobs:
               echo "staged dist/$stem.zip"
             else
               cp "$src" "$stem"
-              tar czf "dist/$stem.tar.gz" "$stem"
+              COPYFILE_DISABLE=1 tar czf "dist/$stem.tar.gz" "$stem"
               echo "staged dist/$stem.tar.gz"
             fi
           done
           ls -la dist/
+
+      - name: Verify packaged signatures (post-build hook)
+        if: ${{ hashFiles('scripts/ci/release-post-build.sh') != '' }}
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash scripts/ci/release-post-build.sh verify-dist
 
       - uses: actions/upload-artifact@v7.0.2
         with:
