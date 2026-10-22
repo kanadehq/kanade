@@ -1,5 +1,5 @@
 preset = "github.com/yukimemi/pj-presets:rust-workspace"
-applied_at = "2026-10-21T08:38:27.344352167Z"
+applied_at = "2026-10-22T08:40:37.327338803Z"
 
 [[templates]]
 source = "github.com/yukimemi/pj-base"
@@ -8,7 +8,7 @@ version = "0.18.0"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust"
-rev = "324a00b775447fe8217bcb4717b5cc24cfc23c8f"
+rev = "33c42d2bc5df1263d6965ed88b9c88c3cc73dc10"
 version = "0.8.1"
 
 [[templates]]
@@ -55,7 +55,7 @@ content_hash = "af314f0c7f556a719d63a9226662b6aac209d0faef32cd384768e0e7cd498676
 once_applied = true
 
 [files."AGENTS.md"]
-content_hash = "a3060bcf43a044df9756231020be550decd2c4eddab6b0517e3901685a8066cc"
+content_hash = "e375806660bfab1501df00e17947ad062ff2e31ef15d8ae1ea62f996ce79dd5a"
 
 [files."CLAUDE.md"]
 content_hash = "a76b3af252969b8120128d7ce44f2b6cfdcf88c7420ee00675732f542d047529"
