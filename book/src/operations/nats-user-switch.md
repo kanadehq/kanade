@@ -57,14 +57,17 @@ and again after broker restart. Absolute times belong to that machine;
 | 11 | ~375 ms | None or almost none authenticated (0–1 of 50), with the shipped 2 s |
 | 12 | ~720 ms | Burst not measured |
 
-A user-credential connect makes the broker perform **two bcrypt
-verifications**: the client's credential probe and the real connection.
-Retries repeat that work. `authorization { timeout }` is accepted in both
-token and users configurations; the default 2 s was verified to be enforced.
-Raising it did not rescue cost 9/10, so the limit is not only the broker's
-authorization timeout. Client-side probe/connect timeouts are a suspected
-amplifier, still requiring separate investigation. The cost 8 results above
-are not a guarantee for the shipped 2 s timeout or for 200 clients.
+In the client measured above, a user-credential connect made the broker
+perform **two bcrypt verifications**: the client's credential probe and the
+real connection. Retries repeat that work. `authorization { timeout }` is
+accepted in both token and users configurations; the default 2 s was verified
+to be enforced. Raising it did not rescue cost 9/10, so the limit is not only
+the broker's authorization timeout. Longer client probe/connect timeouts did
+not rescue it either; removing the second verification did. The client now
+presents one credential per attempt; see
+[Measuring a fleet authentication burst](#measuring-a-fleet-authentication-burst).
+The cost 8 results above are not a guarantee for the shipped 2 s timeout or
+for 200 clients.
 
 A collapse looks like `Authentication Timeout` in both client and broker logs,
 clients repeatedly retrying, and heartbeats absent for minutes after a broker
@@ -229,10 +232,10 @@ time you wrote down:**
   the fleet's heartbeat interval.
 
 The second term used to be a guess. An agent that has lost its connection does
-not heartbeat again until it has reconnected, and on a reconnect the client's
-credential selection first probes the broker with each credential it holds and
-then connects for real, so a reconnect is several round trips with their own
-timeouts and the client's reconnect backoff in between, not one. On a slow or
+not heartbeat again until it has reconnected, and across a mode switch the
+client first presents the credential the broker last accepted, is refused, and
+then presents the other one, so a reconnect is several round trips with their
+own timeouts and the client's reconnect backoff in between, not one. On a slow or
 busy machine that can add up to tens of seconds. Comparing sooner than that
 reads agents that are still reconnecting as disappeared.
 
@@ -250,7 +253,8 @@ these has worked again, all measured side by side from that same instant:
 * the backend's ping of the agent returning 200;
 * a break-glass `kanade run` completing;
 * a fresh call made with the agent role and with the backend role through the
-  real `connect` helper (so the helper's probe is inside the number).
+  real `connect` helper (so the helper's credential selection is inside the
+  number).
 
 Conditions of that measurement, which are not your fleet's: a loopback broker
 on a hosted CI runner, three test processes running in parallel on the
@@ -331,7 +335,7 @@ injected-fault tests and the repeated conformance results must both pass.
 The client recovery targets, counted from when the broker becomes reachable
 and accepts the newly provisioned credential, are:
 
-* resume communication within **30 s** (`RESUME_BOUND`); or
+* resume communication within **31 s** (`RESUME_BOUND`); or
 * exit non-zero within **195 s** (`EXIT_BOUND`) so supervision can restart it.
 
 These recovery bounds assume the broker can authenticate the fleet's
@@ -340,10 +344,17 @@ that assumption; see [Choosing the bcrypt cost](#choosing-the-bcrypt-cost).
 
 These timers are defined in `crates/kanade-shared/src/nats_client.rs` and all
 derive from the protocol PING interval, set explicitly to 60 s (async-nats'
-default). A reconnect attempt allows the 4 s backoff, 3 s probe plus 1 s
-guard, and 5 s handshake; 30 s allows two attempts plus slack. An
-inconclusive probe skips the attempt instead of guessing from the previous
-broker mode.
+default), and from one table of user-reconnect budgets (`USER_RECONNECT`). A
+reconnect attempt allows the 4 s backoff and a 5 s handshake: 9 s at most.
+No credential probe runs on the connection path: each attempt presents the
+shape the broker last accepted (the user before any answer), and only a
+refusal of that handshake makes the next attempt present the other shape. A
+mode switch can therefore take three attempts once the broker answers: one in
+flight when it returned, one refused, one accepted. The resume bound is those
+three attempts plus 4 s of slack, 31 s. Both numbers are compile-time
+derived, so changing a budget moves them. An attempt costs the broker at
+most one bcrypt verification, and a switch adds one refused handshake per
+client.
 
 The watchdog observes each connection's own receive progress. Idle clients
 send a protocol PING every 60 s and the broker's PONG is the progress, so
@@ -356,7 +367,7 @@ receive progress does it open a fresh credential witness. If the witness
 connects or is explicitly refused while the original connection still has no
 progress, the process logs the failure and exits. The exit budget adds the
 5 s check interval, 5 s flush timeout and 5 s witness timeout to the 180 s
-stall threshold: 195 s, inside the 5-minute target. Supervision starts
+stall threshold: 195 s on a stall with no preceding outage. Supervision starts
 immediately after client creation, before subscriptions or resource bootstrap
 can block; fatal failure bypasses application shutdown so it cannot extend
 this deadline.
@@ -366,13 +377,15 @@ reconnect backoff try again. A witness that cannot reach the broker never
 causes an exit and is repeated at most every 30 s; the first witness that
 reaches it again gives the client a further 30 s to resume, and any received
 progress clears the outage state, so a later genuine stall is judged against
-the normal 180 s threshold. The expected wait for a client that is merely
-reconnecting is therefore its reconnect backoff (up to 4 s) plus the handshake,
-well inside the 30 s resume bound; a silently stranded client costs up to
+the normal 180 s threshold. A broker that returns just after an outage
+witness costs one witness cadence, then the recovery grace (the resume bound)
+and a second check: 92 s, inside the 195 s of a stall with no outage, which
+therefore sets `EXIT_BOUND`. The expected wait for a client that is merely
+reconnecting is its backoff plus one handshake (two across a mode switch),
+bounded by the 31 s resume bound; a silently stranded client costs up to
 195 s before its restart.
 
-A broker that is unavailable, or whose mode cannot be determined by the
-probe, is waited for indefinitely. The deadlines assume the client can reach
+A broker that is unavailable is waited for indefinitely. The deadlines assume the client can reach
 and authenticate to the broker; they are not a network outage deadline.
 Repeated actual credential refusals still fail visibly. A single refusal is
 retried by the pinned connection library and does not trigger an immediate
@@ -390,10 +403,11 @@ switch. The CLI is not a service: its caller must rerun it after non-zero exit.
 ### Expected logs
 
 During a restart, expect `event: disconnected`, IO errors and possibly
-`expected INFO, got nothing`. A refused user probe during token mode is
-expected. `NATS credential selected` names the selected shape (`user` or
-`token`) without exposing credentials. An inconclusive probe logs
-`NATS credential probe inconclusive; deferring this attempt` at debug level.
+`expected INFO, got nothing`. One refused handshake per client and mode
+switch is expected (`authorization violation`), as is one refused user
+handshake when a process holding a user starts while the broker is still in
+token mode. `NATS credential accepted` names the accepted shape (`user` or
+`token`) without exposing credentials.
 
 On recovery, expect `event: connected` and resumed heartbeats. If the
 original client stalls while a witness reaches the broker, expect
@@ -526,3 +540,100 @@ The conformance test (`nats_role_conformance`, see the README) covers the
 broker-side behaviour of this switch with live processes; the rehearsal
 covers *your* hosts, tooling and access path, which is what goes wrong in
 practice.
+
+## Measuring a fleet authentication burst
+
+Before changing reconnect budgets, measure with the real broker and the host
+class that will run it. The ignored `nats_auth_burst` test supports an explicit
+measurement feature. `production` measures the production entry point: one
+credential per attempt, the shape the broker last accepted. `baseline` freezes
+the previous client (a 3 second user probe inside the auth callback, then a 5
+second outer handshake, so two verifications per attempt). The exponential
+backoff caps at 4 seconds without jitter in both.
+
+Run each condition serially, at least three times, recording the broker version,
+OS/architecture, available cores, GOMAXPROCS and authorization timeout:
+
+```sh
+ulimit -n 16384
+KANADE_AUTH_BURST_SIZES=50,200 \
+KANADE_AUTH_BURST_COSTS=9,10 \
+KANADE_AUTH_BURST_REPEATS=3 \
+KANADE_AUTH_BURST_VARIANTS=production,baseline,probe,probe-cancel,connect,both,jitter,both-jitter,before,before-both,probe-first-adaptive,direct,baseline-no-proxy,direct-no-proxy \
+KANADE_AUTH_BURST_JSONL=burst-clients.jsonl \
+KANADE_AUTH_BURST_FRAMES_JSONL=burst-frames.jsonl \
+cargo test -p kanade-shared --release --features nats-auth-measurement \
+  --test nats_auth_burst burst_of_user_connections -- --ignored --nocapture
+```
+
+`probe` raises only the probe budget to 60 seconds, `connect` only the outer
+budget, and `both` raises both. Override that experimental budget with
+`KANADE_AUTH_BURST_LONG_TIMEOUT_SECS`. `jitter` keeps the existing exponential
+backoff envelope and randomizes each delay uniformly within it. `before` runs
+the probe before each attempt instead of inside the auth callback;
+`probe-first-adaptive` adds a probe budget that doubles per inconclusive
+attempt up to 30 seconds and a 30 second handshake. `direct` uses the long
+outer budget and presents the user directly, so compare it with `both` to
+distinguish the second verification from retries. Direct connections are
+measurement controls and do not preserve token fallback. `no-proxy` and
+`direct-no-proxy` bypass the measurement proxy; their socket counters are zero,
+so compare their convergence times rather than their connection counts.
+GOMAXPROCS limits broker concurrency and does not emulate a shared two-vCPU
+host. Repeat the matrix with the host's own core count as well as the desired
+concurrency limit, and with the shipped authorization timeout when relevant.
+
+The frame trace records TCP completion, INFO, CONNECT, first PONG and closure,
+without frame contents or credentials. A closed CONNECT without PONG is an
+abandoned or refused handshake; use the recorded auth errors to distinguish
+refusals. A connection closed before CONNECT may be the outer connection whose
+callback never completed. INFO delay includes broker scheduling and is not by
+itself proof of accept-queue saturation; the no-proxy control is necessary.
+All comparison variants derived from `baseline` (`probe`, `connect`, `both`,
+`jitter`, `before`, ...) keep the old cancellation behavior: after an outer
+timeout the spawned probe keeps running until its own budget ends.
+`probe-cancel` uses the `probe` budgets and only adds aborting the worker when
+its parent future is dropped, so comparing the two separates cancellation from
+the budget change. The generous file limit allows those overlapping probes at
+the default experimental budget; raise it further if increasing that budget or
+the fleet size. Raising only the probe budget can consequently increase
+outstanding work.
+
+A restart is measured only after every startup client has authenticated.
+Min/median/max describe converged clients; population p95 is unavailable (`NaN`)
+when anyone fails to converge within the 120-second deadline. Always publish
+the not-converged count with the timings. After any client change, rerun
+cost 8 at N=50 and cost 9 at N=200 for both startup and restart on the target
+host. Measurement-only budgets are not production recovery guarantees; the
+production resume/exit bounds are the ones derived above.
+
+### What the measurements showed
+
+On the two-vCPU host described in
+[Choosing the bcrypt cost](#choosing-the-bcrypt-cost) (nats-server 2.14.3,
+shipped 2 s authorization timeout, cost 9, N = 200, one run each), with the
+previous client, which probed before each attempt with a growing probe budget
+and a 30 s handshake:
+
+| variant | startup | restart |
+|---|---|---|
+| previous client (probe first, budgets up to 30 s) | 0 not converged; median 45.9 s, p95 70.3 s | 0 not converged; median 28.8 s, p95 50.3 s |
+| `probe` (60 s probe) | 200 not converged | not measured |
+| `connect` (60 s handshake) | 198 not converged | not measured |
+| `both` | 200 not converged | not measured |
+| `both-jitter` | 200 not converged | not measured |
+| `direct` (one verification, no switching) | 0 not converged; median 10.0 s, p95 26.0 s | 0 not converged; median 12.2 s, p95 27.7 s |
+
+Longer client budgets, with or without jitter, did not relieve the broker;
+they made the collapse complete. Removing the second verification was the one
+change that helped, and roughly halved the broker's `Authentication Timeout`
+answers. On an 8-core arm64 host (cost 9, N = 200, three runs each, shipped
+authorization timeout, another build running at the same time) the same
+ordering held: p95 per run of 12–25 s for `baseline`, 10–27 s for `probe`,
+5–8 s for `connect`, `both` and `before`, and 3–5 s for `direct`, with
+`direct` opening a quarter of `baseline`'s broker connections. That host's
+cores hide most of the queueing, so it supports the direction only.
+
+The production client therefore presents one credential per attempt and
+keeps the previous 5 s handshake budget; the 3 s probe remains only in the
+stall watchdog's witness. The jitter and growing-budget variants remain
+measurement controls only.

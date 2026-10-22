@@ -65,3 +65,7 @@ portpicker = "0.1.1"
 tempfile = "3.27.0"
 # nats_auth_burst.rs mints bcrypt hashes of a chosen cost for the broker.
 bcrypt = "0.19.3"
+
+[features]
+# Enables an explicit timing seam for real-broker measurements only.
+nats-auth-measurement = []
