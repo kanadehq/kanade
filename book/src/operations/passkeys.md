@@ -1,0 +1,211 @@
+# Passkey (WebAuthn) sign-in
+
+The web console can sign operators in with a **passkey** — a fingerprint,
+face, device PIN or security key — instead of a password. It is opt-in: with
+no `[server.webauthn]` section (or an empty section) in `backend.toml` the
+feature is off and the console shows no passkey controls. The public
+`/api/auth/passkey/config` probe returns `enabled: false`; passkey ceremonies
+and management routes answer `404`. Nothing else about authentication changes
+either way.
+
+Passkeys are **additional** credentials. The password is never removed, the
+`kanade` CLI keeps signing in with username + password (it has no browser),
+and password / TOTP sign-in, the reset-link flow, roles, per-account page
+restrictions and disabled accounts behave exactly as before.
+
+## Configuration
+
+```toml
+[server]
+bind       = '127.0.0.1:8080'
+public_url = 'https://kanade.example.com'
+
+[server.webauthn]
+rp_id      = 'kanade.example.com'
+rp_origins = ['https://kanade.example.com']
+rp_name    = 'Kanade'                 # optional; shown by some authenticators
+```
+
+| Field | Meaning |
+| --- | --- |
+| `rp_id` | The WebAuthn *relying-party ID*: a bare, lowercase host name (no scheme, port, path or wildcard, not an IP address). Credentials are cryptographically bound to it. |
+| `rp_origins` | The exact browser origins the console is served from — the **public** `https://host[:port]` your users type, not the backend's own `bind` address. Each entry's host must equal `rp_id` or be a subdomain of it. |
+| `rp_name` | Display name. Defaults to `Kanade`. |
+
+Both `rp_id` and `rp_origins` are required and are **never derived** from the
+`Host` or `X-Forwarded-*` headers: those are attacker-influenced, and the RP ID
+is the root of trust for every credential.
+
+The backend **refuses to start** (with the reason in the log) when the section
+is unsafe:
+
+- an origin is not `https` (plain `http` is accepted for `localhost` only);
+- an origin or `rp_id` is an IP address, contains a wildcard, a port in
+  `rp_id`, a path, query, fragment or credentials;
+- an origin's host is neither `rp_id` nor a subdomain of it, or `rp_id` is a
+  bare single label such as `com` standing in for a parent domain;
+- `rp_origins` is empty or `rp_id` is not lowercase ASCII.
+
+A `public_url` that is not one of the `rp_origins` is logged as a warning (it
+is almost always a typo in one of the two) but is not fatal: `public_url` only
+shapes emailed links.
+
+### Behind a reverse proxy
+
+Terminate TLS at the proxy and keep the backend on loopback, as in
+`deploy/linux/Caddyfile`:
+
+```caddyfile
+kanade.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+```toml
+[server.webauthn]
+rp_id      = 'kanade.example.com'
+rp_origins = ['https://kanade.example.com']
+```
+
+The proxy must forward the original scheme/host untouched (Caddy does) and
+append the client address to `X-Forwarded-For` — the sign-in throttle reads
+the last hop, exactly as for password login.
+
+### Local development
+
+Browsers treat `http://localhost` as a secure context, so passkeys work
+without TLS there — and only there:
+
+```toml
+[server]
+bind = '127.0.0.1:8080'
+
+[server.webauthn]
+rp_id      = 'localhost'
+rp_origins = ['http://localhost:8080']
+```
+
+Open the console as `http://localhost:8080` (not `127.0.0.1` — an IP address
+cannot be an RP ID). The origin must match the port you actually use; list
+every dev origin (for example the Vite dev server's) you need. Passkeys
+registered for `localhost` are useless against a real deployment and vice
+versa; they are separate credentials.
+
+### Changing the host name later
+
+A passkey is bound to the **RP ID**. If it changes, every existing passkey
+silently stops being offered by the browser and cannot sign in:
+
+- Moving between hosts that share a parent domain is painless **if you chose
+  the parent as `rp_id` up front** — set `rp_id = 'example.com'` and list the old
+  and new origins in `rp_origins`; existing passkeys keep working throughout.
+- Changing `rp_id` itself (a different registered domain, or from
+  `kanade.example.com` to `kanade.example.org`) invalidates all passkeys. Users
+  fall back to password (+ TOTP) and re-enrol; stale rows can be cleared per
+  account by an administrator (see below) or are simply never matched.
+- Changing only `rp_origins` (adding or retiring a front-end host that shares
+  the `rp_id`) does not touch existing credentials.
+
+Pick the `rp_id` you intend to keep before rolling passkeys out.
+
+## What a passkey login guarantees
+
+- **User verification is required** for both enrolment and sign-in. An
+  assertion that proves only presence (a touch of a stolen, unlocked key) is
+  rejected, as is an authenticator that cannot verify the user.
+- Credentials are **discoverable**: the console asks the browser to pick the
+  account, so no username is typed or sent and the sign-in endpoint reveals
+  nothing about which accounts exist.
+- Each challenge is generated by the server, valid for **2 minutes**, and
+  **single-use**: it is deleted when first presented, even if that attempt
+  fails, so a captured response cannot be replayed.
+- The browser-reported **origin** and **RP ID** must match the configuration
+  exactly (no wildcard subdomains, no extra ports).
+- The authenticator's **signature counter** and backup flags are verified and
+  written back after every sign-in; a counter that goes backwards (a cloned
+  credential) is refused and the stored credential is left untouched.
+- The session is the same JWT a password sign-in mints, with the same
+  lifetime. **Role, `disabled`, page restrictions and `must_change_pw` are
+  read from the account on every request and at sign-in**, never from the
+  passkey: disabling an account or changing its role takes effect immediately.
+  A passkey sign-in into an account that still owes a forced password change
+  returns `must_change_pw: true` and the console traps the user on the
+  change-password page, exactly as for a password sign-in.
+
+## Interaction with TOTP (two-factor) and recovery
+
+A user-verified passkey is two factors in one (the device, plus the PIN or
+biometric), so signing in **with a passkey does not ask for a TOTP code**.
+Signing in with a **password** still does — the TOTP requirement of every
+existing account is unchanged and cannot be bypassed that way.
+
+To keep a passkey from becoming a *way around* TOTP, and to keep an unattended
+browser session from planting a new credential:
+
+| Action | Requires |
+| --- | --- |
+| Add a passkey | Signed in, **current password**, and — if TOTP is enabled — a **current TOTP code** |
+| Remove a passkey | The same |
+| List your passkeys | Signed in |
+| Add a passkey while a password change is pending (`must_change_pw`) | Refused until the password is changed |
+| Sign in with a passkey | The passkey itself (user-verified); throttled like password login |
+
+Failed re-authentication counts toward the same per-account lockout as a
+failed password login.
+
+**Lost or compromised device.** Passkeys never replace the password, so the
+existing recovery paths are untouched: the user signs in with password (+
+TOTP) or uses a reset link. To cut a device off, the user removes that passkey
+from *Account → Passkeys*; if they cannot (no password / no session), an
+administrator clears **all** of the account's passkeys:
+
+```sh
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  https://kanade.example.com/api/accounts/alice/passkeys
+```
+
+Clearing all passkeys also invalidates every pending enrollment for the account,
+including enrollment completions racing the reset. A new enrollment must start
+after the reset and pass the usual password/TOTP checks. Enrollment completion
+rechecks disabled and forced-password-change restrictions when storing the key.
+
+An admin password reset (reset link or `must_change_pw`) does **not** remove
+passkeys — if the reset follows a suspected compromise, clear the passkeys too.
+Deleting an account deletes its passkeys with it, so a later account created
+under the same username inherits neither credentials nor pending enrollments.
+Each account incarnation receives a distinct enrollment generation.
+
+> **Known limitation / accepted risk.** There is deliberately no setting that
+> forces a TOTP code *after* a passkey. An account whose password is
+> compromised **and** whose attacker controls an already-enrolled passkey
+> device is, by design, as exposed as the passkey holder. If your policy needs
+> TOTP on every sign-in, do not enable `[server.webauthn]`. Many synced
+> passkeys (platform password managers) also report a signature counter that is
+> always `0`, for which counter-based clone detection cannot work; the
+> single-use challenge, origin/RP checks and user verification still apply.
+
+## Rate limiting and audit
+
+- `login/start` is public; it is limited to 20 starts per minute per client
+  address and a global cap on unanswered challenges (new starts get `503`
+  rather than growing memory).
+- Failed sign-ins feed the same per-IP and per-account lockout as password
+  login (an assertion that cannot be tied to an account only counts against the
+  source address).
+- Audit events (NATS `audit.admin.passkey.*`, mirrored into the audit log):
+  `passkey.register`, `passkey.remove`, `passkey.admin_reset`,
+  `passkey.login` and `passkey.login_failed` (with a `reason`, never a
+  secret).
+
+## Operational notes
+
+- Passkeys live in the SQLite table `user_passkeys` (a migration creates it).
+  `wipe-projector` / `-WipeDb` preserves them together with `users`.
+- Pending challenges are held **in memory** in the single backend process. A
+  restart just invalidates ceremonies in flight (the user retries); running two
+  backend instances behind a load balancer is not supported for passkeys.
+- Tested with Chromium's virtual authenticator (component tests) and a software
+  authenticator against the real verifier (Rust tests). Other browsers are
+  expected to work (the console uses the standard WebAuthn API, with a clear
+  message where it is missing) but are not covered by automated tests.

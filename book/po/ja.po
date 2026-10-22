@@ -4857,3 +4857,35 @@ msgstr ""
 
 #~ msgid "# Elevated PowerShell prompt"
 #~ msgstr "# 管理者権限の PowerShell プロンプト"
+
+#: src\SUMMARY.md:16 src\operations/passkeys.md:1
+msgid "Passkey (WebAuthn) sign-in"
+msgstr "パスキー (WebAuthn) サインイン"
+
+#: src\operations/passkeys.md
+msgid "Behind a reverse proxy"
+msgstr "リバースプロキシ配下での設定"
+
+#: src\operations/passkeys.md
+msgid "Local development"
+msgstr "ローカル開発"
+
+#: src\operations/passkeys.md
+msgid "Changing the host name later"
+msgstr "ホスト名を後から変更する場合"
+
+#: src\operations/passkeys.md
+msgid "What a passkey login guarantees"
+msgstr "パスキーログインが保証すること"
+
+#: src\operations/passkeys.md
+msgid "Interaction with TOTP (two-factor) and recovery"
+msgstr "TOTP（二要素認証）との関係と回復手順"
+
+#: src\operations/passkeys.md
+msgid "Rate limiting and audit"
+msgstr "レート制限と監査"
+
+#: src\operations/passkeys.md
+msgid "Operational notes"
+msgstr "運用上の注意"

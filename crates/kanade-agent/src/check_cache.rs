@@ -134,11 +134,11 @@ impl CheckSink {
             }
         };
         // The data dir may not exist yet on a fresh install.
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!(error = %e, path = %parent.display(), "check_cache: create data dir failed");
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(error = %e, path = %parent.display(), "check_cache: create data dir failed");
+            return;
         }
         let tmp = path.with_extension("json.tmp");
         if let Err(e) = std::fs::write(&tmp, &json) {

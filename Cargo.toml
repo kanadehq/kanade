@@ -19,7 +19,7 @@ members = [
 [workspace.package]
 version = "0.94.0"
 edition      = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license      = "MIT"
 repository   = "https://github.com/kanadehq/kanade"
 homepage     = "https://github.com/kanadehq/kanade"
