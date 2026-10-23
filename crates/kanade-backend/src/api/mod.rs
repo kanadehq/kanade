@@ -25,6 +25,7 @@ pub mod install_attempts;
 pub mod inventory;
 pub mod jetstream_status;
 pub mod jobs;
+pub mod location;
 pub mod notifications;
 pub mod obs_events;
 pub mod passkeys;
@@ -503,6 +504,11 @@ pub fn router(state: AppState) -> Router {
         // /groups routes below). A live agent re-registers on its next
         // heartbeat — see agents::delete.
         .route("/api/agents/{pc_id}", delete(agents::delete))
+        .route("/api/agents/{pc_id}/location", get(location::get_location))
+        .route(
+            "/api/agents/{pc_id}/location/request",
+            post(location::request_location),
+        )
         .route(
             "/api/agents/{pc_id}/groups",
             put(agent_groups::set_groups).post(agent_groups::add_group),
@@ -678,6 +684,10 @@ pub fn router(state: AppState) -> Router {
         // the highest tier even though it only ever reads. The handler
         // runs on the read-only `query_pool`. See `api::query`.
         .route("/api/query", post(query::execute))
+        .route(
+            "/api/server-settings/location",
+            get(location::get_settings).put(location::put_settings),
+        )
         .route_layer(axum::middleware::from_fn(crate::auth::require_admin));
 
     base.route(
@@ -888,6 +898,10 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // --- Exec ---
         "/api/exec/{job_id}" => Feature::Exec,
 
+        // --- Location ---
+        "/api/agents/{pc_id}/location"
+        | "/api/agents/{pc_id}/location/request" => Feature::Location,
+
         // --- Settings (server settings + support codes + backend restart) ---
         //
         // The support-code routes belong here with the settings document
@@ -902,6 +916,7 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // restricted account that held Settings.
         "/api/server-settings"
         | "/api/server-settings/defaults"
+        | "/api/server-settings/location"
         | "/api/server-settings/support-codes/{scope}"
         | "/api/server/restart" => Feature::Settings,
 
@@ -1106,6 +1121,18 @@ mod feature_map_tests {
         assert_eq!(
             feature_for_path("/api/server-settings/support-codes/{scope}"),
             Some(Feature::Settings)
+        );
+        assert_eq!(
+            feature_for_path("/api/server-settings/location"),
+            Some(Feature::Settings)
+        );
+        assert_eq!(
+            feature_for_path("/api/agents/{pc_id}/location"),
+            Some(Feature::Location)
+        );
+        assert_eq!(
+            feature_for_path("/api/agents/{pc_id}/location/request"),
+            Some(Feature::Location)
         );
         assert_eq!(feature_for_path("/api/query"), Some(Feature::Accounts));
         // The installer download gates on its OWN feature — the whole point

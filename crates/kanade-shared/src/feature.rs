@@ -64,6 +64,8 @@ pub enum Feature {
     /// sitting at. Being in the catalog is what lets an operator hold, say,
     /// Agents without also holding Remote.
     Remote,
+    /// Lost-device location visibility and on-demand acquisition.
+    Location,
 }
 
 impl Feature {
@@ -96,6 +98,7 @@ impl Feature {
             Feature::Accounts => "accounts",
             Feature::Settings => "settings",
             Feature::Remote => "remote",
+            Feature::Location => "location",
         }
     }
 
@@ -129,6 +132,7 @@ impl Feature {
             "accounts" => Feature::Accounts,
             "settings" => Feature::Settings,
             "remote" => Feature::Remote,
+            "location" => Feature::Location,
             _ => return None,
         })
     }
@@ -156,7 +160,7 @@ impl Feature {
     /// Every feature, in catalog order. Drives the SPA's account editor
     /// checkbox list and lets the backend validate a submitted allow-list
     /// against the full known set.
-    pub const ALL: [Feature; 25] = [
+    pub const ALL: [Feature; 26] = [
         Feature::Dashboard,
         Feature::Run,
         Feature::Exec,
@@ -182,6 +186,7 @@ impl Feature {
         Feature::Accounts,
         Feature::Settings,
         Feature::Remote,
+        Feature::Location,
     ];
 }
 
@@ -202,7 +207,7 @@ mod tests {
         // validation + the SPA editor; assert the count matches the array
         // length so adding a variant without updating ALL fails to compile
         // (length mismatch) or fails here.
-        assert_eq!(Feature::ALL.len(), 25);
+        assert_eq!(Feature::ALL.len(), 26);
         // No duplicate keys.
         let mut keys: Vec<&str> = Feature::ALL.iter().map(|f| f.as_str()).collect();
         keys.sort_unstable();

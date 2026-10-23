@@ -30,7 +30,8 @@
     "config": "設定",
     "jetstream": "JetStream",
     "accounts": "アカウント",
-    "settings": "オペレーター設定"
+    "settings": "オペレーター設定",
+    "location": "位置情報"
   },
   "menu": {
     "open": "メニューを開く",
