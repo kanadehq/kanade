@@ -552,6 +552,9 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
     if manifest.execute.is_typed() {
         warn!(
             %schedule_id, %job_id,
+            refusal = %kanade_shared::deploy_plan::DeployRefusal::NoDelegatedAuthorization(
+                "the scheduler",
+            ),
             "scheduler fire skipped: typed_operation jobs cannot be scheduled",
         );
         return;

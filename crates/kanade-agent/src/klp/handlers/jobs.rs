@@ -538,11 +538,15 @@ async fn fetch_manifest(client: &async_nats::Client, id: &str) -> Result<Manifes
 }
 
 fn typed_refusal(id: &str) -> RpcError {
-    warn!(job_id = %id, "KLP: typed_operation job refused; typed deployment is disabled");
+    // The shared policy decides: a local path holds no delegated backend
+    // authorization, so it can never start a typed deployment.
+    let refusal =
+        kanade_shared::deploy_plan::local_refusal(kanade_shared::deploy_plan::Boundary::Klp);
+    warn!(job_id = %id, %refusal, "KLP: typed_operation job refused");
     RpcError::new(
         ErrorKind::Unauthorized,
         format!(
-            "job '{id}' is a typed deployment and cannot be started locally: {}",
+            "job '{id}' is a typed deployment and cannot be started locally: {refusal}; {}",
             kanade_shared::typed_operation::TYPED_DEPLOY_DISABLED
         ),
     )

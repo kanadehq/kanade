@@ -299,6 +299,7 @@ mod tests {
         let caller = Caller {
             sub: Some("issuer".into()),
             source: None,
+            ..Default::default()
         };
         let (id, key) = issue(&p, &caller, "unix").await.unwrap();
         let stored: String = sqlx::query_scalar("SELECT key_hash FROM install_attempts")

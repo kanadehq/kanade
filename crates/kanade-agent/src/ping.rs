@@ -57,6 +57,7 @@ pub async fn serve(
                 continue;
             };
             let hb = Heartbeat {
+                agent_arch: None,
                 remote_viewing: Some(crate::remote_viewing_available()),
                 pc_id: pc_id.clone(),
                 at: Utc::now(),
@@ -85,6 +86,8 @@ pub async fn serve(
                 command_keys: None,
                 enforcing: None,
                 command_protocols: None,
+                // Unknown, not empty: a ping reply makes no capability claim.
+                deploy_capabilities: None,
             };
             let payload = match serde_json::to_vec(&hb) {
                 Ok(b) => b,

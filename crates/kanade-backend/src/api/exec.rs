@@ -56,10 +56,42 @@ pub async fn exec_manifest(
     // passes `schedule.on_failure.lowered_retry()`.
     retry: Option<kanade_shared::wire::RetrySpec>,
 ) -> Result<ExecResponse, (StatusCode, String)> {
-    // Typed native deployment is not deliverable until the shared approval
-    // and capability gates exist: refuse before anything is resolved,
-    // recorded or published. Every direct exec and scheduler fire passes
-    // through here, and the shell builder below only ever sees an `Execute`.
+    // Typed native deployment goes through the one shared gate and is never
+    // delivered: plan approval, the caller's current authorization, the exact
+    // target set and fresh capability evidence are all re-checked, and even a
+    // fully approved, compatible plan ends in the handler-unavailable barrier.
+    // Every direct exec and scheduler fire passes through here, and the shell
+    // builder below only ever sees an `Execute`.
+    if manifest.execute.is_typed() {
+        use kanade_shared::deploy_plan::DispatchActor;
+        // The scheduler passes no caller and has no approval of its own; an
+        // operator request without a named, authorized identity gets an
+        // empty principal, which the gate refuses.
+        let dispatch_actor = match caller {
+            Some(c) => DispatchActor::Operator(c.principal().unwrap_or(
+                kanade_shared::deploy_plan::Principal {
+                    subject: String::new(),
+                    operator: false,
+                    exec_feature: false,
+                },
+            )),
+            None => DispatchActor::Scheduler,
+        };
+        let signer = s
+            .commands
+            .identity_parts()
+            .map(|(k, fp)| format!("{k}:{fp}"));
+        let refusal = crate::deploy_gate::refuse_typed(
+            &s.pool,
+            signer.as_deref(),
+            &manifest,
+            &plan,
+            &dispatch_actor,
+            chrono::Utc::now().timestamp(),
+        )
+        .await;
+        return Err((crate::deploy_gate::status_of(&refusal), refusal.to_string()));
+    }
     let shell_exec = manifest
         .execute
         .require_shell()
@@ -786,7 +818,15 @@ mod typed_gate_e2e {
             query_pool: pool.clone(),
             commands: std::sync::Arc::new(crate::command_publisher::CommandPublisher::new(
                 nats.clone(),
-                None,
+                Some(
+                    kanade_shared::signing::Signer::from_secret(
+                        &kanade_shared::signing::encode_secret(
+                            &kanade_shared::signing::generate_keypair().unwrap(),
+                        ),
+                        "backend-1",
+                    )
+                    .unwrap(),
+                ),
             )),
             nats,
             jetstream: js,
@@ -885,13 +925,15 @@ mod typed_gate_e2e {
             plan.clone(),
         )
         .await;
+        // The job names plan `p1`, which was never registered.
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert!(body.contains("not enabled"), "{body}");
+        assert!(body.contains("does not exist"), "{body}");
 
-        // The shared dispatch boundary (also the scheduler's) refuses it too.
+        // The shared dispatch boundary (also the scheduler's) refuses it too:
+        // the scheduler holds no delegated authorization of its own.
         let fan: FanoutPlan = serde_json::from_str(&plan).unwrap();
         match exec_manifest(&app.state, typed, fan, "scheduler", None, None).await {
-            Err((status, _)) => assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY),
+            Err((status, _)) => assert_eq!(status, StatusCode::FORBIDDEN),
             Ok(_) => panic!("exec_manifest dispatched a typed job"),
         }
 
@@ -903,5 +945,143 @@ mod typed_gate_e2e {
         assert_eq!(rows, 0);
         let got = tokio::time::timeout(Duration::from_millis(500), commands.next()).await;
         assert!(got.is_err(), "a command was published for a typed job");
+    }
+    /// An approved plan with fresh, matching capability evidence is still not
+    /// deliverable through any backend entry: the handler barrier holds, nothing
+    /// is published, recorded or consumed, and legacy shell dispatch is intact.
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn approved_compatible_plan_is_still_refused_and_shell_jobs_still_dispatch() {
+        use crate::api::deploy_plans::test_support as plans;
+        use crate::api::deploy_plans::{ApprovePlan, approve_plan, create_plan};
+        use kanade_shared::artifact::ArtifactSha256;
+
+        let app = app().await;
+        let pool = app.state.pool.clone();
+        let mut commands = app.state.nats.subscribe("commands.>").await.unwrap();
+        app.state.nats.flush().await.unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        // A registered, approved, still-valid plan for two case-distinct agents.
+        plans::seed_agents(&pool).await;
+        let req = plans::create_request(plans::request("plan-1", &["PC-a", "pc-A"], now));
+        let view = create_plan(&pool, "alice", &req, now).await.unwrap();
+        let digest = ArtifactSha256::try_from(view.plan_digest).unwrap();
+        approve_plan(
+            &pool,
+            "plan-1",
+            "bob",
+            &ApprovePlan {
+                plan_digest: digest,
+                revision: 0,
+            },
+            now,
+        )
+        .await
+        .unwrap();
+        let job = plans::manifest_of(&plans::job_json(Some(("plan-1", &digest))));
+        let kv = {
+            // The typed definition is hand-poked: the API refuses to store it.
+            let _ = call(&app, "/api/jobs", "application/yaml", SHELL_JOB.into()).await;
+            app.state
+                .jetstream
+                .get_key_value(BUCKET_JOBS)
+                .await
+                .unwrap()
+        };
+        kv.put("deploy-backend", serde_json::to_vec(&job).unwrap().into())
+            .await
+            .unwrap();
+
+        // Fresh evidence that satisfies every preflight condition.
+        let (kid, fp) = app.state.commands.identity_parts().unwrap();
+        let key = format!("{kid}:{fp}");
+        for pc in ["PC-a", "pc-A"] {
+            sqlx::query(
+                "UPDATE agents SET agent_version = '0.95.0', os_family = 'linux', \
+                 deploy_capabilities = ?, deploy_evidence_reported_at = ?, \
+                 deploy_evidence_received_at = ?, deploy_evidence_agent_version = '0.95.0', \
+                 deploy_evidence_protocols = '[\"legacy\",\"kanade.command.v2\"]', \
+                 deploy_evidence_keys = ?, deploy_evidence_os_family = 'linux', \
+                 agent_arch = 'aarch64', deploy_evidence_agent_arch = 'aarch64' WHERE pc_id = ?",
+            )
+            .bind(
+                r#"{"schema_version":1,"handlers":[{"contract":"typed_deploy_v1","operation":"deploy_backend","os":"linux","arch":"aarch64"}]}"#,
+            )
+            .bind(now * 1000)
+            .bind(now)
+            .bind(serde_json::to_string(&[&key]).unwrap())
+            .bind(pc)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let exact = serde_json::json!({"target": {"pcs": ["pc-A", "PC-a"]}}).to_string();
+        let (status, body) = call(
+            &app,
+            "/api/exec/deploy-backend",
+            "application/json",
+            exact.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("not enabled"), "{body}");
+
+        // Scope self-expansion and scheduler entry are refused earlier.
+        for scope in [
+            serde_json::json!({"target": {"all": true}}),
+            serde_json::json!({"target": {"groups": ["fleet"]}}),
+            serde_json::json!({"target": {"pcs": ["PC-a"]}}),
+        ] {
+            let (status, body) = call(
+                &app,
+                "/api/exec/deploy-backend",
+                "application/json",
+                scope.to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(body.contains("do not match the approved plan"), "{body}");
+        }
+        let fan: FanoutPlan = serde_json::from_str(&exact).unwrap();
+        match exec_manifest(&app.state, job, fan, "scheduler", None, None).await {
+            Err((status, _)) => assert_eq!(status, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("scheduler dispatched an approved typed job"),
+        }
+
+        // No execution row, no ledger row, no revision change, nothing on the wire.
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM executions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deploy_plan_applications")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(applied, 0);
+        let revision: i64 = sqlx::query_scalar("SELECT revision FROM deploy_plans")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(revision, 1);
+        let got = tokio::time::timeout(Duration::from_millis(500), commands.next()).await;
+        assert!(got.is_err(), "a command was published for a typed job");
+
+        // Legacy shell jobs keep working through the very same endpoint.
+        let (status, body) = call(
+            &app,
+            "/api/exec/shell-job",
+            "application/json",
+            serde_json::json!({"target": {"pcs": ["PC1"]}}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let msg = tokio::time::timeout(Duration::from_secs(5), commands.next())
+            .await
+            .expect("the shell command was published")
+            .unwrap();
+        assert!(msg.subject.as_str().starts_with("commands.pc.PC1"));
     }
 }

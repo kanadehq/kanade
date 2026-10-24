@@ -116,13 +116,13 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: Agent and app publication admission coverage (backend HTTP, real Object Stores)
+      - name: Publication admission and typed deployment gate coverage (backend HTTP, real NATS)
         if: runner.os == 'Linux'
         # The default coverage job skips these NATS-dependent ignored tests.
-        # Measure both publication APIs' integration tests and merge into Codecov.
+        # Measure publication and typed exec refusal tests and merge into Codecov.
         env:
           KANADE_APP_ARTIFACT_PUBLICATION: backend-exclusive
-        run: cargo llvm-cov --locked -p kanade-backend --bin kanade-backend --lcov --output-path agent-admission-lcov.info -- api::agent_releases api::app_artifacts --ignored
+        run: cargo llvm-cov --locked -p kanade-backend --bin kanade-backend --lcov --output-path agent-admission-lcov.info -- api::agent_releases api::app_artifacts api::exec::typed_gate_e2e --ignored
 
       - uses: codecov/codecov-action@v5
         if: runner.os == 'Linux'
@@ -131,11 +131,11 @@ jobs:
           files: agent-admission-lcov.info
           fail_ci_if_error: false
 
-      - name: Agent and app publication admission (backend HTTP, real Object Stores)
+      - name: Publication admission and typed deployment gates (backend HTTP, real NATS)
         if: runner.os != 'Linux'
         env:
           KANADE_APP_ARTIFACT_PUBLICATION: backend-exclusive
-        run: cargo test -p kanade-backend -- api::agent_releases api::app_artifacts --ignored
+        run: cargo test -p kanade-backend -- api::agent_releases api::app_artifacts api::exec::typed_gate_e2e --ignored
 
       - name: NATS auth (user / token fallback) integration tests
         run: cargo test -p kanade-shared --test nats_auth_live -- --ignored

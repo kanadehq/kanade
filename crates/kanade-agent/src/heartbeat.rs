@@ -161,6 +161,7 @@ pub async fn heartbeat_loop(
                 let (last_logon_user, last_logon_display_name) = last_logon();
                 let (command_keys, enforcing) = verifier.refresh_and_report();
                 let hb = Heartbeat {
+                    agent_arch: Some(std::env::consts::ARCH.into()),
                     remote_viewing: Some(crate::remote_viewing_available()),
                     pc_id: pc_id.clone(),
                     at: chrono::Utc::now(),
@@ -191,6 +192,10 @@ pub async fn heartbeat_loop(
                     command_keys: Some(command_keys),
                     enforcing: Some(enforcing),
                     command_protocols: Some(kanade_shared::wire::supported_command_protocols()),
+                    // Always `Some`: built from the handler registry, which has no
+                    // entry today, so this reports "supports nothing typed" and
+                    // stays distinct from an agent too old to say.
+                    deploy_capabilities: Some(crate::deploy_handlers::capabilities()),
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,

@@ -25,6 +25,25 @@ pub const SOURCE_HEADER: &str = "x-kanade-source";
 pub struct Caller {
     pub sub: Option<String>,
     pub source: Option<String>,
+    /// The authenticated account's role is at least `operator`. Derived from
+    /// the verified claims only (never a request field); `false` when there is
+    /// no identity, so a hand-built or default `Caller` authorizes nothing.
+    pub operator: bool,
+    /// The account may reach the Exec page (`allowed_features`).
+    pub exec_feature: bool,
+}
+
+impl Caller {
+    /// The caller's current authorization for the shared deployment gate, or
+    /// `None` when there is no named authenticated identity.
+    pub fn principal(&self) -> Option<kanade_shared::deploy_plan::Principal> {
+        let subject = self.sub.clone().filter(|s| !s.is_empty())?;
+        Some(kanade_shared::deploy_plan::Principal {
+            subject,
+            operator: self.operator,
+            exec_feature: self.exec_feature,
+        })
+    }
 }
 
 impl<S> FromRequestParts<S> for Caller
@@ -34,14 +53,26 @@ where
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let sub = parts.extensions.get::<Claims>().map(|c| c.sub.clone());
+        let claims = parts.extensions.get::<Claims>();
+        let sub = claims.map(|c| c.sub.clone());
+        let operator = claims.is_some_and(|c| c.role().allows(crate::auth::Role::Operator));
+        let exec_feature = claims.is_some_and(|c| {
+            c.allowed_features
+                .as_ref()
+                .is_none_or(|f| f.contains(&kanade_shared::feature::Feature::Exec))
+        });
         let source = parts
             .headers
             .get(SOURCE_HEADER)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty());
-        Ok(Caller { sub, source })
+        Ok(Caller {
+            sub,
+            source,
+            operator,
+            exec_feature,
+        })
     }
 }
 

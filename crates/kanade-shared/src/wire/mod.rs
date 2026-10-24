@@ -2,6 +2,7 @@ mod agent_config;
 mod agent_groups;
 mod agent_meta;
 mod command;
+mod deploy_capabilities;
 mod envelope;
 mod event;
 mod group_contacts;
@@ -22,6 +23,10 @@ pub use agent_config::{ConfigScope, EffectiveConfig, ResolutionWarning, resolve}
 pub use agent_groups::AgentGroups;
 pub use agent_meta::{AgentMeta, MetaEntry, MetaUpdate};
 pub use command::{Command, CommandKind, FinalizeCommand, RetrySpec, RunAs, Shell};
+pub use deploy_capabilities::{
+    DEPLOY_CAPABILITIES_VERSION, DeployCapabilities, DeployHandler, OPERATION_DEPLOY_BACKEND,
+    OPERATION_DEPLOY_CLI, OPERATION_DEPLOY_CLIENT, TYPED_DEPLOY_CONTRACT_V1,
+};
 pub use envelope::{
     CommandEnvelope, ENVELOPE_KIND_V2, EnvelopeError, FUTURE_SKEW_ALLOWANCE, MAX_ENVELOPE_VALIDITY,
     PROTOCOL_LEGACY, PROTOCOL_V2, VerifiedEnvelope, VerifiedTypedEnvelope, sign_envelope,

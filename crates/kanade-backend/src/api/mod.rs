@@ -12,6 +12,7 @@ pub mod app_packages;
 pub mod audit;
 pub mod checks;
 pub mod collect;
+pub mod deploy_plans;
 pub mod exec;
 pub mod executions;
 pub mod fleet_perf;
@@ -680,25 +681,26 @@ pub fn router(state: AppState) -> Router {
         .route("/api/query", post(query::execute))
         .route_layer(axum::middleware::from_fn(crate::auth::require_admin));
 
-    base.route(
-        "/api/install-reports/{id}",
-        post(install_attempts::report).layer(axum::extract::DefaultBodyLimit::max(1024)),
-    )
-    .merge(operator)
-    .merge(admin)
-    .with_state(state)
-    // Per-account PAGE enforcement (horizontal axis), layered over the
-    // whole API. Runs after `auth::verify` (added in `main`, so it has
-    // injected `Claims`) and after routing (so `MatchedPath` is set,
-    // which `feature_for_path` keys off). Unrestricted callers pass
-    // straight through; restricted ones get only their allow-listed
-    // features plus a small infrastructure set — see
-    // `auth::require_features`.
-    .layer(axum::middleware::from_fn(crate::auth::require_features))
-    // Everything else (`/`, `/assets/...`, hash-router paths) is served
-    // from the rust-embed bundle. The fallback runs after the API routes
-    // above, so JSON endpoints take precedence.
-    .fallback(crate::web::serve)
+    base.merge(deploy_plans::routes())
+        .route(
+            "/api/install-reports/{id}",
+            post(install_attempts::report).layer(axum::extract::DefaultBodyLimit::max(1024)),
+        )
+        .merge(operator)
+        .merge(admin)
+        .with_state(state)
+        // Per-account PAGE enforcement (horizontal axis), layered over the
+        // whole API. Runs after `auth::verify` (added in `main`, so it has
+        // injected `Claims`) and after routing (so `MatchedPath` is set,
+        // which `feature_for_path` keys off). Unrestricted callers pass
+        // straight through; restricted ones get only their allow-listed
+        // features plus a small infrastructure set — see
+        // `auth::require_features`.
+        .layer(axum::middleware::from_fn(crate::auth::require_features))
+        // Everything else (`/`, `/assets/...`, hash-router paths) is served
+        // from the rust-embed bundle. The fallback runs after the API routes
+        // above, so JSON endpoints take precedence.
+        .fallback(crate::web::serve)
 }
 
 /// Map a matched route pattern (`MatchedPath`, e.g. `/api/agents/{pc_id}`)
@@ -886,7 +888,13 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         "/api/run" => Feature::Run,
 
         // --- Exec ---
-        "/api/exec/{job_id}" => Feature::Exec,
+        // Deployment plans are authorized under the same Exec permission as
+        // the dispatch they gate; no new permission is introduced.
+        "/api/exec/{job_id}"
+        | "/api/deploy-plans"
+        | "/api/deploy-plans/{plan_id}"
+        | "/api/deploy-plans/{plan_id}/approve"
+        | "/api/deploy-plans/{plan_id}/revoke" => Feature::Exec,
 
         // --- Settings (server settings + support codes + backend restart) ---
         //

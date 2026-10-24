@@ -264,6 +264,7 @@ pub async fn ws(
     let caller = Caller {
         sub: Some(claims.sub.clone()),
         source: Some("spa".to_string()),
+        ..Default::default()
     };
     upgrade
         // Echo the protocol, never the credential.

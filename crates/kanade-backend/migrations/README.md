@@ -18,6 +18,16 @@ own startup `migrate!()` fail with
 `UNIQUE constraint failed: _sqlx_migrations.version`. A timestamp prefix
 makes two PRs picking the same version effectively impossible.
 
+## Not everything here is rebuildable
+
+The statement above holds for the projections. The `deploy_plans` and
+`deploy_plan_applications` tables (typed deployment plans, SPEC §2.13) are
+**authorization state**: approvals and the single-use ledger cannot be
+re-derived from JetStream, and a wiped database must not be repaired by guessing
+which plans were approved. A wipe therefore drops every plan and approval;
+re-register and re-approve. The `deploy_*` capability-evidence columns on
+`agents` are projection and refill from the next heartbeat.
+
 ## Baseline
 
 `20260604000000_baseline.sql` is a **squashed baseline** that folds the

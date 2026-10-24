@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 /// agents that don't send them still deserialize cleanly.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Heartbeat {
+    /// Architecture of the running agent, independently of handler declarations.
+    /// Omitted by older agents and ping replies (unknown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_arch: Option<String>,
     /// Remote viewing implementation is available; permission and login are
     /// checked on Start. None means an older agent, not unsupported/offline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +178,16 @@ pub struct Heartbeat {
     /// populated set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_protocols: Option<Vec<String>>,
+    /// Typed native-deployment handlers this agent can actually run
+    /// (SPEC §2.13.6.3), as structured (contract, operation, os, arch) facts.
+    ///
+    /// Same three states as [`Self::command_keys`], and the same reason: `None`
+    /// is a ping reply or an agent that predates the field (unknown), `Some`
+    /// with no handlers is "reporting, supports nothing typed", and a populated
+    /// set is exactly what it can run now. It is built from the agent's handler
+    /// registry, so a build without a working handler never advertises one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_capabilities: Option<super::DeployCapabilities>,
 }
 
 #[cfg(test)]
@@ -206,6 +220,7 @@ mod tests {
     #[test]
     fn heartbeat_round_trips_through_json() {
         let hb = Heartbeat {
+            agent_arch: None,
             remote_viewing: None,
             pc_id: "pc-01".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
@@ -222,6 +237,7 @@ mod tests {
             command_keys: Some(vec!["backend-20260728".into()]),
             enforcing: Some(false),
             command_protocols: Some(vec!["legacy".into(), "kanade.command.v2".into()]),
+            deploy_capabilities: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         let back: Heartbeat = serde_json::from_str(&json).unwrap();
@@ -244,6 +260,7 @@ mod tests {
     #[test]
     fn heartbeat_empty_quarantine_is_omitted_on_the_wire() {
         let hb = Heartbeat {
+            agent_arch: None,
             remote_viewing: None,
             pc_id: "x".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
@@ -260,6 +277,7 @@ mod tests {
             command_keys: None,
             enforcing: None,
             command_protocols: None,
+            deploy_capabilities: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -280,6 +298,7 @@ mod tests {
         // exactly like an agent too old to report at all, and the two need
         // opposite responses (provision it / upgrade it first).
         let hb = Heartbeat {
+            agent_arch: None,
             remote_viewing: None,
             pc_id: "x".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
@@ -296,6 +315,7 @@ mod tests {
             command_keys: Some(Vec::new()),
             enforcing: Some(false),
             command_protocols: None,
+            deploy_capabilities: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -319,6 +339,7 @@ mod tests {
         // is too old to say" on the wire as the same absence — and stage 3's
         // remaining work is exactly the first set.
         let hb = Heartbeat {
+            agent_arch: None,
             remote_viewing: None,
             pc_id: "x".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
@@ -335,6 +356,7 @@ mod tests {
             command_keys: Some(vec!["backend-20260728:75b4c8f44e18012d".into()]),
             enforcing: Some(false),
             command_protocols: None,
+            deploy_capabilities: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -372,5 +394,49 @@ mod tests {
         // them (older agent, non-Windows host) decodes to None.
         assert_eq!(hb.last_logon_user, None);
         assert_eq!(hb.last_logon_display_name, None);
+    }
+
+    #[test]
+    fn deploy_capabilities_keep_old_records_omitted_and_empty_distinct() {
+        use crate::wire::DeployCapabilities;
+        // A record from an agent that predates the field decodes as unknown and
+        // re-encodes without inventing the key.
+        let legacy = serde_json::json!({
+            "pc_id": "test", "at": "2026-01-01T00:00:00Z", "agent_version": "0.1.0"
+        });
+        let hb: Heartbeat = serde_json::from_value(legacy).unwrap();
+        assert_eq!(hb.agent_arch, None);
+        assert_eq!(hb.deploy_capabilities, None);
+        assert!(
+            serde_json::to_value(&hb)
+                .unwrap()
+                .get("deploy_capabilities")
+                .is_none()
+        );
+        // Reported-empty survives the wire as a present, empty handler list.
+        let mut hb = hb;
+        hb.agent_arch = Some("aarch64".into());
+        hb.deploy_capabilities = Some(DeployCapabilities::from_handlers(&[]));
+        let wire = serde_json::to_value(&hb).unwrap();
+        assert_eq!(
+            wire["deploy_capabilities"],
+            serde_json::json!({"schema_version": 1, "handlers": []})
+        );
+        let back: Heartbeat = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.agent_arch.as_deref(), Some("aarch64"));
+        assert_eq!(
+            back.deploy_capabilities,
+            Some(DeployCapabilities::from_handlers(&[]))
+        );
+        // A newer agent's unknown future tokens decode instead of dropping the
+        // whole heartbeat (preflight then fails closed on them).
+        let future = serde_json::json!({
+            "pc_id": "test", "at": "2026-01-01T00:00:00Z", "agent_version": "9.0.0",
+            "deploy_capabilities": {"schema_version": 7, "handlers": [
+                {"contract": "typed_deploy_v7", "operation": "deploy_x", "os": "haiku", "arch": "riscv"}
+            ]}
+        });
+        let hb: Heartbeat = serde_json::from_value(future).unwrap();
+        assert_eq!(hb.deploy_capabilities.unwrap().handlers.len(), 1);
     }
 }
