@@ -94,6 +94,25 @@ pub struct AgentRow {
     /// * `[..]` — what it accepts right now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_protocols: Option<Vec<String>>,
+    /// Typed native-deployment handlers this agent last reported
+    /// (`Heartbeat.deploy_capabilities`).
+    ///
+    /// Same three states as [`Self::command_keys`]:
+    ///
+    /// * absent — never reported (an older agent, or no real heartbeat yet).
+    ///   Unknown, NOT "supports nothing".
+    /// * `{"handlers": []}` — reporting, and supports no typed operation.
+    /// * populated — the exact (contract, operation, os, arch) handlers.
+    ///
+    /// A heartbeat that omits the field never changes this, so absence cannot
+    /// be produced by an agent that once reported. Report only: the preflight
+    /// reads the evidence columns directly, with their freshness checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_capabilities: Option<kanade_shared::wire::DeployCapabilities>,
+    /// Unix seconds at which the backend received the report above — the
+    /// freshness clock the preflight uses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_capabilities_received_at: Option<i64>,
     /// #1270: the NATS credential this host's live connection authenticated
     /// with, as reported by the **broker** — not by the agent, which knows
     /// only which token it was handed.
@@ -1117,6 +1136,17 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()),
+        // NULL stays `None`; a malformed blob degrades to `None` (cannot say),
+        // never to a populated or an empty set.
+        deploy_capabilities: r
+            .try_get::<Option<String>, _>("deploy_capabilities")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<kanade_shared::wire::DeployCapabilities>(&s).ok()),
+        deploy_capabilities_received_at: r
+            .try_get::<Option<i64>, _>("deploy_evidence_received_at")
+            .ok()
+            .flatten(),
         // #1270: NULL (never correlated) stays `None`, and an empty string
         // — which no classifier produces, but which a hand-edited row
         // could hold — is folded into it rather than shown as a credential
@@ -1499,6 +1529,7 @@ mod tests {
             command_keys: None,
             enforcing: None,
             command_protocols: protocols,
+            deploy_capabilities: None,
         };
         let project = |hb: Heartbeat| {
             let pool = pool.clone();
@@ -1532,6 +1563,101 @@ mod tests {
             "reported-empty stays empty"
         );
         assert_eq!(by_id("WS-9"), None, "never reported stays unknown");
+    }
+
+    /// `deploy_capabilities` keeps its three states through the projector and
+    /// the API: never reported (absent), reported empty, and populated; a beat
+    /// that omits it changes nothing; a malformed blob reads as unknown.
+    #[tokio::test]
+    async fn deploy_capabilities_preserve_omitted_versus_empty_through_the_api() {
+        use kanade_shared::wire::{DeployCapabilities, DeployHandler, Heartbeat};
+        let pool = seeded_pool().await;
+        let beat = |pc: &str, caps: Option<DeployCapabilities>| Heartbeat {
+            remote_viewing: None,
+            pc_id: pc.into(),
+            at: chrono::Utc::now(),
+            agent_version: "0.95.0".into(),
+            hostname: None,
+            os_family: Some("linux".into()),
+            agent_cpu_pct: None,
+            agent_rss_bytes: None,
+            agent_disk_read_bytes: None,
+            agent_disk_written_bytes: None,
+            quarantined_versions: Vec::new(),
+            last_logon_user: None,
+            last_logon_display_name: None,
+            command_keys: None,
+            enforcing: None,
+            command_protocols: None,
+            deploy_capabilities: caps,
+        };
+        let project = |hb: Heartbeat| {
+            let pool = pool.clone();
+            async move {
+                crate::projector::heartbeat::upsert_baseline(&pool, &hb)
+                    .await
+                    .unwrap()
+            }
+        };
+        let handler = DeployHandler::new(
+            "typed_deploy_v1",
+            "deploy_cli",
+            kanade_shared::artifact::TargetOs::Linux,
+            kanade_shared::artifact::TargetArch::X86_64,
+        );
+        project(beat("PC001", Some(DeployCapabilities::from_handlers(&[])))).await;
+        project(beat(
+            "PC002",
+            Some(DeployCapabilities::from_handlers(&[handler])),
+        ))
+        .await;
+        // PC001 later sends a ping-shaped beat with no capabilities.
+        project(beat("PC001", None)).await;
+
+        let (_h, Json(rows)) = call(pool.clone(), ListParams::default()).await.unwrap();
+        let by_id = |id: &str| rows.iter().find(|r| r.pc_id == id).unwrap();
+        let empty = by_id("PC001").deploy_capabilities.clone().unwrap();
+        assert!(empty.handlers.is_empty(), "reported-empty stays empty");
+        assert_eq!(
+            by_id("PC002")
+                .deploy_capabilities
+                .as_ref()
+                .unwrap()
+                .handlers
+                .len(),
+            1
+        );
+        assert!(by_id("PC001").deploy_capabilities_received_at.is_some());
+        assert_eq!(
+            by_id("WS-9").deploy_capabilities,
+            None,
+            "never reported stays unknown"
+        );
+        assert_eq!(by_id("WS-9").deploy_capabilities_received_at, None);
+
+        // On the wire: absent, not null, for an agent that never reported; an
+        // explicit empty handler list otherwise.
+        let wire = serde_json::to_value(by_id("WS-9")).unwrap();
+        assert!(wire.get("deploy_capabilities").is_none());
+        let wire = serde_json::to_value(by_id("PC001")).unwrap();
+        assert_eq!(
+            wire["deploy_capabilities"]["handlers"],
+            serde_json::json!([])
+        );
+
+        // A malformed blob degrades to unknown, never to a capability set.
+        sqlx::query("UPDATE agents SET deploy_capabilities = 'not json' WHERE pc_id = 'PC002'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.pc_id == "PC002")
+                .unwrap()
+                .deploy_capabilities,
+            None
+        );
     }
 
     #[tokio::test]

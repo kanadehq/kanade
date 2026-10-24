@@ -109,6 +109,14 @@ async fn flush(pool: &SqlitePool, buf: &mut HashMap<String, Heartbeat>) {
     buf.clear();
 }
 
+/// `agent_version` of a heartbeat that carries capability evidence; `None`
+/// otherwise so the evidence-version column is untouched.
+fn deploy_caps_json_version(hb: &Heartbeat) -> Option<&str> {
+    hb.deploy_capabilities
+        .as_ref()
+        .map(|_| hb.agent_version.as_str())
+}
+
 pub(crate) async fn upsert_baseline<'e, E>(executor: E, hb: &Heartbeat) -> Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -158,6 +166,33 @@ where
     let command_protocols_json = hb.command_protocols.as_ref().map(|protocols| {
         serde_json::to_string(protocols).expect("serialising Vec<String> is infallible")
     });
+    // Typed-deployment capability evidence (SPEC §2.13.6.3). Written ONLY by a
+    // heartbeat that carries `deploy_capabilities`, and then as one unit taken
+    // from that same heartbeat — the capability set together with the agent
+    // version, protocols, keys and os it was reported alongside, plus the
+    // backend receipt time that is the freshness clock. A heartbeat that omits
+    // the field (ping reply, older agent) leaves every evidence column exactly
+    // as it was: it can neither refresh the evidence nor invent any. An empty
+    // handler list is stored as such (`"handlers":[]`), NOT NULL, so "reports
+    // nothing supported" stays distinct from "never reported". A report whose
+    // heartbeat time is older than the stored one is ignored, so a reordered
+    // delivery cannot roll the evidence back.
+    let deploy_caps_json = hb
+        .deploy_capabilities
+        .as_ref()
+        .map(|c| serde_json::to_string(c).expect("serialising capabilities is infallible"));
+    let evidence_reported_ms = deploy_caps_json.as_ref().map(|_| hb.at.timestamp_millis());
+    let evidence_received_s = deploy_caps_json
+        .as_ref()
+        .map(|_| chrono::Utc::now().timestamp());
+    let evidence_protocols_json = hb
+        .command_protocols
+        .as_ref()
+        .map(|p| serde_json::to_string(p).expect("serialising Vec<String> is infallible"));
+    let evidence_keys_json = hb
+        .command_keys
+        .as_ref()
+        .map(|k| serde_json::to_string(k).expect("serialising Vec<String> is infallible"));
     // #655: last signed-in account. COALESCE(excluded, agents) — the
     // OPPOSITE precedence to hostname/os_family below: a non-NULL value
     // the agent reports WINS, so a user switch is reflected on the next
@@ -174,8 +209,11 @@ where
              quarantined_versions,
              last_logon_user, last_logon_display_name,
              command_keys, enforcing, command_protocols,
+             deploy_capabilities, deploy_evidence_reported_at, deploy_evidence_received_at,
+             deploy_evidence_agent_version, deploy_evidence_protocols, deploy_evidence_keys,
+             deploy_evidence_os_family,
              updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(pc_id) DO UPDATE SET
              hostname                  = COALESCE(agents.hostname, excluded.hostname),
              os_family                 = COALESCE(agents.os_family, excluded.os_family),
@@ -213,6 +251,14 @@ where
              -- Same precedence: a ping reply reports NULL and must not erase
              -- the set the last real heartbeat reported.
              command_protocols         = COALESCE(excluded.command_protocols, agents.command_protocols),
+             -- Evidence columns move together or not at all (see above).
+             deploy_capabilities = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_capabilities ELSE agents.deploy_capabilities END,
+             deploy_evidence_reported_at = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_reported_at ELSE agents.deploy_evidence_reported_at END,
+             deploy_evidence_received_at = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_received_at ELSE agents.deploy_evidence_received_at END,
+             deploy_evidence_agent_version = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_agent_version ELSE agents.deploy_evidence_agent_version END,
+             deploy_evidence_protocols = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_protocols ELSE agents.deploy_evidence_protocols END,
+             deploy_evidence_keys = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_keys ELSE agents.deploy_evidence_keys END,
+             deploy_evidence_os_family = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_os_family ELSE agents.deploy_evidence_os_family END,
              updated_at                = CURRENT_TIMESTAMP",
     )
     .bind(&hb.pc_id)
@@ -234,6 +280,13 @@ where
     .bind(command_keys_json)
     .bind(hb.enforcing)
     .bind(command_protocols_json)
+    .bind(deploy_caps_json)
+    .bind(evidence_reported_ms)
+    .bind(evidence_received_s)
+    .bind(deploy_caps_json_version(hb))
+    .bind(evidence_protocols_json)
+    .bind(evidence_keys_json)
+    .bind(hb.deploy_capabilities.as_ref().and(hb.os_family.as_deref()))
     .execute(executor)
     .await?;
     Ok(())

@@ -85,6 +85,8 @@ pub async fn serve(
                 command_keys: None,
                 enforcing: None,
                 command_protocols: None,
+                // Unknown, not empty: a ping reply makes no capability claim.
+                deploy_capabilities: None,
             };
             let payload = match serde_json::to_vec(&hb) {
                 Ok(b) => b,

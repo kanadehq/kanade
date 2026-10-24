@@ -30,6 +30,17 @@ def commands():
     yield ["cargo", "test", "-p", "kanade-backend", "--bins", "--",
            "api::exec::tests::typed_deployment_is_refused",
            "api::jobs::tests::job_list_row_for_a_typed"]
+    # Stage 4: plan persistence, the shared gate, capability evidence and
+    # preflight run against real SQLite databases and the real plan routes.
+    yield ["cargo", "test", "-p", "kanade-shared", "--lib", "--",
+           "deploy_plan::tests::", "wire::deploy_capabilities::tests::",
+           "wire::heartbeat::tests::"]
+    yield ["cargo", "test", "-p", "kanade-backend", "--bins", "--",
+           "api::deploy_plans::tests::", "deploy_gate::tests::",
+           "api::agents::tests::deploy_capabilities",
+           "api::agent_releases::tests::agent_self_update_is_not_gated"]
+    yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--",
+           "deploy_handlers::tests::"]
     yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--test", "app_manifest_cli",

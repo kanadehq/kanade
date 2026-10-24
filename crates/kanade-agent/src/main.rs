@@ -3,6 +3,7 @@ mod collect;
 mod commands;
 mod concurrency;
 mod config_supervisor;
+mod deploy_handlers;
 mod env_gate;
 mod finalize;
 mod groups;

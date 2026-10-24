@@ -733,7 +733,7 @@ async fn run(
                             // (no gates / handlers yet): never cache it, and
                             // drop any earlier shell version of the same id.
                             if m.execute.is_typed() {
-                                warn!(key = %entry.key, "local_scheduler: typed_operation job ignored; typed deployment is disabled");
+                                warn!(key = %entry.key, refusal = %kanade_shared::deploy_plan::local_refusal(kanade_shared::deploy_plan::Boundary::AgentScheduler), "local_scheduler: typed_operation job ignored");
                                 let mut s = state.lock().await;
                                 s.jobs.remove(&entry.key);
                                 continue;
@@ -944,7 +944,7 @@ async fn apply_resync(
         .filter(|(id, manifest)| {
             // Typed native deployment is never cached for local execution.
             if manifest.execute.is_typed() {
-                warn!(job_id = %id, "apply_resync: typed_operation job ignored; typed deployment is disabled");
+                warn!(job_id = %id, refusal = %kanade_shared::deploy_plan::local_refusal(kanade_shared::deploy_plan::Boundary::AgentScheduler), "apply_resync: typed_operation job ignored");
             }
             !manifest.execute.is_typed()
         })
@@ -1982,7 +1982,10 @@ async fn local_tick(
         warn!(
             schedule_id = %schedule.id,
             job_id = %manifest.id,
-            "local_scheduler: typed_operation job refused; typed deployment is disabled",
+            refusal = %kanade_shared::deploy_plan::local_refusal(
+                kanade_shared::deploy_plan::Boundary::LocalDispatch,
+            ),
+            "local_scheduler: typed_operation job refused",
         );
         return;
     };

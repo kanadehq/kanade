@@ -2,9 +2,9 @@
 //!
 //! This module defines the **schema, validation and conversion** of a typed
 //! operation only. Nothing here authorises, publishes, dispatches or executes
-//! a deployment: the shared approval / capability gates (Task 4) and the
-//! native handlers (Task 5) do not exist yet, so every delivery path rejects
-//! a typed job with [`TYPED_DEPLOY_DISABLED`]. Accepting the schema is not
+//! a deployment. Plan approval and the capability preflight live in
+//! [`crate::deploy_plan`]; the native handlers (Task 5) do not exist yet, so
+//! every delivery path still rejects a typed job with [`TYPED_DEPLOY_DISABLED`]. Accepting the schema is not
 //! deployment authorisation.
 //!
 //! A stored job's `execute` block is a compatible union ([`ManifestExecute`]):
@@ -44,9 +44,9 @@ pub const MAX_PLAN_ID_LEN: usize = 128;
 
 /// The refusal every delivery / execution entry point returns until the shared
 /// approval and capability gates and the native handlers exist.
-pub const TYPED_DEPLOY_DISABLED: &str = "typed native deployment is not enabled: the shared plan \
-approval and capability gates and the native handlers are not implemented, so a typed_operation \
-job is accepted as a definition but is never published, dispatched or executed";
+pub const TYPED_DEPLOY_DISABLED: &str = "typed native deployment is not enabled: the native \
+handlers are not implemented, so a typed_operation job is accepted as a definition (and a plan may \
+be registered and approved for it) but is never published, dispatched or executed";
 
 /// A typed job reached a path that can only run shell jobs, or a delivery path
 /// while typed deployment is disabled.

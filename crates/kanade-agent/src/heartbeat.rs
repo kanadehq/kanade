@@ -191,6 +191,10 @@ pub async fn heartbeat_loop(
                     command_keys: Some(command_keys),
                     enforcing: Some(enforcing),
                     command_protocols: Some(kanade_shared::wire::supported_command_protocols()),
+                    // Always `Some`: built from the handler registry, which has no
+                    // entry today, so this reports "supports nothing typed" and
+                    // stays distinct from an agent too old to say.
+                    deploy_capabilities: Some(crate::deploy_handlers::capabilities()),
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,

@@ -477,6 +477,31 @@ pub async fn rollout(
 pub(in crate::api) mod tests {
     use super::*;
 
+    /// Agent self-update keeps the existing publish / rollout path: it must not
+    /// consult typed-deployment plans, capabilities or protocol facts, so old
+    /// Windows / Linux / macOS agents (which report none of them) can always be
+    /// upgraded. Behavioural coverage of publish + rollout on every supported
+    /// platform is `official_agents_are_admitted_on_every_supported_platform`;
+    /// that a plan can never name the agent role is pinned in `deploy_plan`.
+    #[test]
+    fn agent_self_update_is_not_gated_on_typed_deployment_facts() {
+        let this = include_str!("agent_releases.rs");
+        let prod = this.split("#[cfg(test)]").next().unwrap();
+        for forbidden in [
+            "deploy_plan",
+            "deploy_capabilities",
+            "deploy_gate",
+            "deploy_evidence",
+            "command_protocols",
+            "typed_deploy",
+        ] {
+            assert!(
+                !prod.contains(forbidden),
+                "agent publish / rollout must not depend on `{forbidden}`"
+            );
+        }
+    }
+
     #[test]
     fn a_rollout_pinned_to_a_pc_id_with_too_many_labels_is_refused() {
         assert!(check_rollout_scope(&RolloutScope::Pc("a.b.c.d".into())).is_ok());
