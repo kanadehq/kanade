@@ -105,7 +105,7 @@ jobs:
       # re-uplifting and the bin is silently absent from release/. A
       # fresh windows build uplifts correctly; the deps-recovery in the
       # build step is the belt-and-suspenders.
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         if: ${{ !contains(matrix.target, 'windows') }}
 
       # musl-targeted builds link against musl libc, so the runner needs
