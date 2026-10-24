@@ -1002,7 +1002,8 @@ mod typed_gate_e2e {
                  deploy_capabilities = ?, deploy_evidence_reported_at = ?, \
                  deploy_evidence_received_at = ?, deploy_evidence_agent_version = '0.95.0', \
                  deploy_evidence_protocols = '[\"legacy\",\"kanade.command.v2\"]', \
-                 deploy_evidence_keys = ?, deploy_evidence_os_family = 'linux' WHERE pc_id = ?",
+                 deploy_evidence_keys = ?, deploy_evidence_os_family = 'linux', \
+                 agent_arch = 'aarch64', deploy_evidence_agent_arch = 'aarch64' WHERE pc_id = ?",
             )
             .bind(
                 r#"{"schema_version":1,"handlers":[{"contract":"typed_deploy_v1","operation":"deploy_backend","os":"linux","arch":"aarch64"}]}"#,

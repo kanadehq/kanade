@@ -60,7 +60,7 @@ pub async fn load_target_facts(
     let mut out = Vec::with_capacity(pcs.len());
     for pc in pcs {
         let row = sqlx::query(
-            "SELECT agent_version, os_family, deploy_capabilities, deploy_evidence_received_at, \
+            "SELECT agent_version, os_family, agent_arch, deploy_evidence_agent_arch, deploy_evidence_reported_at, deploy_capabilities, deploy_evidence_received_at, \
              deploy_evidence_agent_version, deploy_evidence_protocols, deploy_evidence_keys, \
              deploy_evidence_os_family FROM agents WHERE pc_id = ?",
         )
@@ -73,6 +73,7 @@ pub async fn load_target_facts(
                 registered: false,
                 current_agent_version: None,
                 current_os_family: None,
+                current_agent_arch: None,
                 evidence: CapabilityEvidence::default(),
             },
             Some(r) => TargetFacts {
@@ -80,6 +81,7 @@ pub async fn load_target_facts(
                 registered: true,
                 current_agent_version: r.get("agent_version"),
                 current_os_family: r.get("os_family"),
+                current_agent_arch: r.get("agent_arch"),
                 evidence: CapabilityEvidence {
                     // A malformed blob reads as "never reported", not as a
                     // capability set.
@@ -90,6 +92,8 @@ pub async fn load_target_facts(
                     protocols: parse_list(r.get("deploy_evidence_protocols")),
                     keys: parse_list(r.get("deploy_evidence_keys")),
                     os_family: r.get("deploy_evidence_os_family"),
+                    agent_arch: r.get("deploy_evidence_agent_arch"),
+                    reported_at_ms: r.get("deploy_evidence_reported_at"),
                     received_at: r.get("deploy_evidence_received_at"),
                 },
             },
@@ -171,6 +175,7 @@ mod tests {
 
     fn beat(pc: &str, caps: Option<DeployCapabilities>) -> Heartbeat {
         Heartbeat {
+            agent_arch: Some("aarch64".into()),
             remote_viewing: None,
             pc_id: pc.into(),
             at: chrono::Utc::now(),
@@ -321,7 +326,7 @@ mod tests {
             preflight(gate(&pool, &job, &plan, &actor).await),
             PreflightFailure::NoMatchingHandler { .. }
         ));
-        // Supported, but stale: the receipt time is the clock.
+        // Supported, but stale: receipt freshness is independently required.
         all_report(&pool, supporting()).await;
         assert_eq!(
             gate(&pool, &job, &plan, &actor).await,
@@ -347,6 +352,47 @@ mod tests {
             preflight(gate(&pool, &job, &plan, &actor).await),
             PreflightFailure::CapabilitiesUnknown
         );
+    }
+
+    #[tokio::test]
+    async fn report_time_and_independent_architecture_are_required() {
+        let pool = pool().await;
+        let job = approved(&pool).await;
+        let plan = fan(&["PC-a", "pc-A"]);
+        let actor = operator_actor();
+        // A delayed heartbeat is newly received but its facts are already old.
+        for pc in ["PC-a", "pc-A"] {
+            let mut delayed = beat(pc, supporting());
+            delayed.at -= chrono::Duration::seconds(3600);
+            project(&pool, &delayed).await;
+        }
+        let facts = load_target_facts(&pool, &["PC-a".into()]).await.unwrap();
+        assert!(now() - facts[0].evidence.received_at.unwrap() < 300);
+        assert_eq!(
+            preflight(gate(&pool, &job, &plan, &actor).await),
+            PreflightFailure::EvidenceStale
+        );
+        all_report(&pool, supporting()).await;
+        for arch in [None, Some("x86_64"), Some("unknown")] {
+            let mut hb = beat("PC-a", supporting());
+            hb.agent_arch = arch.map(str::to_owned);
+            project(&pool, &hb).await;
+            assert!(matches!(
+                preflight(gate(&pool, &job, &plan, &actor).await),
+                PreflightFailure::ArchMismatch { .. }
+            ));
+        }
+        project(&pool, &beat("PC-a", supporting())).await;
+        let mut ping = beat("PC-a", None);
+        ping.agent_arch = Some("x86_64".into());
+        project(&pool, &ping).await;
+        let facts = load_target_facts(&pool, &["PC-a".into()]).await.unwrap();
+        assert_eq!(facts[0].evidence.agent_arch.as_deref(), Some("aarch64"));
+        assert_eq!(facts[0].current_agent_arch.as_deref(), Some("x86_64"));
+        assert!(matches!(
+            preflight(gate(&pool, &job, &plan, &actor).await),
+            PreflightFailure::ArchMismatch { .. }
+        ));
     }
 
     #[tokio::test]
@@ -628,6 +674,20 @@ mod tests {
         let pool2 = self::pool().await;
         let job2 = approved(&pool2).await;
         all_report(&pool2, supporting()).await;
+        assert!(
+            sqlx::query("UPDATE deploy_plans SET content = replace(content, 'PC-a', 'PC-x')")
+                .execute(&pool2)
+                .await
+                .is_err()
+        );
+        sqlx::query("DROP TRIGGER deploy_plan_immutable")
+            .execute(&pool2)
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER deploy_plan_transition")
+            .execute(&pool2)
+            .await
+            .unwrap();
         sqlx::query("UPDATE deploy_plans SET content = replace(content, 'PC-a', 'PC-x')")
             .execute(&pool2)
             .await

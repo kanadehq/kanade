@@ -46,7 +46,7 @@ pub const JOB_DIGEST_DOMAIN: &[u8] = b"kanade/deploy-job-manifest/sha256/v1\0";
 pub const MAX_PLAN_VALIDITY_SECS: i64 = 24 * 60 * 60;
 /// Most targets one plan may name.
 pub const MAX_PLAN_TARGETS: usize = 1000;
-/// Oldest capability evidence (backend receipt time) a preflight accepts. A
+/// Oldest capability evidence (report time and backend receipt time) a preflight accepts. A
 /// proposal: roughly ten heartbeat intervals at the default cadence.
 pub const MAX_CAPABILITY_EVIDENCE_AGE_SECS: i64 = 300;
 
@@ -358,6 +358,9 @@ pub struct CapabilityEvidence {
     pub protocols: Option<Vec<String>>,
     pub keys: Option<Vec<String>>,
     pub os_family: Option<String>,
+    pub agent_arch: Option<String>,
+    /// Agent report time (unix milliseconds), taken from the same heartbeat.
+    pub reported_at_ms: Option<i64>,
     /// Backend receipt time (unix seconds) of that heartbeat.
     pub received_at: Option<i64>,
 }
@@ -370,6 +373,7 @@ pub struct TargetFacts {
     pub registered: bool,
     pub current_agent_version: Option<String>,
     pub current_os_family: Option<String>,
+    pub current_agent_arch: Option<String>,
     pub evidence: CapabilityEvidence,
 }
 
@@ -382,7 +386,7 @@ pub enum PreflightFailure {
     CapabilitiesUnknown,
     #[error("reports no typed deployment handler")]
     CapabilitiesEmpty,
-    #[error("capability evidence is stale or has no receipt time")]
+    #[error("capability evidence has an absent, future or stale report/receipt time")]
     EvidenceStale,
     #[error("agent version changed since the capability report; wait for a fresh heartbeat")]
     AgentVersionChanged,
@@ -391,6 +395,8 @@ pub enum PreflightFailure {
         reported: Option<String>,
         artifact: &'static str,
     },
+    #[error("agent architecture does not match the artifact ({artifact})")]
+    ArchMismatch { artifact: &'static str },
     #[error("no reported handler for {operation} on {os}/{arch}")]
     NoMatchingHandler {
         operation: &'static str,
@@ -482,7 +488,13 @@ pub fn preflight_target(
         return Err(F::CapabilitiesEmpty);
     }
     match ev.received_at {
-        Some(at) if at <= now && now - at <= MAX_CAPABILITY_EVIDENCE_AGE_SECS => {}
+        Some(at) if at <= now && now.saturating_sub(at) <= MAX_CAPABILITY_EVIDENCE_AGE_SECS => {}
+        _ => return Err(F::EvidenceStale),
+    }
+    // The gate clock is unix seconds. Compare report time at that same
+    // precision, so a fresh report's subsecond part is not deemed future.
+    match ev.reported_at_ms.map(|at| at.div_euclid(1000)) {
+        Some(at) if at <= now && now.saturating_sub(at) <= MAX_CAPABILITY_EVIDENCE_AGE_SECS => {}
         _ => return Err(F::EvidenceStale),
     }
     // The version the agent runs now must be the one that made the report; a
@@ -504,6 +516,13 @@ pub fn preflight_target(
         });
     }
     let arch: TargetArch = artifact.arch();
+    if facts.current_agent_arch.as_deref() != Some(arch.as_str())
+        || ev.agent_arch.as_deref() != Some(arch.as_str())
+    {
+        return Err(F::ArchMismatch {
+            artifact: arch.as_str(),
+        });
+    }
     if !caps.supports(operation, os, arch) {
         return Err(F::NoMatchingHandler {
             operation,
@@ -774,12 +793,15 @@ mod tests {
             registered: true,
             current_agent_version: Some("0.95.0".into()),
             current_os_family: Some("linux".into()),
+            current_agent_arch: Some("aarch64".into()),
             evidence: CapabilityEvidence {
                 capabilities: Some(DeployCapabilities::from_handlers(&[handler()])),
                 agent_version: Some("0.95.0".into()),
                 protocols: Some(vec!["legacy".into(), PROTOCOL_V2.into()]),
                 keys: Some(vec![SIGNER.into()]),
                 os_family: Some("linux".into()),
+                agent_arch: Some("aarch64".into()),
+                reported_at_ms: Some((NOW - 30) * 1000),
                 received_at: Some(NOW - 30),
             },
         }
@@ -1165,6 +1187,36 @@ mod tests {
             Err(PreflightFailure::EvidenceStale),
             "evidence from the future is not fresh"
         );
+        assert_eq!(
+            pre(|f| f.evidence.reported_at_ms = Some(NOW * 1000 + 999)),
+            Ok(())
+        );
+        for reported in [
+            None,
+            Some((NOW - MAX_CAPABILITY_EVIDENCE_AGE_SECS) * 1000 - 1),
+            Some((NOW + 1) * 1000),
+            Some(i64::MIN),
+        ] {
+            assert_eq!(
+                pre(|f| f.evidence.reported_at_ms = reported),
+                Err(PreflightFailure::EvidenceStale)
+            );
+        }
+        assert_eq!(
+            pre(|f| f.evidence.reported_at_ms =
+                Some((NOW - MAX_CAPABILITY_EVIDENCE_AGE_SECS) * 1000)),
+            Ok(())
+        );
+        for arch in [None, Some("x86_64"), Some("unknown")] {
+            assert!(matches!(
+                pre(|f| f.evidence.agent_arch = arch.map(str::to_owned)),
+                Err(PreflightFailure::ArchMismatch { .. })
+            ));
+            assert!(matches!(
+                pre(|f| f.current_agent_arch = arch.map(str::to_owned)),
+                Err(PreflightFailure::ArchMismatch { .. })
+            ));
+        }
         assert_eq!(
             pre(|f| f.current_agent_version = Some("0.96.0".into())),
             Err(PreflightFailure::AgentVersionChanged)

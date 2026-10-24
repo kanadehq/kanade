@@ -110,9 +110,12 @@ pub struct AgentRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_capabilities: Option<kanade_shared::wire::DeployCapabilities>,
     /// Unix seconds at which the backend received the report above — the
-    /// freshness clock the preflight uses.
+    /// receipt freshness clock (report time is checked separately).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_capabilities_received_at: Option<i64>,
+    /// Architecture reported by the running agent; absent for old records.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_arch: Option<String>,
     /// #1270: the NATS credential this host's live connection authenticated
     /// with, as reported by the **broker** — not by the agent, which knows
     /// only which token it was handed.
@@ -1143,6 +1146,7 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<kanade_shared::wire::DeployCapabilities>(&s).ok()),
+        agent_arch: r.try_get("agent_arch").ok().flatten(),
         deploy_capabilities_received_at: r
             .try_get::<Option<i64>, _>("deploy_evidence_received_at")
             .ok()
@@ -1513,6 +1517,7 @@ mod tests {
 
         let pool = seeded_pool().await;
         let beat = |pc: &str, protocols: Option<Vec<String>>| Heartbeat {
+            agent_arch: None,
             remote_viewing: None,
             pc_id: pc.into(),
             at: chrono::Utc::now(),
@@ -1573,6 +1578,7 @@ mod tests {
         use kanade_shared::wire::{DeployCapabilities, DeployHandler, Heartbeat};
         let pool = seeded_pool().await;
         let beat = |pc: &str, caps: Option<DeployCapabilities>| Heartbeat {
+            agent_arch: caps.as_ref().map(|_| "x86_64".into()),
             remote_viewing: None,
             pc_id: pc.into(),
             at: chrono::Utc::now(),
@@ -1616,6 +1622,8 @@ mod tests {
 
         let (_h, Json(rows)) = call(pool.clone(), ListParams::default()).await.unwrap();
         let by_id = |id: &str| rows.iter().find(|r| r.pc_id == id).unwrap();
+        assert_eq!(by_id("PC001").agent_arch.as_deref(), Some("x86_64"));
+        assert_eq!(by_id("WS-9").agent_arch, None);
         let empty = by_id("PC001").deploy_capabilities.clone().unwrap();
         assert!(empty.handlers.is_empty(), "reported-empty stays empty");
         assert_eq!(

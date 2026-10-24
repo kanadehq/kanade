@@ -169,8 +169,8 @@ where
     // Typed-deployment capability evidence (SPEC §2.13.6.3). Written ONLY by a
     // heartbeat that carries `deploy_capabilities`, and then as one unit taken
     // from that same heartbeat — the capability set together with the agent
-    // version, protocols, keys and os it was reported alongside, plus the
-    // backend receipt time that is the freshness clock. A heartbeat that omits
+    // version, protocols, keys, os and architecture it was reported alongside, plus the
+    // report and backend receipt times used for freshness. A heartbeat that omits
     // the field (ping reply, older agent) leaves every evidence column exactly
     // as it was: it can neither refresh the evidence nor invent any. An empty
     // handler list is stored as such (`"handlers":[]`), NOT NULL, so "reports
@@ -211,9 +211,9 @@ where
              command_keys, enforcing, command_protocols,
              deploy_capabilities, deploy_evidence_reported_at, deploy_evidence_received_at,
              deploy_evidence_agent_version, deploy_evidence_protocols, deploy_evidence_keys,
-             deploy_evidence_os_family,
+             deploy_evidence_os_family, agent_arch, deploy_evidence_agent_arch,
              updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(pc_id) DO UPDATE SET
              hostname                  = COALESCE(agents.hostname, excluded.hostname),
              os_family                 = COALESCE(agents.os_family, excluded.os_family),
@@ -259,6 +259,8 @@ where
              deploy_evidence_protocols = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_protocols ELSE agents.deploy_evidence_protocols END,
              deploy_evidence_keys = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_keys ELSE agents.deploy_evidence_keys END,
              deploy_evidence_os_family = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_os_family ELSE agents.deploy_evidence_os_family END,
+             agent_arch = COALESCE(excluded.agent_arch, agents.agent_arch),
+             deploy_evidence_agent_arch = CASE WHEN excluded.deploy_capabilities IS NOT NULL AND (agents.deploy_evidence_reported_at IS NULL OR excluded.deploy_evidence_reported_at >= agents.deploy_evidence_reported_at) THEN excluded.deploy_evidence_agent_arch ELSE agents.deploy_evidence_agent_arch END,
              updated_at                = CURRENT_TIMESTAMP",
     )
     .bind(&hb.pc_id)
@@ -287,6 +289,8 @@ where
     .bind(evidence_protocols_json)
     .bind(evidence_keys_json)
     .bind(hb.deploy_capabilities.as_ref().and(hb.os_family.as_deref()))
+    .bind(&hb.agent_arch)
+    .bind(hb.deploy_capabilities.as_ref().and(hb.agent_arch.as_deref()))
     .execute(executor)
     .await?;
     Ok(())

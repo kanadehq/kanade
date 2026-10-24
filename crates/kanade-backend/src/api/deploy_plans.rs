@@ -1232,6 +1232,23 @@ mod tests {
             .unwrap();
         let widened = content.replace("\"PC-a\"", "\"PC-a\",\"PC-evil\"");
         assert_ne!(widened, content);
+        assert!(
+            sqlx::query("UPDATE deploy_plans SET content = ?")
+                .bind(&widened)
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        // Simulate a corrupt database predating the guard; read-side integrity
+        // checks remain a separate defense.
+        sqlx::query("DROP TRIGGER deploy_plan_immutable")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER deploy_plan_transition")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE deploy_plans SET content = ?")
             .bind(widened)
             .execute(&pool)
@@ -1294,15 +1311,102 @@ mod tests {
         }
         // Coherent transitions are accepted.
         sqlx::query(
-            "UPDATE deploy_plans SET state = 'approved', approved_by = 'x', approved_at = 1",
+            "UPDATE deploy_plans SET state = 'approved', approved_by = 'x', approved_at = 1, revision = revision + 1",
         )
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("UPDATE deploy_plans SET state = 'revoked', revoked_by = 'y', revoked_at = 2")
+        sqlx::query("UPDATE deploy_plans SET state = 'revoked', revoked_by = 'y', revoked_at = 2, revision = revision + 1")
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn triggers_protect_bindings_transitions_and_approval_history() {
+        let pool = pool().await;
+        let req = create_request(request("plan-1", &["PC-a", "pc-A"], NOW));
+        let view = create_plan(&pool, "alice", &req, NOW).await.unwrap();
+        for change in [
+            "plan_id = 'other'",
+            "record_version = 2",
+            "plan_digest = printf('%064d', 0)",
+            "content = '{}'",
+            "job_manifest = '{}'",
+            "job_id = 'other'",
+            "role = 'cli'",
+            "not_before = not_before - 1",
+            "expires_at = expires_at + 1",
+            "created_by = 'mallory'",
+            "created_at = created_at + 1",
+        ] {
+            let sql = format!(
+                "UPDATE deploy_plans SET {change}, state = 'approved', approved_by = 'bob', approved_at = 1, revision = revision + 1"
+            );
+            // Only the fixed SQL fragments in this test enter this string.
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{sql}"
+            );
+        }
+        for bad in [
+            "UPDATE deploy_plans SET revision = revision + 1",
+            "UPDATE deploy_plans SET state = 'approved', approved_by = 'bob', approved_at = 1",
+            "UPDATE deploy_plans SET state = 'revoked', revoked_by = 'carol', revoked_at = 1, approved_by = 'bob', approved_at = 1, revision = revision + 1",
+        ] {
+            assert!(sqlx::query(bad).execute(&pool).await.is_err(), "{bad}");
+        }
+        let digest = ArtifactSha256::try_from(view.plan_digest).unwrap();
+        approve_plan(
+            &pool,
+            "plan-1",
+            "bob",
+            &ApprovePlan {
+                plan_digest: digest,
+                revision: 0,
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+        for change in [
+            "state = 'pending', approved_by = NULL, approved_at = NULL",
+            "approved_by = 'mallory'",
+            "approved_at = approved_at + 1",
+            "state = 'revoked', revoked_by = 'carol', revoked_at = 2, approved_by = NULL, approved_at = NULL",
+        ] {
+            let sql = format!("UPDATE deploy_plans SET {change}, revision = revision + 1");
+            // Only the fixed SQL fragments in this test enter this string.
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{sql}"
+            );
+        }
+        revoke_plan(&pool, "plan-1", "carol", None, NOW)
+            .await
+            .unwrap();
+        for change in [
+            "state = 'approved', revoked_by = NULL, revoked_at = NULL",
+            "revoked_by = 'mallory'",
+            "revoked_at = revoked_at + 1",
+            "revoke_reason = 'rewritten'",
+        ] {
+            let sql = format!("UPDATE deploy_plans SET {change}, revision = revision + 1");
+            // Only the fixed SQL fragments in this test enter this string.
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{sql}"
+            );
+        }
     }
 
     /// File-backed database with several connections, so the races below are
