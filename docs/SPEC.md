@@ -3330,6 +3330,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
   - §2.11.7 の未実装 session / KLP / 通知契約を個別検証。GUI と Task 6 の受入前に Linux packaging を完了扱いしない
 - [ ] **Task 8b: Client Packaging パイプライン整備 (CI / Scripts、Linux は 8a 依存)**
   - Apple Silicon macOS 向け `Kanade Client.app` バンドルおよび `.pkg` 生成パイプラインの構築
+    - **packaging slice 実装済み（activation なし）**: `scripts/build-client-macos-pkg.sh` が未署名・payload-only の `client/<version>/macos-aarch64-darwin14.pkg` を生成し、構造検証と負例試験を `client-macos.yml` で実行する（手順は `crates/kanade-client/MACOS.md`）。LaunchAgent / session helper / opt-out は未実装のため自動起動は有効化しない。残: installer 署名・notarization、clean macOS 14 での実 install / receipt / Gatekeeper / GUI / KLP 受入、型付き pkg handler、リリース公開（kata 管理 workflow の上流対応）
   - Ubuntu 24.04 x86_64 向け `.deb` パッケージ生成パイプラインの構築
 - [ ] **Task 9: 実機フリートでの同等性検証 (Acceptance Testing)**
   - Windows, Ubuntu, macOS 実機環境での E2E 受入テスト実施

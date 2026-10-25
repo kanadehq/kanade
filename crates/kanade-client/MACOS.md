@@ -4,7 +4,8 @@ The production Client UI now builds on Apple Silicon for macOS 14 or later.
 Windows retains its adapters and existing behavior; Linux and Intel macOS still
 run the shim. This stage does not implement native notifications, URL registration
 or full cold/warm deep-link handling, tray/close-to-hide, session launchers,
-LaunchAgents, emergency fallback, pkg installation, deployment jobs or updates.
+LaunchAgents, emergency fallback, pkg installation (see the package section
+below: only an unsigned payload-only build artifact exists), deployment jobs or updates.
 
 ## Build a local app
 
@@ -34,6 +35,79 @@ Ad-hoc signing provides no trusted distribution or notarization. On a managed
 test Mac, use the OS's app-specific approval flow if Gatekeeper blocks this
 locally built app (Privacy & Security → Open Anyway, according to local policy).
 Never disable Gatekeeper globally. Developer ID and notarization remain deferred.
+
+## Build the test .pkg (packaging slice, no activation)
+
+```sh
+sh scripts/build-client-macos-pkg.sh            # builds the app first
+SKIP_APP_BUILD=1 sh scripts/build-client-macos-pkg.sh   # reuse an existing app
+python3 -I scripts/ci/test_client_macos_pkg.py  # validator regressions
+```
+
+Output: `target/client-macos-pkg/client/<version>/macos-aarch64-darwin14.pkg`
+(the shared `ArtifactIdentity` key `client/<version>/macos-aarch64-darwin14.pkg`)
+plus `target/client-macos-pkg/build-record.json` (SHA-256, size, source commit,
+identity). The record is a build note, not a signed package manifest. Only plain
+numeric `x.y.z` versions are accepted; workspace, Tauri, `Info.plist`, package
+and component versions must agree. Identifiers are fixed: bundle
+`com.yukimemi.kanade-client`, component `com.yukimemi.kanade-client.pkg`, product
+`com.yukimemi.kanade-client.product`.
+
+The package is a `productbuild` distribution around a `pkgbuild` component. It is
+**payload-only**: exactly `/Applications/Kanade Client.app`, owned `root:wheel`
+(directories and the executable 0755, other files 0644), non-relocatable, with no
+scripts, LaunchAgent, session helper or resources. The distribution requires
+arm64 and macOS 14.0+, local-system domain only. Payload content is reproducible;
+the `.pkg` bytes are not (timestamps). Before packaging, the app is validated
+(identity, versions, every Mach-O's arch/deployment target/dependencies, resources,
+ad-hoc signature, embedded SPA) and again after the payload is restored. Package
+validation parses the bounded XAR TOC (paths, types, links, sizes and data ranges)
+and odc cpio (paths, root ownership, modes, links, sizes and directory parents)
+before restoring payload files. A manual restore is compared with the input app;
+`pkgutil --expand-full` then independently restores xattrs for the existing bundle
+and attribute checks. BOM, `PackageInfo` and `Distribution` checks remain required.
+Before building, `pkgbuild --analyze` must discover exactly the expected one app;
+its component plist is retained with the explicit replacement/relocation policy.
+Rejected: extra members, scripts, symlinks, hard links, `..`/absolute paths,
+duplicates, wrong owner/mode, tampered or unsigned bundles. AppleDouble `._*`
+carriers (build hosts may stamp `com.apple.provenance`) are tolerated only for that
+one xattr and never appear in the restored tree.
+
+### Signing boundary
+
+The app is ad-hoc signed; the **package is unsigned** (`pkgutil --check-signature`
+reports no signature). An ad-hoc app signature does not make the pkg
+Gatekeeper-trusted. Developer ID Application/Installer signing and notarization
+are deferred and need paid credentials; nothing re-signs on the target and
+Gatekeeper/quarantine are never disabled globally. Publishing as a release asset
+needs upstream (kata-managed) release-workflow work; this repo only uploads a
+7-day CI artifact from `client-macos.yml` and does not edit managed workflows.
+
+### Ownership contract for the later typed agent handler
+
+* Install target is fixed: `/Applications/Kanade Client.app`; receipt id
+  `com.yukimemi.kanade-client.pkg`.
+* The pkg cannot protect an unmanaged bundle: the installer's overwrite/version
+  settings are explicit (`BundleOverwriteAction=upgrade`, version check off so an
+  operator can reinstall an older version) but do not stop replacement of a
+  foreign app with the same identifier. The handler must first compare receipt,
+  bundle identifier, `Info.plist` and managed ownership, and refuse implicit
+  takeover of any unmanaged or differently-identified bundle.
+* Uninstall (later) removes only a verified managed bundle and its receipt. It
+  must preserve every user's `Library/Application Support/Kanade/Client`,
+  `Library/Logs/Kanade/Client`, caches and UI state, must not walk home
+  directories, and must not stop or launch GUI sessions on its own.
+* Verification after install reads the receipt and `Info.plist` version back.
+
+### Not done (acceptance prerequisites)
+
+* **Automatic startup is not implemented**: there is no LaunchAgent, session
+  helper or opt-out store, so this package does not enable login start and must
+  not be described as doing so. Later integration owns the Aqua `--tray`
+  LaunchAgent, session helper and opt-out (SPEC 2.11.7.4).
+* Not run in this change: real `installer` receipt generation, install on a clean
+  macOS 14 VM, Gatekeeper behavior, GUI session, KLP against an installed agent,
+  update/uninstall, session/opt-out. CI checks package structure only.
 
 ## Runtime boundaries
 
