@@ -2013,3 +2013,63 @@ fn interrupted_restore_exchange_preserves_unverified_displaced_paths() {
         }
     }
 }
+
+#[test]
+fn structured_state_corruption_requires_recovery_without_mutation_or_execution() {
+    for (name, code) in [
+        (RECEIPT_NAME, "receipt_corrupt"),
+        (JOURNAL_NAME, "journal_corrupt"),
+    ] {
+        for mutation in ["schema", "body", "unknown_field"] {
+            let fx = Fx::new();
+            fx.ok(&Pkg::new(&fx, "1.0.0"));
+            let path = fx.roots.deploy_dir.join(name);
+            let original = std::fs::read(&path).unwrap();
+            let corrupt = if mutation == "schema" {
+                // A valid checksum must not authorize an unsupported schema.
+                if name == RECEIPT_NAME {
+                    let mut receipt = Receipt::parse(&original).unwrap();
+                    receipt.body.schema += 1;
+                    Receipt::new(receipt.body).to_bytes()
+                } else {
+                    let mut journal = JournalFile::parse(&original).unwrap();
+                    journal.body.schema += 1;
+                    JournalFile::new(journal.body).to_bytes()
+                }
+            } else {
+                let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+                if mutation == "body" {
+                    // Valid JSON with stale integrity evidence must be refused.
+                    value["body"]["exec_id"] = serde_json::json!("different-execution");
+                } else {
+                    value["unknown_field"] = serde_json::json!(true);
+                }
+                serde_json::to_vec(&value).unwrap()
+            };
+            std::fs::write(&path, corrupt).unwrap();
+            let before = fx.snapshot();
+            let calls = fx.probe.calls();
+            let update = Pkg::new(&fx, "1.1.0");
+            for _ in 0..2 {
+                let result = fx.run(&fx.installer(), &update);
+                let record = ResultRecord::from_result(&result);
+                assert_eq!(
+                    record.status,
+                    ResultStatus::RecoveryRequired,
+                    "{name}/{mutation}"
+                );
+                assert_eq!(record.code, code);
+                assert!(!record.installed_verified);
+                assert_eq!(record.execution, ExecutionObservation::NotObserved);
+                assert!(record.version.is_none());
+                assert!(record.binary_sha256.is_none());
+                assert_eq!(fx.snapshot(), before, "{name}/{mutation}");
+                assert_eq!(
+                    fx.probe.calls(),
+                    calls,
+                    "corruption must never trigger execution"
+                );
+            }
+        }
+    }
+}
