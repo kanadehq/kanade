@@ -29,7 +29,8 @@ pub use real::RealProbe;
 
 #[cfg(unix)]
 mod real {
-    use std::io::Read;
+    use std::io::{ErrorKind, Read};
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::Instant;
@@ -75,29 +76,55 @@ mod real {
                 .spawn()
                 .map_err(|e| format!("cannot run: {e}"))?;
             let mut stdout = child.stdout.take().expect("piped");
-            let reader = std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = (&mut stdout)
-                    .take(MAX_PROBE_OUTPUT as u64 + 1)
-                    .read_to_end(&mut buf);
-                buf
-            });
+            // Nonblocking reads keep the deadline effective even if a descendant
+            // retains stdout after the direct child exits (or leaves its group).
+            let fd = stdout.as_raw_fd();
+            // SAFETY: stdout owns this valid descriptor throughout the probe.
+            if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
+                kill_group(&mut child);
+                return Err(format!(
+                    "cannot configure stdout: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
             let deadline = Instant::now() + self.timeout;
+            let mut out = Vec::new();
+            let mut status = None;
+            let mut eof = false;
             let status = loop {
-                match child.try_wait() {
-                    Ok(Some(s)) => break Some(s),
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Ok(None) => {
-                        kill_group(&mut child);
-                        break None;
-                    }
-                    Err(e) => return Err(format!("wait failed: {e}")),
+                if Instant::now() >= deadline {
+                    kill_group(&mut child);
+                    return Err("timed out".into());
                 }
+                let mut buf = [0; 1024];
+                match stdout.read(&mut buf) {
+                    Ok(0) => eof = true,
+                    Ok(n) => out.extend_from_slice(&buf[..n]),
+                    Err(e)
+                        if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+                    Err(e) => {
+                        kill_group(&mut child);
+                        return Err(format!("read failed: {e}"));
+                    }
+                }
+                if out.len() > MAX_PROBE_OUTPUT {
+                    kill_group(&mut child);
+                    return Err("output too large".into());
+                }
+                if status.is_none() {
+                    match child.try_wait() {
+                        Ok(s) => status = s,
+                        Err(e) => {
+                            kill_group(&mut child);
+                            return Err(format!("wait failed: {e}"));
+                        }
+                    }
+                }
+                if eof && let Some(s) = status {
+                    break s;
+                }
+                std::thread::sleep(Duration::from_millis(5));
             };
-            let out = reader.join().map_err(|_| "reader panicked".to_string())?;
-            let status = status.ok_or_else(|| "timed out".to_string())?;
             if !status.success() {
                 return Err(format!("exited with {status}"));
             }
@@ -131,6 +158,18 @@ mod real {
             );
             let line = RealProbe::default().version_line(&p).unwrap();
             assert_eq!(line, "kanade 1.2.3");
+        }
+
+        #[test]
+        fn exited_parent_with_stdout_holding_descendant_is_bounded() {
+            let t = tempfile::tempdir().unwrap();
+            let p = script(t.path(), "sleep 30 &\necho 'kanade 1.2.3'\nexit 0");
+            let probe = RealProbe {
+                timeout: Duration::from_millis(200),
+            };
+            let start = Instant::now();
+            assert_eq!(probe.version_line(&p).unwrap_err(), "timed out");
+            assert!(start.elapsed() < Duration::from_secs(2));
         }
 
         #[test]

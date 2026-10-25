@@ -158,6 +158,7 @@ impl Fx {
 
     fn installer(&self) -> Installer {
         Installer::new(self.roots.clone(), Box::new(Shared(self.probe.clone())))
+            .with_clock(Box::new(Clock))
             .with_lock_wait(Duration::from_secs(10))
     }
 
@@ -1088,7 +1089,8 @@ fn unsafe_install_and_state_directories_are_refused() {
     // A different principal than the one running: cannot create its files.
     let mut roots = fx.roots.clone();
     roots.owner.uid += 1;
-    let inst = Installer::new(roots, Box::new(Shared(fx.probe.clone())));
+    let inst =
+        Installer::new(roots, Box::new(Shared(fx.probe.clone()))).with_clock(Box::new(Clock));
     assert!(matches!(
         fx.run(&inst, &pkg).unwrap_err(),
         InstallError::UnsafeRoot(_)
@@ -1118,7 +1120,8 @@ fn unsafe_install_and_state_directories_are_refused() {
     symlink(&real, &alias).unwrap();
     let mut roots = fx.roots.clone();
     roots.install_dir = alias;
-    let inst = Installer::new(roots, Box::new(Shared(fx.probe.clone())));
+    let inst =
+        Installer::new(roots, Box::new(Shared(fx.probe.clone()))).with_clock(Box::new(Clock));
     assert!(matches!(
         fx.run(&inst, &pkg).unwrap_err(),
         InstallError::UnsafeRoot(_)
@@ -1741,7 +1744,8 @@ fn offline_api_rejects_production_roots_before_any_mutation() {
         }
         assert!(matches!(
             fx.run(
-                &Installer::new(roots, Box::new(Shared(fx.probe.clone()))),
+                &Installer::new(roots, Box::new(Shared(fx.probe.clone())))
+                    .with_clock(Box::new(Clock)),
                 &Pkg::new(&fx, "1.0.0")
             ),
             Err(InstallError::UnsafeRoot(_))
@@ -1854,4 +1858,91 @@ fn adoption_observation_changes_the_approved_plan_digest() {
         first.approval().plan_digest(),
         second.approval().plan_digest()
     );
+}
+
+#[test]
+fn interrupted_foreign_swap_back_retains_displaced_files_and_freezes() {
+    for crash in [Point::SwapBack, Point::BeforePhase(Phase::SwapBackRequired)] {
+        for variant in 0..3 {
+            let link = variant == 1;
+            let fx = Fx::new();
+            fx.ok(&Pkg::new(&fx, "1.0.0"));
+            let third = if variant == 2 {
+                fx.exe().unwrap()
+            } else {
+                binary("7.7.7", "foreign")
+            };
+            let victim = fx.base.join("foreign-target");
+            std::fs::write(&victim, &third).unwrap();
+            let (exe, target, bytes) = (fx.exe_path(), victim.clone(), third.clone());
+            let inst = fx.installer_with(move |p| {
+                if p == Point::Swap {
+                    let tmp = exe.with_extension("foreign");
+                    if link {
+                        symlink(&target, &tmp).unwrap();
+                    } else {
+                        std::fs::write(&tmp, &bytes).unwrap();
+                    }
+                    std::fs::rename(tmp, &exe).unwrap();
+                }
+                if p == crash {
+                    Fault::Crash
+                } else {
+                    Fault::Pass
+                }
+            });
+            let pkg = Pkg::new(&fx, "1.1.0");
+            assert!(matches!(
+                fx.run(&inst, &pkg),
+                Err(InstallError::Interrupted)
+            ));
+            let displaced = fx.roots.install_dir.join(STAGING_DIR).join("kanade.new");
+            for _ in 0..2 {
+                assert!(matches!(
+                    fx.run(&fx.installer(), &pkg),
+                    Err(InstallError::RecoveryRequired(_))
+                ));
+                assert_eq!(std::fs::read(&displaced).unwrap(), third);
+                assert_eq!(
+                    std::fs::symlink_metadata(&displaced).unwrap().is_symlink(),
+                    link
+                );
+                assert_eq!(std::fs::read(&victim).unwrap(), third);
+                assert_eq!(fx.journal().unwrap().phase, Phase::RecoveryRequired);
+            }
+        }
+    }
+}
+
+#[test]
+fn approval_expiring_while_waiting_for_the_lock_is_rejected() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    struct AdvancingClock(AtomicU64);
+    impl WallClock for AdvancingClock {
+        fn unix_now(&self) -> u64 {
+            self.0.fetch_add(301, Ordering::SeqCst)
+        }
+        fn monotonic(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+    let fx = Fx::new();
+    fx.ok(&Pkg::new(&fx, "1.0.0"));
+    let snap = fx.snapshot();
+    let deploy = Dir::open_absolute(&fx.roots.deploy_dir, None, Owner::current()).unwrap();
+    let held = FileLock::acquire(&deploy, LOCK_NAME, Owner::current(), Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        let inst = fx
+            .installer()
+            .with_clock(Box::new(AdvancingClock(AtomicU64::new(T0))));
+        let err = fx.run(&inst, &Pkg::new(&fx, "1.1.0")).unwrap_err();
+        assert!(matches!(err, InstallError::Approval(_)), "{err:?}");
+    });
+    assert_eq!(fx.snapshot(), snap);
 }

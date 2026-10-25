@@ -145,7 +145,6 @@ pub struct Approval {
     scope: RequestedScope,
     targets: Vec<TargetFacts>,
     signer: Option<String>,
-    now: i64,
     target: String,
 }
 
@@ -171,7 +170,6 @@ impl Approval {
             scope: gate.scope.clone(),
             targets: gate.targets.to_vec(),
             signer: gate.signer.map(str::to_owned),
-            now: gate.now,
             target: target.into(),
         })
     }
@@ -180,6 +178,7 @@ impl Approval {
         &self,
         operation: &TypedOperation,
         exec: &ExecContext,
+        now: i64,
     ) -> Result<(), InstallError> {
         let authorized = evaluate(&GateInput {
             manifest: &self.manifest,
@@ -188,7 +187,7 @@ impl Approval {
             scope: &self.scope,
             targets: &self.targets,
             signer: self.signer.as_deref(),
-            now: self.now,
+            now,
         })
         .map_err(|e| InstallError::Approval(e.to_string()))?;
         if !authorized.targets.contains(&self.target)
@@ -313,6 +312,8 @@ pub enum Phase {
     BackedUp,
     /// About to rename onto the install path (may or may not have happened).
     Swapping,
+    /// A foreign displaced path must be preserved; swap-back is pending.
+    SwapBackRequired,
     /// Executable replaced on the install path; receipt not yet replaced.
     Swapped,
     /// New receipt in place.
@@ -339,7 +340,11 @@ impl Phase {
     pub fn may_have_changed_install(self) -> bool {
         matches!(
             self,
-            Phase::Swapping | Phase::Swapped | Phase::ReceiptWritten | Phase::RollingBack
+            Phase::Swapping
+                | Phase::SwapBackRequired
+                | Phase::Swapped
+                | Phase::ReceiptWritten
+                | Phase::RollingBack
         )
     }
 }
@@ -348,6 +353,9 @@ impl Phase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrevState {
+    /// Device/inode observed before exchange; missing legacy evidence freezes recovery.
+    #[serde(default)]
+    pub file_id: Option<[u64; 2]>,
     pub binary_sha256: ArtifactSha256,
     pub binary_size_bytes: u64,
     pub mode: u32,

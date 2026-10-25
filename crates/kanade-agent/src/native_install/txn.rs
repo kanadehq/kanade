@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use kanade_shared::artifact::ArtifactSha256;
-use kanade_shared::publisher_trust::PublisherTrustStore;
+use kanade_shared::publisher_trust::{PublisherTrustStore, SystemClock, WallClock};
 
 use super::admit::{InstallInputs, VerifiedPackage, verify_inputs};
 use super::archive::MAX_STREAM_BYTES;
@@ -101,6 +101,7 @@ pub struct Installer {
     probe: Box<dyn VersionProbe>,
     faults: Box<dyn Faults>,
     lock_wait: Duration,
+    clock: Box<dyn WallClock>,
 }
 
 /// Open directories for one run.
@@ -148,7 +149,13 @@ impl Installer {
             probe,
             faults: Box::new(NoFaults),
             lock_wait: DEFAULT_LOCK_WAIT,
+            clock: Box::new(SystemClock::new()),
         }
+    }
+
+    pub fn with_clock(mut self, clock: Box<dyn WallClock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn with_lock_wait(mut self, wait: Duration) -> Self {
@@ -195,7 +202,7 @@ impl Installer {
         // Cheap, side-effect-free rejection first: nothing is created for a
         // package that would be refused anyway.
         let pkg = verify_inputs(store, inputs)?;
-        approval.validate(inputs.operation, exec)?;
+        approval.validate(inputs.operation, exec, self.clock.unix_now() as i64)?;
         check_adoption_flag(&pkg, approval)?;
         #[cfg(unix)]
         {
@@ -218,7 +225,7 @@ impl Installer {
         let pkg = verify_inputs(store, inputs).inspect(|p| {
             debug_assert_eq!(p.binary_sha256, pkg.binary_sha256);
         })?;
-        approval.validate(inputs.operation, exec)?;
+        approval.validate(inputs.operation, exec, self.clock.unix_now() as i64)?;
         let install = Dir::open_absolute(&self.roots.install_dir, Some(0o755), owner)
             .map_err(|e| InstallError::UnsafeRoot(format!("install directory: {e}")))?;
         let st = install
@@ -531,6 +538,7 @@ impl Installer {
             installed_at_unix: chrono::Utc::now().timestamp(),
         };
         let prev = existing.as_ref().map(|(s, b, sha)| PrevState {
+            file_id: Some([s.dev, s.ino]),
             binary_sha256: *sha,
             binary_size_bytes: b.len() as u64,
             mode: s.mode,
@@ -562,6 +570,7 @@ impl Installer {
         match swapped {
             Ok(rep) => Ok(rep),
             Err(Stop::Pre(e)) => Err(self.abandon(ctx, &mut j, e)),
+            Err(Stop::Frozen(e)) => Err(e),
             Err(Stop::Crash) => Err(InstallError::Interrupted),
             Err(Stop::Failed(e)) => match self.rollback(ctx, &mut j) {
                 Ok(()) => Err(InstallError::RolledBack {
@@ -702,19 +711,56 @@ impl Installer {
             let displaced = ctx.staging.read_file(STAGED, MAX_STREAM_BYTES);
             let ok = matches!(&displaced, Ok((b, s)) if s.same_file(stat) && digest(b) == *sha);
             if !ok {
-                self.hit(Point::SwapBack).map_err(Stop::from_crashy)?;
+                j.note = Some("foreign displaced path retained; swap-back required".into());
+                for dir in [&ctx.staging, &ctx.install] {
+                    dir.fsync().map_err(|e| {
+                        Stop::Frozen(self.freeze(
+                            ctx,
+                            j,
+                            "cannot flush foreign displaced path",
+                            &io_err("sync swap", e),
+                        ))
+                    })?;
+                }
+                self.persist(ctx, j, Phase::SwapBackRequired).map_err(|e| {
+                    if matches!(e, InstallError::Interrupted) {
+                        Stop::Crash
+                    } else {
+                        Stop::Frozen(self.freeze(ctx, j, "cannot record swap-back intent", &e))
+                    }
+                })?;
+                self.hit(Point::SwapBack).map_err(|e| {
+                    if matches!(e, InstallError::Interrupted) {
+                        Stop::Crash
+                    } else {
+                        Stop::Frozen(self.freeze(ctx, j, "swap-back interrupted", &e))
+                    }
+                })?;
                 let back =
                     ctx.staging
                         .rename_to(STAGED, &ctx.install, INSTALL_NAME, RenameMode::Swap);
                 return Err(match back {
-                    Ok(()) => Stop::Pre(InstallError::Concurrent(
-                        "the install path was replaced between inspection and swap; the other \
-                         party's file was put back"
-                            .into(),
-                    )),
-                    Err(e) => {
-                        Stop::Failed(InstallError::Concurrent(format!("swap-back failed: {e}")))
+                    Ok(()) => {
+                        for dir in [&ctx.staging, &ctx.install] {
+                            if let Err(e) = dir.fsync() {
+                                return Err(Stop::Frozen(self.freeze(
+                                    ctx,
+                                    j,
+                                    "cannot flush completed swap-back",
+                                    &io_err("sync swap-back", e),
+                                )));
+                            }
+                        }
+                        Stop::Pre(InstallError::Concurrent(
+                            "the install path was replaced between inspection and swap; the other party's file was put back".into(),
+                        ))
                     }
+                    Err(e) => Stop::Frozen(self.freeze(
+                        ctx,
+                        j,
+                        "swap-back failed; foreign path retained",
+                        &io_err("swap-back", e),
+                    )),
                 });
             }
         }
@@ -1049,6 +1095,39 @@ impl Installer {
         j.recovery_attempts += 1;
         self.write_journal(ctx, &j)?;
 
+        if j.phase == Phase::SwapBackRequired {
+            return Err(self.freeze(
+                ctx,
+                &mut j,
+                "interrupted swap-back; foreign path retained in staging",
+                &cause,
+            ));
+        }
+        // Swapping is durable before the exchange, but a crash can precede
+        // displaced-file validation. Never delete an unverified displaced path.
+        if j.phase == Phase::Swapping {
+            let staged = ctx.staging.read_file(STAGED, MAX_STREAM_BYTES);
+            let current = ctx.install.stat(INSTALL_NAME);
+            let known = match (&j.prev, &staged, &current) {
+                (Some(prev), Ok((bytes, st)), Ok(cur)) => {
+                    let original = |s: &Stat| prev.file_id == Some([s.dev, s.ino]);
+                    (original(st) && digest(bytes) == prev.binary_sha256)
+                        || (cur.as_ref().is_some_and(original)
+                            && digest(bytes) == j.new_receipt.binary_sha256)
+                }
+                (None, Ok((bytes, _)), Ok(None)) => digest(bytes) == j.new_receipt.binary_sha256,
+                (None, Err(_), _) => ctx.staging.stat(STAGED).is_ok_and(|s| s.is_none()),
+                _ => false,
+            };
+            if !known {
+                return Err(self.freeze(
+                    ctx,
+                    &mut j,
+                    "unverified displaced path retained in staging",
+                    &cause,
+                ));
+            }
+        }
         if !j.phase.may_have_changed_install() {
             self.clean_staging(ctx)?;
             j.note = Some("interrupted before the install path was touched".into());
@@ -1170,6 +1249,7 @@ enum Stop {
     Pre(InstallError),
     /// Failed after the install path may have changed: roll back.
     Failed(InstallError),
+    Frozen(InstallError),
     Crash,
 }
 
@@ -1187,9 +1267,6 @@ impl Stop {
         } else {
             Stop::Failed(e)
         }
-    }
-    fn from_crashy(e: InstallError) -> Stop {
-        Stop::failed(e)
     }
 }
 
