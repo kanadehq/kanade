@@ -59,21 +59,27 @@ pub struct Stat {
 
 impl Stat {
     fn from_raw(st: &libc::stat) -> Stat {
-        let fmt = st.st_mode as u32 & libc::S_IFMT as u32;
+        let fmt = st.st_mode & libc::S_IFMT;
         let kind = match fmt {
-            x if x == libc::S_IFREG as u32 => Kind::Regular,
-            x if x == libc::S_IFDIR as u32 => Kind::Directory,
-            x if x == libc::S_IFLNK as u32 => Kind::Symlink,
+            x if x == libc::S_IFREG => Kind::Regular,
+            x if x == libc::S_IFDIR => Kind::Directory,
+            x if x == libc::S_IFLNK => Kind::Symlink,
             _ => Kind::Other,
         };
+        // Linux already exposes these fields at the normalized widths;
+        // Darwin uses narrower mode/link types and a signed device ID.
+        #[cfg(target_os = "linux")]
+        let (mode, dev, nlink) = (st.st_mode, st.st_dev, st.st_nlink);
+        #[cfg(not(target_os = "linux"))]
+        let (mode, dev, nlink) = (st.st_mode as u32, st.st_dev as u64, st.st_nlink as u64);
         Stat {
             kind,
             uid: st.st_uid,
             gid: st.st_gid,
-            mode: st.st_mode as u32 & 0o7777,
-            dev: st.st_dev as u64,
+            mode: mode & 0o7777,
+            dev,
             ino: st.st_ino,
-            nlink: st.st_nlink as u64,
+            nlink,
             size: st.st_size.max(0) as u64,
         }
     }
