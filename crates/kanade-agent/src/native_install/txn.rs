@@ -62,6 +62,7 @@ pub enum Point {
     ReceiptWrite,
     RestoreWrite,
     RestoreSwap,
+    AfterRestoreSwap,
     RestoreReceipt,
 }
 
@@ -888,6 +889,37 @@ impl Installer {
                 )));
             }
         };
+        // Recovery may arrive after the restore exchange but before the
+        // displaced executable was checked. Validate leftovers before either
+        // treating the old CLI as restored or replacing/cleaning staging.
+        let restored = matches!((&j.prev, &cur),
+            (Some(p), Some((_, sha))) if *sha == p.binary_sha256);
+        for (name, expected) in [
+            (
+                RESTORE,
+                if restored {
+                    Some(new_sha)
+                } else {
+                    j.prev.as_ref().map(|p| p.binary_sha256)
+                },
+            ),
+            (DISCARD, Some(new_sha)),
+        ] {
+            let present = ctx.staging.stat(name).map_err(|e| {
+                RollbackStop::Failed(format!("cannot inspect rollback staging {name}: {e}"))
+            })?;
+            if present.is_some() {
+                let verified = ctx
+                    .staging
+                    .read_file(name, MAX_STREAM_BYTES)
+                    .is_ok_and(|(bytes, _)| Some(digest(&bytes)) == expected);
+                if !verified {
+                    return Err(RollbackStop::Failed(format!(
+                        "unverified rollback file retained in staging: {name}"
+                    )));
+                }
+            }
+        }
         match (&j.prev, cur) {
             (None, None) => {}
             (None, Some((_, sha))) if sha == new_sha => {
@@ -979,6 +1011,11 @@ impl Installer {
             ctx.staging
                 .rename_to(RESTORE, &ctx.install, INSTALL_NAME, RenameMode::Swap)
                 .map_err(|e| fail(format!("cannot swap the previous executable back: {e}")))?;
+            match self.hit(Point::AfterRestoreSwap) {
+                Err(InstallError::Interrupted) => return Err(RollbackStop::Crash),
+                Err(e) => return Err(fail(e.to_string())),
+                Ok(()) => {}
+            }
             // What came out must be ours; if not, put the other party's file back.
             let out = ctx.staging.read_file(RESTORE, MAX_STREAM_BYTES);
             if !matches!(&out, Ok((b, _)) if digest(b) == new_sha) {

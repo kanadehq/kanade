@@ -1946,3 +1946,70 @@ fn approval_expiring_while_waiting_for_the_lock_is_rejected() {
     });
     assert_eq!(fx.snapshot(), snap);
 }
+
+#[test]
+fn interrupted_restore_exchange_preserves_unverified_displaced_paths() {
+    // No race, foreign binary, foreign symlink, and foreign old-version bytes.
+    for variant in 0..4 {
+        let fx = Fx::new();
+        let v1 = Pkg::new(&fx, "1.0.0");
+        let v2 = Pkg::new(&fx, "1.1.0");
+        fx.ok(&v1);
+        let exe = fx.exe_path();
+        fx.probe.fail_when(move |p| p == exe);
+        let foreign = if variant == 3 {
+            v1.binary.clone()
+        } else {
+            binary("7.7.7", "foreign")
+        };
+        let victim = fx.base.join("rollback-foreign-target");
+        std::fs::write(&victim, &foreign).unwrap();
+        let (exe, target, bytes) = (fx.exe_path(), victim.clone(), foreign.clone());
+        let inst = fx.installer_with(move |point| {
+            if point == Point::RestoreSwap && variant != 0 {
+                let tmp = exe.with_extension("foreign");
+                if variant == 2 {
+                    symlink(&target, &tmp).unwrap();
+                } else {
+                    std::fs::write(&tmp, &bytes).unwrap();
+                }
+                std::fs::rename(tmp, &exe).unwrap();
+            }
+            if point == Point::AfterRestoreSwap {
+                Fault::Crash
+            } else {
+                Fault::Pass
+            }
+        });
+        assert!(matches!(fx.run(&inst, &v2), Err(InstallError::Interrupted)));
+        assert_eq!(fx.journal().unwrap().phase, Phase::RollingBack);
+        assert_eq!(fx.exe().unwrap(), v1.binary);
+        fx.probe.fail_when(|_| false);
+        if variant == 0 {
+            let result = fx.run(&fx.installer(), &v1).unwrap();
+            assert_eq!(result.outcome, InstallOutcome::NoOp);
+            assert!(result.recovered.is_some());
+            assert!(fx.staging_entries().is_empty());
+        } else {
+            let displaced = fx
+                .roots
+                .install_dir
+                .join(STAGING_DIR)
+                .join("kanade.restore");
+            for _ in 0..2 {
+                assert!(matches!(
+                    fx.run(&fx.installer(), &v1),
+                    Err(InstallError::RecoveryRequired(_))
+                ));
+                assert_eq!(std::fs::read(&displaced).unwrap(), foreign);
+                assert_eq!(
+                    std::fs::symlink_metadata(&displaced).unwrap().is_symlink(),
+                    variant == 2
+                );
+                assert_eq!(fx.exe().unwrap(), v1.binary);
+                assert_eq!(fx.journal().unwrap().phase, Phase::RecoveryRequired);
+                assert_eq!(std::fs::read(&victim).unwrap(), foreign);
+            }
+        }
+    }
+}
