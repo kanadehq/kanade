@@ -190,10 +190,12 @@ impl Installer {
         approval: &Approval,
         exec: &ExecContext,
     ) -> R<InstallReport> {
+        self.roots.validate_offline()?;
         exec.validate()?;
         // Cheap, side-effect-free rejection first: nothing is created for a
         // package that would be refused anyway.
         let pkg = verify_inputs(store, inputs)?;
+        approval.validate(inputs.operation, exec)?;
         check_adoption_flag(&pkg, approval)?;
         #[cfg(unix)]
         {
@@ -216,6 +218,7 @@ impl Installer {
         let pkg = verify_inputs(store, inputs).inspect(|p| {
             debug_assert_eq!(p.binary_sha256, pkg.binary_sha256);
         })?;
+        approval.validate(inputs.operation, exec)?;
         let install = Dir::open_absolute(&self.roots.install_dir, Some(0o755), owner)
             .map_err(|e| InstallError::UnsafeRoot(format!("install directory: {e}")))?;
         let st = install
@@ -1208,6 +1211,12 @@ fn require_private_dir(d: &Dir, owner: Owner, what: &str) -> R<()> {
 fn check_adoption_flag(pkg: &VerifiedPackage, approval: &Approval) -> R<()> {
     // Adoption must be asked for by the signed operation *and* approved with
     // a recorded observation; either alone is refused.
+    if pkg.spec.adoption_observation_sha256 != approval.adoption().map(ExistingObservation::digest)
+    {
+        return Err(InstallError::Approval(
+            "adoption observation digest differs from approved operation".into(),
+        ));
+    }
     match (pkg.spec.adopt_existing_cli, approval.adoption().is_some()) {
         (true, false) => Err(InstallError::Approval(
             "adopt_existing_cli requires an approved observation of the existing executable".into(),

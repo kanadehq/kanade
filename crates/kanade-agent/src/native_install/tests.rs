@@ -11,12 +11,16 @@ use kanade_shared::artifact::{
     ArtifactIdentity, ArtifactIntegrity, ArtifactRole, ArtifactSha256, DistroAbi, PackageFormat,
     TargetArch, TargetOs,
 };
-use kanade_shared::deploy_plan::AuthorizedDeployment;
+use kanade_shared::deploy_plan::*;
+use kanade_shared::manifest::Manifest;
 use kanade_shared::package_manifest::{ManifestClaims, PublisherSigningKey, sign_manifest};
 use kanade_shared::publisher_trust::{
     PublisherEntry, PublisherTrustStore, TrustRoot, TrustStateClaims, WallClock, sign_trust_state,
 };
-use kanade_shared::typed_operation::{DeployAuthorizationRef, DeployCliSpec, TypedOperation};
+use kanade_shared::typed_operation::{DeployCliSpec, TypedOperation};
+use kanade_shared::wire::{
+    DeployCapabilities, DeployHandler, OPERATION_DEPLOY_CLI, PROTOCOL_V2, TYPED_DEPLOY_CONTRACT_V1,
+};
 
 use super::admit::InstallInputs;
 use super::archive;
@@ -243,6 +247,7 @@ struct Pkg {
     manifest: Vec<u8>,
     op: TypedOperation,
     adoption: Option<ExistingObservation>,
+    approved_op: TypedOperation,
 }
 
 struct B<'a> {
@@ -327,12 +332,14 @@ impl<'a> B<'a> {
             package_id: "com.kanade.cli".into(),
             manifest_sha256: ArtifactSha256::of(&manifest),
             adopt_existing_cli: self.adopt.is_some(),
+            adoption_observation_sha256: self.adopt.as_ref().map(ExistingObservation::digest),
         });
         Pkg {
             version: self.version.into(),
             binary: bin,
             archive,
             manifest,
+            approved_op: op.clone(),
             op,
             adoption: self.adopt,
         }
@@ -351,20 +358,96 @@ impl Pkg {
             host,
         }
     }
-    fn plan_ref() -> DeployAuthorizationRef {
-        DeployAuthorizationRef {
-            plan_id: "plan-1".into(),
-            plan_digest: ArtifactSha256::of(b"plan"),
-        }
-    }
     fn approval(&self) -> Approval {
-        let r = Self::plan_ref();
-        let auth = AuthorizedDeployment {
-            plan_id: r.plan_id.clone(),
-            plan_digest: r.plan_digest,
-            targets: vec!["host".into()],
+        self.approval_with("host", |_, _, _, _| {}).unwrap()
+    }
+    fn approval_with(
+        &self,
+        target: &str,
+        change: impl FnOnce(&mut PlanRecord, &mut Manifest, &mut RequestedScope, &mut i64),
+    ) -> Result<Approval, InstallError> {
+        let mut manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "id":"job-1", "version":"1.0.0", "require_approval":true,
+            "execute":{"kind":"typed_operation","payload_version":1,"timeout":"1m","run_as":"system","operation":self.approved_op},
+            "deploy_authorization":{"plan_id":"plan-1","plan_digest":String::from(ArtifactSha256::of(b"placeholder"))}
+        })).unwrap();
+        let TypedOperation::DeployCli(spec) = &self.approved_op else {
+            unreachable!()
         };
-        Approval::new(&auth, &r, self.adoption.clone()).unwrap()
+        let content = PlanContent {
+            record_version: PLAN_RECORD_VERSION,
+            plan_id: "plan-1".into(),
+            job_id: manifest.id.clone(),
+            job_manifest_digest: job_manifest_digest(&manifest).unwrap(),
+            role: ArtifactRole::Cli,
+            operation: self.approved_op.clone(),
+            artifact: PlanArtifact {
+                identity: spec.artifact_identity.clone(),
+                integrity: ArtifactIntegrity {
+                    sha256: spec.artifact_sha256,
+                    size_bytes: spec.artifact_size_bytes,
+                },
+                manifest_sha256: spec.manifest_sha256,
+            },
+            targets: vec!["host".into()],
+            not_before: T0 as i64 - 1,
+            expires_at: T0 as i64 + 300,
+            execution_policy: ExecutionPolicy::SingleUsePerTarget,
+        };
+        manifest.deploy_authorization.as_mut().unwrap().plan_digest = content.digest();
+        let mut plan = PlanRecord {
+            stored_digest: content.digest(),
+            content,
+            state: PlanState::Approved,
+            approved_by: Some("operator".into()),
+            revoked_by: None,
+            applied_targets: vec![],
+        };
+        let facts = TargetFacts {
+            pc_id: "host".into(),
+            registered: true,
+            current_agent_version: Some("1.0.0".into()),
+            current_os_family: Some("macos".into()),
+            current_agent_arch: Some("aarch64".into()),
+            evidence: CapabilityEvidence {
+                capabilities: Some(DeployCapabilities::from_handlers(&[DeployHandler::new(
+                    TYPED_DEPLOY_CONTRACT_V1,
+                    OPERATION_DEPLOY_CLI,
+                    TargetOs::Macos,
+                    TargetArch::Aarch64,
+                )])),
+                agent_version: Some("1.0.0".into()),
+                protocols: Some(vec![PROTOCOL_V2.into()]),
+                keys: Some(vec!["offline-signer".into()]),
+                os_family: Some("macos".into()),
+                agent_arch: Some("aarch64".into()),
+                reported_at_ms: Some(T0 as i64 * 1000),
+                received_at: Some(T0 as i64),
+            },
+        };
+        let mut scope = RequestedScope {
+            pcs: vec!["host".into()],
+            ..Default::default()
+        };
+        let mut now = T0 as i64;
+        change(&mut plan, &mut manifest, &mut scope, &mut now);
+        Approval::new(
+            &GateInput {
+                manifest: &manifest,
+                plan: Some(&plan),
+                actor: &DispatchActor::Operator(Principal {
+                    subject: "operator".into(),
+                    operator: true,
+                    exec_feature: true,
+                }),
+                scope: &scope,
+                targets: &[facts],
+                signer: Some("offline-signer"),
+                now,
+            },
+            target,
+            self.adoption.clone(),
+        )
     }
     fn exec(&self) -> ExecContext {
         ExecContext {
@@ -393,8 +476,11 @@ fn place_unmanaged(fx: &Fx, bytes: &[u8]) {
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
-    std::fs::write(fx.exe_path(), bytes).unwrap();
-    std::fs::set_permissions(fx.exe_path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Temporary directories may inherit a different group on macOS. Model
+    // the operator's executable with the exact principal the receipt expects.
+    let dir = Dir::open_absolute(&fx.roots.install_dir, None, Owner::current()).unwrap();
+    dir.write_new(INSTALL_NAME, bytes, 0o755, Owner::current())
+        .unwrap();
 }
 
 fn calls_touching(fx: &Fx) -> Vec<String> {
@@ -865,23 +951,6 @@ fn unsupported_hosts_and_targets_are_refused() {
 
 #[test]
 fn approval_is_a_separate_prerequisite_bound_to_the_job_plan() {
-    let auth = AuthorizedDeployment {
-        plan_id: "plan-1".into(),
-        plan_digest: ArtifactSha256::of(b"plan"),
-        targets: vec![],
-    };
-    let mut other = Pkg::plan_ref();
-    other.plan_digest = ArtifactSha256::of(b"different plan");
-    assert!(matches!(
-        Approval::new(&auth, &other, None),
-        Err(InstallError::Approval(_))
-    ));
-    let mut other = Pkg::plan_ref();
-    other.plan_id = "plan-2".into();
-    assert!(matches!(
-        Approval::new(&auth, &other, None),
-        Err(InstallError::Approval(_))
-    ));
     let bad = ExecContext {
         job_id: "../x".into(),
         exec_id: "e".into(),
@@ -1658,4 +1727,131 @@ fn the_installer_probes_only_staged_and_installed_paths_under_the_install_root()
             "{rel:?}"
         );
     }
+}
+
+#[test]
+fn offline_api_rejects_production_roots_before_any_mutation() {
+    let fx = Fx::new();
+    for install in [true, false] {
+        let mut roots = fx.roots.clone();
+        if install {
+            roots.install_dir = PRODUCTION_INSTALL_DIR.into();
+        } else {
+            roots.deploy_dir = PRODUCTION_DEPLOY_DIR.into();
+        }
+        assert!(matches!(
+            fx.run(
+                &Installer::new(roots, Box::new(Shared(fx.probe.clone()))),
+                &Pkg::new(&fx, "1.0.0")
+            ),
+            Err(InstallError::UnsafeRoot(_))
+        ));
+    }
+    assert_untouched(&fx);
+    assert!(fx.probe.calls().is_empty());
+}
+
+#[test]
+fn approval_reuses_stage_four_gate_for_plan_operation_scope_and_time() {
+    let fx = Fx::new();
+    let pkg = Pkg::new(&fx, "1.0.0");
+    assert!(pkg.approval_with("other-host", |_, _, _, _| {}).is_err());
+    assert!(
+        pkg.approval_with("host", |p, _, _, _| p.state = PlanState::Revoked)
+            .is_err()
+    );
+    assert!(
+        pkg.approval_with("host", |_, m, _, _| m
+            .deploy_authorization
+            .as_mut()
+            .unwrap()
+            .plan_digest =
+            ArtifactSha256::of(b"other"))
+            .is_err()
+    );
+    assert!(
+        pkg.approval_with("host", |p, _, _, _| {
+            let TypedOperation::DeployCli(s) = &mut p.content.operation else {
+                unreachable!()
+            };
+            s.package_id = "com.other.cli".into();
+        })
+        .is_err()
+    );
+    assert!(
+        pkg.approval_with("host", |_, _, scope, _| scope.pcs =
+            vec!["other-host".into()])
+            .is_err()
+    );
+    assert!(
+        pkg.approval_with("host", |_, _, _, now| *now += 400)
+            .is_err()
+    );
+    let mut exec = pkg.exec();
+    exec.job_id = "other-job".into();
+    assert!(matches!(
+        fx.installer()
+            .install(&fx.store, &pkg.inputs(&fx.host), &pkg.approval(), &exec),
+        Err(InstallError::Approval(_))
+    ));
+    assert_untouched(&fx);
+}
+
+#[test]
+fn adoption_observation_cannot_be_substituted_after_plan_approval() {
+    let fx = Fx::new();
+    let manual = binary("0.9.0", "manual");
+    place_unmanaged(&fx, &manual);
+    let mut pkg = B::new(&fx, "1.0.0")
+        .adopt(observe(&manual, "0.9.0"))
+        .build();
+    let before = fx.snapshot();
+    pkg.adoption.as_mut().unwrap().version = "0.8.0".into();
+    assert!(matches!(
+        fx.run(&fx.installer(), &pkg),
+        Err(InstallError::Approval(_))
+    ));
+    assert_eq!(fx.snapshot(), before);
+    assert!(fx.probe.calls().is_empty());
+    let TypedOperation::DeployCli(spec) = &mut pkg.op else {
+        unreachable!()
+    };
+    spec.adoption_observation_sha256 = None;
+    assert!(pkg.op.validate().is_err());
+}
+
+#[test]
+fn installer_rejects_a_different_valid_operation_than_the_approved_plan() {
+    let fx = Fx::new();
+    let approved = Pkg::new(&fx, "1.0.0");
+    let requested = B::new(&fx, "1.0.0")
+        .adopt(observe(&binary("0.9.0", "manual"), "0.9.0"))
+        .build();
+    assert!(matches!(
+        fx.installer().install(
+            &fx.store,
+            &requested.inputs(&fx.host),
+            &approved.approval(),
+            &requested.exec()
+        ),
+        Err(InstallError::Approval(_))
+    ));
+    assert_untouched(&fx);
+    assert!(fx.probe.calls().is_empty());
+}
+
+#[test]
+fn adoption_observation_changes_the_approved_plan_digest() {
+    let fx = Fx::new();
+    let first = B::new(&fx, "1.0.0")
+        .adopt(observe(&binary("0.9.0", "first"), "0.9.0"))
+        .build();
+    let second = B::new(&fx, "1.0.0")
+        .adopt(observe(&binary("0.9.0", "second"), "0.9.0"))
+        .build();
+    assert_eq!(first.archive, second.archive);
+    assert_ne!(
+        first.approval().plan_digest(),
+        second.approval().plan_digest()
+    );
 }

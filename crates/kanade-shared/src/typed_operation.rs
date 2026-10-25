@@ -133,6 +133,9 @@ pub struct DeployCliSpec {
     /// Explicit adoption of the fixed macOS location only; never a path.
     #[serde(default)]
     pub adopt_existing_cli: bool,
+    /// Digest of the explicit observation included in the approved plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoption_observation_sha256: Option<ArtifactSha256>,
 }
 
 /// The externally expected immutable artifact a typed operation must name.
@@ -267,6 +270,11 @@ impl TypedOperation {
                 if s.adopt_existing_cli && s.artifact_identity.os() != TargetOs::Macos {
                     return Err(
                         "deploy_cli.adopt_existing_cli is only valid for a macOS artifact".into(),
+                    );
+                }
+                if s.adopt_existing_cli != s.adoption_observation_sha256.is_some() {
+                    return Err(
+                        "deploy_cli adoption requires exactly one observation digest".into(),
                     );
                 }
             }

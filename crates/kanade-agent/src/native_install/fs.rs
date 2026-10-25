@@ -253,6 +253,7 @@ impl Dir {
     }
 
     pub fn stat_self(&self) -> io::Result<Stat> {
+        reject_extended_acl(self.raw())?;
         let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
         // SAFETY: valid fd and out-pointer.
         check(unsafe { libc::fstat(self.raw(), st.as_mut_ptr()) })?;
@@ -470,7 +471,50 @@ fn rename_flagged(_: RawFd, _: &CString, _: RawFd, _: &CString, _: RenameMode) -
     ))
 }
 
+#[cfg(target_os = "macos")]
+fn reject_extended_acl(fd: RawFd) -> io::Result<()> {
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: i32, kind: i32) -> *mut libc::c_void;
+        fn acl_get_entry(
+            acl: *mut libc::c_void,
+            entry_id: i32,
+            entry: *mut *mut libc::c_void,
+        ) -> i32;
+        fn acl_free(ptr: *mut libc::c_void) -> i32;
+    }
+    // SAFETY: fd is held open by the caller. ACL storage is freed once, after
+    // examining its first entry; preserve errno before acl_free can change it.
+    unsafe {
+        let acl = acl_get_fd_np(fd, 0x100); // ACL_TYPE_EXTENDED
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ENOENT) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let mut entry = std::ptr::null_mut();
+        let result = acl_get_entry(acl, 0, &mut entry); // ACL_FIRST_ENTRY
+        let error = io::Error::last_os_error();
+        acl_free(acl);
+        if result == -1 && error.raw_os_error() == Some(libc::EINVAL) {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "extended ACL or ACL inspection failure",
+        ))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reject_extended_acl(_: RawFd) -> io::Result<()> {
+    Ok(())
+}
+
 pub fn fstat_file(f: &File) -> io::Result<Stat> {
+    reject_extended_acl(f.as_raw_fd())?;
     let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
     // SAFETY: valid fd and out-pointer.
     check(unsafe { libc::fstat(f.as_raw_fd(), st.as_mut_ptr()) })?;
@@ -666,5 +710,51 @@ mod tests {
         )
         .unwrap();
         assert!(FileLock::acquire(&d, "l", o, std::time::Duration::from_millis(10)).is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod acl_tests {
+    use super::*;
+    #[test]
+    fn extended_acls_on_open_directories_and_files_are_refused() {
+        unsafe extern "C" {
+            fn acl_init(count: i32) -> *mut libc::c_void;
+            fn acl_create_entry(acl: *mut *mut libc::c_void, entry: *mut *mut libc::c_void) -> i32;
+            fn acl_set_tag_type(entry: *mut libc::c_void, tag: i32) -> i32;
+            fn acl_set_qualifier(entry: *mut libc::c_void, qualifier: *const libc::c_void) -> i32;
+            fn acl_get_permset(entry: *mut libc::c_void, perms: *mut *mut libc::c_void) -> i32;
+            fn acl_add_perm(perms: *mut libc::c_void, perm: u32) -> i32;
+            fn acl_set_fd_np(fd: i32, acl: *mut libc::c_void, kind: i32) -> i32;
+            fn acl_free(acl: *mut libc::c_void) -> i32;
+            fn mbr_uid_to_uuid(uid: u32, uuid: *mut u8) -> i32;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Dir::open_absolute(&temp.path().canonicalize().unwrap(), None, Owner::current())
+            .unwrap();
+        let file = dir.create_new("test", 0o600, Owner::current()).unwrap();
+        for fd in [file.as_raw_fd(), dir.raw()] {
+            assert!(reject_extended_acl(fd).is_ok());
+            // SAFETY: all buffers and returned ACL handles are valid until
+            // acl_free; only isolated temporary descriptors are modified.
+            unsafe {
+                let mut acl = acl_init(1);
+                assert!(!acl.is_null());
+                let mut entry = std::ptr::null_mut();
+                assert_eq!(acl_create_entry(&mut acl, &mut entry), 0);
+                assert_eq!(acl_set_tag_type(entry, 1), 0); // ACL_EXTENDED_ALLOW
+                let mut uuid = [0u8; 16];
+                assert_eq!(mbr_uid_to_uuid(libc::geteuid(), uuid.as_mut_ptr()), 0);
+                assert_eq!(acl_set_qualifier(entry, uuid.as_ptr().cast()), 0);
+                let mut perms = std::ptr::null_mut();
+                assert_eq!(acl_get_permset(entry, &mut perms), 0);
+                assert_eq!(acl_add_perm(perms, 1 << 1), 0); // ACL_READ_DATA
+                assert_eq!(acl_set_fd_np(fd, acl, 0x100), 0);
+                assert_eq!(acl_free(acl), 0);
+            }
+            assert!(reject_extended_acl(fd).is_err());
+        }
+        assert!(dir.stat_self().is_err());
+        assert!(fstat_file(&file).is_err());
     }
 }

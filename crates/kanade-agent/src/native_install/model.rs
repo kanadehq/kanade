@@ -7,8 +7,11 @@
 use std::path::PathBuf;
 
 use kanade_shared::artifact::{ArtifactIdentity, ArtifactSha256};
-use kanade_shared::deploy_plan::AuthorizedDeployment;
-use kanade_shared::typed_operation::DeployAuthorizationRef;
+use kanade_shared::deploy_plan::{
+    DispatchActor, GateInput, PlanRecord, RequestedScope, TargetFacts, evaluate,
+};
+use kanade_shared::manifest::Manifest;
+use kanade_shared::typed_operation::TypedOperation;
 use serde::{Deserialize, Serialize};
 
 use super::archive::ArchiveError;
@@ -24,9 +27,7 @@ pub const PRODUCTION_DEPLOY_DIR: &str = "/Library/Application Support/Kanade/dep
 /// Largest receipt/journal file we will read.
 pub const MAX_STATE_FILE_BYTES: u64 = 256 * 1024;
 
-/// Where the installer reads and writes. Production uses [`Roots::production`];
-/// tests point both at temporary directories and use the invoking user as the
-/// owning principal.
+/// Offline roots only. Production paths are policy constants, not a live API.
 #[derive(Debug, Clone)]
 pub struct Roots {
     pub install_dir: PathBuf,
@@ -35,16 +36,44 @@ pub struct Roots {
     pub owner: super::fs::Owner,
 }
 
-#[cfg(unix)]
 impl Roots {
-    /// The fixed SPEC locations, owned by `root:wheel`. Nothing in this build
-    /// calls this: the handler is not wired to any delivery path yet.
-    pub fn production() -> Self {
-        Self {
-            install_dir: PRODUCTION_INSTALL_DIR.into(),
-            deploy_dir: PRODUCTION_DEPLOY_DIR.into(),
-            owner: super::fs::Owner::ROOT_WHEEL,
+    pub fn validate_offline(&self) -> Result<(), InstallError> {
+        let temp = std::env::temp_dir()
+            .canonicalize()
+            .map_err(|e| InstallError::io("temp root", e))?;
+        let shared = std::path::Path::new("/tmp").canonicalize().ok();
+        for path in [&self.install_dir, &self.deploy_dir] {
+            if !path.is_absolute()
+                || path.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err(InstallError::UnsafeRoot(
+                    "offline roots must be absolute temporary paths".into(),
+                ));
+            }
+            // Resolve the existing ancestor without creating anything. The fd walk
+            // still rejects symlinks when the transaction opens the directories.
+            let mut ancestor = path.as_path();
+            while !ancestor.exists() {
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| InstallError::UnsafeRoot("no existing ancestor".into()))?;
+            }
+            let resolved = ancestor
+                .canonicalize()
+                .map_err(|e| InstallError::io("offline root", e))?;
+            let inside = |base: &std::path::Path| resolved.starts_with(base) && resolved != base;
+            if !inside(&temp) && !shared.as_deref().is_some_and(inside) {
+                return Err(InstallError::UnsafeRoot(
+                    "offline installer requires a temporary subdirectory".into(),
+                ));
+            }
         }
+        Ok(())
     }
 }
 
@@ -93,6 +122,16 @@ pub struct ExistingObservation {
     pub mode: u32,
 }
 
+impl ExistingObservation {
+    pub fn digest(&self) -> ArtifactSha256 {
+        let mut bytes = b"kanade/cli-adoption/v1\0".to_vec();
+        bytes.extend(kanade_shared::deploy_plan::canonical_json(
+            &serde_json::to_value(self).expect("observation serializes"),
+        ));
+        ArtifactSha256::of(&bytes)
+    }
+}
+
 /// Operator approval of exactly this deployment — a prerequisite that is
 /// distinct from package admission and never derived from it.
 #[derive(Debug, Clone)]
@@ -100,28 +139,71 @@ pub struct Approval {
     plan_id: String,
     plan_digest: ArtifactSha256,
     adoption: Option<ExistingObservation>,
+    manifest: Manifest,
+    plan: Option<PlanRecord>,
+    actor: DispatchActor,
+    scope: RequestedScope,
+    targets: Vec<TargetFacts>,
+    signer: Option<String>,
+    now: i64,
+    target: String,
 }
 
 impl Approval {
-    /// Bind the gate's [`AuthorizedDeployment`] to the job's own
-    /// `deploy_authorization` reference. `adoption` is the observation the
-    /// approved plan recorded for an explicit adoption.
+    /// Capture offline gate inputs; install re-evaluates them under the lock.
+    /// This is not a transport authorization or a production dispatch entry.
     pub fn new(
-        authorized: &AuthorizedDeployment,
-        job_ref: &DeployAuthorizationRef,
+        gate: &GateInput<'_>,
+        target: &str,
         adoption: Option<ExistingObservation>,
     ) -> Result<Self, InstallError> {
-        job_ref.validate().map_err(InstallError::Approval)?;
-        if authorized.plan_id != job_ref.plan_id || authorized.plan_digest != job_ref.plan_digest {
-            return Err(InstallError::Approval(
-                "approval is for a different plan than the job references".into(),
-            ));
+        let authorized = evaluate(gate).map_err(|e| InstallError::Approval(e.to_string()))?;
+        if !authorized.targets.iter().any(|t| t == target) {
+            return Err(InstallError::Approval("target is not approved".into()));
         }
         Ok(Self {
-            plan_id: authorized.plan_id.clone(),
+            plan_id: authorized.plan_id,
             plan_digest: authorized.plan_digest,
             adoption,
+            manifest: gate.manifest.clone(),
+            plan: gate.plan.cloned(),
+            actor: gate.actor.clone(),
+            scope: gate.scope.clone(),
+            targets: gate.targets.to_vec(),
+            signer: gate.signer.map(str::to_owned),
+            now: gate.now,
+            target: target.into(),
         })
+    }
+
+    pub fn validate(
+        &self,
+        operation: &TypedOperation,
+        exec: &ExecContext,
+    ) -> Result<(), InstallError> {
+        let authorized = evaluate(&GateInput {
+            manifest: &self.manifest,
+            plan: self.plan.as_ref(),
+            actor: &self.actor,
+            scope: &self.scope,
+            targets: &self.targets,
+            signer: self.signer.as_deref(),
+            now: self.now,
+        })
+        .map_err(|e| InstallError::Approval(e.to_string()))?;
+        if !authorized.targets.contains(&self.target)
+            || self.manifest.id != exec.job_id
+            || self
+                .manifest
+                .execute
+                .typed()
+                .is_none_or(|t| &t.operation != operation)
+        {
+            return Err(InstallError::Approval(
+                "operation, job or target differs from the approved plan".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn plan_id(&self) -> &str {

@@ -6,7 +6,7 @@
 //! the handler registry that feeds the heartbeat stays empty, the backend's
 //! typed-delivery barrier is untouched, and there is no remote path, no
 //! scheduler hook and no privilege-escalating shortcut. A later stage wires
-//! a verified signed command, replay protection, plan approval and result
+//! a verified signed command, replay protection, current plan/target evidence and result
 //! publication to [`Installer::install`].
 //!
 //! What it does *not* do, by design: kill processes, register services,
