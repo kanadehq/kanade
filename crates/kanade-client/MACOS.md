@@ -61,8 +61,13 @@ arm64 and macOS 14.0+, local-system domain only. Payload content is reproducible
 the `.pkg` bytes are not (timestamps). Before packaging, the app is validated
 (identity, versions, every Mach-O's arch/deployment target/dependencies, resources,
 ad-hoc signature, embedded SPA) and again after the payload is restored. Package
-validation lists archive members and payload paths before expansion, then compares
-BOM, `PackageInfo`, `Distribution` and the restored payload with the input app.
+validation parses the bounded XAR TOC (paths, types, links, sizes and data ranges)
+and odc cpio (paths, root ownership, modes, links, sizes and directory parents)
+before restoring payload files. A manual restore is compared with the input app;
+`pkgutil --expand-full` then independently restores xattrs for the existing bundle
+and attribute checks. BOM, `PackageInfo` and `Distribution` checks remain required.
+Before building, `pkgbuild --analyze` must discover exactly the expected one app;
+its component plist is retained with the explicit replacement/relocation policy.
 Rejected: extra members, scripts, symlinks, hard links, `..`/absolute paths,
 duplicates, wrong owner/mode, tampered or unsigned bundles. AppleDouble `._*`
 carriers (build hosts may stamp `com.apple.provenance`) are tolerated only for that

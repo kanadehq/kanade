@@ -6,6 +6,11 @@ real .pkg need an Apple Silicon Mac with Xcode tools; elsewhere they are reporte
 as skipped, and a skip is not a pass. Nothing is installed or launched.
 """
 import os
+import io
+import stat
+import struct
+import zlib
+import xml.etree.ElementTree as ET
 import pathlib
 import plistlib
 import shutil
@@ -114,6 +119,136 @@ class Pure(unittest.TestCase):
         self.assertFalse(item["BundleIsRelocatable"])
         self.assertTrue(item["BundleHasStrictIdentifier"])
         self.assertEqual(item["RootRelativeBundlePath"], m.APP_NAME)
+
+
+class ArchiveParsing(unittest.TestCase):
+    def setUp(self):
+        self.rows, self.expected = Pure()._bom()
+
+    def cpio(self, rows=None, overrides=None):
+        result = bytearray()
+        for name, mode, _, _ in rows or self.rows:
+            name = name.encode() + b"\0"
+            fields = [1, len(result), mode, 0, 0, 1, 0, 0, len(name), 0 if stat.S_ISDIR(mode) else 1]
+            if overrides:
+                overrides(name, fields)
+            result += b"070707" + b"".join(f"{v:0{w}o}".encode() for v, w in zip(fields, (6, 6, 6, 6, 6, 6, 6, 11, 6, 11)))
+            result += name
+            result += b"x" * min(fields[-1], 1)
+        result += b"070707" + b"000000" * 7 + b"00000000000" + b"000013" + b"00000000000" + b"TRAILER!!!\0"
+        return bytes(result)
+
+    def test_cpio_roundtrip(self):
+        entries = m.payload_entries(io.BytesIO(self.cpio()), self.expected)
+        with tempfile.TemporaryDirectory() as t:
+            root = pathlib.Path(t) / "restored"
+            m.restore_payload(entries, root)
+            self.assertEqual((root / m.APP_NAME / "Contents/Resources/icon.icns").read_bytes(), b"x")
+
+    def test_cpio_rejects_paths_types_metadata_and_limits(self):
+        for index, value in ((2, 0o120644), (2, 0o020644), (2, 0o100777),
+                             (3, 501), (4, 20), (5, 2), (8, 5000), (9, m.MAX_PAYLOAD_BYTES + 1)):
+            def change(name, fields):
+                if name.endswith(b"Info.plist\0"):
+                    fields[index] = value
+            with self.subTest(index=index, value=value), self.assertRaises(m.PkgError):
+                m.payload_entries(io.BytesIO(self.cpio(overrides=change)), self.expected)
+        for rows in (self.rows + [("./../escape", 0o100644, "root", "wheel")],
+                     self.rows + [("/absolute", 0o100644, "root", "wheel")],
+                     self.rows + [self.rows[-1]], self.rows[1:],
+                     self.rows + [("./._orphan", 0o100644, "root", "wheel")]):
+            with self.assertRaises(m.PkgError):
+                m.payload_entries(io.BytesIO(self.cpio(rows)), self.expected)
+        for data in (self.cpio()[:-1], self.cpio() + b"evil", self.cpio().replace(b"070707", b"070708", 1)):
+            with self.assertRaises(m.PkgError):
+                m.payload_entries(io.BytesIO(data), self.expected)
+
+    def test_cpio_requires_directory_parents_before_restoration(self):
+        rows = [(".", 0o40755, "root", "wheel"), ("./file/child", 0o100644, "root", "wheel")]
+        # Isolate parent validation from the stricter expected-bundle check.
+        from unittest.mock import patch
+        with patch.object(m, "check_bom"), self.assertRaisesRegex(m.PkgError, "directory parent"):
+            m.payload_entries(io.BytesIO(self.cpio(rows)), self.expected)
+
+    def test_cpio_aggregate_limits_and_appledouble_metadata(self):
+        from unittest.mock import patch
+        for key, value in (("MAX_PAYLOAD_BYTES", 2), ("MAX_FILES", 1)):
+            with patch.object(m, key, value), self.assertRaisesRegex(m.PkgError, "expansion limit"):
+                m.payload_entries(io.BytesIO(self.cpio()), self.expected)
+        rows = self.rows + [(f"./{m.APP_NAME}/Contents/._Info.plist", 0o100644, "root", "wheel")]
+        entries = m.payload_entries(io.BytesIO(self.cpio(rows)), self.expected)
+        self.assertNotIn(f"{m.APP_NAME}/Contents/._Info.plist", entries)
+        def change(name, fields):
+            if name.endswith(b"._Info.plist\0"):
+                fields[5] = 2
+        with self.assertRaisesRegex(m.PkgError, "AppleDouble link count"):
+            m.payload_entries(io.BytesIO(self.cpio(rows, change)), self.expected)
+
+    def xar(self, mutate=lambda toc: None):
+        root = ET.Element("xar")
+        toc = ET.SubElement(root, "toc")
+        payload = bytearray()
+        def member(parent, name, directory=False):
+            node = ET.SubElement(parent, "file")
+            ET.SubElement(node, "name").text = name
+            ET.SubElement(node, "type").text = "directory" if directory else "file"
+            if not directory:
+                data = ET.SubElement(node, "data")
+                for key, value in (("length", 1), ("size", 1), ("offset", len(payload))):
+                    ET.SubElement(data, key).text = str(value)
+                ET.SubElement(data, "encoding", style="application/octet-stream")
+                payload.extend(b"x")
+            return node
+        member(toc, "Distribution")
+        component = member(toc, m.COMPONENT_FILE, True)
+        for name in ("Bom", "Payload", "PackageInfo"):
+            member(component, name)
+        mutate(toc)
+        xml = ET.tostring(root)
+        compressed = zlib.compress(xml)
+        return struct.pack(">4sHHQQI", b"xar!", 28, 1, len(compressed), len(xml), 0) + compressed + payload
+
+    def test_xar_roundtrip_and_rejects_before_writing(self):
+        with tempfile.TemporaryDirectory() as t:
+            pkg = pathlib.Path(t) / "test.pkg"
+            pkg.write_bytes(self.xar())
+            dest = pathlib.Path(t) / "good"
+            m.inspect_xar(pkg, dest)
+            self.assertEqual((dest / m.COMPONENT_FILE / "Payload").read_bytes(), b"x")
+            mutations = [
+                lambda toc: setattr(toc.find("file/name"), "text", "../escape"),
+                lambda toc: setattr(toc.find("file/type"), "text", "symlink"),
+                lambda toc: toc.find("file/type").set("link", "1"),
+                lambda toc: ET.SubElement(toc.find("file"), "link"),
+                lambda toc: setattr(toc.find("file/data/size"), "text", str(m.MAX_PAYLOAD_BYTES + 1)),
+                lambda toc: setattr(toc.find("file/data/offset"), "text", "999999"),
+                lambda toc: setattr(toc.find("file/data/size"), "text", "-1"),
+                lambda toc: setattr(ET.SubElement(toc.find("file"), "name"), "text", "elsewhere"),
+                lambda toc: toc.append(toc.find("file")),
+                lambda toc: toc.remove(toc.find("file")),
+            ]
+            for mutate in mutations:
+                pkg.write_bytes(self.xar(mutate))
+                dest = pathlib.Path(t) / "bad"
+                with self.assertRaises(m.PkgError):
+                    m.inspect_xar(pkg, dest)
+                self.assertFalse(dest.exists())
+
+    def test_bounded_zlib_rejects_bombs_truncation_and_trailing_data(self):
+        compressed = zlib.compress(b"a" * 10000)
+        self.assertEqual(m.bounded_zlib(compressed, 10000), b"a" * 10000)
+        for data, size in ((compressed, 10), (compressed[:-1], 10000), (compressed + b"extra", 10000)):
+            with self.assertRaises(m.PkgError):
+                m.bounded_zlib(data, size)
+
+    def test_analyzed_components_must_be_exactly_one_expected_bundle(self):
+        for bad in ([], {}, [{"RootRelativeBundlePath": "Other.app"}],
+                    [{"RootRelativeBundlePath": m.APP_NAME}] * 2):
+            with self.assertRaises(m.PkgError):
+                m.component_plist(bad)
+        result = plistlib.loads(m.component_plist([dict(RootRelativeBundlePath=m.APP_NAME, Extra="retained")]))
+        self.assertEqual(result[0]["Extra"], "retained")
+        self.assertFalse(result[0]["BundleIsVersionChecked"])
 
 
 @needs_mac

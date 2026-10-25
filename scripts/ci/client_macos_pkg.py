@@ -11,6 +11,7 @@ Every check raises PkgError so callers and tests get a precise failure.
 """
 import argparse
 import datetime
+import gzip
 import hashlib
 import json
 import os
@@ -19,11 +20,13 @@ import plistlib
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import tomllib
 import xml.etree.ElementTree as ET
+import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -245,13 +248,16 @@ def stage(app, dest):
     return out
 
 
-def component_plist():
+def component_plist(analyzed=None):
     # Relocation off so the bundle cannot be installed elsewhere. Version checking
     # is off so an operator re-run of an older package can recover. None of this
     # protects an existing unmanaged bundle: the typed handler must check first.
-    return plistlib.dumps([dict(BundleHasStrictIdentifier=True, BundleIsRelocatable=False,
-                                BundleIsVersionChecked=False, BundleOverwriteAction="upgrade",
-                                RootRelativeBundlePath=APP_NAME)])
+    values = analyzed if analyzed is not None else [dict(RootRelativeBundlePath=APP_NAME)]
+    require(isinstance(values, list) and len(values) == 1 and isinstance(values[0], dict)
+            and values[0].get("RootRelativeBundlePath") == APP_NAME, "unexpected analyzed component set")
+    values[0].update(BundleHasStrictIdentifier=True, BundleIsRelocatable=False,
+                     BundleIsVersionChecked=False, BundleOverwriteAction="upgrade")
+    return plistlib.dumps(values)
 
 
 def distribution_xml(version, installed_kb):
@@ -299,7 +305,9 @@ def build(app, out_dir, *, production=True):
         staged = stage(app, payload)
         require(tree_digest(staged) == tree_digest(app), "staged bundle differs from input app")
         validate_app(staged, version)
-        (tmp / "component.plist").write_bytes(component_plist())
+        components = tmp / "component.plist"
+        run("pkgbuild", "--analyze", "--root", payload, components)
+        components.write_bytes(component_plist(plistlib.loads(components.read_bytes())))
         parts = tmp / "parts"
         parts.mkdir()
         run("pkgbuild", "--root", payload, "--component-plist", tmp / "component.plist",
@@ -325,6 +333,176 @@ def build(app, out_dir, *, production=True):
 
 
 # --- package validation -------------------------------------------------------
+
+
+def bounded_zlib(data, size):
+    decoder = zlib.decompressobj()
+    result = decoder.decompress(data, size + 1)
+    require(len(result) == size and decoder.eof and not decoder.unused_data
+            and not decoder.unconsumed_tail, "invalid or oversized zlib stream")
+    return result
+
+
+def inspect_xar(pkg, dest):
+    """Parse bounded XAR TOC and members before writing; no native extraction."""
+    limit = MAX_PAYLOAD_BYTES
+    require(pkg.stat().st_size <= limit, "package too large")
+    with pkg.open("rb") as source:
+        header = source.read(28)
+        require(len(header) == 28, "short xar header")
+        magic, size, version, compressed, expanded, checksum = struct.unpack(">4sHHQQI", header)
+        require(magic == b"xar!" and size == 28 and version == 1 and checksum in (0, 1, 2), "invalid xar header")
+        require(0 < compressed <= 1024 * 1024 and 0 < expanded <= 4 * 1024 * 1024, "xar TOC size limit")
+        xml = bounded_zlib(source.read(compressed), expanded)
+        require(b"<!DOCTYPE" not in xml and b"<!ENTITY" not in xml, "xar XML declarations forbidden")
+        toc = ET.fromstring(xml)
+        require(toc.tag == "xar" and len(toc.findall("toc")) == 1, "invalid xar TOC")
+        require(toc.find(".//signature") is None, "expected unsigned installer")
+        allowed = {"Distribution", COMPONENT_FILE, f"{COMPONENT_FILE}/Bom",
+                   f"{COMPONENT_FILE}/PackageInfo", f"{COMPONENT_FILE}/Payload"}
+        entries = {}
+        total = 0
+        streams = []
+        heap = 28 + compressed
+
+        def data_record(data, name):
+            nonlocal total
+            require(all(len(data.findall(tag)) == 1 for tag in ("length", "size", "offset", "encoding")),
+                    "missing/ambiguous xar data fields")
+            length = int(data.findtext("length", "-1"))
+            expanded_size = int(data.findtext("size", "-1"))
+            offset = int(data.findtext("offset", "-1"))
+            require(0 <= length <= limit and 0 <= expanded_size <= limit and offset >= 0
+                    and heap + offset + length <= pkg.stat().st_size, "xar data range/size limit")
+            total += expanded_size
+            require(total <= limit, "xar expansion limit")
+            streams.append((name, offset, length, expanded_size, data.find("encoding")))
+
+        def visit(node, parent=""):
+            for item in node.findall("file"):
+                leaf = item.findtext("name", "")
+                # productbuild can emit identical name elements twice.
+                require(item.findall("name") and all(n.text == leaf for n in item.findall("name"))
+                        and len(item.findall("type")) == 1, "ambiguous xar name/type")
+                require("/" not in leaf, "xar name must be one component")
+                name = parent + leaf
+                check_rel_path(name)
+                require(name in allowed and name not in entries, "unexpected/duplicate xar member")
+                directory = name == COMPONENT_FILE
+                require(item.findtext("type") == ("directory" if directory else "file"), "xar link/special file")
+                require(item.find("link") is None and item.find("type").get("link") is None, "xar hardlink")
+                entries[name] = directory
+                if directory:
+                    require(item.find("data") is None, "xar directory has data")
+                else:
+                    require(not item.findall("file"), "xar file has children")
+                    require(len(item.findall("data")) == 1, "missing/ambiguous xar data")
+                    data_record(item.find("data"), name)
+                attrs = item.findall("ea")
+                require(len(attrs) <= 1, "too many xar attributes")
+                for attr in attrs:
+                    require(len(attr.findall("name")) == 1 and attr.findtext("name") in ALLOWED_XATTRS,
+                            "unexpected xar extended attribute")
+                    require(0 <= int(attr.findtext("size", "-1")) <= 4096, "xar attribute size limit")
+                    data_record(attr, None)
+                visit(item, name + "/")
+
+        visit(toc.find("toc"))
+        require(set(entries) == allowed, "incomplete xar package")
+        # Decode every member before writing anything into the scratch directory.
+        decoded = {}
+        for name, offset, length, size, encoding in streams:
+            source.seek(heap + offset)
+            raw = source.read(length)
+            style = encoding.get("style")
+            if style == "application/x-gzip":
+                value = bounded_zlib(raw, size)
+            else:
+                require(style == "application/octet-stream" and len(raw) == size, "unsupported xar encoding/size")
+                value = raw
+            if name is not None:
+                decoded[name] = value
+    dest.mkdir()
+    (dest / COMPONENT_FILE).mkdir()
+    for name, data in decoded.items():
+        (dest / name).write_bytes(data)
+
+
+def payload_entries(stream, expected):
+    """Parse odc cpio with bounded reads; validate all paths and metadata first."""
+    entries = {}
+    total = 0
+    link_counts = {}
+    while True:
+        header = stream.read(76)
+        require(len(header) == 76 and header[:6] == b"070707", "expected odc cpio")
+        fields, offset = [], 6
+        for width in (6, 6, 6, 6, 6, 6, 6, 11, 6, 11):
+            field = header[offset:offset + width]
+            require(all(c in b"01234567" for c in field), "invalid cpio octal field")
+            fields.append(int(field, 8))
+            offset += width
+        dev, ino, mode, uid, gid, links, rdev, mtime, namesize, size = fields
+        require(0 < namesize <= 4096 and size <= MAX_PAYLOAD_BYTES, "cpio entry size limit")
+        raw = stream.read(namesize)
+        require(len(raw) == namesize and raw[-1:] == b"\0" and b"\0" not in raw[:-1], "invalid cpio name")
+        name = raw[:-1].decode("utf-8")
+        if name == "TRAILER!!!":
+            require(size == 0, "invalid cpio trailer")
+            tail = stream.read(1024 * 1024)
+            require(not tail.strip(b"\0") and not stream.read(1), "unexpected cpio tail")
+            break
+        require(name == "." or name.startswith("./"), "cpio path not relative")
+        name = "" if name == "." else name[2:]
+        # Validate AppleDouble targets with the same path rules as normal files.
+        head, _, leaf = name.rpartition("/")
+        carrier = leaf.startswith("._")
+        clean = f"{head}/{leaf[2:]}" if head else leaf[2:]
+        if name:
+            check_rel_path(clean if carrier else name)
+        require(name not in entries, "duplicate cpio path")
+        directory = stat.S_ISDIR(mode)
+        require(directory or stat.S_ISREG(mode), "cpio link/special file")
+        require(directory or carrier or links == 1, "cpio hardlink")
+        require(uid == gid == 0, "cpio owner must be root:wheel")
+        executable = name == f"{APP_NAME}/Contents/MacOS/{EXECUTABLE}"
+        require(stat.S_IMODE(mode) == (0o755 if directory or executable else 0o644), "unexpected cpio mode")
+        require(not directory or size == 0, "cpio directory has data")
+        require(not carrier or not directory, "AppleDouble carrier must be a file")
+        total += size
+        require(total <= MAX_PAYLOAD_BYTES and len(entries) < MAX_FILES + 2, "cpio expansion limit")
+        data = stream.read(size)
+        require(len(data) == size, "truncated cpio data")
+        entries[name] = (mode, data)
+        link_counts[name] = links
+    real, carriers = split_carriers(entries)
+    for name in carriers:
+        head, _, leaf = name.rpartition("/")
+        target = f"{head}/{leaf[2:]}" if head else leaf[2:]
+        # Apple's packer copies a directory's nlink onto its AppleDouble carrier.
+        require(link_counts[name] == link_counts[target], "AppleDouble link count differs from target")
+    rows = [("." if not name else "./" + name, mode, "root", "wheel")
+            for name, (mode, _) in entries.items()]
+    check_bom(rows, expected)
+    for name in entries:
+        if name:
+            parent = name.rpartition("/")[0]
+            require(parent in entries and stat.S_ISDIR(entries[parent][0]), "missing cpio directory parent")
+    return {name: entries[name] for name in real}
+
+
+def restore_payload(entries, dest):
+    """Restore only validated regular files/directories, excluding xattr carriers."""
+    dest.mkdir()
+    for name in sorted(entries, key=lambda p: (p.count("/"), p)):
+        mode, data = entries[name]
+        path = dest / name
+        if stat.S_ISDIR(mode):
+            path.mkdir(exist_ok=True)
+        else:
+            with path.open("xb") as target:
+                target.write(data)
+        path.chmod(stat.S_IMODE(mode))
 
 
 def parse_bom(text):
@@ -416,37 +594,24 @@ def check_package_info(path, version, expected):
 
 
 def validate_pkg(pkg, app, *, root=ROOT):
-    """Inspect a built .pkg: list before expanding, expand safely, compare with the input app."""
+    """Inspect XAR/cpio before restoring, then compare metadata and both restored bundles."""
     pkg = pathlib.Path(pkg)
     app = pathlib.Path(app)
     version = expected_version(root)
     require(pkg.is_file() and not pkg.is_symlink() and pkg.name == ARTIFACT_BASENAME, f"artifact name must be {ARTIFACT_BASENAME}")
     require(pkg.parent.as_posix().endswith(f"client/{version}"), f"artifact directory must end in client/{version}")
     expected = walk_app(app)
-    # 1. archive member list before any extraction
-    members = [m for m in run("xar", "-tf", pkg).stdout.splitlines() if m]
-    allowed = {"Distribution", COMPONENT_FILE, f"{COMPONENT_FILE}/Bom", f"{COMPONENT_FILE}/PackageInfo",
-               f"{COMPONENT_FILE}/Payload"}
-    for m in members:
-        check_rel_path(m)
-    require(set(members) == allowed and len(members) == len(allowed),
-            f"unexpected archive members (scripts/resources not allowed): {sorted(set(members) ^ allowed)}")
-    # 2. payload listing before extraction
-    listing = run("pkgutil", "--payload-files", pkg).stdout.splitlines()
-    for line in listing:
-        require(line == "." or line.startswith("./"), f"payload path not relative: {line!r}")
-    real, carriers = split_carriers(l[2:] for l in listing if l != ".")
-    for rel in real:
-        check_rel_path(rel)
-    for rel in carriers:
-        head, _, tail = rel.rpartition("/")
-        check_rel_path(f"{head}/{tail[2:]}" if head else tail[2:])
-    require(len(listing) == len(set(listing)), "duplicate payload paths")
-    require(len(listing) <= MAX_FILES + 2, "payload has too many entries")
     with tempfile.TemporaryDirectory(prefix="kanade-pkgcheck-") as tmp:
         dest = pathlib.Path(tmp) / "x"
-        run("pkgutil", "--expand", pkg, dest)
+        inspect_xar(pkg, dest)
         comp = dest / COMPONENT_FILE
+        with gzip.open(comp / "Payload", "rb") as stream:
+            entries = payload_entries(stream, expected)
+        # All cpio entries are checked before either manual or native restoration.
+        manual = pathlib.Path(tmp) / "manual"
+        restore_payload(entries, manual)
+        validate_app(manual / APP_NAME, version, root=root)
+        require(tree_digest(manual / APP_NAME) == tree_digest(app), "parsed payload differs from input app")
         require(not (comp / "Scripts").exists() and not (dest / "Resources").exists(), "installer scripts/resources present")
         require(sorted(p.name for p in dest.iterdir()) == sorted(["Distribution", COMPONENT_FILE]), "expanded layout")
         require(sorted(p.name for p in comp.iterdir()) == ["Bom", "PackageInfo", "Payload"], "component layout")
