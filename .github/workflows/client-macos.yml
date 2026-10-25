@@ -16,6 +16,17 @@ jobs:
         run: sh scripts/build-client-macos.sh
       - name: Unix KLP, shared policy and private storage regressions
         run: cargo test --locked -p kanade-client --all-targets
+      - name: Package validator regressions (negative cases on a synthetic app)
+        run: python3 -I scripts/ci/test_client_macos_pkg.py
+      - name: Build and validate the unsigned payload-only .pkg
+        run: SKIP_APP_BUILD=1 sh scripts/build-client-macos-pkg.sh
+      - name: Upload test .pkg (short-lived, unsigned, not a release)
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: kanade-client-macos-test-pkg
+          path: target/client-macos-pkg
+          retention-days: 7
+          if-no-files-found: error
 
   windows-regression:
     runs-on: windows-latest
