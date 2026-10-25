@@ -41,6 +41,9 @@ def commands():
            "api::agent_releases::tests::agent_self_update_is_not_gated"]
     yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--",
            "deploy_handlers::tests::"]
+    # Stage 5a: isolated native CLI installer, including recovery and ACL checks.
+    yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--",
+           "native_install::"]
     yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--test", "app_manifest_cli",

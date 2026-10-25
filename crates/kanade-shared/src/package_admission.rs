@@ -438,6 +438,7 @@ mod tests {
             package_id: "com.kanade.cli".into(),
             manifest_sha256: ArtifactSha256::of(&bytes),
             adopt_existing_cli: false,
+            adoption_observation_sha256: None,
         };
         TypedOperation::DeployCli(spec.clone())
             .check_admission(&admitted)

@@ -129,8 +129,18 @@ impl NatsServer {
     /// case 3 in offline_boot).
     pub async fn start_on_port(port: u16) -> Result<Self> {
         let storage_dir = TempDir::new().context("create nats-server storage tempdir")?;
+        // The default JetStream limit is derived from free disk. CI's build
+        // artifacts can leave less than bootstrap's logical stream/store
+        // reservations, even though these tests write only small payloads.
+        // Match the explicit test-broker budget in nats_role_conformance;
+        // retain all production stream caps and bootstrap assertions.
+        let config_path = storage_dir.path().join("nats.conf");
+        std::fs::write(&config_path, "jetstream { max_file_store: 1TB }\n")
+            .context("write test nats-server config")?;
         let mut cmd = Command::new("nats-server");
-        cmd.arg("-js")
+        cmd.arg("-c")
+            .arg(&config_path)
+            .arg("-js")
             .arg("-p")
             .arg(port.to_string())
             .arg("-sd")

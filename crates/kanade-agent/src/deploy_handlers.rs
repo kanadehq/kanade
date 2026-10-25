@@ -16,6 +16,35 @@ fn implemented() -> &'static [DeployHandler] {
     &[]
 }
 
+/// Handlers whose installer code exists and is tested in this build, but
+/// that are **not** wired to any delivery path (SPEC §2.13 Task 5, stage 5a:
+/// the macOS arm64 admin CLI). This is distinct from [`implemented`]: the
+/// heartbeat reports only the latter, so no remote deploy capability is
+/// advertised until the signed-command / replay / approval / result path is
+/// integrated and a later change moves the entry across.
+#[allow(dead_code)]
+pub fn tested_but_not_dispatch_ready() -> Vec<DeployHandler> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        use kanade_shared::artifact::{TargetArch, TargetOs};
+        use kanade_shared::wire::{OPERATION_DEPLOY_CLI, TYPED_DEPLOY_CONTRACT_V1};
+        vec![DeployHandler::new(
+            TYPED_DEPLOY_CONTRACT_V1,
+            OPERATION_DEPLOY_CLI,
+            TargetOs::Macos,
+            TargetArch::Aarch64,
+        )]
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        Vec::new()
+    }
+}
+
+/// End-to-end deploy readiness. Always `false` in this build.
+#[allow(dead_code)]
+pub const END_TO_END_DEPLOY_READY: bool = false;
+
 /// The capability report for the heartbeat.
 pub fn capabilities() -> DeployCapabilities {
     DeployCapabilities::from_handlers(implemented())
@@ -34,5 +63,16 @@ mod tests {
         );
         let json = serde_json::to_value(&caps).unwrap();
         assert_eq!(json["handlers"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn tested_installer_support_is_not_advertised_or_dispatch_ready() {
+        const { assert!(!END_TO_END_DEPLOY_READY) };
+        for h in tested_but_not_dispatch_ready() {
+            assert!(!implemented().contains(&h));
+            assert!(!capabilities().handlers.contains(&h));
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(tested_but_not_dispatch_ready().len(), 1);
     }
 }

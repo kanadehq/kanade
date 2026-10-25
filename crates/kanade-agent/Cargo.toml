@@ -34,12 +34,18 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 sha2       = { workspace = true }
 tokio      = { workspace = true }
+thiserror  = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
 tracing    = { workspace = true }
 tracing-appender   = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid       = { workspace = true }
 sysinfo    = { workspace = true }
+# SPEC §2.13 Task 5 (stage 5a): bounded in-memory inspection of the macOS
+# admin CLI release `.tar.gz` (`native_install::archive`). Same versions as
+# the backend's package handling; nothing is extracted to disk by these crates.
+tar        = "0.4.46"
+flate2     = "1.1.9"
 # #219 collect: zip the script's listed files into a bundle before
 # uploading to OBJECT_COLLECTIONS. Minimal feature set (deflate only) —
 # no bzip2/zstd/aes — keeps the build lean.
