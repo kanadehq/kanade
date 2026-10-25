@@ -17,6 +17,7 @@ mod kill;
 mod live_tail;
 mod log_tail;
 mod logs;
+mod native_install;
 mod output_cap;
 mod ping;
 mod process;
