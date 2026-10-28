@@ -177,3 +177,25 @@ install/update/recovery and system receipt reconciliation, root:wheel/ACL and
 quarantine behavior, native process/launch inhibition, opt-out/Quit preservation,
 and separately verified eligible-user GUI/KLP behavior. No operator app,
 process, receipt database or deployment job was changed.
+
+## 追加した結果・境界試験
+
+`client_pkg::result::ResultRecord` は既存の `Report` / `Error` を構造化し、
+導入検証状態、バージョン、GUI 状態、`FailureClass` を個別に記録する。
+成功と no-op の双方で receipt/bundle の検証を示すが、GUI 起動や KLP 接続は
+示さない。中断や段階不明の I/O エラーは保守的に `recovery_required` と分類する。
+これはローカルの結果モデルであり、結果送信経路は追加していない。
+
+ネイティブの `ProcessView` は実行パスが一致する Client の PID・UID・開始時刻を
+読み取る。同名の別パスは Client と判定せず、実行パスや Client の識別情報が
+取得できない場合は defer する。空の観測結果も launch lease の代わりにはならず、
+既存の launch coordination 不足による全ネイティブ変更の defer は維持する。
+プロセス分類試験は決定的な観測データを使う。
+
+runner 試験は実際の `/bin/sleep`、`/usr/bin/yes`、`/usr/bin/env`、
+`/usr/bin/printf`、`/usr/bin/false` を使い、時間・出力上限、空環境、
+特殊文字を含む argv の保持、終了失敗と起動失敗を確認する。これは OS installer
+の試験ではなく、receipt データベースや `/Applications` を変更しない。
+既存 e2e の `native_install::client_pkg::` フィルタが追加試験も対象にする。
+実 pkg の新規導入・更新・復旧については、引き続き使い捨ての clean-Mac 環境での
+受け入れ確認が必要である。

@@ -84,7 +84,7 @@ pub struct Report {
     pub outcome: Outcome,
     pub version: String,
     /// Never means a GUI was launched, eligible, or connected to KLP.
-    pub gui_activation: &'static str,
+    pub gui_activation: super::result::GuiActivation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -865,6 +865,6 @@ fn report(outcome: Outcome, version: &str) -> Report {
     Report {
         outcome,
         version: version.into(),
-        gui_activation: "unsupported_not_attempted",
+        gui_activation: super::result::GuiActivation::UnsupportedNotAttempted,
     }
 }

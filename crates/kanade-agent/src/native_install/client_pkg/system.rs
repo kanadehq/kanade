@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use super::processes::{NativeProcessView, ProcessView};
 use super::structure::{self, BUNDLE, COMPONENT, require};
 use super::{Error, Result};
 
@@ -121,6 +122,7 @@ impl NativeSystem {
     }
 }
 
+#[derive(Debug)]
 struct Output {
     stdout: String,
     stderr: String,
@@ -130,6 +132,12 @@ struct Output {
 // direct child exits. On failure the installer worker lifetime remains unknown.
 fn run(program: &'static str, args: &[&std::ffi::OsStr], timeout: Duration) -> Result<Output> {
     require(cfg!(target_os = "macos"), "native pkg tools require macOS")?;
+    run_bounded(program, args, timeout)
+}
+
+// Kept separate from the macOS admission above so tests exercise the exact
+// runner with harmless Unix tools, without enabling native pkg execution.
+fn run_bounded(program: &str, args: &[&std::ffi::OsStr], timeout: Duration) -> Result<Output> {
     let mut child = Command::new(program)
         .args(args)
         .env_clear()
@@ -304,6 +312,14 @@ impl System for NativeSystem {
         }))
     }
     fn coordinate(&self) -> Result<Box<dyn LaunchLease + '_>> {
+        let processes = NativeProcessView {
+            client_exe: self
+                .target
+                .join("Applications")
+                .join(structure::APP)
+                .join("Contents/MacOS/kanade-client"),
+        };
+        processes.snapshot()?.require_inactive()?;
         Err(Error::Deferred("trustworthy Client launch inhibition/session coordination unavailable; GUI restart unsupported".into()))
     }
     fn install(&self, pkg: &Path) -> Result<InstallerExit> {
@@ -334,5 +350,49 @@ impl System for NativeSystem {
         Err(Error::RecoveryRequired(
             "OS installer transaction quiescence cannot be proven".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+
+    #[test]
+    fn real_runner_bounds_time_and_combined_output() {
+        let start = Instant::now();
+        let timeout = run_bounded("/bin/sleep", &["30".as_ref()], Duration::from_millis(100));
+        assert!(matches!(timeout, Err(Error::Deferred(ref s)) if s.contains("timeout")));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let start = Instant::now();
+        let output = run_bounded("/usr/bin/yes", &[], Duration::from_secs(10));
+        assert!(matches!(output, Err(Error::Deferred(ref s)) if s.contains("output limit")));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn real_runner_clears_environment_and_preserves_literal_argv() {
+        let env = run_bounded("/usr/bin/env", &[], Duration::from_secs(5)).unwrap();
+        assert!(env.success);
+        assert!(env.stdout.is_empty());
+        assert!(env.stderr.is_empty());
+        let literal = "a b;$(id)\n*.pkg";
+        let output = run_bounded(
+            "/usr/bin/printf",
+            &["%s".as_ref(), literal.as_ref()],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout, literal);
+        assert!(output.stderr.is_empty());
+        assert!(
+            !run_bounded("/usr/bin/false", &[], Duration::from_secs(5))
+                .unwrap()
+                .success
+        );
+        assert!(matches!(
+            run_bounded("/nonexistent/tool", &[], Duration::from_secs(1)),
+            Err(Error::Io(_))
+        ));
     }
 }

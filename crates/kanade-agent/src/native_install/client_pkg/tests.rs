@@ -621,8 +621,18 @@ fn install_update_and_verified_noop_never_activate_gui() {
     let q = f.pkg("0.98.0");
     let r = f.run(&p).unwrap();
     assert_eq!(r.outcome, Outcome::InstalledVerified);
-    assert_eq!(r.gui_activation, "unsupported_not_attempted");
-    assert_eq!(f.run(&p).unwrap().outcome, Outcome::NoOpVerified);
+    assert_eq!(
+        r.gui_activation,
+        super::result::GuiActivation::UnsupportedNotAttempted
+    );
+    let record = super::result::ResultRecord::from_result(&Ok(r));
+    assert!(record.installed_verified);
+    assert_eq!(record.version.as_deref(), Some("0.97.0"));
+    let noop = f.run(&p);
+    assert_eq!(noop.as_ref().unwrap().outcome, Outcome::NoOpVerified);
+    let record = super::result::ResultRecord::from_result(&noop);
+    assert!(record.installed_verified);
+    assert_eq!(record.status, super::result::ResultStatus::NoOpVerified);
     assert_eq!(f.sys.calls.get(), 1);
     assert_eq!(f.run(&q).unwrap().version, "0.98.0");
     assert_eq!(f.sys.calls.get(), 2);
