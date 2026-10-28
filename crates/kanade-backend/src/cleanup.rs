@@ -365,6 +365,25 @@ pub fn spawn(
                 Ok(_) => {} // 0 = pruning disabled
                 Err(e) => warn!(error = %e, "agents prune: read server_settings failed; skipping"),
             }
+
+            // Prune expired lost-device location readings past their retention window.
+            match effective_location_settings(&jetstream).await {
+                Ok(loc) => {
+                    let retention_days = loc.effective_retention_days();
+                    match crate::api::location::sweep_expired_locations(&pool, retention_days).await
+                    {
+                        Ok(n) if n > 0 => info!(
+                            cleared = n,
+                            "location cleanup: purged {n} expired location readings older than {retention_days}d",
+                        ),
+                        Ok(_) => {}
+                        Err(e) => warn!(error = %e, "location retention sweep failed"),
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "location retention: read server_settings failed; skipping")
+                }
+            }
         }
     })
 }
@@ -390,6 +409,27 @@ async fn effective_agent_prune_days(jetstream: &async_nats::jetstream::Context) 
         None => ServerSettings::default(),
     };
     Ok(settings.effective_agent_prune_days())
+}
+
+/// Read the effective location settings from `server_settings` KV.
+async fn effective_location_settings(
+    jetstream: &async_nats::jetstream::Context,
+) -> Result<kanade_shared::wire::LocationSettings> {
+    let kv = jetstream
+        .get_key_value(BUCKET_SERVER_SETTINGS)
+        .await
+        .context("open server_settings KV")?;
+    let settings = match kv
+        .get(KEY_SERVER_SETTINGS)
+        .await
+        .context("get server_settings")?
+    {
+        Some(bytes) => serde_json::from_slice::<ServerSettings>(&bytes)
+            .context("decode server_settings")?
+            .effective_location(),
+        None => kanade_shared::wire::LocationSettings::default(),
+    };
+    Ok(settings)
 }
 
 /// Delete `agents` rows whose `last_heartbeat` predates the cutoff —

@@ -30,7 +30,8 @@
     "config": "Config",
     "jetstream": "JetStream",
     "accounts": "Accounts",
-    "settings": "Settings"
+    "settings": "Settings",
+    "location": "Device location"
   },
   "menu": {
     "open": "Open menu",

@@ -588,6 +588,11 @@ pub struct ServerSettings {
     /// round-tripping through the SPA form can never blank a live code.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub support_codes: Vec<SupportCode>,
+
+    /// Settings governing lost-device location visibility and retention.
+    /// Explicit enablement required; default is disabled with 7-day retention.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<crate::wire::location::LocationSettings>,
 }
 
 impl ServerSettings {
@@ -621,6 +626,7 @@ impl ServerSettings {
             check_status_stale_days: Some(DEFAULT_CHECK_STATUS_STALE_DAYS),
             nats_auth_mode: None,
             nats_auth_mode_changed_at: None,
+            location: Some(crate::wire::location::LocationSettings::default()),
             // Real per-bucket defaults, so the SPA renders them as faint
             // placeholders and unset deployments are capped out of the box.
             object_store_caps: Some(ObjectStoreCaps {
@@ -695,6 +701,11 @@ impl ServerSettings {
             .as_deref()
             .map(str::trim)
             .filter(|g| !g.is_empty())
+    }
+
+    /// The effective location settings: stored values if set, else built-in defaults (disabled, 7 days).
+    pub fn effective_location(&self) -> crate::wire::location::LocationSettings {
+        self.location.clone().unwrap_or_default()
     }
 
     /// The effective dead-agent prune window in days: the stored value if
