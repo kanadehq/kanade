@@ -1,0 +1,10 @@
+# Minimal smoke-test manifest referenced by the Quickstart in the
+# root README. Kept in-repo (unlike the operational examples, which
+# moved to https://github.com/kanadehq/kanade-manifests) because a
+# fresh clone needs one working `kanade exec` target with zero setup.
+id: echo-test
+version: 0.0.1
+execute:
+  shell: powershell
+  script: "echo 'kanade'"
+  timeout: 30s
