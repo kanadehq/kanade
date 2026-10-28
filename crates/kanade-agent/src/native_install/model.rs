@@ -208,6 +208,9 @@ impl Approval {
     pub fn plan_id(&self) -> &str {
         &self.plan_id
     }
+    pub fn target(&self) -> &str {
+        &self.target
+    }
     pub fn plan_digest(&self) -> &ArtifactSha256 {
         &self.plan_digest
     }

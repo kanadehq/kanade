@@ -43,7 +43,14 @@ def commands():
            "deploy_handlers::tests::"]
     # Stage 5a: isolated native CLI installer, including recovery and ACL checks.
     yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--",
-           "native_install::"]
+           "native_install::tests::", "native_install::fs::",
+           "native_install::archive::", "native_install::macho::",
+           "native_install::probe::", "native_install::model::"]
+    # Stage 5b must pass its own nonempty harness: pkg transactions, native
+    # read-only validators, current approval/trust and conservative recovery.
+    if os.name == "posix":
+        yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--",
+               "native_install::client_pkg::"]
     yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--test", "app_manifest_cli",

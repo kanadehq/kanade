@@ -1,0 +1,21 @@
+.	40755	root	wheel
+./._Kanade Client.app	40755	root	wheel
+./Kanade Client.app	40755	root	wheel
+./Kanade Client.app/._Contents	40755	root	wheel
+./Kanade Client.app/Contents	40755	root	wheel
+./Kanade Client.app/Contents/._Info.plist	100644	root	wheel
+./Kanade Client.app/Contents/._MacOS	40755	root	wheel
+./Kanade Client.app/Contents/._Resources	40755	root	wheel
+./Kanade Client.app/Contents/.__CodeSignature	40755	root	wheel
+./Kanade Client.app/Contents/Info.plist	100644	root	wheel
+./Kanade Client.app/Contents/MacOS	40755	root	wheel
+./Kanade Client.app/Contents/MacOS/._kanade-client	100755	root	wheel
+./Kanade Client.app/Contents/MacOS/kanade-client	100755	root	wheel
+./Kanade Client.app/Contents/Resources	40755	root	wheel
+./Kanade Client.app/Contents/Resources/._THIRD-PARTY-NOTICES.md	100644	root	wheel
+./Kanade Client.app/Contents/Resources/._icon.icns	100644	root	wheel
+./Kanade Client.app/Contents/Resources/THIRD-PARTY-NOTICES.md	100644	root	wheel
+./Kanade Client.app/Contents/Resources/icon.icns	100644	root	wheel
+./Kanade Client.app/Contents/_CodeSignature	40755	root	wheel
+./Kanade Client.app/Contents/_CodeSignature/._CodeResources	100644	root	wheel
+./Kanade Client.app/Contents/_CodeSignature/CodeResources	100644	root	wheel

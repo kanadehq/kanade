@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Kanade Client</title>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <allowed-os-versions>
+        <os-version min="14.0"/>
+    </allowed-os-versions>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <product id="com.yukimemi.kanade-client.product" version="0.97.0"/>
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+    <choice id="default" title="Kanade Client">
+        <pkg-ref id="com.yukimemi.kanade-client.pkg"/>
+    </choice>
+    <pkg-ref id="com.yukimemi.kanade-client.pkg" version="0.97.0" installKBytes="25" updateKBytes="0">#kanade-client-component.pkg</pkg-ref>
+    <pkg-ref id="com.yukimemi.kanade-client.pkg">
+        <bundle-version>
+            <bundle CFBundleShortVersionString="0.97.0" CFBundleVersion="0.97.0" id="com.yukimemi.kanade-client" path="Kanade Client.app"/>
+        </bundle-version>
+    </pkg-ref>
+</installer-gui-script>
