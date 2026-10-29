@@ -8587,12 +8587,13 @@ impl std::fmt::Display for ScheduleTz {
 #[serde(untagged)]
 pub enum PerPolicy {
     /// The bare string `once`: succeed once, then skip permanently
-    /// (cooldown = infinity), version-blind.
+    /// (cooldown = infinity), version-blind. Backend per-PC successes are
+    /// durable across execution-history cleanup (manual exec included).
     Once(OnceLiteral),
     /// The bare string `once_per_version`: succeed once *per manifest
-    /// version*, then skip until the job's YAML `version` changes. Like
-    /// `once` but re-arms each pc when the version it succeeded at is no
-    /// longer current — the version-aware redistribution shape. per_pc
+    /// version*. Backend successes survive execution-history cleanup;
+    /// manual exec counts, and returning to a previously successful version
+    /// stays suppressed. A version with no success re-arms the PC. per_pc
     /// only (`Schedule::validate` rejects it on `per_target`).
     OncePerVersion(OncePerVersionLiteral),
     /// Re-arm after the humantime interval, e.g. `{ every: 6h }`.
@@ -9336,10 +9337,9 @@ impl Schedule {
         match &self.when {
             When::PerPc(p) => Lowered {
                 cron: POLL_CRON.into(),
-                // `once_per_version` re-arms each pc when the manifest
-                // version changes; the scheduler keys that dedup on
-                // `execution_results.version`. Plain `once` / `every`
-                // stay version-blind.
+                // `once_per_version` fires only versions without a recorded
+                // success in the backend's durable per-version ledger.
+                // Plain `once` / `every` stay version-blind.
                 mode: match p {
                     PerPolicy::OncePerVersion(_) => ExecMode::OncePerPcVersion,
                     PerPolicy::Once(_) | PerPolicy::Every(_) => ExecMode::OncePerPc,
@@ -9475,7 +9475,7 @@ impl Schedule {
             );
         }
         // `once_per_version` keys its dedup on the backend's
-        // `execution_results.version` history. A runs_on: agent schedule
+        // durable per-version completion ledger. A runs_on: agent schedule
         // self-schedules from the agent's local completion map, which has
         // no per-version record, so it is backend-only (symmetric with
         // per_target). Reject it rather than silently degrade to

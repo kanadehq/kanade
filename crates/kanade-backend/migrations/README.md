@@ -28,6 +28,25 @@ which plans were approved. A wipe therefore drops every plan and approval;
 re-register and re-approve. The `deploy_*` capability-evidence columns on
 `agents` are projection and refill from the next heartbeat.
 
+## Permanent scheduler completions (#1660)
+
+`job_completions` (job/PC) and `job_version_completions` (job/PC/version)
+are durable state, exempt from execution-history retention. INSERT/UPDATE
+triggers atomically retain the latest finished exit-0 success, including
+manual exec, late results and later version enrichment. All successful
+versions remain recorded, including versions no longer current. Unknown
+versions contribute only to the version-blind ledger. Cooldown-free
+`once_per_target` also uses that ledger, including successes by offline members
+of the target roster.
+
+The migration backfills retained successful results; already-deleted history
+cannot be reconstructed, so those PCs may execute again after upgrade.
+`wipe-projector` snapshots/restores both ledgers (or salvages retained
+history from a pre-ledger DB). Stream replay alone is insufficient to restore
+permanent semantics. Back up these tables with the durable account data;
+manually deleting the database loses them. Cooldown schedules still use
+retained execution history.
+
 ## Baseline
 
 `20260604000000_baseline.sql` is a **squashed baseline** that folds the
@@ -41,14 +60,12 @@ many small `ALTER`s — the data re-projects from JetStream.
 
 > **Upgrade note:** an existing `backend.db` whose `_sqlx_migrations`
 > table still records `0001..0011` will fail sqlx's missing-migration
-> check against this squashed set. Delete the SQLite file and let the
-> backend recreate it (`deploy-backend.ps1 -WipeDb` does this and only
+> check against this squashed set. Run `kanade-backend wipe-projector`
+> to preserve durable tables while rebuilding the schema
+> (`deploy-backend.ps1 -WipeDb` delegates to this command and only
 > touches the configured projector DB, never the agent's `state.db`).
 >
 > The wipe re-projects from JetStream, but is **not fully lossless**:
-> `users`/accounts are not a projection (only the bootstrap admin
-> re-seeds — recreate other accounts by hand), and re-projection only
-> covers each stream's `max_age` window (history older than retention is
-> gone, and `once_per_pc` completions older than retention look un-done,
-> so those schedules can re-fire — idempotent kitting makes this OK at
-> PoC).
+> accounts and permanent scheduler completions are not rebuildable from
+> streams. Use `wipe-projector` to preserve them; raw DB deletion loses
+> them. Re-projection only covers each stream's `max_age` window.

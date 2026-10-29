@@ -60,8 +60,9 @@
   backend.toml's `[db] sqlite_path` (default backend.db) plus its
   -wal/-shm sidecars — so the backend re-derives it from JetStream on
   next start. Delegates to `kanade-backend wipe-projector`, which
-  preserves the durable `users` table across the wipe (snapshot → delete
-  → migrate → restore). Targets that one DB explicitly, NOT a `data\*.db`
+  preserves accounts, permission groups, passkeys and permanent job
+  completions (snapshot → delete → migrate → restore). Targets that one
+  DB explicitly, NOT a `data\*.db`
   glob: the agent's `state.db` shares this data dir on combined installs
   and must not be clobbered by a backend deploy.
 
@@ -77,15 +78,14 @@
   each stream from the beginning (#389; backends older than that fix
   resume from the old consumer position and re-derive nothing). The
   wipe is still NOT fully lossless:
-    * `users` / accounts ARE preserved across the wipe (no re-seed
-      needed). The only durable table NOT kept is `executions` (run
-      history): its counters are bumped incrementally by the results
-      projector, so preserving it across a replay would double-count.
-    * Re-projection is bounded by each stream's `max_age` (7-90 d):
-      execution history older than retention is gone, and `once_per_pc`
-      completions older than retention look un-done, so those schedules
-      can re-fire (the kitting jobs are idempotent, so this is fine at
-      PoC).
+    * Accounts, permission groups, passkeys and permanent job completions
+      ARE preserved. `executions` run counters are not retained, because
+      the results projector increments them and replay would double-count.
+      Deployment plans and approvals must be re-registered and re-approved.
+    * Re-projection is bounded by each stream's `max_age` (7-90 d).
+      Permanent per-PC completion ledgers survive independently. On an
+      upgrade from a pre-ledger DB, only retained successful history can
+      be salvaged; already-deleted successes cannot be reconstructed.
 
 .PARAMETER NatsToken
   If set, write the NATS bearer token to
@@ -720,9 +720,9 @@ foreach ($d in @($binDir, $configDir, $dataDir, $logsDir)) {
 }
 
 # -WipeDb: drop the backend's projector SQLite DB so it re-derives from
-# JetStream replay on next start, WHILE preserving the durable `users`
-# table (auth accounts live only in SQLite — no NATS stream carries them,
-# so a blind delete locks every operator out until a bootstrap re-seed).
+# JetStream replay on next start, preserving accounts, permission groups,
+# passkeys and permanent job completions. Raw deletion loses durable data
+# that replay cannot reconstruct.
 # The service is already stopped above (file unlocked) and dirs are ensured.
 #
 # This delegates to `kanade-backend wipe-projector --config <toml>` rather
@@ -749,7 +749,7 @@ if ($WipeDb) {
     # taken when it exists, so $configForWipe always points to a real file.
     $configForWipe = if ($ForceConfig -or -not (Test-Path $configDst)) { $configSrc } else { $configDst }
 
-    Write-Host "WipeDb: wiping projector DB (preserving users) via '$exeName wipe-projector'"
+    Write-Host "WipeDb: wiping projector DB (preserving accounts and permanent job completions) via '$exeName wipe-projector'"
     # NOTE: no 2>&1 here. Under $ErrorActionPreference='Stop', merging native
     # stderr into the success stream wraps each line in an ErrorRecord that can
     # terminate the script before we inspect $LASTEXITCODE. Let the subcommand's
