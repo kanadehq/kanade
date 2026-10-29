@@ -35,7 +35,9 @@ are durable state, exempt from execution-history retention. INSERT/UPDATE
 triggers atomically retain the latest finished exit-0 success, including
 manual exec, late results and later version enrichment. All successful
 versions remain recorded, including versions no longer current. Unknown
-versions contribute only to the version-blind ledger.
+versions contribute only to the version-blind ledger. Cooldown-free
+`once_per_target` also uses that ledger, including successes by offline members
+of the target roster.
 
 The migration backfills retained successful results; already-deleted history
 cannot be reconstructed, so those PCs may execute again after upgrade.

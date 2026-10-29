@@ -620,7 +620,8 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
         }
     };
     // Cooldown schedules retain their history-bounded behavior. Permanent
-    // per-PC modes use the durable ledger, independent of the 90-day sweep.
+    // once modes (per-PC and whole-target) use the durable ledger, independent
+    // of the 90-day sweep.
     let completion_cutoff = cooldown.map(|cd| now - cd);
     // `once_per_version` (OncePerPcVersion) scopes the "already
     // succeeded" set to the CURRENT manifest version, so a pc that only
@@ -636,7 +637,7 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
     let lookup = if cooldown.is_none()
         && matches!(
             lowered.mode,
-            ExecMode::OncePerPc | ExecMode::OncePerPcVersion
+            ExecMode::OncePerPc | ExecMode::OncePerPcVersion | ExecMode::OncePerTarget
         ) {
         permanent_completions(&state.pool, &job_id, version_filter).await
     } else {
@@ -1190,8 +1191,8 @@ async fn permanent_completions(
 /// (keeps `MAX(finished_at)` so the policy doesn't see stale
 /// duplicates).
 ///
-/// Cooldown and per-target modes keep the existing history-based lookup.
-/// Permanent per-PC modes use `permanent_completions` instead.
+/// Cooldown schedules keep the existing history-based lookup.
+/// Permanent once modes use `permanent_completions` instead.
 async fn recent_completions(
     pool: &sqlx::SqlitePool,
     job_id: &str,
@@ -1570,6 +1571,18 @@ mod tests {
         assert_eq!(
             decide_fire(ExecMode::OncePerPc, None, &expected, &[], &once, now),
             FireAction::FirePcs(vec!["failed".into()])
+        );
+        // A whole target remains done after cleanup while its successful PC is offline.
+        assert_eq!(
+            decide_fire(
+                ExecMode::OncePerTarget,
+                None,
+                &["failed".into()],
+                &expected,
+                &once,
+                now,
+            ),
+            FireAction::Skip
         );
         let v1 = permanent_completions(&pool, "install-kanade-client", Some("v1"))
             .await

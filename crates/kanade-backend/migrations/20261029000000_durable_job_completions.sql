@@ -47,7 +47,7 @@ END;
 -- UPDATE also captures started -> success, late results after reaping, and
 -- metadata enrichment. Replays cannot move the last success backwards.
 CREATE TRIGGER execution_results_completion_update
-AFTER UPDATE ON execution_results
+AFTER UPDATE OF exit_code, finished_at, job_id, pc_id, version ON execution_results
 WHEN NEW.job_id IS NOT NULL AND NEW.exit_code = 0 AND NEW.finished_at IS NOT NULL
 BEGIN
     INSERT INTO job_completions (job_id, pc_id, last_success_at)

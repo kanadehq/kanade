@@ -957,7 +957,7 @@ async fn snapshot_job_completions(pool: &sqlx::SqlitePool) -> Result<Vec<JobComp
     .fetch_one(pool)
     .await?;
     if exists {
-        return Ok(sqlx::query_as("SELECT job_id, pc_id, NULL AS version, last_success_at FROM job_completions UNION ALL SELECT job_id, pc_id, version, last_success_at FROM job_version_completions")
+        return Ok(sqlx::query_as("SELECT job_id, pc_id, CAST(NULL AS TEXT) AS version, CAST(last_success_at AS TEXT) AS last_success_at FROM job_completions UNION ALL SELECT job_id, pc_id, version, CAST(last_success_at AS TEXT) AS last_success_at FROM job_version_completions")
             .fetch_all(pool).await?);
     }
     let history: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_results')")
@@ -965,20 +965,21 @@ async fn snapshot_job_completions(pool: &sqlx::SqlitePool) -> Result<Vec<JobComp
     if !history {
         return Ok(Vec::new());
     }
-    Ok(sqlx::query_as("SELECT job_id, pc_id, NULL AS version, MAX(finished_at) AS last_success_at FROM execution_results WHERE job_id IS NOT NULL AND exit_code = 0 AND finished_at IS NOT NULL GROUP BY job_id, pc_id UNION ALL SELECT job_id, pc_id, version, MAX(finished_at) AS last_success_at FROM execution_results WHERE job_id IS NOT NULL AND version IS NOT NULL AND exit_code = 0 AND finished_at IS NOT NULL GROUP BY job_id, pc_id, version")
+    Ok(sqlx::query_as("SELECT job_id, pc_id, NULL AS version, CAST(MAX(finished_at) AS TEXT) AS last_success_at FROM execution_results WHERE job_id IS NOT NULL AND exit_code = 0 AND finished_at IS NOT NULL GROUP BY job_id, pc_id UNION ALL SELECT job_id, pc_id, version, CAST(MAX(finished_at) AS TEXT) AS last_success_at FROM execution_results WHERE job_id IS NOT NULL AND version IS NOT NULL AND exit_code = 0 AND finished_at IS NOT NULL GROUP BY job_id, pc_id, version")
         .fetch_all(pool).await?)
 }
 
+/// Merge snapshots with backfilled or restored rows without regressing success times.
 async fn restore_job_completions(pool: &sqlx::SqlitePool, rows: &[JobCompletionRow]) -> Result<()> {
     let mut tx = pool.begin().await?;
     for row in rows {
         if let Some(version) = &row.version {
-            sqlx::query("INSERT INTO job_version_completions (job_id, pc_id, version, last_success_at) VALUES (?, ?, ?, ?)")
+            sqlx::query("INSERT INTO job_version_completions (job_id, pc_id, version, last_success_at) VALUES (?, ?, ?, ?) ON CONFLICT (job_id, version, pc_id) DO UPDATE SET last_success_at = MAX(last_success_at, excluded.last_success_at)")
                 .bind(&row.job_id).bind(&row.pc_id).bind(version).bind(&row.last_success_at)
                 .execute(&mut *tx).await?;
         } else {
             sqlx::query(
-                "INSERT INTO job_completions (job_id, pc_id, last_success_at) VALUES (?, ?, ?)",
+                "INSERT INTO job_completions (job_id, pc_id, last_success_at) VALUES (?, ?, ?) ON CONFLICT (job_id, pc_id) DO UPDATE SET last_success_at = MAX(last_success_at, excluded.last_success_at)",
             )
             .bind(&row.job_id)
             .bind(&row.pc_id)
@@ -2051,6 +2052,38 @@ mod tests {
         let after = snapshot_job_completions(&pool).await.unwrap();
         assert_eq!(after.len(), 3);
         for row in before {
+            assert!(after.iter().any(|r| r.job_id == row.job_id
+                && r.pc_id == row.pc_id
+                && r.version == row.version
+                && r.last_success_at == row.last_success_at));
+        }
+        pool.close().await;
+        remove_db_files(&db_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn completion_snapshots_cast_timestamps_and_merge_duplicate_rows() {
+        let db_path = temp_db_path("completion-merge");
+        let pool = open(&db_path).await;
+        // Result triggers populate both ledgers, as retained-history backfill does.
+        sqlx::raw_sql("INSERT INTO execution_results (result_id, request_id, pc_id, job_id, version, exit_code, started_at, finished_at) VALUES ('r', 'r', 'pc', 'job', 'v1', 0, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        let latest = snapshot_job_completions(&pool).await.unwrap();
+        assert_eq!(latest.len(), 2);
+        // SQLite's TIMESTAMP affinity also accepts numeric values. Snapshot
+        // decoding must return text for those values as well as ISO timestamps.
+        sqlx::raw_sql("UPDATE job_completions SET last_success_at=1234; UPDATE job_version_completions SET last_success_at=1234;")
+            .execute(&pool).await.unwrap();
+        let older = snapshot_job_completions(&pool).await.unwrap();
+        assert_eq!(older.len(), 2);
+        assert!(older.iter().all(|row| row.last_success_at == "1234"));
+        restore_job_completions(&pool, &latest).await.unwrap();
+        // Repeated snapshots and a stale restore may overlap backfilled rows.
+        restore_job_completions(&pool, &latest).await.unwrap();
+        restore_job_completions(&pool, &older).await.unwrap();
+        let after = snapshot_job_completions(&pool).await.unwrap();
+        assert_eq!(after.len(), latest.len());
+        for row in latest {
             assert!(after.iter().any(|r| r.job_id == row.job_id
                 && r.pc_id == row.pc_id
                 && r.version == row.version

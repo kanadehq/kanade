@@ -667,7 +667,9 @@ enabled: true
 backend の `per_pc: once` / `once_per_version` は、実行履歴の90日保持とは独立した
 `job_completions` / `job_version_completions` に成功を記録する。同じ job_id / pc_id
 の手動 exec 成功も対象で、版別では成功済みの旧版に戻しても再実行しない。
-版不明の成功は `once` のみを抑止し、現在版から推測しない。失敗は再試行を妨げない。
+版不明の成功は版別の抑止には使わず、現在版から推測しない。失敗は再試行を妨げない。
+cooldown のない `once_per_target` も `job_completions` を参照し、成功した PC が
+対象に残ってオフラインになった場合も、履歴削除によって対象全体を再実行しない。
 `every` の cooldown 判定は従来どおり保持中の実行履歴を使う。
 導入時は残存する成功履歴を補完するが、既に削除された成功履歴は復元できず、
 その PC は再実行される場合がある。`wipe-projector` は成功台帳を退避・復元する。
