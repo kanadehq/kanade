@@ -1694,7 +1694,30 @@ async fn allowed_flows(pc_id: Option<&str>) {
             .await
             .unwrap_or_else(|e| panic!("store {o}: {e}"));
     }
-    // Buckets bootstrap does not create: first use creates them.
+    // The scheduler provisions this bucket in a background task, so HTTP
+    // readiness does not mean it exists yet. Wait only for stream-not-found;
+    // authorization and other errors must still fail immediately.
+    wait_until(
+        Waiter::new(
+            &BACKEND_READY,
+            "scheduler_dispatch bucket exists",
+            f.watch(),
+        ),
+        || async {
+            match backend.js.get_stream("KV_scheduler_dispatch").await {
+                Ok(_) => Ok(()),
+                Err(e) => match e.kind() {
+                    jetstream::context::GetStreamErrorKind::JetStream(ref err)
+                        if err.error_code() == jetstream::ErrorCode::STREAM_NOT_FOUND =>
+                    {
+                        Err(e.to_string())
+                    }
+                    _ => panic!("scheduler_dispatch readiness: {e:?}"),
+                },
+            }
+        },
+    )
+    .await;
     backend
         .js
         .get_key_value("scheduler_dispatch")
