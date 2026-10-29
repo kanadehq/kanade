@@ -196,16 +196,12 @@ enum Command {
         /// where `check_on_boot` looks for the rollback target.
         installed_exe: PathBuf,
     },
-    /// Drop the projector SQLite DB so it re-derives from JetStream
-    /// replay on next boot, WITHOUT losing the durable `users` table.
-    /// `deploy-backend.ps1 -WipeDb` calls this instead of `rm
-    /// backend.db`: auth accounts live ONLY in SQLite (no NATS stream
-    /// carries them), so a plain file delete locks every operator out
-    /// until a bootstrap re-seed. This snapshots `users`, deletes the
-    /// DB (+ `-wal`/`-shm`), re-creates the schema via migrations, then
-    /// restores the accounts. Resolves the DB path the same way the
-    /// service does (the global `--config`), so it targets the exact
-    /// file the backend opens.
+    /// Rebuild the projector SQLite DB from JetStream replay on next boot,
+    /// preserving accounts, permission groups, passkeys and permanent job
+    /// completions. Snapshots durable rows, deletes the DB (+ sidecars),
+    /// migrates and restores. Resolves the DB using the service's --config.
+    /// `deploy-backend.ps1 -WipeDb` delegates here; raw DB deletion loses
+    /// durable data that stream replay cannot reconstruct.
     WipeProjector,
     /// #1165: mint this backend's command-signing keypair.
     ///
@@ -386,11 +382,20 @@ struct PasskeyRow {
     last_used_at: Option<String>,
 }
 
+#[derive(sqlx::FromRow)]
+struct JobCompletionRow {
+    job_id: String,
+    pc_id: String,
+    version: Option<String>,
+    last_success_at: String,
+}
+
 #[derive(Default)]
 struct DurableSnapshot {
     users: Vec<UserRow>,
     groups: Vec<PermGroupRow>,
     passkeys: Vec<PasskeyRow>,
+    completions: Vec<JobCompletionRow>,
 }
 
 /// Decide the `kid` for a generate run, and refuse the two ways it can wreck
@@ -746,25 +751,15 @@ fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `wipe-projector` subcommand: drop the projector DB so it re-derives
-/// from JetStream replay, preserving the durable `users` table.
+/// `wipe-projector` rebuilds projections from JetStream while preserving
+/// accounts, permission groups, passkeys and permanent job completions.
+/// Completion ledgers outlive both execution-history and stream retention;
+/// replay alone cannot recover them. Pre-ledger databases salvage whatever
+/// successful history remains, without guessing unknown manifest versions.
 ///
-/// Why a dedicated subcommand instead of `rm backend.db` in the deploy
-/// script: of all the projector DB's tables, only `users` and
-/// `executions` are NOT sourced from a NATS stream — everything else
-/// (audit_log, notification_acks, execution_results, agents, perf
-/// samples, obs_events, inventory_*, check_status, the explode tables)
-/// re-projects on replay. A blind file delete therefore takes the auth
-/// accounts with it and locks every operator out until a bootstrap
-/// re-seed (the lockout that motivated this).
-///
-/// `executions` is the OTHER durable table but is deliberately NOT
-/// preserved: the results projector bumps its `success_count` /
-/// `failure_count` *incrementally* (an `UPDATE ... SET success_count =
-/// success_count + delta`), so keeping a row across a wipe+replay would
-/// double-count, and faithfully rebuilding it would mean reconstructing
-/// the exec-lifecycle reaping state too. Losing run history is
-/// acceptable collateral; an auth lockout is not.
+/// `executions` is deliberately NOT preserved: the results projector bumps
+/// counters incrementally, so retaining it across replay would double-count.
+/// Deploy approvals are also dropped and must be re-approved (SPEC §2.13).
 fn wipe_projector(config: Option<&Path>) -> Result<()> {
     let cfg_path = default_paths::find_config(config, "KANADE_BACKEND_CONFIG", "backend.toml")?;
     let cfg =
@@ -780,13 +775,13 @@ fn wipe_projector(config: Option<&Path>) -> Result<()> {
         .context("build current-thread runtime")?;
     let (users, groups) = runtime.block_on(wipe_projector_at(&db_path))?;
     eprintln!(
-        "wipe-projector: wiped projector DB at {db_path}; preserved {users} user account(s) and {groups} permission group(s)"
+        "wipe-projector: wiped projector DB at {db_path}; preserved {users} user account(s), {groups} permission group(s), passkeys and permanent job completions"
     );
     Ok(())
 }
 
 /// Core of `wipe-projector`, split out so it can be unit-tested against a
-/// throwaway DB path: snapshot durable tables (`users`, `permission_groups`, `user_passkeys`)
+/// throwaway DB path: snapshot durable tables (accounts, permission groups, passkeys, job completions)
 /// → delete the DB + sidecars → re-create the schema via migrations → restore
 /// them. Returns `(accounts, groups)` restored.
 async fn wipe_projector_at(db_path: &str) -> Result<(usize, usize)> {
@@ -794,6 +789,7 @@ async fn wipe_projector_at(db_path: &str) -> Result<(usize, usize)> {
         users,
         groups,
         passkeys,
+        completions,
     } = snapshot_durable(db_path)
         .await
         .context("snapshot durable tables")?;
@@ -823,13 +819,16 @@ async fn wipe_projector_at(db_path: &str) -> Result<(usize, usize)> {
     restore_passkeys(&pool, &passkeys)
         .await
         .context("restore passkeys")?;
+    restore_job_completions(&pool, &completions)
+        .await
+        .context("restore permanent job completions")?;
     pool.close().await;
     Ok((users_restored, groups_restored))
 }
 
 /// Read every durable (SQLite-only, not projector-derived) row worth
 /// preserving across a wipe: `users` **and** `permission_groups` (#1008
-/// Phase 3), and passkeys, from a single read-only open of the DB. Tolerates a missing DB
+/// Phase 3), passkeys and permanent job completions, from a single read-only open of the DB. Tolerates a missing DB
 /// file (fresh box) and missing tables (older / partially-migrated DB) by
 /// returning an empty snapshot — both mean "nothing to preserve", not an error.
 async fn snapshot_durable(db_path: &str) -> Result<DurableSnapshot> {
@@ -862,6 +861,9 @@ async fn snapshot_durable(db_path: &str) -> Result<DurableSnapshot> {
             )
         })?;
 
+    let completions = snapshot_job_completions(&pool)
+        .await
+        .context("snapshot permanent job completions")?;
     let has_users: Option<String> =
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
             .fetch_optional(&pool)
@@ -869,7 +871,10 @@ async fn snapshot_durable(db_path: &str) -> Result<DurableSnapshot> {
             .context("probe for users table")?;
     if has_users.is_none() {
         pool.close().await;
-        return Ok(DurableSnapshot::default());
+        return Ok(DurableSnapshot {
+            completions,
+            ..Default::default()
+        });
     }
 
     // The `email` (#770) and `allowed_features` (#1008) columns may be
@@ -939,7 +944,51 @@ async fn snapshot_durable(db_path: &str) -> Result<DurableSnapshot> {
         users,
         groups,
         passkeys,
+        completions,
     })
+}
+
+/// Preserve permanent successes even when history and stream replay have expired.
+/// On a pre-ledger DB, salvage retained history before deleting the source.
+async fn snapshot_job_completions(pool: &sqlx::SqlitePool) -> Result<Vec<JobCompletionRow>> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_completions')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if exists {
+        return Ok(sqlx::query_as("SELECT job_id, pc_id, NULL AS version, last_success_at FROM job_completions UNION ALL SELECT job_id, pc_id, version, last_success_at FROM job_version_completions")
+            .fetch_all(pool).await?);
+    }
+    let history: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_results')")
+        .fetch_one(pool).await?;
+    if !history {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as("SELECT job_id, pc_id, NULL AS version, MAX(finished_at) AS last_success_at FROM execution_results WHERE job_id IS NOT NULL AND exit_code = 0 AND finished_at IS NOT NULL GROUP BY job_id, pc_id UNION ALL SELECT job_id, pc_id, version, MAX(finished_at) AS last_success_at FROM execution_results WHERE job_id IS NOT NULL AND version IS NOT NULL AND exit_code = 0 AND finished_at IS NOT NULL GROUP BY job_id, pc_id, version")
+        .fetch_all(pool).await?)
+}
+
+async fn restore_job_completions(pool: &sqlx::SqlitePool, rows: &[JobCompletionRow]) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    for row in rows {
+        if let Some(version) = &row.version {
+            sqlx::query("INSERT INTO job_version_completions (job_id, pc_id, version, last_success_at) VALUES (?, ?, ?, ?)")
+                .bind(&row.job_id).bind(&row.pc_id).bind(version).bind(&row.last_success_at)
+                .execute(&mut *tx).await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO job_completions (job_id, pc_id, last_success_at) VALUES (?, ?, ?)",
+            )
+            .bind(&row.job_id)
+            .bind(&row.pc_id)
+            .bind(&row.last_success_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Older databases have no passkey table. Any other read error aborts the
@@ -1983,6 +2032,50 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn wipe_preserves_permanent_completions_after_history_cleanup() {
+        let db_path = temp_db_path("completions");
+        let pool = open(&db_path).await;
+        sqlx::raw_sql("INSERT INTO execution_results (result_id, request_id, pc_id, job_id, version, exit_code, started_at, finished_at, recorded_at) VALUES ('r1', 'r1', 'pc', 'job', 'v1', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('r2', 'r2', 'pc', 'job', 'v2', 0, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        cleanup::prune_execution_results(&pool, chrono::Utc::now() - chrono::Duration::days(90))
+            .await
+            .unwrap();
+        let before = snapshot_job_completions(&pool).await.unwrap();
+        assert_eq!(before.len(), 3);
+        pool.close().await;
+        wipe_projector_at(&db_path).await.unwrap();
+        let pool = open(&db_path).await;
+        let after = snapshot_job_completions(&pool).await.unwrap();
+        assert_eq!(after.len(), 3);
+        for row in before {
+            assert!(after.iter().any(|r| r.job_id == row.job_id
+                && r.pc_id == row.pc_id
+                && r.version == row.version
+                && r.last_success_at == row.last_success_at));
+        }
+        pool.close().await;
+        remove_db_files(&db_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wipe_salvages_pre_ledger_history() {
+        let db_path = temp_db_path("pre-ledger");
+        let pool = open(&db_path).await;
+        // Simulate the schema immediately before the new ledger migration.
+        sqlx::raw_sql("DROP TRIGGER execution_results_completion_insert; DROP TRIGGER execution_results_completion_update; DROP TABLE job_completions; DROP TABLE job_version_completions; DELETE FROM _sqlx_migrations WHERE version=20261029000000; INSERT INTO execution_results (result_id, request_id, pc_id, job_id, exit_code, started_at, finished_at) VALUES ('r', 'r', 'pc', 'job', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+        wipe_projector_at(&db_path).await.unwrap();
+        let pool = open(&db_path).await;
+        let rows = snapshot_job_completions(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].job_id, "job");
+        assert_eq!(rows[0].version, None);
+        pool.close().await;
+        remove_db_files(&db_path).unwrap();
     }
 
     #[tokio::test]

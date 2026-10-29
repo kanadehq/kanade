@@ -136,6 +136,7 @@ const OBS_EVENTS_RETENTION_DAYS: i64 = 90;
 /// can replay (a retention-emptied table therefore implies an empty
 /// stream, keeping consumer_reset's empty-table heuristic benign —
 /// see #529).
+// Permanent per-PC successes live in job[_version]_completions and are never swept.
 const RESULTS_RETENTION_DAYS: i64 = 90;
 
 /// #486: `executions` retention, matched to
@@ -422,7 +423,10 @@ async fn prune_stale_agents(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<
 /// old is this history", and indexed by
 /// `idx_execution_results_recorded_at` (added alongside this sweep)
 /// so the no-op common case is an index probe, not a table scan.
-async fn prune_execution_results(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
+pub(crate) async fn prune_execution_results(
+    pool: &SqlitePool,
+    cutoff: DateTime<Utc>,
+) -> Result<u64> {
     // ORDER BY makes the capped batch deterministic (oldest first)
     // and is free: it matches the index's natural scan order.
     prune_batched(

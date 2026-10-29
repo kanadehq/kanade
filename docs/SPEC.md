@@ -653,7 +653,7 @@ enabled: true
 # job の YAML `version` を上げると、旧版でしか成功していない PC が再び
 # 対象になる（= 版バンプが再配布トリガ）。`once` が版を無視して初回成功で
 # 永久スキップするのに対し、`once_per_version` は版ごとに再アーム。
-# dedup は backend の `execution_results.version` を見るので backend 専用
+# dedup は backend の永続版別成功台帳を見るので backend 専用
 # (runs_on: agent / per_target との併用は create 時にエラー)。
 id: install-kanade-client
 when:
@@ -663,6 +663,14 @@ target: { groups: [dejisen] }
 runs_on: backend
 enabled: true
 ```
+
+backend の `per_pc: once` / `once_per_version` は、実行履歴の90日保持とは独立した
+`job_completions` / `job_version_completions` に成功を記録する。同じ job_id / pc_id
+の手動 exec 成功も対象で、版別では成功済みの旧版に戻しても再実行しない。
+版不明の成功は `once` のみを抑止し、現在版から推測しない。失敗は再試行を妨げない。
+`every` の cooldown 判定は従来どおり保持中の実行履歴を使う。
+導入時は残存する成功履歴を補完するが、既に削除された成功履歴は復元できず、
+その PC は再実行される場合がある。`wipe-projector` は成功台帳を退避・復元する。
 
 ```yaml
 # 巡回/棚卸し: 各 PC 6 時間ごと
@@ -2702,7 +2710,7 @@ pub struct JobProgress {
 2. **`-WipeDb` の安全化**:
    - デフォルトは常にデータベース保護（No Wipe）。
    - 通常更新と `--wipe-db` の両方で、§2.13.7.5 の整合 snapshot を必須とする。DB / WAL の稼働中単純コピーはバックアップとみなさない。
-   - `users` / `permission_groups` / `user_passkeys` を保護する。その他の非再生成データと replay source / retention の調査も wipe 承認の前提とし、再投影 readiness と結果投影まで検証する (§2.13.7.4–5)。
+   - `users` / `permission_groups` / `user_passkeys` と永続成功台帳を保護する。その他の非再生成データと replay source / retention の調査も wipe 承認の前提とし、再投影 readiness と結果投影まで検証する (§2.13.7.4–5)。
 3. **`-NoVerify` の廃止と検証の厳格化**:
    - ジョブがキューに受理されたこと（Admission）と、実際にサービスが起動して正しいバージョンで応答したこと（Verified Success）を明確に区別する。
    - タイムアウト付きでヘルスチェックと実版照合を自動実行し、未達の場合は失敗（または警告付き延期）として報告する。
@@ -3190,8 +3198,8 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 2. **厳格な事前バックアップ**:
    - `--wipe-db` が指定された場合、Agent は既存 DB の snapshot バックアップを作成し、退避を確認してから `kanade-backend wipe-projector` を呼び出す。
 3. **非再生成データの保護**:
-   - 現行 `main.rs::wipe_projector_at` は `users` / `permission_groups` / `user_passkeys` を snapshot し、schema 再生成後に復元する。承認 plan と受入試験はアカウントだけでなく permission group の feature 権限・所属・passkey credential とログインを照合する。
-   - この3テーブル以外の非 event-source データが全て再生成可能と確認したわけではない。wipe 前に全データの source / retention / 復旧可否を棚卸しし、保持不能・不明なら拒否する。既存 wipe の3テーブル退避は §2.13.7.5 の全 DB snapshot・consumer checkpoint と組の復旧契約の代用ではない。
+   - 現行 `main.rs::wipe_projector_at` は `users` / `permission_groups` / `user_passkeys` / `job_completions` / `job_version_completions` を snapshot し、schema 再生成後に復元する。承認 plan と受入試験はアカウントだけでなく permission group の feature 権限・所属・passkey credential とログインを照合する。
+   - これらの保護対象以外の非 event-source データが全て再生成可能と確認したわけではない。wipe 前に全データの source / retention / 復旧可否を棚卸しし、保持不能・不明なら拒否する。既存 wipe の保護対象テーブル退避は §2.13.7.5 の全 DB snapshot・consumer checkpoint と組の復旧契約の代用ではない。
 4. **再投影完了の検証**:
    - ワイプ後の初回起動時、Backend が JetStream の各ストリーム（Streams）からイベントを最初からリプレイし、プロジェクションテーブルの復元が完了するまで、デプロイ結果を「完了」と判定しない。
 
@@ -3276,7 +3284,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
    - ネットワーク切断や Backend 一時停止中も Agent が処理を継続し、復旧後に Outbox から正常に結果が再投影されること。
 5. **Backend 更新とデータ保護**:
    - Backend 更新時、設定ファイル・SQLite DB・NATS サービスが保持され、再起動後に `/api/health` が green に復帰すること。
-   - `--wipe-db` 指定時、事前バックアップが作成され、`users` / `permission_groups` / `user_passkeys` と認証・feature 権限が保持され、JetStream からの再投影が完了すること。
+   - `--wipe-db` 指定時、事前バックアップが作成され、`users` / `permission_groups` / `user_passkeys` と永続成功台帳・認証・feature 権限が保持され、JetStream からの再投影が完了すること。
    - Windows / Linux x86_64 / aarch64 で通常更新の forward migration 後に health を失敗させ、旧 binary + 更新前 snapshot 復元で起動・認証・結果再投影できること。backup 不可、disk full、migration 途中失敗、復元失敗、Agent 再起動も注入し、binary-only rollback を行わず、復旧不能は recovery_required となること。maintenance 中の書込拒否と NATS 継続も確認する。
    - データ入り snapshot 作成 → 新版が結果・監査・obs・通知 ack/unack を投影して ACK → health 失敗 → DB と5経路の consumer checkpoint を復元、の順に障害試験を行う。S 以前のデータ保持、S 以降の再投影、監査の非重複、counter / 通知状態の整合を検証する。commit 後 ACK 前の crash、consumer 復元途中の再 crash、復元権限不足、retention 欠落も注入し、欠落を成功扱いせず復旧 gate が維持されること。
 6. **Client GUI セッション安全性**:
@@ -3357,7 +3365,7 @@ Backend のデプロイでは以下を保持する。DB の forward migration、
 | 通常 plan で upload / Backend 保存、dry-run だけ read-only | **不採用**。現行の全 plan read-only と apply 登録を維持。ローカル入力の publish は apply、旧案の CLI 綴り・節構成への全面置換もしない |
 | 別 wire kind / shell stub 代替、publisher trust | **既存を維持**。現行 §2.13.6 の v2 envelope 必須・preflight・鍵 fingerprint / 失効・全 dispatch 認可が具体的。旧案の別 kind や stub へ変更する必要はなく、stub fallback は採らない |
 | Quit / opt-out / 緊急 fallback | **採用**。§2.11.7.4 の確定契約を優先し §2.13.6.7 / 受入を整合。永続 opt-out 保存方式は未解決 |
-| Backend 復旧・不可侵データ | **部分採用**。wipe の保持対象は `main.rs::wipe_projector_at` の3テーブルに訂正。migration preflight と実行後失敗を分離。旧案の「互換保証がなければ自動復旧しない」へ後退せず、現行の maintenance・全 DB snapshot・5 consumer checkpoint・DB/binary 組復元を維持。他の非再生成データ調査は未完了 |
+| Backend 復旧・不可侵データ | **部分採用**。wipe の保持対象は `main.rs::wipe_projector_at` のアカウント3テーブルと永続成功台帳2テーブル。migration preflight と実行後失敗を分離。旧案の「互換保証がなければ自動復旧しない」へ後退せず、現行の maintenance・全 DB snapshot・5 consumer checkpoint・DB/binary 組復元を維持。他の非再生成データ調査は未完了 |
 | Mac lock / native package ownership | **部分採用**。既存 Mac CLI handler と `/var/run` を維持し、OS 標準リンクと管理配下 symlink を区別。安全な open 手順は未解決。pkg/deb の復旧手順・依存 transaction は adapter 実装時に検証 |
 | Agent scope の持続と将来 membership | **採用**。`cmd/agent.rs` / `agent_config` は持続 target を設定する。固定 job cohort と区別し、timeout で scope を clear しない。競合検出は追加 proposal |
 | emergency swap / NATS maintenance / Client uninstall | **採用**。現行ファイルに機能が存在し、四 role 通常更新だけでは代替できない。§2.13.8.2 のファイル単位の撤去 gate に追加 |

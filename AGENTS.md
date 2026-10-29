@@ -699,6 +699,16 @@ Widening either allow list is a licensing decision, not a build fix.
   separate from historical rollout success. `OVERDUE` means no observed start
   for three intervals; offline hosts, windows and freezes can also explain it.
 
+## Backend permanent schedule completions
+
+- `job_completions` and `job_version_completions` are durable scheduler state,
+  maintained by execution-result INSERT/UPDATE triggers (including manual exec
+  successes). Never expire them with execution history. `main.rs` snapshots and
+  restores both on `wipe-projector`; pre-ledger DBs salvage retained history only.
+- Only cooldown-less per-PC modes read these ledgers. Cooldown and per-target
+  modes retain their history-based behavior. Unknown versions count only for
+  version-blind `once`; never infer a version from the current manifest.
+
 ## macOS remote viewing
 
 - `crates/kanade-agent/src/remote_macos.rs` accepts capture only after a valid

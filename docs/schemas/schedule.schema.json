@@ -268,11 +268,11 @@
       "description": "`once` / `once_per_version` / `{ every: <humantime> }` — shared by\n`per_pc` / `per_target`. Untagged so the YAML stays the bare keyword\nor a one-key map, nothing more ceremonial. `once_per_version` is\nper_pc + backend only (see the variant doc and `Schedule::validate`).",
       "anyOf": [
         {
-          "description": "The bare string `once`: succeed once, then skip permanently\n(cooldown = infinity), version-blind.",
+          "description": "The bare string `once`: succeed once, then skip permanently\n(cooldown = infinity), version-blind. Backend per-PC successes are\ndurable across execution-history cleanup (manual exec included).",
           "$ref": "#/$defs/OnceLiteral"
         },
         {
-          "description": "The bare string `once_per_version`: succeed once *per manifest\nversion*, then skip until the job's YAML `version` changes. Like\n`once` but re-arms each pc when the version it succeeded at is no\nlonger current — the version-aware redistribution shape. per_pc\nonly (`Schedule::validate` rejects it on `per_target`).",
+          "description": "The bare string `once_per_version`: succeed once *per manifest\nversion*. Backend successes survive execution-history cleanup;\nmanual exec counts, and returning to a previously successful version\nstays suppressed. A version with no success re-arms the PC. per_pc\nonly (`Schedule::validate` rejects it on `per_target`).",
           "$ref": "#/$defs/OncePerVersionLiteral"
         },
         {

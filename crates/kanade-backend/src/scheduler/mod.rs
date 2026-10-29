@@ -619,15 +619,8 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
             return;
         }
     };
-    // #487: bound the completion scan by the cooldown window — a
-    // completion older than `now - cooldown` is re-armed by
-    // definition and can never suppress, so reading it is wasted
-    // I/O. This query runs every POLL_CRON minute per schedule, so
-    // without the bound it walked the job's entire completion
-    // history each tick. Cooldown-less schedules (`per_pc: once`
-    // kitting semantics — "succeeded ever ⇒ permanently skip") keep
-    // the unbounded scan: any historical completion matters there,
-    // and the #486 retention now caps the table at 90 d anyway.
+    // Cooldown schedules retain their history-bounded behavior. Permanent
+    // per-PC modes use the durable ledger, independent of the 90-day sweep.
     let completion_cutoff = cooldown.map(|cd| now - cd);
     // `once_per_version` (OncePerPcVersion) scopes the "already
     // succeeded" set to the CURRENT manifest version, so a pc that only
@@ -640,14 +633,22 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
     } else {
         None
     };
-    let completions =
-        match recent_completions(&state.pool, &job_id, completion_cutoff, version_filter).await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
-                return;
-            }
-        };
+    let lookup = if cooldown.is_none()
+        && matches!(
+            lowered.mode,
+            ExecMode::OncePerPc | ExecMode::OncePerPcVersion
+        ) {
+        permanent_completions(&state.pool, &job_id, version_filter).await
+    } else {
+        recent_completions(&state.pool, &job_id, completion_cutoff, version_filter).await
+    };
+    let completions = match lookup {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
+            return;
+        }
+    };
 
     // #912: OncePerTarget dedup counts completions from any target
     // MEMBER (alive or not), so a member that succeeded and then went
@@ -1163,19 +1164,34 @@ fn parse_starting_deadline(
     }
 }
 
+/// Successful jobs survive history cleanup, including manual exec successes.
+/// Every successful version remains recorded, so rolling back does not re-arm.
+async fn permanent_completions(
+    pool: &sqlx::SqlitePool,
+    job_id: &str,
+    version: Option<&str>,
+) -> Result<Vec<Completion>> {
+    let rows: Vec<(String, DateTime<Utc>)> = if let Some(version) = version {
+        sqlx::query_as("SELECT pc_id, last_success_at FROM job_version_completions WHERE job_id = ? AND version = ?")
+            .bind(job_id).bind(version).fetch_all(pool).await?
+    } else {
+        sqlx::query_as("SELECT pc_id, last_success_at FROM job_completions WHERE job_id = ?")
+            .bind(job_id)
+            .fetch_all(pool)
+            .await?
+    };
+    Ok(rows
+        .into_iter()
+        .map(|(pc_id, finished_at)| Completion { pc_id, finished_at })
+        .collect())
+}
+
 /// Recent (exit_code = 0) completions for this job, one row per pc
 /// (keeps `MAX(finished_at)` so the policy doesn't see stale
 /// duplicates).
 ///
-/// #487: `cutoff` bounds the scan to completions that can still
-/// suppress a fire. `Some(now - cooldown)` for cooldown-ful
-/// schedules (older completions are re-armed by definition);
-/// `None` for cooldown-less `once` semantics, where any historical
-/// completion permanently suppresses. Note the #486/#541 retention
-/// interaction: completions older than the 90 d sweep are deleted,
-/// so a cooldown-less `once` schedule re-fires a PC whose only
-/// completion aged out — acceptable for the idempotent
-/// kitting-once jobs that mode exists for.
+/// Cooldown and per-target modes keep the existing history-based lookup.
+/// Permanent per-PC modes use `permanent_completions` instead.
 async fn recent_completions(
     pool: &sqlx::SqlitePool,
     job_id: &str,
@@ -1514,6 +1530,287 @@ mod tests {
             sorted_pcs(&scoped),
             vec!["a"],
             "only a current-version success should suppress a pc",
+        );
+    }
+
+    async fn old_result(
+        pool: &sqlx::SqlitePool,
+        pc: &str,
+        version: Option<&str>,
+        exit: Option<i32>,
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        let old = Utc::now() - ChronoDuration::days(100);
+        sqlx::query("INSERT INTO execution_results (result_id, request_id, pc_id, job_id, version, exit_code, started_at, finished_at, recorded_at) VALUES (?, 'manual', ?, 'install-kanade-client', ?, ?, ?, ?, ?)")
+            .bind(&id).bind(pc).bind(version).bind(exit).bind(old)
+            .bind(exit.map(|_| old)).bind(old).execute(pool).await.unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn permanent_completions_survive_retention_and_allow_new_versions_and_retries() {
+        let pool = fresh_pool().await;
+        // No executions or schedule row: manual exec successes count too.
+        old_result(&pool, "done", Some("v1"), Some(0)).await;
+        old_result(&pool, "failed", Some("v1"), Some(1)).await;
+        old_result(&pool, "unknown", None, Some(0)).await;
+        old_result(&pool, "running", Some("v1"), None).await;
+        let now = Utc::now();
+        assert_eq!(
+            crate::cleanup::prune_execution_results(&pool, now - ChronoDuration::days(90))
+                .await
+                .unwrap(),
+            4
+        );
+        let expected = vec!["done".into(), "failed".into(), "unknown".into()];
+        let once = permanent_completions(&pool, "install-kanade-client", None)
+            .await
+            .unwrap();
+        assert_eq!(sorted_pcs(&once), vec!["done", "unknown"]);
+        assert_eq!(
+            decide_fire(ExecMode::OncePerPc, None, &expected, &[], &once, now),
+            FireAction::FirePcs(vec!["failed".into()])
+        );
+        let v1 = permanent_completions(&pool, "install-kanade-client", Some("v1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            decide_fire(ExecMode::OncePerPcVersion, None, &expected, &[], &v1, now),
+            FireAction::FirePcs(vec!["failed".into(), "unknown".into()])
+        );
+        let v2 = permanent_completions(&pool, "install-kanade-client", Some("v2"))
+            .await
+            .unwrap();
+        assert_eq!(
+            decide_fire(ExecMode::OncePerPcVersion, None, &expected, &[], &v2, now),
+            FireAction::FirePcs(expected)
+        );
+        // Complete a new version, then roll back: both successes remain.
+        insert_result(&pool, "done", "v2", 0).await;
+        assert_eq!(
+            sorted_pcs(
+                &permanent_completions(&pool, "install-kanade-client", Some("v1"))
+                    .await
+                    .unwrap()
+            ),
+            vec!["done"]
+        );
+        // Failure never bars a legitimate retry; its later success does.
+        insert_result(&pool, "failed", "v1", 0).await;
+        assert_eq!(
+            sorted_pcs(
+                &permanent_completions(&pool, "install-kanade-client", Some("v1"))
+                    .await
+                    .unwrap()
+            ),
+            vec!["done", "failed"]
+        );
+        // Cooldown behavior still uses retained history, even for >90 days.
+        let recent = recent_completions(
+            &pool,
+            "install-kanade-client",
+            Some(now - ChronoDuration::days(120)),
+            Some("v1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sorted_pcs(&recent), vec!["failed"]);
+    }
+
+    #[tokio::test]
+    async fn permanent_completions_capture_updates_enrichment_and_late_replays() {
+        let pool = fresh_pool().await;
+        let id = old_result(&pool, "pc", None, None).await;
+        assert!(
+            permanent_completions(&pool, "install-kanade-client", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // An unfinished exit-0 row is not a completion.
+        sqlx::query("UPDATE execution_results SET exit_code=0 WHERE result_id=?")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            permanent_completions(&pool, "install-kanade-client", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Started row becomes successful with no known version. Preserve the
+        // existing exit-0 rule even for a reported skip.
+        sqlx::query(
+            "UPDATE execution_results SET exit_code=0, skipped=1, finished_at=? WHERE result_id=?",
+        )
+        .bind(Utc::now())
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let success = permanent_completions(&pool, "install-kanade-client", None)
+            .await
+            .unwrap();
+        assert_eq!(sorted_pcs(&success), vec!["pc"]);
+        assert!(
+            permanent_completions(&pool, "install-kanade-client", Some("v1"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Later metadata supplies the actual version.
+        sqlx::query("UPDATE execution_results SET version='v1' WHERE result_id=?")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            permanent_completions(&pool, "install-kanade-client", Some("v1"))
+                .await
+                .unwrap(),
+            success
+        );
+        // An older replay must not regress the ledger's last success.
+        old_result(&pool, "pc", Some("v1"), Some(0)).await;
+        assert_eq!(
+            permanent_completions(&pool, "install-kanade-client", Some("v1"))
+                .await
+                .unwrap(),
+            success
+        );
+        // A reaped failure is replaced by a late genuine successful result.
+        let late = old_result(&pool, "late", Some("v1"), Some(-1)).await;
+        sqlx::query("UPDATE execution_results SET reaped=1 WHERE result_id=?")
+            .bind(&late)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE execution_results SET exit_code=0, reaped=0, finished_at=? WHERE result_id=?",
+        )
+        .bind(Utc::now())
+        .bind(&late)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sorted_pcs(
+                &permanent_completions(&pool, "install-kanade-client", Some("v1"))
+                    .await
+                    .unwrap()
+            ),
+            vec!["late", "pc"]
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_completions_backfill_retained_history_without_guessing_versions() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/20260604000000_baseline.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        old_result(&pool, "pc", Some("v1"), Some(0)).await;
+        old_result(&pool, "pc", Some("v2"), Some(0)).await;
+        old_result(&pool, "unknown", None, Some(0)).await;
+        old_result(&pool, "failed", Some("v1"), Some(1)).await;
+        old_result(&pool, "running", Some("v1"), None).await;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261029000000_durable_job_completions.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sorted_pcs(
+                &permanent_completions(&pool, "install-kanade-client", None)
+                    .await
+                    .unwrap()
+            ),
+            vec!["pc", "unknown"]
+        );
+        for version in ["v1", "v2"] {
+            assert_eq!(
+                sorted_pcs(
+                    &permanent_completions(&pool, "install-kanade-client", Some(version))
+                        .await
+                        .unwrap()
+                ),
+                vec!["pc"]
+            );
+        }
+        assert!(
+            permanent_completions(&pool, "install-kanade-client", Some("v3"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The migration's maximum matches the live trigger's maximum.
+        insert_result(&pool, "pc", "v1", 0).await;
+        let latest = permanent_completions(&pool, "install-kanade-client", Some("v1"))
+            .await
+            .unwrap();
+        assert!(latest[0].finished_at > Utc::now() - ChronoDuration::minutes(1));
+    }
+
+    #[tokio::test]
+    async fn permanent_completions_roll_back_with_result_transaction() {
+        let pool = fresh_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO execution_results (result_id, request_id, pc_id, job_id, version, exit_code, started_at, finished_at) VALUES ('rollback', 'rollback', 'pc', 'job', 'v1', 0, ?, ?)")
+            .bind(Utc::now()).bind(Utc::now()).execute(&mut *tx).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_version_completions")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        tx.rollback().await.unwrap();
+        assert!(
+            permanent_completions(&pool, "job", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            permanent_completions(&pool, "job", Some("v1"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cooldown_boundary_remains_history_based() {
+        let pool = fresh_pool().await;
+        insert_result(&pool, "pc", "v1", 0).await;
+        let successes = recent_completions(&pool, "install-kanade-client", None, None)
+            .await
+            .unwrap();
+        let at = successes[0].finished_at;
+        let pcs = vec!["pc".into()];
+        let cd = ChronoDuration::hours(6);
+        assert_eq!(
+            decide_fire(
+                ExecMode::OncePerPc,
+                Some(cd),
+                &pcs,
+                &[],
+                &successes,
+                at + cd - ChronoDuration::seconds(1)
+            ),
+            FireAction::Skip
+        );
+        assert_eq!(
+            decide_fire(
+                ExecMode::OncePerPc,
+                Some(cd),
+                &pcs,
+                &[],
+                &successes,
+                at + cd
+            ),
+            FireAction::FirePcs(pcs)
         );
     }
 

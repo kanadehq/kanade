@@ -68,7 +68,7 @@ pub fn decide_fire(
         // OncePerPcVersion shares the per-pc decision: the ONLY
         // difference from OncePerPc is that its `completions` set was
         // pre-filtered to the current manifest version by the caller
-        // (`recent_completions` with a version filter), so a pc that
+        // (`permanent_completions` with a version filter), so a pc that
         // only succeeded at an older version isn't in `completions` and
         // therefore fires. The dedup arithmetic here is identical.
         ExecMode::OncePerPc | ExecMode::OncePerPcVersion => {
