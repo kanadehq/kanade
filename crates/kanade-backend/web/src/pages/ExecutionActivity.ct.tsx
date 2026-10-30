@@ -144,3 +144,109 @@ test('Activity preserves navigation, back/forward and debounced edits without st
   await c.locator('#res-exec').fill('');
   await expect(c.getByTestId('location')).not.toContainText('exec_id=');
 });
+
+test('Activity continues across scan-budget windows with pinned since and resets cursor on filter change', async ({ mount, page }) => {
+  const requests: URLSearchParams[] = [];
+  await page.route('**/api/results?*', async (route) => {
+    const sp = new URL(route.request().url()).searchParams;
+    requests.push(sp);
+    const cursor = sp.get('cursor');
+    const stdout = sp.get('stdout');
+
+    if (stdout === 'fresh-filter') {
+      await route.fulfill({
+        json: [
+          {
+            result_id: 'res-fresh-1',
+            request_id: 'req-fresh-1',
+            exec_id: 'exec-fresh-1',
+            pc_id: 'PC-FRESH',
+            exit_code: 0,
+            skipped: false,
+            stdout: 'fresh-filter output',
+            stderr: '',
+            started_at: '2026-04-02T00:00:00Z',
+            finished_at: '2026-04-02T00:00:01Z',
+            job_id: 'job-fresh',
+            version: '1',
+          },
+        ],
+        headers: {
+          'X-Results-Scanned': '12',
+          'X-Results-Stop-Reason': 'end_of_range',
+        },
+      });
+      return;
+    }
+
+    if (!cursor) {
+      await route.fulfill({
+        json: [],
+        headers: {
+          'X-Results-Scanned': '10000',
+          'X-Results-Stop-Reason': 'scan_limit_reached',
+          'X-Results-Next-Cursor': 'cursor-window-2',
+        },
+      });
+      return;
+    }
+
+    if (cursor === 'cursor-window-2') {
+      await route.fulfill({
+        json: [
+          {
+            result_id: 'res-old-match',
+            request_id: 'req-old-match',
+            exec_id: 'exec-old-match',
+            pc_id: 'PC-OLD-99',
+            exit_code: 0,
+            skipped: false,
+            stdout: 'older matching run',
+            stderr: '',
+            started_at: '2026-03-20T12:00:00Z',
+            finished_at: '2026-03-20T12:00:05Z',
+            job_id: 'job-old',
+            version: '1',
+          },
+        ],
+        headers: {
+          'X-Results-Scanned': '2500',
+          'X-Results-Stop-Reason': 'end_of_range',
+        },
+      });
+      return;
+    }
+
+    await route.fulfill({ json: [] });
+  });
+
+  const c = await mount(<ExecutionActivityHost initial="/activity?job_id=job-old" />);
+
+  // First window hit the 10k scan cap with 0 matches: must show incomplete-scan
+  // state with a continuation button rather than definitive "No activity matches".
+  await expect(c.getByText('No matches in the scanned window', { exact: true })).toBeVisible();
+  await expect(c.getByTestId('activity-scan-status')).toContainText('10000');
+
+  const searchOlderBtn = c.getByRole('button', { name: 'Search older history', exact: true });
+  await expect(searchOlderBtn).toBeVisible();
+  await searchOlderBtn.click();
+
+  // Second window finds the older matching row and reports end_of_range.
+  await expect(c.getByText('PC-OLD-99', { exact: true })).toBeVisible();
+  await expect(c.getByTestId('activity-scan-status')).toContainText('End of time range (2500 runs inspected)');
+  expect(requests.length).toBeGreaterThanOrEqual(2);
+  expect(requests[1]?.get('cursor')).toBe('cursor-window-2');
+  // `since` must stay pinned across cursor steps in the same search series.
+  expect(requests[1]?.get('since')).toBe(requests[0]?.get('since'));
+
+  // Stepping back returns to the previous window; changing a filter resets cursor.
+  await c.getByRole('button', { name: 'Previous window', exact: true }).click();
+  await expect(c.getByText('No matches in the scanned window', { exact: true })).toBeVisible();
+  await c.getByRole('button', { name: 'Search older history', exact: true }).click();
+  await expect(c.getByText('PC-OLD-99', { exact: true })).toBeVisible();
+
+  await c.locator('#res-stdout').fill('fresh-filter');
+  await expect(c.getByText('PC-FRESH', { exact: true })).toBeVisible();
+  expect(requests.at(-1)?.get('stdout')).toBe('fresh-filter');
+  expect(requests.at(-1)?.has('cursor')).toBe(false);
+});

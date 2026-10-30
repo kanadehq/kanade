@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use kanade_shared::subject;
 use kanade_shared::wire::{JobTailReply, JobTailRequest};
 use regex::Regex;
@@ -9,6 +9,7 @@ use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tracing::warn;
 
 use super::AppState;
+use super::time_bounds::{bound_in_range, bounds_in_range};
 
 /// A regex-match excerpt for the Activity listing. The matched run is
 /// returned split from its surrounding context (`before` / `matched` /
@@ -115,7 +116,7 @@ pub struct FinalizeChild {
 /// `running` selects in-flight rows (events.started landed but no
 /// ExecResult yet, so finished_at IS NULL). Anything else (or
 /// omitted) returns the unfiltered listing.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StatusFilter {
     Success,
@@ -148,39 +149,103 @@ pub struct ListParams {
     /// Regex on `stderr` content — same shape as `stdout`.
     pub stderr: Option<String>,
     pub status: Option<StatusFilter>,
-    /// ISO-8601 lower bound on `started_at`. Anything strictly older is
-    /// filtered out. #399: was `recorded_at` (backend projection time),
-    /// which answered "what did the backend record recently" instead of
-    /// the operator's actual question "what *ran* recently" — and after
-    /// a -WipeDb re-projection (#389) every replayed row's recorded_at
-    /// collapses onto the replay instant, flooding the default 24h
-    /// window with weeks-old runs. `started_at` matches the column the
+    /// ISO-8601 inclusive lower bound on `started_at`. Anything strictly
+    /// older is filtered out. #399: was `recorded_at` (backend projection
+    /// time), which answered "what did the backend record recently"
+    /// instead of the operator's actual question "what *ran* recently" —
+    /// and after a -WipeDb re-projection (#389) every replayed row's
+    /// recorded_at collapses onto the replay instant, flooding the default
+    /// 24h window with weeks-old runs. `started_at` matches the column the
     /// table displays and is immune to re-projection.
+    #[serde(default)]
     pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// ISO-8601 inclusive upper bound on `started_at` (#1666). Pairs with
+    /// `since` to bound the time window from above; older pages within the
+    /// same search series advance via `cursor`.
+    #[serde(default)]
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Opaque continuation token returned in `X-Results-Next-Cursor`
+    /// (#1666). Resumes strictly after the last inspected `(started_at,
+    /// result_id)` pair in descending order and verifies that the active
+    /// filter parameters have not changed since the cursor was issued.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 fn default_limit() -> u32 {
     50
 }
 
-// Upper bound on the prefilter window when at least one regex filter
-// is active. SQL narrows by `status` + `since` first; then we ORDER BY
-// started_at DESC and scan up to MAX_FETCH rows in Rust, applying the
-// compiled regexes and stopping once `limit` matches are collected.
-// Pulling the prefilter into Rust is the same trick used by
-// `api::audit::list` — sqlx 0.8 doesn't expose `create_scalar_function`
-// so a native REGEXP UDF isn't on the table.
-//
-// #517: the prefilter SELECT excludes `stdout` / `stderr` unless a
-// regex actually targets them — post-#227 each can be ~256 KB
-// inline, so `SELECT *` over the window was a multi-GB worst case
-// (and a single keystroke in the Activity pc_id filter triggered
-// it). Metadata-only rows are a few hundred bytes, so 10k is a few
-// MB. When an output regex IS present the blobs must be fetched to
-// match against, so that path gets a smaller window; operators
-// wanting more should narrow `since`.
-const MAX_FETCH: i64 = 10_000;
-const MAX_FETCH_WITH_OUTPUT: i64 = 1_000;
+/// Hard ceiling on `limit` (#1666). Matches the SPA's largest page-size
+/// selector (`1000`) and bounds per-response hydration + wire payload.
+const MAX_LIMIT: u32 = 1_000;
+
+/// Per-request scan budget when at least one non-exact regex filter is
+/// evaluated in Rust (#1666).
+///
+/// Exact anchored literal filters on `pc_id` / `job_id` / `exec_id`
+/// (`^<literal>$` with no flags or regex operators) are pushed down to
+/// SQL equality and use the composite `(col, started_at DESC, result_id
+/// DESC)` indexes directly. General regexes (unanchored substring
+/// searches, alternations, flags, character classes, or `stdout` /
+/// `stderr` content patterns) are evaluated in Rust in bounded chunks up
+/// to `MAX_FETCH` rows per request (`MAX_FETCH_WITH_OUTPUT` when an
+/// output regex requires reading the ~256 KB stdio columns).
+///
+/// When a request reaches `limit` or exhausts its scan budget while older
+/// rows remain in the SQL-filtered range, the response sets
+/// `X-Results-Stop-Reason` (`limit_reached` or `scan_limit_reached`) and
+/// `X-Results-Next-Cursor` at the last *inspected* row so the caller can
+/// continue scanning older history without skipping uninspected rows or
+/// mistaking an exhausted scan window for "no matches".
+const MAX_FETCH: usize = 10_000;
+const MAX_FETCH_WITH_OUTPUT: usize = 1_000;
+
+/// Chunk size per SQL fetch during a Rust-regex scan (#1666). Fetching in
+/// chunks avoids pulling all 10,000 metadata rows (or 1,000 stdio blob
+/// rows) when `limit` matches are found near the top of the window.
+const SCAN_CHUNK: usize = 1_000;
+const SCAN_CHUNK_WITH_OUTPUT: usize = 250;
+
+/// Maximum encoded length and per-field length accepted for `cursor`.
+const MAX_CURSOR_LEN: usize = 512;
+const MAX_CURSOR_FIELD_LEN: usize = 256;
+const CURSOR_VERSION: u8 = 1;
+
+/// Response header reporting how many candidate rows were inspected in
+/// this request.
+pub const HEADER_SCANNED: &str = "x-results-scanned";
+/// Response header reporting why scanning stopped: `limit_reached`,
+/// `scan_limit_reached`, or `end_of_range`.
+pub const HEADER_STOP_REASON: &str = "x-results-stop-reason";
+/// Response header carrying the opaque cursor to resume scanning older
+/// rows when `X-Results-Stop-Reason` is not `end_of_range`.
+pub const HEADER_NEXT_CURSOR: &str = "x-results-next-cursor";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    LimitReached,
+    ScanLimitReached,
+    EndOfRange,
+}
+
+impl StopReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LimitReached => "limit_reached",
+            Self::ScanLimitReached => "scan_limit_reached",
+            Self::EndOfRange => "end_of_range",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct ScanCursor {
+    v: u8,
+    started_at: String,
+    result_id: String,
+    filter_hash: String,
+}
 
 /// Prefilter projection for the no-output-regex path: everything
 /// `row_to_result` reads except the two blob columns. MUST stay in
@@ -209,34 +274,227 @@ const SNIPPET_CONTEXT_CHARS: usize = 80;
 /// trim, so clip it and flag the clip via `clipped_end`.
 const SNIPPET_MATCH_CHARS: usize = 240;
 
-pub async fn list(
-    State(pool): State<SqlitePool>,
-    Query(params): Query<ListParams>,
-) -> Result<Json<Vec<ResultRow>>, (StatusCode, String)> {
-    let pc_re = super::compile(params.pc_id.as_deref())?;
-    let job_re = super::compile(params.job_id.as_deref())?;
-    let exec_re = super::compile(params.exec_id.as_deref())?;
-    let stdout_re = super::compile(params.stdout.as_deref())?;
-    let stderr_re = super::compile(params.stderr.as_deref())?;
-    let has_regex = pc_re.is_some()
-        || job_re.is_some()
-        || exec_re.is_some()
-        || stdout_re.is_some()
-        || stderr_re.is_some();
-    // #517: only fetch the (potentially ~256 KB each) blob columns
-    // into the prefilter window when a regex actually matches
-    // against them; otherwise winners are re-fetched by id below.
-    let needs_output = stdout_re.is_some() || stderr_re.is_some();
+/// Extract an exact literal when `raw` (after trimming, matching
+/// [`super::compile`]) is an anchored `^...$` regex whose body contains
+/// only literal characters and escaped regex punctuation, with no flags,
+/// character classes, quantifiers, groups, or alternation, and whose
+/// decoded literal is non-empty.
+///
+/// Returns `None` for any pattern whose semantics are not strictly
+/// identical to SQLite `=` (`BINARY` collation):
+/// - Unanchored literals (`PC001`) are substring searches (`PC001` matches
+///   `PC0010`) and must stay on the Rust `Regex` path.
+/// - Empty literals (`^$`) match `NULL` on nullable columns (`job_id`,
+///   `exec_id`) because the Rust path folds `NULL` to `""`, whereas SQL
+///   `col = ''` rejects `NULL`.
+/// - Inline flags (`(?i)`), character classes (`\d`, `[a-z]`), alternation
+///   (`^a|b$`), and assertions (`\b`, `\A`, `\z`) stay on the Rust path.
+fn extract_exact_literal(raw: Option<&str>) -> Option<String> {
+    let s = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    let body = s.strip_prefix('^')?.strip_suffix('$')?;
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                // If `chars.next()` is `None`, the trailing `$` in `s` was
+                // escaped (`\$`), so the pattern has no end anchor.
+                let escaped = chars.next()?;
+                if matches!(
+                    escaped,
+                    '.' | '*'
+                        | '+'
+                        | '?'
+                        | '^'
+                        | '$'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '|'
+                        | '\\'
+                        | '/'
+                        | '-'
+                ) {
+                    out.push(escaped);
+                } else {
+                    return None;
+                }
+            }
+            '.' | '*' | '+' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\r'
+            | '\n' => {
+                return None;
+            }
+            _ => out.push(c),
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
 
-    let select = if has_regex && !needs_output {
-        format!("SELECT {META_COLUMNS} FROM execution_results")
-    } else {
-        "SELECT * FROM execution_results".to_string()
+fn norm_opt(opt: &Option<String>) -> Option<&str> {
+    opt.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn compute_filter_hash(params: &ListParams) -> String {
+    use sha2::{Digest, Sha256};
+
+    let status_str = match params.status {
+        Some(StatusFilter::Success) => "success",
+        Some(StatusFilter::Failure) => "failure",
+        Some(StatusFilter::Skipped) => "skipped",
+        Some(StatusFilter::Running) => "running",
+        None => "",
     };
-    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(select);
-    let mut sep = " WHERE ";
+    let since_str = params
+        .since
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        .unwrap_or_default();
+    let until_str = params
+        .until
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        .unwrap_or_default();
 
-    if let Some(status) = &params.status {
+    let canonical = serde_json::json!([
+        norm_opt(&params.pc_id),
+        norm_opt(&params.job_id),
+        norm_opt(&params.exec_id),
+        norm_opt(&params.stdout),
+        norm_opt(&params.stderr),
+        status_str,
+        since_str,
+        until_str,
+    ]);
+    let digest = Sha256::digest(canonical.to_string().as_bytes());
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    hex
+}
+
+fn encode_cursor(started_at: &str, result_id: &str, filter_hash: &str) -> Option<String> {
+    if started_at.is_empty() || result_id.is_empty() {
+        return None;
+    }
+    let payload = ScanCursor {
+        v: CURSOR_VERSION,
+        started_at: started_at.to_string(),
+        result_id: result_id.to_string(),
+        filter_hash: filter_hash.to_string(),
+    };
+    let json = serde_json::to_vec(&payload).ok()?;
+    use base64::Engine;
+    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
+}
+
+fn decode_cursor(
+    raw: &str,
+    expected_filter_hash: &str,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(String, String), (StatusCode, String)> {
+    use base64::Engine;
+
+    if raw.is_empty() || raw.len() > MAX_CURSOR_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor: invalid length".to_string(),
+        ));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "cursor: invalid base64 encoding".to_string(),
+            )
+        })?;
+    let parsed: ScanCursor = serde_json::from_slice(&bytes).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "cursor: invalid payload".to_string(),
+        )
+    })?;
+    if parsed.v != CURSOR_VERSION {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor: unsupported version".to_string(),
+        ));
+    }
+    if parsed.started_at.is_empty()
+        || parsed.started_at.len() > MAX_CURSOR_FIELD_LEN
+        || parsed.result_id.is_empty()
+        || parsed.result_id.len() > MAX_CURSOR_FIELD_LEN
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor: invalid key fields".to_string(),
+        ));
+    }
+    let cursor_dt = parsed
+        .started_at
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "cursor: invalid started_at timestamp".to_string(),
+            )
+        })?;
+    if !bound_in_range(cursor_dt) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor: started_at year out of range (must be 0..=9999)".to_string(),
+        ));
+    }
+    if parsed.filter_hash != expected_filter_hash {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor: does not match active search filters".to_string(),
+        ));
+    }
+    if let Some(s) = since
+        && cursor_dt < s
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor: started_at is older than since".to_string(),
+        ));
+    }
+    if let Some(u) = until
+        && cursor_dt > u
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor: started_at is newer than until".to_string(),
+        ));
+    }
+    // Keep the exact stored `started_at` string for SQLite's lexical
+    // comparison rather than reformatting `cursor_dt`.
+    Ok((parsed.started_at, parsed.result_id))
+}
+
+struct SqlFilters<'a> {
+    status: Option<StatusFilter>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    pc_exact: Option<&'a str>,
+    job_exact: Option<&'a str>,
+    exec_exact: Option<&'a str>,
+}
+
+fn push_sql_filters(
+    qb: &mut QueryBuilder<Sqlite>,
+    filters: &SqlFilters<'_>,
+    after: Option<&(String, String)>,
+) {
+    let mut sep = " WHERE ";
+    if let Some(status) = filters.status {
         qb.push(sep);
         match status {
             // Success / failure / skipped all require the run to be
@@ -254,45 +512,196 @@ pub async fn list(
         };
         sep = " AND ";
     }
-    if let Some(since) = params.since {
+    if let Some(pc_id) = filters.pc_exact {
+        qb.push(sep).push("pc_id = ").push_bind(pc_id.to_owned());
+        sep = " AND ";
+    }
+    if let Some(job_id) = filters.job_exact {
+        qb.push(sep).push("job_id = ").push_bind(job_id.to_owned());
+        sep = " AND ";
+    }
+    if let Some(exec_id) = filters.exec_exact {
+        qb.push(sep)
+            .push("exec_id = ")
+            .push_bind(exec_id.to_owned());
+        sep = " AND ";
+    }
+    if let Some(since) = filters.since {
         qb.push(sep).push("started_at >= ").push_bind(since);
         sep = " AND ";
     }
+    if let Some(until) = filters.until {
+        qb.push(sep).push("started_at <= ").push_bind(until);
+        sep = " AND ";
+    }
+    if let Some((started_at, result_id)) = after {
+        qb.push(sep)
+            .push("(started_at, result_id) < (")
+            .push_bind(started_at.clone())
+            .push(", ")
+            .push_bind(result_id.clone())
+            .push(")");
+        sep = " AND ";
+    }
     let _ = sep;
+}
 
-    // #399: order by started_at (the displayed column) so the listing
-    // is a run-time timeline, not a projection-time feed. result_id
-    // breaks ties (broadcast fan-outs can share a start instant) so
-    // pagination across refetches is deterministic. Served by
-    // idx_execution_results_started_at.
-    qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT ");
-    let sql_limit = if !has_regex {
-        params.limit as i64
-    } else if needs_output {
-        MAX_FETCH_WITH_OUTPUT
-    } else {
-        MAX_FETCH
-    };
-    qb.push_bind(sql_limit);
-
-    let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
-        warn!(error = %e, "list results");
+async fn has_older_rows(
+    pool: &SqlitePool,
+    filters: &SqlFilters<'_>,
+    after: &(String, String),
+) -> Result<bool, (StatusCode, String)> {
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT 1 FROM execution_results");
+    push_sql_filters(&mut qb, filters, Some(after));
+    qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT 1");
+    let row = qb.build().fetch_optional(pool).await.map_err(|e| {
+        warn!(error = %e, "list results lookahead");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "list results failed".to_string(),
         )
     })?;
+    Ok(row.is_some())
+}
 
-    // Fast path: no regex filters → SQL already applied the LIMIT.
-    // Hydrate each row with a *clipped* stdout/stderr preview (the full
-    // body is one detail fetch away on "show more") so a 1000-row
-    // fleet-wide window of kilobyte-each outputs doesn't ship megabytes
-    // of stdio the table only ever shows PREVIEW_CHARS of. The DB read
-    // is unchanged; only the wire payload shrinks.
-    if !has_regex {
+fn build_response_headers(
+    scanned: usize,
+    stop_reason: StopReason,
+    next_cursor: Option<&str>,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&scanned.to_string()) {
+        headers.insert(HEADER_SCANNED, v);
+    }
+    headers.insert(
+        HEADER_STOP_REASON,
+        HeaderValue::from_static(stop_reason.as_str()),
+    );
+    if let Some(cursor) = next_cursor
+        && let Ok(v) = HeaderValue::from_str(cursor)
+    {
+        headers.insert(HEADER_NEXT_CURSOR, v);
+    }
+    headers
+}
+
+pub async fn list(
+    State(pool): State<SqlitePool>,
+    Query(params): Query<ListParams>,
+) -> Result<(HeaderMap, Json<Vec<ResultRow>>), (StatusCode, String)> {
+    if params.limit == 0 || params.limit > MAX_LIMIT {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("limit must be between 1 and {MAX_LIMIT}"),
+        ));
+    }
+    if !bounds_in_range([params.since]) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "since: year out of range (must be 0..=9999)".to_string(),
+        ));
+    }
+    if !bounds_in_range([params.until]) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "until: year out of range (must be 0..=9999)".to_string(),
+        ));
+    }
+    if let (Some(since), Some(until)) = (params.since, params.until)
+        && since > until
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "since must not be after until".to_string(),
+        ));
+    }
+
+    let mut pc_re = super::compile(params.pc_id.as_deref())?;
+    let mut job_re = super::compile(params.job_id.as_deref())?;
+    let mut exec_re = super::compile(params.exec_id.as_deref())?;
+    let stdout_re = super::compile(params.stdout.as_deref())?;
+    let stderr_re = super::compile(params.stderr.as_deref())?;
+
+    // #1666: push strictly exact, flag-free non-empty literal regexes on
+    // identifier columns down to SQL equality so indexed lookups don't
+    // waste the 10k/1k scan window on unrelated rows. General regexes
+    // (including unanchored substring literals and `^$`) stay in Rust.
+    let pc_exact = extract_exact_literal(params.pc_id.as_deref());
+    if pc_exact.is_some() {
+        pc_re = None;
+    }
+    let job_exact = extract_exact_literal(params.job_id.as_deref());
+    if job_exact.is_some() {
+        job_re = None;
+    }
+    let exec_exact = extract_exact_literal(params.exec_id.as_deref());
+    if exec_exact.is_some() {
+        exec_re = None;
+    }
+
+    let filter_hash = compute_filter_hash(&params);
+    let initial_cursor = match params.cursor.as_deref() {
+        Some(raw) => Some(decode_cursor(
+            raw,
+            &filter_hash,
+            params.since,
+            params.until,
+        )?),
+        None => None,
+    };
+
+    let has_rust_regex = pc_re.is_some()
+        || job_re.is_some()
+        || exec_re.is_some()
+        || stdout_re.is_some()
+        || stderr_re.is_some();
+    // #517: only fetch the (potentially ~256 KB each) blob columns
+    // into the prefilter window when a regex actually matches
+    // against them; otherwise winners are re-fetched by id below.
+    let needs_output = stdout_re.is_some() || stderr_re.is_some();
+
+    let sql_filters = SqlFilters {
+        status: params.status,
+        since: params.since,
+        until: params.until,
+        pc_exact: pc_exact.as_deref(),
+        job_exact: job_exact.as_deref(),
+        exec_exact: exec_exact.as_deref(),
+    };
+    let limit = params.limit as usize;
+
+    // Fast path: no Rust-evaluated regex filters remain (either no regex
+    // was supplied or every regex was an exact identifier literal pushed
+    // down to SQL). Fetch `limit + 1` rows so a single query both fills
+    // the page and determines whether older rows remain.
+    if !has_rust_regex {
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM execution_results");
+        push_sql_filters(&mut qb, &sql_filters, initial_cursor.as_ref());
+        // #399: order by started_at (the displayed column) so the listing
+        // is a run-time timeline, not a projection-time feed. result_id
+        // breaks ties (broadcast fan-outs can share a start instant) so
+        // pagination across refetches is deterministic.
+        qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT ");
+        qb.push_bind((limit + 1) as i64);
+
+        let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
+            warn!(error = %e, "list results");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "list results failed".to_string(),
+            )
+        })?;
+
+        let has_more = rows.len() > limit;
+        let mut last_inspected: Option<(String, String)> = None;
         let out: Vec<ResultRow> = rows
             .iter()
+            .take(limit)
             .map(|r| {
+                last_inspected = Some((
+                    r.try_get::<String, _>("started_at").unwrap_or_default(),
+                    r.try_get::<String, _>("result_id").unwrap_or_default(),
+                ));
                 let stdout_raw: &str = r.try_get("stdout").unwrap_or("");
                 let stderr_raw: &str = r.try_get("stderr").unwrap_or("");
                 let (sp, st) = take_prefix(stdout_raw, PREVIEW_CHARS);
@@ -300,68 +709,129 @@ pub async fn list(
                 build_row(r, sp.to_string(), ep.to_string(), st, et, None, None)
             })
             .collect();
-        return Ok(Json(out));
+
+        let scanned = out.len();
+        let (stop_reason, next_cursor) = if has_more {
+            let cur = last_inspected
+                .as_ref()
+                .and_then(|(s, id)| encode_cursor(s, id, &filter_hash));
+            (StopReason::LimitReached, cur)
+        } else {
+            (StopReason::EndOfRange, None)
+        };
+        let headers = build_response_headers(scanned, stop_reason, next_cursor.as_deref());
+        return Ok((headers, Json(out)));
     }
 
-    // Regex path: match against the raw column values first so a row
-    // that's about to be dropped never pays for `String::from(stdout)`
-    // (potentially kilobytes). Only winners get hydrated into a
-    // `ResultRow`. Read the columns as `&str` borrows on the row —
-    // for SQLite NULL surfaces as Err on `try_get`, which we collapse
-    // to "" so the regex sees the documented empty-string semantics.
-    let limit = params.limit as usize;
+    // Regex scan path: fetch candidate rows in bounded chunks up to the
+    // per-request scan budget (`MAX_FETCH` / `MAX_FETCH_WITH_OUTPUT`) and
+    // match against the raw `&str` column borrows so non-matching rows
+    // never allocate `String` copies.
+    let scan_budget = if needs_output {
+        MAX_FETCH_WITH_OUTPUT
+    } else {
+        MAX_FETCH
+    };
+    let chunk_cap = if needs_output {
+        SCAN_CHUNK_WITH_OUTPUT
+    } else {
+        SCAN_CHUNK
+    };
+    let select = if needs_output {
+        "SELECT * FROM execution_results".to_string()
+    } else {
+        format!("SELECT {META_COLUMNS} FROM execution_results")
+    };
+
     let mut out: Vec<ResultRow> = Vec::with_capacity(limit.min(64));
-    for r in rows {
-        if let Some(re) = &pc_re
-            && !re.is_match(r.try_get::<&str, _>("pc_id").unwrap_or(""))
-        {
-            continue;
+    let mut scanned: usize = 0;
+    let mut last_inspected: Option<(String, String)> = None;
+    let mut exhausted_sql = false;
+    let mut has_uninspected_fetched_row = false;
+
+    while out.len() < limit && scanned < scan_budget {
+        let fetch_count = (scan_budget - scanned).min(chunk_cap);
+        let after = last_inspected.as_ref().or(initial_cursor.as_ref());
+
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(&select);
+        push_sql_filters(&mut qb, &sql_filters, after);
+        qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT ");
+        qb.push_bind(fetch_count as i64);
+
+        let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
+            warn!(error = %e, "list results");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "list results failed".to_string(),
+            )
+        })?;
+
+        let fetched_len = rows.len();
+        if fetched_len == 0 {
+            exhausted_sql = true;
+            break;
         }
-        if let Some(re) = &job_re
-            && !re.is_match(r.try_get::<&str, _>("job_id").unwrap_or(""))
-        {
-            continue;
+
+        for (idx, r) in rows.into_iter().enumerate() {
+            scanned += 1;
+            last_inspected = Some((
+                r.try_get::<String, _>("started_at").unwrap_or_default(),
+                r.try_get::<String, _>("result_id").unwrap_or_default(),
+            ));
+
+            let matched = pc_re
+                .as_ref()
+                .is_none_or(|re| re.is_match(r.try_get::<&str, _>("pc_id").unwrap_or("")))
+                && job_re
+                    .as_ref()
+                    .is_none_or(|re| re.is_match(r.try_get::<&str, _>("job_id").unwrap_or("")))
+                && exec_re
+                    .as_ref()
+                    .is_none_or(|re| re.is_match(r.try_get::<&str, _>("exec_id").unwrap_or("")))
+                && stdout_re
+                    .as_ref()
+                    .is_none_or(|re| re.is_match(r.try_get::<&str, _>("stdout").unwrap_or("")))
+                && stderr_re
+                    .as_ref()
+                    .is_none_or(|re| re.is_match(r.try_get::<&str, _>("stderr").unwrap_or("")));
+
+            if matched {
+                let stdout_raw: &str = r.try_get("stdout").unwrap_or("");
+                let stderr_raw: &str = r.try_get("stderr").unwrap_or("");
+                let stdout_match = stdout_re
+                    .as_ref()
+                    .and_then(|re| match_snippet(re, stdout_raw));
+                let stderr_match = stderr_re
+                    .as_ref()
+                    .and_then(|re| match_snippet(re, stderr_raw));
+                let (sp, st) = take_prefix(stdout_raw, PREVIEW_CHARS);
+                let (ep, et) = take_prefix(stderr_raw, PREVIEW_CHARS);
+                out.push(build_row(
+                    &r,
+                    sp.to_string(),
+                    ep.to_string(),
+                    st,
+                    et,
+                    stdout_match,
+                    stderr_match,
+                ));
+            }
+
+            if out.len() >= limit {
+                if idx + 1 < fetched_len {
+                    has_uninspected_fetched_row = true;
+                } else if fetched_len < fetch_count {
+                    exhausted_sql = true;
+                }
+                break;
+            }
         }
-        if let Some(re) = &exec_re
-            && !re.is_match(r.try_get::<&str, _>("exec_id").unwrap_or(""))
-        {
-            continue;
-        }
-        if let Some(re) = &stdout_re
-            && !re.is_match(r.try_get::<&str, _>("stdout").unwrap_or(""))
-        {
-            continue;
-        }
-        if let Some(re) = &stderr_re
-            && !re.is_match(r.try_get::<&str, _>("stderr").unwrap_or(""))
-        {
-            continue;
-        }
-        // Row survived every filter. Re-borrow the raw columns to build
-        // the match excerpt (around the *first* hit) and the clipped
-        // preview — matching already ran against the full text above, so
-        // clipping the wire payload here doesn't change which rows
-        // surface, only how much stdio rides along.
-        let stdout_raw: &str = r.try_get("stdout").unwrap_or("");
-        let stderr_raw: &str = r.try_get("stderr").unwrap_or("");
-        let stdout_match = stdout_re
-            .as_ref()
-            .and_then(|re| match_snippet(re, stdout_raw));
-        let stderr_match = stderr_re
-            .as_ref()
-            .and_then(|re| match_snippet(re, stderr_raw));
-        let (sp, st) = take_prefix(stdout_raw, PREVIEW_CHARS);
-        let (ep, et) = take_prefix(stderr_raw, PREVIEW_CHARS);
-        out.push(build_row(
-            &r,
-            sp.to_string(),
-            ep.to_string(),
-            st,
-            et,
-            stdout_match,
-            stderr_match,
-        ));
+
         if out.len() >= limit {
+            break;
+        }
+        if fetched_len < fetch_count {
+            exhausted_sql = true;
             break;
         }
     }
@@ -417,7 +887,32 @@ pub async fn list(
             }
         }
     }
-    Ok(Json(out))
+
+    let has_more = if exhausted_sql {
+        false
+    } else if has_uninspected_fetched_row {
+        true
+    } else if let Some(ref after) = last_inspected {
+        has_older_rows(&pool, &sql_filters, after).await?
+    } else {
+        false
+    };
+
+    let (stop_reason, next_cursor) = if !has_more {
+        (StopReason::EndOfRange, None)
+    } else {
+        let cur = last_inspected
+            .as_ref()
+            .and_then(|(s, id)| encode_cursor(s, id, &filter_hash));
+        if out.len() >= limit {
+            (StopReason::LimitReached, cur)
+        } else {
+            (StopReason::ScanLimitReached, cur)
+        }
+    };
+
+    let headers = build_response_headers(scanned, stop_reason, next_cursor.as_deref());
+    Ok((headers, Json(out)))
 }
 
 /// `GET /api/results/{id}` — `{id}` is now `result_id` (v0.29).
@@ -753,7 +1248,13 @@ mod tests {
             stderr: None,
             status: None,
             since,
+            until: None,
+            cursor: None,
         }
+    }
+
+    async fn list_rows(pool: SqlitePool, p: ListParams) -> Vec<ResultRow> {
+        list(State(pool), Query(p)).await.unwrap().1.0
     }
 
     /// Insert a finished row the way the results projector does:
@@ -834,13 +1335,7 @@ mod tests {
         let pool = fresh_pool().await;
         insert_row(&pool, "r-1").await;
 
-        let rows = list(
-            State(pool.clone()),
-            Query(params(Some(Utc::now() - Duration::hours(24)))),
-        )
-        .await
-        .unwrap()
-        .0;
+        let rows = list_rows(pool.clone(), params(Some(Utc::now() - Duration::hours(24)))).await;
         assert_eq!(
             rows.len(),
             1,
@@ -848,13 +1343,7 @@ mod tests {
         );
 
         // Sanity: a bound minutes in the future excludes it.
-        let rows = list(
-            State(pool),
-            Query(params(Some(Utc::now() + Duration::minutes(5)))),
-        )
-        .await
-        .unwrap()
-        .0;
+        let rows = list_rows(pool, params(Some(Utc::now() + Duration::minutes(5)))).await;
         assert!(rows.is_empty(), "future bound must exclude the row");
     }
 
@@ -879,23 +1368,14 @@ mod tests {
         .await
         .unwrap();
 
-        let rows = list(
-            State(pool.clone()),
-            Query(params(Some(now - Duration::hours(24)))),
-        )
-        .await
-        .unwrap()
-        .0;
+        let rows = list_rows(pool.clone(), params(Some(now - Duration::hours(24)))).await;
         assert!(
             rows.is_empty(),
             "a re-projected three-week-old run must not flood the 24h window",
         );
 
         // It still shows up once the window actually covers its run time.
-        let rows = list(State(pool), Query(params(Some(now - Duration::days(30)))))
-            .await
-            .unwrap()
-            .0;
+        let rows = list_rows(pool, params(Some(now - Duration::days(30)))).await;
         assert_eq!(rows.len(), 1);
     }
 
@@ -920,16 +1400,18 @@ mod tests {
         .unwrap();
         insert_row(&pool, "r-other").await; // pc-1, must not match
 
-        let mut p = params(None);
-        p.pc_id = Some("^pc-9$".into());
-        let rows = list(State(pool), Query(p)).await.unwrap().0;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].result_id, "r-out");
-        assert_eq!(
-            rows[0].stdout, "hello stdout",
-            "winners must be re-hydrated with their output",
-        );
-        assert_eq!(rows[0].stderr, "hello stderr");
+        for pattern in ["pc-9", "^pc-9$"] {
+            let mut p = params(None);
+            p.pc_id = Some(pattern.into());
+            let rows = list_rows(pool.clone(), p).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].result_id, "r-out");
+            assert_eq!(
+                rows[0].stdout, "hello stdout",
+                "winners must be re-hydrated with their output ({pattern})",
+            );
+            assert_eq!(rows[0].stderr, "hello stderr");
+        }
     }
 
     /// #517 schema-drift guard: a row served through the metadata-
@@ -955,13 +1437,10 @@ mod tests {
         .await
         .unwrap();
 
-        let fast = list(State(pool.clone()), Query(params(None)))
-            .await
-            .unwrap()
-            .0;
+        let fast = list_rows(pool.clone(), params(None)).await;
         let mut p = params(None);
         p.pc_id = Some("pc-7".into());
-        let via_regex = list(State(pool), Query(p)).await.unwrap().0;
+        let via_regex = list_rows(pool, p).await;
 
         assert_eq!(fast.len(), 1);
         assert_eq!(via_regex.len(), 1);
@@ -998,7 +1477,7 @@ mod tests {
         .await
         .unwrap();
 
-        let rows = list(State(pool), Query(params(None))).await.unwrap().0;
+        let rows = list_rows(pool, params(None)).await;
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(
@@ -1059,10 +1538,8 @@ mod tests {
             async move {
                 let mut p = params(None);
                 p.status = Some(status);
-                let mut rows: Vec<(String, bool)> = list(State(pool), Query(p))
+                let mut rows: Vec<(String, bool)> = list_rows(pool, p)
                     .await
-                    .unwrap()
-                    .0
                     .into_iter()
                     .map(|r| (r.result_id, r.skipped))
                     .collect();
@@ -1111,7 +1588,7 @@ mod tests {
 
         let mut p = params(None);
         p.stdout = Some("(?i)error".into());
-        let rows = list(State(pool), Query(p)).await.unwrap().0;
+        let rows = list_rows(pool, p).await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].result_id, "r-hit");
         assert_eq!(rows[0].stdout, "ERROR: kaboom");
@@ -1147,13 +1624,7 @@ mod tests {
         let long = "x".repeat(PREVIEW_CHARS + 50);
         insert_row_io(&pool, "r-long", &long, "").await;
 
-        let rows = list(
-            State(pool),
-            Query(params(Some(Utc::now() - Duration::hours(24)))),
-        )
-        .await
-        .unwrap()
-        .0;
+        let rows = list_rows(pool, params(Some(Utc::now() - Duration::hours(24)))).await;
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(
@@ -1176,8 +1647,6 @@ mod tests {
     async fn metadata_regex_path_clips_rehydrated_output() {
         let pool = fresh_pool().await;
         let long = "y".repeat(PREVIEW_CHARS + 80);
-        // pc-9 so a `^pc-9$` metadata regex selects it via the
-        // blob-free prefilter, forcing the rehydration path.
         let now = Utc::now();
         sqlx::query(
             "INSERT INTO execution_results
@@ -1193,19 +1662,23 @@ mod tests {
         .await
         .unwrap();
 
-        let mut p = params(None);
-        p.pc_id = Some("^pc-9$".into());
-        let rows = list(State(pool), Query(p)).await.unwrap().0;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].stdout.chars().count(),
-            PREVIEW_CHARS,
-            "rehydrated output must still be clipped to the preview",
-        );
-        assert!(
-            rows[0].stdout_truncated,
-            "a clipped rehydrated stdout must be flagged",
-        );
+        // Exercise both the unanchored metadata-regex rehydration path
+        // ("pc-9") and the exact-literal SQL pushdown path ("^pc-9$").
+        for pattern in ["pc-9", "^pc-9$"] {
+            let mut p = params(None);
+            p.pc_id = Some(pattern.into());
+            let rows = list_rows(pool.clone(), p).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].stdout.chars().count(),
+                PREVIEW_CHARS,
+                "rehydrated output must still be clipped to the preview ({pattern})",
+            );
+            assert!(
+                rows[0].stdout_truncated,
+                "a clipped rehydrated stdout must be flagged ({pattern})",
+            );
+        }
     }
 
     /// A stdout regex hit must come back with a match excerpt even when
@@ -1219,7 +1692,7 @@ mod tests {
 
         let mut p = params(Some(Utc::now() - Duration::hours(24)));
         p.stdout = Some("NEEDLE".to_string());
-        let rows = list(State(pool), Query(p)).await.unwrap().0;
+        let rows = list_rows(pool, p).await;
         assert_eq!(rows.len(), 1);
         let m = rows[0]
             .stdout_match
@@ -1241,7 +1714,7 @@ mod tests {
 
         let mut p = params(Some(Utc::now() - Duration::hours(24)));
         p.stdout = Some("z+".to_string());
-        let rows = list(State(pool), Query(p)).await.unwrap().0;
+        let rows = list_rows(pool, p).await;
         let m = rows[0].stdout_match.as_ref().unwrap();
         assert_eq!(
             m.matched.chars().count(),
@@ -1249,5 +1722,546 @@ mod tests {
             "matched run is capped",
         );
         assert!(m.clipped_end, "a capped match flags clipped_end");
+    }
+
+    fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+        headers.get(name).and_then(|v| v.to_str().ok())
+    }
+
+    /// Seed `count` newer unrelated rows (`pc-noise`, `job-noise`,
+    /// `exec-noise`, `stdout = 'ok'`) with strictly descending
+    /// `started_at` timestamps above `older_than`.
+    async fn seed_newer_unrelated_rows(
+        pool: &SqlitePool,
+        count: usize,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) {
+        sqlx::query(
+            "WITH RECURSIVE cnt(i) AS (
+                 SELECT 1
+                 UNION ALL
+                 SELECT i + 1 FROM cnt WHERE i < ?
+             )
+             INSERT INTO execution_results
+                 (result_id, request_id, exec_id, pc_id, job_id, exit_code,
+                  stdout, stderr, started_at, finished_at, recorded_at)
+             SELECT
+                 printf('noise-%06d', i),
+                 'req-noise',
+                 'exec-noise',
+                 'pc-noise',
+                 'job-noise',
+                 0,
+                 'all quiet',
+                 '',
+                 strftime('%Y-%m-%dT%H:%M:%f', ?, printf('+%d seconds', i)) || '+00:00',
+                 strftime('%Y-%m-%dT%H:%M:%f', ?, printf('+%d seconds', i + 1)) || '+00:00',
+                 strftime('%Y-%m-%dT%H:%M:%f', ?, printf('+%d seconds', i + 1)) || '+00:00'
+             FROM cnt",
+        )
+        .bind(count as i64)
+        .bind(older_than)
+        .bind(older_than)
+        .bind(older_than)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn extract_exact_literal_is_conservative() {
+        // Anchored plain and escaped-punctuation literals push down.
+        assert_eq!(
+            extract_exact_literal(Some("^PC001$")).as_deref(),
+            Some("PC001")
+        );
+        assert_eq!(
+            extract_exact_literal(Some("  ^job\\.\\+\\-\\[1\\]$  ")).as_deref(),
+            Some("job.+-[1]")
+        );
+        // Unanchored or half-anchored literals must NOT become SQL `=`.
+        assert_eq!(extract_exact_literal(Some("PC001")), None);
+        assert_eq!(extract_exact_literal(Some("^PC001")), None);
+        assert_eq!(extract_exact_literal(Some("PC001$")), None);
+        // Empty anchored pattern matches NULL on job_id/exec_id in Rust
+        // and must NOT become `col = ''`.
+        assert_eq!(extract_exact_literal(Some("^$")), None);
+        // Flags, alternations, groups, quantifiers, character classes, and
+        // escaped trailing `$` stay on the Rust regex path.
+        assert_eq!(extract_exact_literal(Some("^(?i)PC001$")), None);
+        assert_eq!(extract_exact_literal(Some("(?i)^PC001$")), None);
+        assert_eq!(extract_exact_literal(Some("^PC001|PC002$")), None);
+        assert_eq!(extract_exact_literal(Some("^(PC001)$")), None);
+        assert_eq!(extract_exact_literal(Some("^PC.*$")), None);
+        assert_eq!(extract_exact_literal(Some("^PC\\d+$")), None);
+        assert_eq!(extract_exact_literal(Some("^PC001\\$")), None);
+    }
+
+    /// #1666 regression: when more than `MAX_FETCH` (10,000) newer
+    /// unrelated rows exist, an exact anchored identifier filter
+    /// (`^...$`) pushes down to SQL equality (finding the old match on page
+    /// 1), while a general metadata regex reports `scan_limit_reached` +
+    /// `X-Results-Next-Cursor` and reaches the older match on page 2.
+    #[tokio::test]
+    async fn older_metadata_match_beyond_10k_newer_rows_is_reachable() {
+        let pool = fresh_pool().await;
+        let base = Utc::now() - Duration::days(10);
+
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, exec_id, pc_id, job_id, exit_code,
+                 stdout, stderr, started_at, finished_at, recorded_at)
+             VALUES ('old-target', 'req-old', 'exec-old-42', 'pc-old-42', 'job.old+42', 0,
+                     'old stdout payload', '', ?, ?, ?)",
+        )
+        .bind(base)
+        .bind(base + Duration::seconds(1))
+        .bind(base + Duration::seconds(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        seed_newer_unrelated_rows(&pool, MAX_FETCH + 5, base).await;
+
+        // 1. Exact identifier regexes push down to SQL and find the old row
+        //    immediately without exhausting the 10k scan window.
+        let mut exact_p = params(Some(base - Duration::hours(1)));
+        exact_p.pc_id = Some("^pc-old-42$".into());
+        exact_p.job_id = Some("^job\\.old\\+42$".into());
+        exact_p.exec_id = Some("^exec-old-42$".into());
+        let (headers, Json(rows)) = list(State(pool.clone()), Query(exact_p)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result_id, "old-target");
+        assert_eq!(rows[0].stdout, "old stdout payload");
+        assert_eq!(header_str(&headers, HEADER_SCANNED), Some("1"));
+        assert_eq!(
+            header_str(&headers, HEADER_STOP_REASON),
+            Some("end_of_range")
+        );
+        assert!(headers.get(HEADER_NEXT_CURSOR).is_none());
+
+        // 2. General (unanchored substring) regex scans 10,000 rows on page 1,
+        //    signals `scan_limit_reached` with a cursor, and finds the old row
+        //    on page 2.
+        let mut regex_p = params(Some(base - Duration::hours(1)));
+        regex_p.job_id = Some("old\\+42".into());
+        let (headers_p1, Json(rows_p1)) = list(State(pool.clone()), Query(regex_p)).await.unwrap();
+        assert!(
+            rows_p1.is_empty(),
+            "first 10k window contains only newer unrelated rows"
+        );
+        assert_eq!(header_str(&headers_p1, HEADER_SCANNED), Some("10000"));
+        assert_eq!(
+            header_str(&headers_p1, HEADER_STOP_REASON),
+            Some("scan_limit_reached")
+        );
+        let cursor = header_str(&headers_p1, HEADER_NEXT_CURSOR)
+            .expect("scan_limit_reached must provide a continuation cursor")
+            .to_string();
+
+        let mut regex_p2 = params(Some(base - Duration::hours(1)));
+        regex_p2.job_id = Some("old\\+42".into());
+        regex_p2.cursor = Some(cursor);
+        let (headers_p2, Json(rows_p2)) = list(State(pool), Query(regex_p2)).await.unwrap();
+        assert_eq!(rows_p2.len(), 1);
+        assert_eq!(rows_p2[0].result_id, "old-target");
+        assert_eq!(rows_p2[0].stdout, "old stdout payload");
+        assert_eq!(header_str(&headers_p2, HEADER_SCANNED), Some("6"));
+        assert_eq!(
+            header_str(&headers_p2, HEADER_STOP_REASON),
+            Some("end_of_range")
+        );
+        assert!(headers_p2.get(HEADER_NEXT_CURSOR).is_none());
+    }
+
+    /// #1666 regression: when more than `MAX_FETCH_WITH_OUTPUT` (1,000)
+    /// newer unrelated rows exist, a `stdout` / `stderr` regex search
+    /// scans 1,000 rows in page 1 (`scan_limit_reached`) and reaches the
+    /// older match (with match snippet) on page 2 via `cursor`.
+    #[tokio::test]
+    async fn older_output_match_beyond_1k_newer_rows_is_reachable() {
+        let pool = fresh_pool().await;
+        let base = Utc::now() - Duration::days(5);
+        let needle_out = format!("{}ANCIENT_NEEDLE{}", "p".repeat(PREVIEW_CHARS + 30), "q");
+
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, job_id, exit_code,
+                 stdout, stderr, started_at, finished_at, recorded_at)
+             VALUES ('old-output-hit', 'req-old', 'pc-1', 'job-1', 1,
+                     ?, 'FATAL_OLD_STDERR', ?, ?, ?)",
+        )
+        .bind(&needle_out)
+        .bind(base)
+        .bind(base + Duration::seconds(1))
+        .bind(base + Duration::seconds(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        seed_newer_unrelated_rows(&pool, MAX_FETCH_WITH_OUTPUT + 4, base).await;
+
+        let mut p1 = params(Some(base - Duration::hours(1)));
+        p1.stdout = Some("ANCIENT_NEEDLE".into());
+        p1.stderr = Some("FATAL_OLD".into());
+        let (h1, Json(rows1)) = list(State(pool.clone()), Query(p1)).await.unwrap();
+        assert!(rows1.is_empty());
+        assert_eq!(header_str(&h1, HEADER_SCANNED), Some("1000"));
+        assert_eq!(
+            header_str(&h1, HEADER_STOP_REASON),
+            Some("scan_limit_reached")
+        );
+        let cursor = header_str(&h1, HEADER_NEXT_CURSOR).unwrap().to_string();
+
+        let mut p2 = params(Some(base - Duration::hours(1)));
+        p2.stdout = Some("ANCIENT_NEEDLE".into());
+        p2.stderr = Some("FATAL_OLD".into());
+        p2.cursor = Some(cursor);
+        let (h2, Json(rows2)) = list(State(pool), Query(p2)).await.unwrap();
+        assert_eq!(rows2.len(), 1);
+        assert_eq!(rows2[0].result_id, "old-output-hit");
+        assert_eq!(
+            rows2[0].stdout_match.as_ref().unwrap().matched,
+            "ANCIENT_NEEDLE"
+        );
+        assert_eq!(rows2[0].stderr_match.as_ref().unwrap().matched, "FATAL_OLD");
+        assert_eq!(header_str(&h2, HEADER_SCANNED), Some("5"));
+        assert_eq!(header_str(&h2, HEADER_STOP_REASON), Some("end_of_range"));
+        assert!(h2.get(HEADER_NEXT_CURSOR).is_none());
+    }
+
+    /// #1666: preserve regex filter semantics — unanchored literals match
+    /// substrings, inline flags like `(?i)` match case-insensitively, and
+    /// NULL `job_id` / `exec_id` values match `^$` as empty strings while
+    /// being excluded by `^foo$`.
+    #[tokio::test]
+    async fn regex_semantics_for_substrings_flags_and_nulls_are_preserved() {
+        let pool = fresh_pool().await;
+        let now = Utc::now();
+        for (id, pc, job, exec) in [
+            ("r-sub", "PC0010", Some("deploy-prod"), Some("abc-123")),
+            ("r-exact", "PC001", None, None),
+        ] {
+            sqlx::query(
+                "INSERT INTO execution_results
+                    (result_id, request_id, exec_id, pc_id, job_id, exit_code,
+                     stdout, stderr, started_at, finished_at, recorded_at)
+                 VALUES (?, 'req', ?, ?, ?, 0, '', '', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(exec)
+            .bind(pc)
+            .bind(job)
+            .bind(now - Duration::minutes(5))
+            .bind(now - Duration::minutes(4))
+            .bind(now - Duration::minutes(4))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Unanchored `PC001` must match both `PC001` and `PC0010`.
+        let mut p = params(None);
+        p.pc_id = Some("PC001".into());
+        let rows = list_rows(pool.clone(), p).await;
+        assert_eq!(rows.len(), 2);
+
+        // Anchored `^PC001$` matches only `PC001`.
+        let mut p = params(None);
+        p.pc_id = Some("^PC001$".into());
+        let rows = list_rows(pool.clone(), p).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result_id, "r-exact");
+
+        // Case-insensitive flag `(?i)^pc001$` stays on Rust regex path and matches.
+        let mut p = params(None);
+        p.pc_id = Some("(?i)^pc001$".into());
+        let rows = list_rows(pool.clone(), p).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result_id, "r-exact");
+
+        // `^$` on nullable `job_id` / `exec_id` matches the NULL row (`r-exact`).
+        let mut p = params(None);
+        p.job_id = Some("^$".into());
+        p.exec_id = Some("^$".into());
+        let rows = list_rows(pool, p).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result_id, "r-exact");
+    }
+
+    /// #1666: equal `started_at` timestamps (e.g. a broadcast fan-out)
+    /// paginate deterministically by `(started_at DESC, result_id DESC)`
+    /// without duplicating or dropping rows across cursor boundaries.
+    #[tokio::test]
+    async fn equal_timestamp_rows_paginate_without_skips_or_duplicates() {
+        let pool = fresh_pool().await;
+        let same_instant = Utc::now() - Duration::minutes(30);
+        for id in ["r-a", "r-b", "r-c", "r-d", "r-e"] {
+            sqlx::query(
+                "INSERT INTO execution_results
+                    (result_id, request_id, pc_id, job_id, exit_code,
+                     stdout, stderr, started_at, finished_at, recorded_at)
+                 VALUES (?, 'req', 'pc-fanout', 'job-fanout', 0, '', '', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(same_instant)
+            .bind(same_instant)
+            .bind(same_instant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut collected = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut p = params(None);
+            p.limit = 2;
+            p.pc_id = Some("fanout".into()); // unanchored regex path
+            p.cursor = cursor.clone();
+            let (headers, Json(rows)) = list(State(pool.clone()), Query(p)).await.unwrap();
+            collected.extend(rows.into_iter().map(|r| r.result_id));
+            match header_str(&headers, HEADER_NEXT_CURSOR) {
+                Some(next) => {
+                    assert_eq!(
+                        header_str(&headers, HEADER_STOP_REASON),
+                        Some("limit_reached")
+                    );
+                    cursor = Some(next.to_string());
+                }
+                None => {
+                    assert_eq!(
+                        header_str(&headers, HEADER_STOP_REASON),
+                        Some("end_of_range")
+                    );
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(collected, vec!["r-e", "r-d", "r-c", "r-b", "r-a"]);
+    }
+
+    /// #1666: when `limit` is reached mid-chunk during a Rust-regex scan,
+    /// the cursor must point to the last *inspected* row rather than the
+    /// end of the fetched SQL chunk so uninspected rows in that chunk are
+    /// not skipped on the next page.
+    #[tokio::test]
+    async fn mid_chunk_stop_does_not_skip_uninspected_fetched_rows() {
+        let pool = fresh_pool().await;
+        let base = Utc::now() - Duration::hours(2);
+
+        // Insert 10 rows (all fetched in the first 1,000-row chunk) where
+        // every even row matches `pc-even`. With `limit = 2`, page 1 stops
+        // after inspecting 4 rows; page 2 must still see the remaining
+        // matching rows from that same chunk.
+        for i in 1..=10 {
+            let pc = if i % 2 == 0 { "pc-even" } else { "pc-odd" };
+            let ts = base + Duration::seconds(i);
+            sqlx::query(
+                "INSERT INTO execution_results
+                    (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                     started_at, finished_at, recorded_at)
+                 VALUES (?, 'req', ?, 0, '', '', ?, ?, ?)",
+            )
+            .bind(format!("row-{i:02}"))
+            .bind(pc)
+            .bind(ts)
+            .bind(ts)
+            .bind(ts)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut p1 = params(None);
+        p1.limit = 2;
+        p1.pc_id = Some("even".into());
+        let (h1, Json(r1)) = list(State(pool.clone()), Query(p1)).await.unwrap();
+        assert_eq!(
+            r1.iter().map(|r| r.result_id.as_str()).collect::<Vec<_>>(),
+            vec!["row-10", "row-08"]
+        );
+        // Descending order: row-10 (match), row-09 (miss), row-08 (match) -> 3 inspected.
+        assert_eq!(header_str(&h1, HEADER_SCANNED), Some("3"));
+        assert_eq!(header_str(&h1, HEADER_STOP_REASON), Some("limit_reached"));
+        let c1 = header_str(&h1, HEADER_NEXT_CURSOR).unwrap().to_string();
+
+        let mut p2 = params(None);
+        p2.limit = 2;
+        p2.pc_id = Some("even".into());
+        p2.cursor = Some(c1);
+        let (h2, Json(r2)) = list(State(pool.clone()), Query(p2)).await.unwrap();
+        assert_eq!(
+            r2.iter().map(|r| r.result_id.as_str()).collect::<Vec<_>>(),
+            vec!["row-06", "row-04"]
+        );
+        assert_eq!(header_str(&h2, HEADER_SCANNED), Some("4"));
+        assert_eq!(header_str(&h2, HEADER_STOP_REASON), Some("limit_reached"));
+        let c2 = header_str(&h2, HEADER_NEXT_CURSOR).unwrap().to_string();
+
+        let mut p3 = params(None);
+        p3.limit = 2;
+        p3.pc_id = Some("even".into());
+        p3.cursor = Some(c2);
+        let (h3, Json(r3)) = list(State(pool), Query(p3)).await.unwrap();
+        assert_eq!(
+            r3.iter().map(|r| r.result_id.as_str()).collect::<Vec<_>>(),
+            vec!["row-02"]
+        );
+        assert_eq!(header_str(&h3, HEADER_SCANNED), Some("3"));
+        assert_eq!(header_str(&h3, HEADER_STOP_REASON), Some("end_of_range"));
+        assert!(h3.get(HEADER_NEXT_CURSOR).is_none());
+    }
+
+    /// #1666: when the total number of rows in the range equals
+    /// `MAX_FETCH_WITH_OUTPUT` (1,000) and no older row exists behind
+    /// them, lookahead must report `end_of_range` (no cursor) rather than
+    /// a false `scan_limit_reached`.
+    #[tokio::test]
+    async fn exact_budget_at_end_of_range_reports_end_of_range() {
+        let pool = fresh_pool().await;
+        let base = Utc::now() - Duration::hours(5);
+        seed_newer_unrelated_rows(&pool, MAX_FETCH_WITH_OUTPUT, base).await;
+
+        let mut p = params(None);
+        p.stdout = Some("NO_SUCH_OUTPUT".into());
+        let (headers, Json(rows)) = list(State(pool), Query(p)).await.unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(header_str(&headers, HEADER_SCANNED), Some("1000"));
+        assert_eq!(
+            header_str(&headers, HEADER_STOP_REASON),
+            Some("end_of_range")
+        );
+        assert!(
+            headers.get(HEADER_NEXT_CURSOR).is_none(),
+            "exact budget with no 1001st row must not emit a continuation cursor"
+        );
+    }
+
+    /// #1666: `until` acts as an inclusive upper bound on `started_at`,
+    /// and invalid `limit`, out-of-range years, inverted `since > until`,
+    /// or malformed / mismatched cursors return `400 Bad Request`.
+    #[tokio::test]
+    async fn validates_bounds_limits_and_cursors() {
+        let pool = fresh_pool().await;
+        let t1 = Utc::now() - Duration::minutes(20);
+        let t2 = Utc::now() - Duration::minutes(10);
+        for (id, ts) in [("r-older", t1), ("r-newer", t2)] {
+            sqlx::query(
+                "INSERT INTO execution_results
+                    (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                     started_at, finished_at, recorded_at)
+                 VALUES (?, 'req', 'pc-1', 0, '', '', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(ts)
+            .bind(ts)
+            .bind(ts)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Inclusive `until = t1` keeps `r-older` and excludes `r-newer`.
+        let mut p = params(Some(t1));
+        p.until = Some(t1);
+        let rows = list_rows(pool.clone(), p).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result_id, "r-older");
+
+        // Invalid limits (0 and > MAX_LIMIT).
+        for bad_limit in [0, MAX_LIMIT + 1] {
+            let mut p = params(None);
+            p.limit = bad_limit;
+            let err = list(State(pool.clone()), Query(p)).await.err().unwrap();
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        }
+
+        // Inverted `since > until`.
+        let mut p = params(Some(t2));
+        p.until = Some(t1);
+        let err = list(State(pool.clone()), Query(p)).await.err().unwrap();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // Out-of-range 5-digit year on `since` or `until`.
+        use chrono::TimeZone;
+        let year_10000 = Utc.with_ymd_and_hms(10_000, 1, 1, 0, 0, 0).unwrap();
+        let err = list(State(pool.clone()), Query(params(Some(year_10000))))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        let mut p = params(None);
+        p.until = Some(year_10000);
+        let err = list(State(pool.clone()), Query(p)).await.err().unwrap();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // Malformed / empty / overlong cursors.
+        for bad_cursor in ["", "not-valid-base64!!!", &"a".repeat(MAX_CURSOR_LEN + 1)] {
+            let mut p = params(None);
+            p.cursor = Some(bad_cursor.to_string());
+            let err = list(State(pool.clone()), Query(p)).await.err().unwrap();
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        }
+
+        // Cursor minted for one filter set must be rejected when reused
+        // with a different filter set.
+        let mut p1 = params(None);
+        p1.limit = 1;
+        p1.pc_id = Some("pc-1".into());
+        let (h1, _) = list(State(pool.clone()), Query(p1)).await.unwrap();
+        let cursor = header_str(&h1, HEADER_NEXT_CURSOR).unwrap().to_string();
+
+        let mut p_mismatch = params(None);
+        p_mismatch.limit = 1;
+        p_mismatch.pc_id = Some("pc-2".into());
+        p_mismatch.cursor = Some(cursor);
+        let err = list(State(pool), Query(p_mismatch)).await.err().unwrap();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// #1666: composite identifier indexes serve exact identifier filters
+    /// + `ORDER BY started_at DESC, result_id DESC` directly without
+    /// falling back to `USE TEMP B-TREE FOR ORDER BY`.
+    #[tokio::test]
+    async fn exact_identifier_queries_use_composite_started_at_indexes() {
+        let pool = fresh_pool().await;
+        for (sql, expected_idx) in [
+            (
+                "EXPLAIN QUERY PLAN SELECT * FROM execution_results \
+                 WHERE pc_id = 'pc-1' AND (started_at, result_id) < ('2026-10-30', 'r1') \
+                 ORDER BY started_at DESC, result_id DESC LIMIT 50",
+                "idx_execution_results_pc_started_at",
+            ),
+            (
+                "EXPLAIN QUERY PLAN SELECT * FROM execution_results \
+                 WHERE job_id = 'job-1' AND (started_at, result_id) < ('2026-10-30', 'r1') \
+                 ORDER BY started_at DESC, result_id DESC LIMIT 50",
+                "idx_execution_results_job_started_at",
+            ),
+            (
+                "EXPLAIN QUERY PLAN SELECT * FROM execution_results \
+                 WHERE exec_id = 'exec-1' AND (started_at, result_id) < ('2026-10-30', 'r1') \
+                 ORDER BY started_at DESC, result_id DESC LIMIT 50",
+                "idx_execution_results_exec_started_at",
+            ),
+        ] {
+            let plan_rows = sqlx::query(sql).fetch_all(&pool).await.unwrap();
+            let details: Vec<String> = plan_rows
+                .into_iter()
+                .map(|r| r.try_get::<String, _>("detail").unwrap_or_default())
+                .collect();
+            let joined = details.join(" | ");
+            assert!(
+                joined.contains(expected_idx),
+                "expected query plan to use {expected_idx}, got: {joined}",
+            );
+            assert!(
+                !joined.contains("USE TEMP B-TREE"),
+                "expected index-ordered scan without temp B-tree sort, got: {joined}",
+            );
+        }
     }
 }

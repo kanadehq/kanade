@@ -8,7 +8,19 @@
   "errorTitle": "アクティビティを読み込めませんでした",
   "empty": {
     "title": "該当するアクティビティがありません",
-    "body": "フィルター期間を広げるか、 pc_id / job_id / exec_id / stdout / stderr / status をクリアすると、 過去の実行が表示されます。"
+    "body": "この期間の実行結果に一致するものはありません。期間を広げるか、 pc_id / job_id / exec_id / stdout / stderr / status の条件を調整してください。",
+    "scanLimitTitle": "スキャン範囲内に一致する実行結果がありません",
+    "scanLimitBody": "直近 {{count}} 件の実行結果をスキャンしましたが一致しませんでした。選択した期間内のさらに過去の実行結果はまだ検索されていません。",
+    "olderEndBody": "選択した期間の末尾に到達しましたが、このウィンドウに一致する実行結果はありません。"
+  },
+  "pagination": {
+    "searchOlder": "さらに過去の履歴を検索",
+    "previousWindow": "前のウィンドウへ",
+    "resetNewest": "最新に戻る",
+    "scanLimitReached": "スキャン上限に到達 ({{count}} 件検査済み) — 期間内にさらに過去の実行結果があります",
+    "limitReached": "表示上限に到達 ({{count}} 件検査済み) — 期間内にさらに過去の実行結果があります",
+    "endOfRange": "期間の末尾に到達 ({{count}} 件検査済み)",
+    "pageBadge": "ウィンドウ {{page}}"
   },
   "filters": {
     "pcId": "pc_id",

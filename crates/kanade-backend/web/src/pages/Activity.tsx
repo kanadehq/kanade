@@ -81,10 +81,21 @@ type ResultRow = {
   version: string | null;
 };
 
-// Each regex keystroke triggers a `useQuery` refetch that scans up to
-// MAX_FETCH rows on the backend — debounce the inputs so a typed
-// pattern doesn't spam the server while the operator is still typing.
+// Exact anchored literals (`^...$`) on pc_id / job_id / exec_id push
+// down to SQL equality, while general regex filters scan up to the
+// per-request budget (MAX_FETCH / MAX_FETCH_WITH_OUTPUT) and expose
+// `X-Results-Next-Cursor` to continue into older history (#1666).
+// Debounce typed patterns so keystrokes don't spam the backend.
 const FILTER_DEBOUNCE_MS = 300;
+
+type StopReason = 'limit_reached' | 'scan_limit_reached' | 'end_of_range';
+
+type ResultsPage = {
+  rows: ResultRow[];
+  stopReason: StopReason | null;
+  nextCursor: string | null;
+  scanned: number | null;
+};
 
 function useDebouncedValue<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -158,6 +169,8 @@ export function Activity() {
   const dStdoutFilter = useDebouncedValue(stdoutFilter, FILTER_DEBOUNCE_MS);
   const dStderrFilter = useDebouncedValue(stderrFilter, FILTER_DEBOUNCE_MS);
 
+  const untilParam = searchParams.get('until') ?? '';
+
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
     sp.set('limit', String(limit));
@@ -167,17 +180,79 @@ export function Activity() {
     if (dStdoutFilter) sp.set('stdout', dStdoutFilter);
     if (dStderrFilter) sp.set('stderr', dStderrFilter);
     if (status)        sp.set('status', status);
+    if (untilParam)    sp.set('until', untilParam);
     return sp.toString();
-  }, [dPcId, dJobId, dExecId, dStdoutFilter, dStderrFilter, status, limit]);
+  }, [dPcId, dJobId, dExecId, dStdoutFilter, dStderrFilter, status, limit, untilParam]);
 
-  const { data, error, isLoading, isFetching } = useQuery({
-    // Preset key (not a computed ISO) keeps the cache partitioned
-    // per window without millisecond-tick invalidation (#519).
-    queryKey: ['results', queryString, since],
-    queryFn: () => {
+  // #1666: Pin the search window (`since` anchor) across cursor pages
+  // within a search series so the backend's `filter_hash` and time
+  // bounds stay consistent, and reset the series synchronously whenever
+  // any filter or URL parameter changes so stale cursors / responses
+  // from an earlier search cannot mix into the current view.
+  const filterSignature = `${searchParams.toString()}|${queryString}|${since}`;
+  const [paging, setPaging] = useState<{
+    filterSignature: string;
+    seriesId: number;
+    anchorMs: number;
+    cursor: string | null;
+    cursorHistory: Array<string | null>;
+  }>(() => ({
+    filterSignature,
+    seriesId: 0,
+    anchorMs: Date.now(),
+    cursor: null,
+    cursorHistory: [],
+  }));
+
+  const activePaging =
+    paging.filterSignature === filterSignature
+      ? paging
+      : {
+          filterSignature,
+          seriesId: paging.seriesId + 1,
+          anchorMs: Date.now(),
+          cursor: null,
+          cursorHistory: [],
+        };
+
+  if (paging.filterSignature !== filterSignature) {
+    setPaging(activePaging);
+  }
+
+  const { data, error, isLoading, isFetching } = useQuery<ResultsPage>({
+    // Preset key (not a computed ISO) + seriesId + cursor keeps the
+    // cache partitioned per search window and page without millisecond
+    // invalidation (#519, #1666).
+    queryKey: ['results', queryString, since, activePaging.seriesId, activePaging.cursor],
+    queryFn: async () => {
       const sp = new URLSearchParams(queryString);
-      if (sinceMs) sp.set('since', new Date(Date.now() - sinceMs).toISOString());
-      return apiFetch<ResultRow[]>(`/api/results?${sp.toString()}`);
+      if (sinceMs) sp.set('since', new Date(activePaging.anchorMs - sinceMs).toISOString());
+      if (activePaging.cursor) sp.set('cursor', activePaging.cursor);
+      let stopReason: StopReason | null = null;
+      let nextCursor: string | null = null;
+      let scanned: number | null = null;
+      const rows = await apiFetch<ResultRow[]>(`/api/results?${sp.toString()}`, {}, (res) => {
+        const rawStop = res.headers.get('X-Results-Stop-Reason');
+        if (
+          rawStop === 'limit_reached' ||
+          rawStop === 'scan_limit_reached' ||
+          rawStop === 'end_of_range'
+        ) {
+          stopReason = rawStop;
+        }
+        nextCursor = res.headers.get('X-Results-Next-Cursor');
+        const rawScanned = res.headers.get('X-Results-Scanned');
+        if (rawScanned !== null) {
+          const n = Number(rawScanned);
+          if (!Number.isNaN(n)) scanned = n;
+        }
+      });
+      return {
+        rows: rows ?? [],
+        stopReason,
+        nextCursor,
+        scanned,
+      };
     },
   });
 
@@ -210,7 +285,44 @@ export function Activity() {
     },
   });
 
-  const rows = data ?? [];
+  const rows = data?.rows ?? [];
+  const stopReason = data?.stopReason ?? null;
+  const nextCursor = data?.nextCursor ?? null;
+  const scanned = data?.scanned ?? null;
+  const hasOlder =
+    Boolean(nextCursor) &&
+    (stopReason === 'scan_limit_reached' || stopReason === 'limit_reached');
+  const hasPrev = activePaging.cursor !== null;
+  const pageNumber = activePaging.cursorHistory.length + 1;
+
+  const handleSearchOlder = () => {
+    if (!nextCursor) return;
+    setPaging({
+      ...activePaging,
+      cursorHistory: [...activePaging.cursorHistory, activePaging.cursor],
+      cursor: nextCursor,
+    });
+  };
+
+  const handlePreviousWindow = () => {
+    if (activePaging.cursorHistory.length === 0) return;
+    const prevCursor = activePaging.cursorHistory[activePaging.cursorHistory.length - 1] ?? null;
+    setPaging({
+      ...activePaging,
+      cursorHistory: activePaging.cursorHistory.slice(0, -1),
+      cursor: prevCursor,
+    });
+  };
+
+  const handleResetNewest = () => {
+    setPaging({
+      filterSignature,
+      seriesId: activePaging.seriesId + 1,
+      anchorMs: Date.now(),
+      cursor: null,
+      cursorHistory: [],
+    });
+  };
 
   return (
     <div className="space-y-4">
@@ -318,123 +430,244 @@ export function Activity() {
       ) : error ? (
         <ErrorCard title={t('errorTitle')} error={error} />
       ) : rows.length === 0 ? (
-        <Card>
-          <CardHeader><CardTitle>{t('empty.title')}</CardTitle></CardHeader>
-          <CardContent className="text-muted">
-            {t('empty.body')}
-          </CardContent>
-        </Card>
-      ) : (
-        <Table resizeKey="activity" picker metaColumns sortFilter>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{t('columns.resultId')}</TableHead>
-              <TableHead>{t('columns.pcId')}</TableHead>
-              <TableHead>{t('columns.jobId')}</TableHead>
-              <TableHead>{t('columns.execId')}</TableHead>
-              <TableHead>{t('columns.exit')}</TableHead>
-              <TableHead>{t('columns.started')}</TableHead>
-              <TableHead>{t('columns.finished')}</TableHead>
-              <TableHead sortable={false} filterable={false}>{t('columns.stdio')}</TableHead>
-              <TableHead sortable={false} filterable={false}>{t('columns.actions')}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((r) => (
-              <TableRow key={r.result_id} pcId={r.pc_id}>
-                <TableCell label={t('columns.resultId')}>
-                  {/* result_id (v0.29) is the detail-route key — was
-                      request_id pre-v0.29 but that's no longer unique
-                      across broadcast Commands. Ctrl/⌘ click opens
-                      a new tab so operators can compare results
-                      side-by-side. */}
-                  <Link
-                    to={`/activity/${encodeURIComponent(r.result_id)}`}
-                    className="text-accent hover:underline inline-flex items-center gap-1"
-                    title={t('actions.openDetail')}
-                  >
-                    <code className="text-xs">{r.result_id.slice(0, ID_PREVIEW_LENGTH)}</code>
-                    <ExternalLink className="size-3" />
-                  </Link>
-                </TableCell>
-                <TableCell label={t('columns.pcId')}><code className="text-xs">{r.pc_id}</code></TableCell>
-                <TableCell label={t('columns.jobId')}>
-                  {r.job_id
-                    ? <code className="text-xs">{r.job_id}</code>
-                    : <span className="text-muted text-xs">—</span>}
-                </TableCell>
-                <TableCell label={t('columns.execId')}>
-                  {r.exec_id
-                    ? <code className="text-xs">{r.exec_id.slice(0, ID_PREVIEW_LENGTH)}</code>
-                    : <span className="text-muted text-xs">—</span>}
-                </TableCell>
-                <TableCell label={t('columns.exit')} sortValue={r.exit_code ?? undefined}>
-                  {/* v0.30 / PR α' unified: exit_code is null while
-                      the row is in flight (events.started landed
-                      but no ExecResult yet). Show a 'running' badge
-                      instead of `0` or empty so operators see
-                      lifecycle clearly. */}
-                  {r.exit_code === null ? (
-                    <Badge variant="violet">{t('status.running')}</Badge>
-                  ) : (
-                    <ExitCodeBadge code={r.exit_code} skipped={r.skipped} />
-                  )}
-                </TableCell>
-                <TableCell label={t('columns.started')} sortValue={r.started_at ?? undefined} className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
-                <TableCell label={t('columns.finished')} sortValue={r.finished_at ?? undefined} className="text-muted text-xs">
-                  {/* v0.30 / PR α' unified: finished_at null = still
-                      running. fmtIsoLocal returns "—" for null
-                      which is OK but ambiguous with "no data"; show
-                      "running…" explicitly. */}
-                  {r.finished_at ? fmtIsoLocal(r.finished_at) : t('status.runningEllipsis')}
-                </TableCell>
-                <TableCell label={t('columns.stdio')} className="max-w-md">
-                  <StdioPreview
-                    resultId={r.result_id}
-                    stdout={r.stdout}
-                    stderr={r.stderr}
-                    stdoutTruncated={r.stdout_truncated}
-                    stderrTruncated={r.stderr_truncated}
-                    stdoutMatch={r.stdout_match}
-                    stderrMatch={r.stderr_match}
-                    running={r.finished_at === null}
-                  />
-                </TableCell>
-                <TableCell>
-                  {/* v0.30 / PR α' unified: Activity now lists
-                      in-flight rows too (events.started inserts
-                      with finished_at = NULL). The condition
-                      `r.job_id && !r.finished_at` was historically
-                      always false because every Activity row had
-                      a finished_at; now it actually fires for
-                      running rows. */}
-                  {r.job_id && !r.finished_at ? (
+        stopReason === 'scan_limit_reached' && nextCursor ? (
+          <Card>
+            <CardHeader><CardTitle>{t('empty.scanLimitTitle')}</CardTitle></CardHeader>
+            <CardContent className="space-y-3 text-muted">
+              <p data-testid="activity-scan-status">
+                {t('empty.scanLimitBody', { count: scanned ?? 0 })}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                {hasPrev && (
+                  <>
+                    <Badge variant="violet">{t('pagination.pageBadge', { page: pageNumber })}</Badge>
                     <Button
-                      variant="danger"
+                      variant="secondary"
                       size="sm"
-                      disabled={pendingKill.has(r.job_id)}
-                      onClick={async () => {
-                        const ok = await confirm({
-                          title: t('confirm.killTitle', { jobId: r.job_id }),
-                          description: t('confirm.killDescription'),
-                          confirmLabel: t('confirm.killLabel'),
-                          danger: true,
-                        });
-                        if (ok) kill.mutate(r.job_id!);
-                      }}
-                      title={t('actions.killTitle')}
+                      disabled={isFetching}
+                      onClick={handlePreviousWindow}
                     >
-                      <Skull className="size-3.5" />
-                      {t('actions.kill')}
+                      {t('pagination.previousWindow')}
                     </Button>
-                  ) : (
-                    <span className="text-muted text-xs">—</span>
-                  )}
-                </TableCell>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={isFetching}
+                      onClick={handleResetNewest}
+                    >
+                      {t('pagination.resetNewest')}
+                    </Button>
+                  </>
+                )}
+                <Button
+                  variant="default"
+                  size="sm"
+                  disabled={isFetching}
+                  onClick={handleSearchOlder}
+                >
+                  {t('pagination.searchOlder')}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardHeader><CardTitle>{t('empty.title')}</CardTitle></CardHeader>
+            <CardContent className="space-y-3 text-muted">
+              <p>{hasPrev && stopReason === 'end_of_range' ? t('empty.olderEndBody') : t('empty.body')}</p>
+              {stopReason === 'end_of_range' && (
+                <p className="text-xs" data-testid="activity-scan-status">
+                  {t('pagination.endOfRange', { count: scanned ?? 0 })}
+                </p>
+              )}
+              {hasPrev && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="violet">{t('pagination.pageBadge', { page: pageNumber })}</Badge>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={isFetching}
+                    onClick={handlePreviousWindow}
+                  >
+                    {t('pagination.previousWindow')}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={isFetching}
+                    onClick={handleResetNewest}
+                  >
+                    {t('pagination.resetNewest')}
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )
+      ) : (
+        <div className="space-y-3">
+          <Table resizeKey="activity" picker metaColumns sortFilter>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{t('columns.resultId')}</TableHead>
+                <TableHead>{t('columns.pcId')}</TableHead>
+                <TableHead>{t('columns.jobId')}</TableHead>
+                <TableHead>{t('columns.execId')}</TableHead>
+                <TableHead>{t('columns.exit')}</TableHead>
+                <TableHead>{t('columns.started')}</TableHead>
+                <TableHead>{t('columns.finished')}</TableHead>
+                <TableHead sortable={false} filterable={false}>{t('columns.stdio')}</TableHead>
+                <TableHead sortable={false} filterable={false}>{t('columns.actions')}</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {rows.map((r) => (
+                <TableRow key={r.result_id} pcId={r.pc_id}>
+                  <TableCell label={t('columns.resultId')}>
+                    {/* result_id (v0.29) is the detail-route key — was
+                        request_id pre-v0.29 but that's no longer unique
+                        across broadcast Commands. Ctrl/⌘ click opens
+                        a new tab so operators can compare results
+                        side-by-side. */}
+                    <Link
+                      to={`/activity/${encodeURIComponent(r.result_id)}`}
+                      className="text-accent hover:underline inline-flex items-center gap-1"
+                      title={t('actions.openDetail')}
+                    >
+                      <code className="text-xs">{r.result_id.slice(0, ID_PREVIEW_LENGTH)}</code>
+                      <ExternalLink className="size-3" />
+                    </Link>
+                  </TableCell>
+                  <TableCell label={t('columns.pcId')}><code className="text-xs">{r.pc_id}</code></TableCell>
+                  <TableCell label={t('columns.jobId')}>
+                    {r.job_id
+                      ? <code className="text-xs">{r.job_id}</code>
+                      : <span className="text-muted text-xs">—</span>}
+                  </TableCell>
+                  <TableCell label={t('columns.execId')}>
+                    {r.exec_id
+                      ? <code className="text-xs">{r.exec_id.slice(0, ID_PREVIEW_LENGTH)}</code>
+                      : <span className="text-muted text-xs">—</span>}
+                  </TableCell>
+                  <TableCell label={t('columns.exit')} sortValue={r.exit_code ?? undefined}>
+                    {/* v0.30 / PR α' unified: exit_code is null while
+                        the row is in flight (events.started landed
+                        but no ExecResult yet). Show a 'running' badge
+                        instead of `0` or empty so operators see
+                        lifecycle clearly. */}
+                    {r.exit_code === null ? (
+                      <Badge variant="violet">{t('status.running')}</Badge>
+                    ) : (
+                      <ExitCodeBadge code={r.exit_code} skipped={r.skipped} />
+                    )}
+                  </TableCell>
+                  <TableCell label={t('columns.started')} sortValue={r.started_at ?? undefined} className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
+                  <TableCell label={t('columns.finished')} sortValue={r.finished_at ?? undefined} className="text-muted text-xs">
+                    {/* v0.30 / PR α' unified: finished_at null = still
+                        running. fmtIsoLocal returns "—" for null
+                        which is OK but ambiguous with "no data"; show
+                        "running…" explicitly. */}
+                    {r.finished_at ? fmtIsoLocal(r.finished_at) : t('status.runningEllipsis')}
+                  </TableCell>
+                  <TableCell label={t('columns.stdio')} className="max-w-md">
+                    <StdioPreview
+                      resultId={r.result_id}
+                      stdout={r.stdout}
+                      stderr={r.stderr}
+                      stdoutTruncated={r.stdout_truncated}
+                      stderrTruncated={r.stderr_truncated}
+                      stdoutMatch={r.stdout_match}
+                      stderrMatch={r.stderr_match}
+                      running={r.finished_at === null}
+                    />
+                  </TableCell>
+                  <TableCell>
+                    {/* v0.30 / PR α' unified: Activity now lists
+                        in-flight rows too (events.started inserts
+                        with finished_at = NULL). The condition
+                        `r.job_id && !r.finished_at` was historically
+                        always false because every Activity row had
+                        a finished_at; now it actually fires for
+                        running rows. */}
+                    {r.job_id && !r.finished_at ? (
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        disabled={pendingKill.has(r.job_id)}
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: t('confirm.killTitle', { jobId: r.job_id }),
+                            description: t('confirm.killDescription'),
+                            confirmLabel: t('confirm.killLabel'),
+                            danger: true,
+                          });
+                          if (ok) kill.mutate(r.job_id!);
+                        }}
+                        title={t('actions.killTitle')}
+                      >
+                        <Skull className="size-3.5" />
+                        {t('actions.kill')}
+                      </Button>
+                    ) : (
+                      <span className="text-muted text-xs">—</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+
+          {(stopReason !== null || hasPrev) && (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+              <div className="flex items-center gap-2">
+                {(hasPrev || hasOlder) && (
+                  <Badge variant="violet">{t('pagination.pageBadge', { page: pageNumber })}</Badge>
+                )}
+                {stopReason !== null && (
+                  <span data-testid="activity-scan-status">
+                    {stopReason === 'scan_limit_reached'
+                      ? t('pagination.scanLimitReached', { count: scanned ?? rows.length })
+                      : stopReason === 'limit_reached'
+                        ? t('pagination.limitReached', { count: scanned ?? rows.length })
+                        : t('pagination.endOfRange', { count: scanned ?? rows.length })}
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {hasPrev && (
+                  <>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={isFetching}
+                      onClick={handlePreviousWindow}
+                    >
+                      {t('pagination.previousWindow')}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={isFetching}
+                      onClick={handleResetNewest}
+                    >
+                      {t('pagination.resetNewest')}
+                    </Button>
+                  </>
+                )}
+                {hasOlder && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={isFetching}
+                    onClick={handleSearchOlder}
+                  >
+                    {t('pagination.searchOlder')}
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       )}
       {kill.error && <ErrorCard title={t('killErrorTitle')} error={kill.error} />}
     </div>

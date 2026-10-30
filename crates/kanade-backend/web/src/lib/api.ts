@@ -70,8 +70,13 @@ async function apiFetchRaw(path: string, init: RequestInit = {}): Promise<{ res:
   return { res, text };
 }
 
-export async function apiFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
-  const { text } = await apiFetchRaw(path, init);
+export async function apiFetch<T = unknown>(
+  path: string,
+  init: RequestInit = {},
+  onResponse?: (res: Response) => void,
+): Promise<T> {
+  const { res, text } = await apiFetchRaw(path, init);
+  onResponse?.(res);
   return text ? (JSON.parse(text) as T) : (undefined as T);
 }
 

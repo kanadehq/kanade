@@ -8,7 +8,19 @@
   "errorTitle": "Couldn't load activity",
   "empty": {
     "title": "No activity matches",
-    "body": "Widen the filter window or clear pc_id / job_id / exec_id / stdout / stderr / status to see older runs."
+    "body": "No runs matched in this window. Widen the time range or adjust pc_id / job_id / exec_id / stdout / stderr / status.",
+    "scanLimitTitle": "No matches in the scanned window",
+    "scanLimitBody": "Scanned {{count}} recent runs without a match. Older runs in the selected time range were not inspected yet.",
+    "olderEndBody": "Reached the end of the selected time range with no matching runs in this window."
+  },
+  "pagination": {
+    "searchOlder": "Search older history",
+    "previousWindow": "Previous window",
+    "resetNewest": "Back to newest",
+    "scanLimitReached": "Scan budget reached ({{count}} runs inspected) — older runs remain in range",
+    "limitReached": "Page limit reached ({{count}} runs inspected) — older runs remain in range",
+    "endOfRange": "End of time range ({{count}} runs inspected)",
+    "pageBadge": "Window {{page}}"
   },
   "filters": {
     "pcId": "pc_id",
