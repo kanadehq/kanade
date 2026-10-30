@@ -250,3 +250,73 @@ test('Activity continues across scan-budget windows with pinned since and resets
   expect(requests.at(-1)?.get('stdout')).toBe('fresh-filter');
   expect(requests.at(-1)?.has('cursor')).toBe(false);
 });
+
+for (const ignoreAbort of [false, true]) {
+  test(`Activity の検索更新は過去ページを${ignoreAbort ? '遅延応答後も破棄する' : 'キャンセルする'}`, async ({ mount, page }) => {
+    // キャンセル通知を観測し、遅延応答のケースでは通信側だけ通知を無視させる。
+    await page.evaluate((ignore) => {
+      const state = window as typeof window & { olderAborted: boolean; olderCompleted: boolean };
+      state.olderAborted = false;
+      state.olderCompleted = false;
+      const original = window.fetch.bind(window);
+      window.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), location.href);
+        if (url.pathname === '/api/results' && url.searchParams.has('cursor')) {
+          init?.signal?.addEventListener('abort', () => { state.olderAborted = true; });
+          const response = await original(input, ignore ? { ...init, signal: undefined } : init);
+          state.olderCompleted = true;
+          return response;
+        }
+        return original(input, init);
+      }, original);
+    }, ignoreAbort);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    let requestedOlder = false;
+    let newestRequests = 0;
+    let fulfilledOlder = false;
+    await page.route('**/api/results?*', async (route) => {
+      if (new URL(route.request().url()).searchParams.has('cursor')) {
+        requestedOlder = true;
+        await pending;
+        await route.fulfill({
+          json: [{
+            result_id: 'stale-result', request_id: 'stale-request', pc_id: 'STALE-PC',
+            exit_code: 0, skipped: false, stdout: '', stderr: '',
+            started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:00:01Z',
+          }],
+          headers: { 'X-Results-Stop-Reason': 'end_of_range', 'X-Results-Scanned': '1' },
+        });
+        fulfilledOlder = true;
+      } else {
+        newestRequests++;
+        await route.fulfill({ json: [], headers: {
+          'X-Results-Stop-Reason': 'scan_limit_reached',
+          'X-Results-Next-Cursor': 'older-page', 'X-Results-Scanned': '10000',
+        } });
+      }
+    });
+    const c = await mount(<ExecutionActivityHost initial="/activity" />);
+    const older = c.getByRole('button', { name: 'Search older history', exact: true });
+    await expect(older).toBeEnabled();
+    await older.click();
+    try {
+      await expect.poll(() => requestedOlder).toBe(true);
+      await c.getByRole('button', { name: 'Back to newest', exact: true }).first().click();
+      await expect.poll(() => newestRequests).toBe(2);
+      await expect.poll(() => page.evaluate(() =>
+        (window as typeof window & { olderAborted: boolean }).olderAborted)).toBe(true);
+      await expect(older).toBeEnabled();
+    } finally {
+      release();
+    }
+    await expect.poll(() => fulfilledOlder).toBe(true);
+    if (ignoreAbort) {
+      await expect.poll(() => page.evaluate(() =>
+        (window as typeof window & { olderCompleted: boolean }).olderCompleted)).toBe(true);
+    }
+    await expect(c.getByText('STALE-PC', { exact: true })).toHaveCount(0);
+    await expect(c.getByText('No matches in the scanned window', { exact: true })).toBeVisible();
+    await expect(older).toBeEnabled();
+  });
+}

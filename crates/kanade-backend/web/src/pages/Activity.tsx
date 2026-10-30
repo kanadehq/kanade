@@ -224,14 +224,14 @@ export function Activity() {
     // cache partitioned per search window and page without millisecond
     // invalidation (#519, #1666).
     queryKey: ['results', queryString, since, activePaging.seriesId, activePaging.cursor],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const sp = new URLSearchParams(queryString);
       if (sinceMs) sp.set('since', new Date(activePaging.anchorMs - sinceMs).toISOString());
       if (activePaging.cursor) sp.set('cursor', activePaging.cursor);
       let stopReason: StopReason | null = null;
       let nextCursor: string | null = null;
       let scanned: number | null = null;
-      const rows = await apiFetch<ResultRow[]>(`/api/results?${sp.toString()}`, {}, (res) => {
+      const rows = await apiFetch<ResultRow[]>(`/api/results?${sp.toString()}`, { signal }, (res) => {
         const rawStop = res.headers.get('X-Results-Stop-Reason');
         if (
           rawStop === 'limit_reached' ||
@@ -328,6 +328,9 @@ export function Activity() {
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">{t('title')}</h2>
+        <Button variant="ghost" size="sm" onClick={handleResetNewest}>
+          {t('pagination.resetNewest')}
+        </Button>
         <Badge variant="violet">
           {isFetching && !isLoading
             ? t('countBadgeFetching', { count: rows.length })

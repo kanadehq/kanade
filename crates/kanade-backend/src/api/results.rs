@@ -440,6 +440,11 @@ fn decode_cursor(
     let cursor_dt = parsed
         .started_at
         .parse::<chrono::DateTime<chrono::Utc>>()
+        .or_else(|_| {
+            // SQLite の旧形式も受け入れ、比較には元の文字列を保持する。
+            chrono::NaiveDateTime::parse_from_str(&parsed.started_at, "%Y-%m-%d %H:%M:%S%.f")
+                .map(|dt| dt.and_utc())
+        })
         .map_err(|_| {
             (
                 StatusCode::BAD_REQUEST,
@@ -546,14 +551,25 @@ fn push_sql_filters(
     let _ = sep;
 }
 
+fn search_query(
+    select: &str,
+    filters: &SqlFilters<'_>,
+    after: Option<&(String, String)>,
+    limit: i64,
+) -> QueryBuilder<Sqlite> {
+    let mut qb = QueryBuilder::new(select.to_owned());
+    push_sql_filters(&mut qb, filters, after);
+    qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT ")
+        .push_bind(limit);
+    qb
+}
+
 async fn has_older_rows(
     pool: &SqlitePool,
     filters: &SqlFilters<'_>,
     after: &(String, String),
 ) -> Result<bool, (StatusCode, String)> {
-    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT 1 FROM execution_results");
-    push_sql_filters(&mut qb, filters, Some(after));
-    qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT 1");
+    let mut qb = search_query("SELECT 1 FROM execution_results", filters, Some(after), 1);
     let row = qb.build().fetch_optional(pool).await.map_err(|e| {
         warn!(error = %e, "list results lookahead");
         (
@@ -675,14 +691,16 @@ pub async fn list(
     // down to SQL). Fetch `limit + 1` rows so a single query both fills
     // the page and determines whether older rows remain.
     if !has_rust_regex {
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM execution_results");
-        push_sql_filters(&mut qb, &sql_filters, initial_cursor.as_ref());
+        let mut qb = search_query(
+            "SELECT * FROM execution_results",
+            &sql_filters,
+            initial_cursor.as_ref(),
+            (limit + 1) as i64,
+        );
         // #399: order by started_at (the displayed column) so the listing
         // is a run-time timeline, not a projection-time feed. result_id
         // breaks ties (broadcast fan-outs can share a start instant) so
         // pagination across refetches is deterministic.
-        qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT ");
-        qb.push_bind((limit + 1) as i64);
 
         let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
             warn!(error = %e, "list results");
@@ -753,10 +771,7 @@ pub async fn list(
         let fetch_count = (scan_budget - scanned).min(chunk_cap);
         let after = last_inspected.as_ref().or(initial_cursor.as_ref());
 
-        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(&select);
-        push_sql_filters(&mut qb, &sql_filters, after);
-        qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT ");
-        qb.push_bind(fetch_count as i64);
+        let mut qb = search_query(&select, &sql_filters, after, fetch_count as i64);
 
         let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
             warn!(error = %e, "list results");
@@ -2222,46 +2237,146 @@ mod tests {
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn legacy_sqlite_timestamps_continue_without_reformatting() {
+        let pool = fresh_pool().await;
+        for id in ["a", "b", "c"] {
+            insert_row(&pool, id).await;
+        }
+        for timestamp in ["2026-01-02 03:04:05", "2026-01-02 03:04:05.123456"] {
+            sqlx::query("UPDATE execution_results SET started_at = ?")
+                .bind(timestamp)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut p = params(None);
+            p.limit = 1;
+            let (headers, rows) = list(State(pool.clone()), Query(p)).await.unwrap();
+            assert_eq!(rows.0[0].result_id, "c");
+            let cursor = header_str(&headers, HEADER_NEXT_CURSOR).unwrap();
+            let hash = compute_filter_hash(&params(None));
+            assert_eq!(
+                decode_cursor(cursor, &hash, None, None).unwrap(),
+                (timestamp.into(), "c".into())
+            );
+            let mut p = params(None);
+            p.limit = 1;
+            p.cursor = Some(cursor.into());
+            let rows = list_rows(pool.clone(), p).await;
+            assert_eq!(rows[0].result_id, "b");
+            let lower = "2026-01-03T00:00:00Z".parse().unwrap();
+            let upper = "2026-01-01T00:00:00Z".parse().unwrap();
+            assert!(decode_cursor(cursor, &hash, Some(lower), None).is_err());
+            assert!(decode_cursor(cursor, &hash, None, Some(upper)).is_err());
+        }
+        let hash = compute_filter_hash(&params(None));
+        for bad in ["invalid", "2026-02-30 03:04:05", "10000-01-01 00:00:00"] {
+            let cursor = encode_cursor(bad, "c", &hash).unwrap();
+            assert!(decode_cursor(&cursor, &hash, None, None).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn search_http_keeps_array_body_and_rejects_malformed_bounds() {
+        use axum::{Router, body::Body, routing::get};
+        use tower::ServiceExt;
+        let pool = fresh_pool().await;
+        insert_row(&pool, "a").await;
+        let app = Router::new()
+            .route("/api/results", get(list))
+            .with_state(pool);
+        for query in [
+            "since=invalid",
+            "until=invalid",
+            "limit=0",
+            "limit=1001",
+            "limit=-1",
+            "cursor=bad",
+            "cursor=",
+            "since=2026-02-01T00:00:00Z&until=2026-01-01T00:00:00Z",
+            "until=%2B10000-01-01T00:00:00Z",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/api/results?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/results")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEADER_STOP_REASON], "end_of_range");
+        assert_eq!(response.headers()[HEADER_SCANNED], "1");
+        assert!(!response.headers().contains_key(HEADER_NEXT_CURSOR));
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(rows.is_array());
+        assert_eq!(rows[0]["result_id"], "a");
+    }
+
     /// #1666: composite identifier indexes serve exact identifier filters
     /// + `ORDER BY started_at DESC, result_id DESC` directly without
     /// falling back to `USE TEMP B-TREE FOR ORDER BY`.
     #[tokio::test]
     async fn exact_identifier_queries_use_composite_started_at_indexes() {
         let pool = fresh_pool().await;
-        for (sql, expected_idx) in [
-            (
-                "EXPLAIN QUERY PLAN SELECT * FROM execution_results \
-                 WHERE pc_id = 'pc-1' AND (started_at, result_id) < ('2026-10-30', 'r1') \
-                 ORDER BY started_at DESC, result_id DESC LIMIT 50",
-                "idx_execution_results_pc_started_at",
-            ),
-            (
-                "EXPLAIN QUERY PLAN SELECT * FROM execution_results \
-                 WHERE job_id = 'job-1' AND (started_at, result_id) < ('2026-10-30', 'r1') \
-                 ORDER BY started_at DESC, result_id DESC LIMIT 50",
-                "idx_execution_results_job_started_at",
-            ),
-            (
-                "EXPLAIN QUERY PLAN SELECT * FROM execution_results \
-                 WHERE exec_id = 'exec-1' AND (started_at, result_id) < ('2026-10-30', 'r1') \
-                 ORDER BY started_at DESC, result_id DESC LIMIT 50",
-                "idx_execution_results_exec_started_at",
-            ),
+        for (column, expected_idx) in [
+            ("pc_id", "idx_execution_results_pc_started_at"),
+            ("job_id", "idx_execution_results_job_started_at"),
+            ("exec_id", "idx_execution_results_exec_started_at"),
         ] {
-            let plan_rows = sqlx::query(sql).fetch_all(&pool).await.unwrap();
-            let details: Vec<String> = plan_rows
-                .into_iter()
-                .map(|r| r.try_get::<String, _>("detail").unwrap_or_default())
-                .collect();
-            let joined = details.join(" | ");
-            assert!(
-                joined.contains(expected_idx),
-                "expected query plan to use {expected_idx}, got: {joined}",
-            );
-            assert!(
-                !joined.contains("USE TEMP B-TREE"),
-                "expected index-ordered scan without temp B-tree sort, got: {joined}",
-            );
+            let filters = SqlFilters {
+                status: None,
+                since: None,
+                until: None,
+                pc_exact: (column == "pc_id").then_some("pc-1"),
+                job_exact: (column == "job_id").then_some("job-1"),
+                exec_exact: (column == "exec_id").then_some("exec-1"),
+            };
+            let after = ("2026-10-30T00:00:00Z".into(), "r1".into());
+            for select in [
+                "SELECT * FROM execution_results",
+                &format!("SELECT {META_COLUMNS} FROM execution_results"),
+            ] {
+                let mut qb = search_query(select, &filters, Some(&after), 50);
+                let sql = format!("EXPLAIN QUERY PLAN {}", qb.sql().as_str());
+                use sqlx::Execute;
+                let plan_rows = sqlx::query_with(
+                    sqlx::AssertSqlSafe(sql),
+                    qb.build().take_arguments().unwrap().unwrap(),
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+                let details: Vec<String> = plan_rows
+                    .into_iter()
+                    .map(|r| r.try_get::<String, _>("detail").unwrap_or_default())
+                    .collect();
+                let joined = details.join(" | ");
+                assert!(
+                    joined.contains(expected_idx),
+                    "expected query plan to use {expected_idx}, got: {joined}",
+                );
+                assert!(
+                    !joined.contains("USE TEMP B-TREE"),
+                    "expected index-ordered scan without temp B-tree sort, got: {joined}",
+                );
+            }
         }
     }
 }

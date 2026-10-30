@@ -245,6 +245,40 @@ bootstraps, with usage against its limit.
 
 ![JetStream](../images/screenshots/jetstream-light-en.jpg)
 
+## Activity の履歴検索 API
+
+`GET /api/results` は従来どおり結果の JSON 配列を返します（#1666）。
+`pc_id`、`job_id`、`exec_id`、`stdout`、`stderr` は正規表現です。
+アンカーのない `PC001` は `PC0010` にも一致します。識別子の完全一致を
+指定する場合は `^PC001$` を使い、識別子中の正規表現メタ文字をエスケープ
+してください。安全に完全一致と判定できる識別子のパターンだけが SQL の
+等価条件へ変換されます。出力の正規表現は出力全体に適用されます。
+
+`since` と `until` は RFC 3339 形式で指定する `started_at` の包含下限・上限です。
+省略した側には時刻制限がありません。`since` が `until` より後、年が
+0〜9999 の範囲外、不正な日時、不正なカーソルは HTTP 400 になります。
+`limit` は返却件数で、既定値は 50、指定可能範囲は 1〜1000 です。
+
+一般の正規表現検索は1リクエストにつき最大10,000行、`stdout` または
+`stderr` の検索では最大1,000行を調べます。この上限は保持履歴の検索可能範囲
+を意味しません。次のレスポンスヘッダーで継続の要否を判定します。
+
+| ヘッダー | 意味 |
+|---|---|
+| `X-Results-Scanned` | 今回調べた候補行数 |
+| `X-Results-Stop-Reason` | `limit_reached`: 返却件数に到達、`scan_limit_reached`: 走査上限に到達、`end_of_range`: 指定範囲を走査し終えた |
+| `X-Results-Next-Cursor` | 古い履歴が残る場合に返す継続トークン |
+
+配列が空でも `scan_limit_reached` なら、まだ一致が残っている可能性があります。
+次のリクエストは検索条件と時刻境界を保ち、`cursor` にトークンを渡します。
+カーソルは検索条件に紐づくため、条件を変える場合は破棄してください。
+順序は `started_at DESC, result_id DESC` で、同時刻の行も継続できます。
+`end_of_range` が示す完了は指定範囲に対するもので、保持履歴全体とは限りません。
+
+Activity の「Search older history」で継続し、「Previous window」で戻れます。
+「Back to newest」は検索を最初からやり直します。期間プリセットの下限は
+ページ間で固定され、フィルター変更や検索のやり直しで再設定されます。
+
 ## Dark theme
 
 The console follows the operating system by default, and can be pinned to
