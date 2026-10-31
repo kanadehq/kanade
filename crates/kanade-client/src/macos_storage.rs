@@ -280,12 +280,18 @@ mod tests {
 /// Lifecycle preferences live independently of window state and pkg payloads.
 /// Quit is scoped to the kernel boot/audit session; opt-out is persistent.
 fn lifecycle_marker(name: &str, value: Option<bool>) -> io::Result<bool> {
-    let paths = paths()?;
-    let dir = directory(&paths, paths.window_size.parent().ok_or_else(denied)?)?;
+    lifecycle_marker_at(&paths()?, name, value)
+}
+pub(crate) fn lifecycle_marker_at(
+    paths: &ClientPaths,
+    name: &str,
+    value: Option<bool>,
+) -> io::Result<bool> {
+    let dir = directory(paths, paths.window_size.parent().ok_or_else(denied)?)?;
     let name = CString::new(name).map_err(|_| denied())?;
     if value == Some(false) {
         match open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
-            Ok(f) => validate(&f, &paths, PrivateEntry::File)?,
+            Ok(f) => validate(&f, paths, PrivateEntry::File)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e),
         }
@@ -309,19 +315,38 @@ fn lifecycle_marker(name: &str, value: Option<bool>) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e),
     };
-    validate(&f, &paths, PrivateEntry::File)?;
+    validate(&f, paths, PrivateEntry::File)?;
     if value == Some(true) {
-        f.write_all(b"1")?;
+        let bytes = kanade_shared::client_lifecycle::encode_envelope(&name.to_bytes())?;
+        f.set_len(0)?;
+        f.write_all(&bytes)?;
         kanade_shared::client_lifecycle::gate::durable_sync(&f)?;
         kanade_shared::client_lifecycle::gate::durable_sync(&dir)?;
     }
-    // Any existing marker, including partial/crashed writes, is a veto.
+    if value.is_none() {
+        let mut bytes = Vec::new();
+        f.take(4097).read_to_end(&mut bytes)?;
+        let stored: Vec<u8> = kanade_shared::client_lifecycle::decode_envelope(&bytes)?;
+        if stored != name.to_bytes() {
+            return Err(denied());
+        }
+    }
+    // Invalid/partial markers return an error; automatic launch fails closed.
     Ok(true)
 }
 pub fn autostart_disabled(value: Option<bool>) -> io::Result<bool> {
     lifecycle_marker("autostart-disabled", value)
 }
+pub fn autostart_disabled_at(paths: &ClientPaths) -> io::Result<bool> {
+    lifecycle_marker_at(paths, "autostart-disabled", None)
+}
+pub fn session_quit_at(paths: &ClientPaths, session: u32) -> io::Result<bool> {
+    lifecycle_marker_at(paths, &quit_marker_name(session)?, None)
+}
 pub fn session_quit(session: u32, value: Option<bool>) -> io::Result<bool> {
+    lifecycle_marker(&quit_marker_name(session)?, value)
+}
+pub(crate) fn quit_marker_name(session: u32) -> io::Result<String> {
     let mut boot = [0u8; 128];
     let mut n = boot.len();
     if unsafe {
@@ -343,5 +368,5 @@ pub fn session_quit(session: u32, value: Option<bool>) -> io::Result<bool> {
     if !boot.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
         return Err(denied());
     }
-    lifecycle_marker(&format!("quit-{boot}-{session}"), value)
+    Ok(format!("quit-{boot}-{session}"))
 }

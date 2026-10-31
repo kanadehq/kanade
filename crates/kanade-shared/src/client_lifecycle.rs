@@ -6,6 +6,32 @@ pub mod macos;
 
 use serde::{Deserialize, Serialize};
 
+/// Detect state corruption in addition to filesystem ownership and mode checks.
+/// This is an unkeyed checksum, not proof of authorship.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChecksumEnvelope<T> {
+    body: T,
+    sha256: crate::artifact::ArtifactSha256,
+}
+pub fn encode_envelope<T: Serialize>(body: &T) -> std::io::Result<Vec<u8>> {
+    let sha256 = crate::artifact::ArtifactSha256::of(&serde_json::to_vec(body)?);
+    Ok(serde_json::to_vec(&ChecksumEnvelope { body, sha256 })?)
+}
+pub fn decode_envelope<T: serde::de::DeserializeOwned + Serialize>(
+    bytes: &[u8],
+) -> std::io::Result<T> {
+    let envelope: ChecksumEnvelope<T> = serde_json::from_slice(bytes)?;
+    if envelope.sha256 != crate::artifact::ArtifactSha256::of(&serde_json::to_vec(&envelope.body)?)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "lifecycle checksum mismatch",
+        ));
+    }
+    Ok(envelope.body)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Instance {
@@ -80,6 +106,16 @@ mod tests {
             quit_generation: 0,
             opted_out: false,
         }
+    }
+    #[test]
+    fn checksum_rejects_valid_json_with_modified_body() {
+        let bytes = encode_envelope(&presence(501)).unwrap();
+        let restored: Presence = decode_envelope(&bytes).unwrap();
+        assert_eq!(restored, presence(501));
+        let mut changed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        changed["body"]["opted_out"] = true.into();
+        assert!(decode_envelope::<Presence>(&serde_json::to_vec(&changed).unwrap()).is_err());
+        assert!(decode_envelope::<Presence>(b"{}").is_err());
     }
     #[test]
     fn restore_requires_fresh_same_session_without_quit_or_optout() {

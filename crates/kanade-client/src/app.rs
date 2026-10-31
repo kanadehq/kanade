@@ -351,7 +351,10 @@ fn app_version() -> &'static str {
 #[tauri::command]
 fn show_main_window(app: tauri::AppHandle) {
     #[cfg(target_os = "macos")]
-    if !kanade_client::macos_lifecycle::allowed() {
+    if !kanade_client::macos_lifecycle::allowed(
+        kanade_client::macos_lifecycle::Entrypoint::ShowMainWindow,
+        StartupIntent::from_args(&[]),
+    ) {
         return;
     }
     if let Some(win) = app.get_webview_window("main") {
@@ -716,7 +719,16 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
 
 #[cfg(target_os = "macos")]
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
-    if !kanade_client::macos_lifecycle::allowed() {
+    use kanade_client::macos_lifecycle::{self, Entrypoint};
+    let intent = StartupIntent::from_args(&argv);
+    let entrypoint = if intent.deep_link {
+        Entrypoint::DeepLink
+    } else if intent.notification || intent.resurface {
+        Entrypoint::EmergencyFallback
+    } else {
+        Entrypoint::SecondInstance
+    };
+    if !macos_lifecycle::allowed(entrypoint, intent) {
         return;
     }
     // Full URL-open/focus queues and session-scoped instance identity are later stages.
@@ -938,7 +950,10 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 kanade_client::macos_lifecycle::watch(app.handle().clone());
-                if !kanade_client::macos_lifecycle::allowed() {
+                if !kanade_client::macos_lifecycle::allowed(
+                    kanade_client::macos_lifecycle::Entrypoint::BeforeWindowReveal,
+                    StartupIntent::from_args(&[]),
+                ) {
                     return Err("Client update gate closed".into());
                 }
                 // WKWebView uses a nonpersistent datastore: no unmanaged WebKit
@@ -971,7 +986,10 @@ pub fn run() {
             if initially_visible && {
                 #[cfg(target_os = "macos")]
                 {
-                    kanade_client::macos_lifecycle::allowed()
+                    kanade_client::macos_lifecycle::allowed(
+                        kanade_client::macos_lifecycle::Entrypoint::BeforeWindowReveal,
+                        StartupIntent::from_args(&[]),
+                    )
                 }
                 #[cfg(not(target_os = "macos"))]
                 {

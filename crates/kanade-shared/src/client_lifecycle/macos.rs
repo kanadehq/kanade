@@ -161,7 +161,14 @@ mod tests {
         let endpoint = temp.path().join("child.sock");
         let listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let mut child = ChildGuard(std::process::Command::new(std::env::current_exe().unwrap())
+        // Only execute a private copy in a synthetic bundle; no installed
+        // Client, helper or arbitrary host process is ever a signal target.
+        let executable = temp
+            .path()
+            .join("Synthetic.app/Contents/MacOS/lifecycle-test");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let mut child = ChildGuard(std::process::Command::new(&executable)
             .args(["--exact", "client_lifecycle::macos::tests::native_audit_tokens_bound_signals_to_a_test_owned_child", "--nocapture"])
             .env_clear().env(CHILD, &endpoint).stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()).spawn().unwrap());
@@ -187,6 +194,25 @@ mod tests {
         let token: [u32; 8] = receive(&mut stream).unwrap();
         assert_eq!(peer(&stream).unwrap(), token);
         assert_eq!(token[5], child.id());
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(&executable).unwrap();
+        assert_eq!(token[1], metadata.uid());
+        assert_eq!(metadata.nlink(), 1);
+        let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let count = unsafe {
+            libc::proc_pidpath(
+                child.id() as i32,
+                path.as_mut_ptr().cast(),
+                path.len() as u32,
+            )
+        };
+        assert!(count > 0);
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CStr::from_bytes_until_nul(&path).unwrap();
+        assert_eq!(
+            Path::new(std::ffi::OsStr::from_bytes(path.to_bytes())),
+            executable.canonicalize().unwrap()
+        );
         // Always reap this exclusively test-owned subprocess, even on failure.
         let mut wrong = token;
         wrong[7] = wrong[7].wrapping_add(1);

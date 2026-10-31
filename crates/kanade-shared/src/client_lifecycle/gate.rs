@@ -70,7 +70,9 @@ impl Gate {
                 return Err(io::Error::last_os_error());
             }
             dir = unsafe { File::from_raw_fd(fd) };
-            if created && unsafe { libc::fchmod(dir.as_raw_fd(), 0o755) } != 0 { return Err(io::Error::last_os_error()); }
+            if created && unsafe { libc::fchmod(dir.as_raw_fd(), 0o755) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
             let m = dir.metadata()?;
             #[cfg(target_os = "macos")]
             super::macos::no_acl(&dir)?;
@@ -109,7 +111,7 @@ impl Gate {
         };
         let mut bytes = Vec::new();
         f.take(4097).read_to_end(&mut bytes)?;
-        let s: State = serde_json::from_slice(&bytes).map_err(|_| denied())?;
+        let s: State = super::decode_envelope(&bytes).map_err(|_| denied())?;
         if s.schema != 1 || s.transaction.is_empty() {
             return Err(denied());
         }
@@ -173,8 +175,10 @@ impl Writer {
             .mode(0o644)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&tmp)?;
-        if unsafe { libc::fchmod(f.as_raw_fd(), 0o644) } != 0 { return Err(io::Error::last_os_error()); }
-        f.write_all(&serde_json::to_vec(&State {
+        if unsafe { libc::fchmod(f.as_raw_fd(), 0o644) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        f.write_all(&super::encode_envelope(&State {
             schema: 1,
             transaction: self.transaction.clone(),
             mutating,
@@ -224,16 +228,24 @@ fn lock(f: &File, mode: i32) -> io::Result<()> {
     }
 }
 fn open_file(path: &Path, owner: u32, create: bool, write: bool) -> io::Result<File> {
-    let opened = OpenOptions::new().read(true).write(write || create)
-        .create_new(create).mode(0o644)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(path);
+    let opened = OpenOptions::new()
+        .read(true)
+        .write(write || create)
+        .create_new(create)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path);
     let f = match opened {
         Ok(f) => f,
-        Err(e) if create && e.kind() == io::ErrorKind::AlreadyExists => return open_file(path, owner, false, write),
+        Err(e) if create && e.kind() == io::ErrorKind::AlreadyExists => {
+            return open_file(path, owner, false, write);
+        }
         Err(e) => return Err(e),
     };
     if create {
-        if unsafe { libc::fchmod(f.as_raw_fd(), 0o644) } != 0 { return Err(io::Error::last_os_error()); }
+        if unsafe { libc::fchmod(f.as_raw_fd(), 0o644) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
         durable_sync(&f)?;
         durable_sync(&File::open(path.parent().ok_or_else(denied)?)?)?;
     }
@@ -273,6 +285,21 @@ mod tests {
         assert!(open(&root).reader().is_ok());
     }
     #[test]
+    fn modified_transaction_cannot_acquire_or_release_gate() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap().join("gate");
+        let writer = open(&root).writer("original").unwrap();
+        drop(writer);
+        let path = root.join("closed.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        state["body"]["transaction"] = "forged".into();
+        std::fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(open(&root).reader().is_err());
+        assert!(open(&root).writer("forged").is_err());
+        assert!(open(&root).writer("original").is_err());
+    }
+    #[test]
     fn planted_links_and_replaced_lock_inode_are_refused() {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().canonicalize().unwrap().join("gate");
@@ -289,6 +316,8 @@ mod tests {
 /// fsync plus the macOS drive-cache barrier for persistent ownership evidence.
 pub fn durable_sync(file: &File) -> io::Result<()> {
     #[cfg(target_os = "macos")]
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == 0 { return Ok(()); }
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
+        return Ok(());
+    }
     file.sync_all()
 }

@@ -14,8 +14,67 @@ use std::time::{Duration, Instant};
 
 static CONTROL: OnceLock<Mutex<UnixStream>> = OnceLock::new();
 static LEASE: OnceLock<Reader> = OnceLock::new();
-pub fn allowed() -> bool {
-    LEASE.get().is_none_or(|lease| lease.recheck().is_ok())
+#[derive(Clone, Copy, Debug)]
+pub enum Entrypoint {
+    BeforeWindowReveal,
+    SecondInstance,
+    ShowMainWindow,
+    DeepLink,
+    EmergencyFallback,
+}
+
+/// Explicit inputs make policy evaluation independent of process globals.
+/// Evaluation never clears Quit or changes persistent opt-out.
+pub fn evaluate_cold_start(
+    directory: &Path,
+    owner: u32,
+    paths: &crate::paths::ClientPaths,
+    session: u32,
+    intent: crate::startup::StartupIntent,
+) -> io::Result<Reader> {
+    let lease = Gate::open(directory, owner, false)?.reader()?;
+    evaluate_runtime_entrypoint(
+        &lease,
+        paths,
+        session,
+        intent,
+        Entrypoint::BeforeWindowReveal,
+    )?;
+    Ok(lease)
+}
+pub fn evaluate_runtime_entrypoint(
+    lease: &Reader,
+    paths: &crate::paths::ClientPaths,
+    session: u32,
+    intent: crate::startup::StartupIntent,
+    _entrypoint: Entrypoint,
+) -> io::Result<()> {
+    lease.recheck()?;
+    if session == 0 {
+        return Err(macos::denied());
+    }
+    if intent.tray
+        && (crate::macos_storage::autostart_disabled_at(paths)?
+            || crate::macos_storage::session_quit_at(paths, session)?)
+    {
+        return Err(macos::denied());
+    }
+    Ok(())
+}
+pub fn allowed(entrypoint: Entrypoint, intent: crate::startup::StartupIntent) -> bool {
+    let Some(lease) = LEASE.get() else {
+        return true;
+    };
+    (|| {
+        evaluate_runtime_entrypoint(
+            lease,
+            &crate::macos_storage::paths()?,
+            macos::current()?[6],
+            intent,
+            entrypoint,
+        )
+    })()
+    .is_ok()
 }
 /// Returns false for an internal command or a suppressed launch.
 pub fn prepare() -> io::Result<bool> {
@@ -38,14 +97,15 @@ pub fn prepare() -> io::Result<bool> {
         crate::macos_storage::autostart_disabled(Some(false))?;
         return Ok(false);
     }
-    let lease = Gate::open(Path::new(gate::DIRECTORY), 0, false)?.reader()?;
-    let automatic = args.iter().any(|a| a == "--tray");
-    if automatic
-        && (crate::macos_storage::autostart_disabled(None)?
-            || crate::macos_storage::session_quit(token[6], None)?)
-    {
-        return Ok(false);
-    }
+    let intent = crate::startup::StartupIntent::from_args(&args);
+    let lease = evaluate_cold_start(
+        Path::new(gate::DIRECTORY),
+        0,
+        &crate::macos_storage::paths()?,
+        token[6],
+        intent,
+    )?;
+    let automatic = intent.tray;
     if !automatic {
         crate::macos_storage::session_quit(token[6], Some(false))?;
     }
@@ -65,7 +125,7 @@ pub fn prepare() -> io::Result<bool> {
         .set(Mutex::new(control))
         .map_err(|_| macos::denied())?;
     LEASE.set(lease).map_err(|_| macos::denied())?;
-    if !allowed() {
+    if LEASE.get().unwrap().recheck().is_err() {
         return Ok(false);
     }
     Ok(true)
@@ -305,4 +365,111 @@ fn restore(session: u32) -> io::Result<bool> {
         .stderr(Stdio::null())
         .spawn()?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{paths::ClientPaths, startup::StartupIntent};
+
+    #[test]
+    fn entrypoint_matrix_rechecks_gate_and_keeps_quit_separate_from_optout() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("kanade-lifecycle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let owner = unsafe { libc::geteuid() };
+        let paths = ClientPaths {
+            uid: owner,
+            config: root.join("unused-config"),
+            log: root.join("unused-log"),
+            cache: root.join("unused-cache"),
+            window_size: root.join("Kanade/Client/window-size.json"),
+        };
+        let directory = root.join("gate");
+        let open = || Gate::open(&directory, owner, true).unwrap();
+        let lease = open().reader().unwrap();
+        for quit in [false, true] {
+            for optout in [false, true] {
+                crate::macos_storage::lifecycle_marker_at(
+                    &paths,
+                    &crate::macos_storage::quit_marker_name(9).unwrap(),
+                    Some(quit),
+                )
+                .unwrap();
+                crate::macos_storage::lifecycle_marker_at(
+                    &paths,
+                    "autostart-disabled",
+                    Some(optout),
+                )
+                .unwrap();
+                for automatic in [false, true] {
+                    let args = if automatic {
+                        vec!["--tray".into()]
+                    } else {
+                        vec![]
+                    };
+                    let intent = StartupIntent::from_args(&args);
+                    assert_eq!(
+                        evaluate_cold_start(&directory, owner, &paths, 9, intent).is_ok(),
+                        !automatic || !(quit || optout)
+                    );
+                    for entry in [
+                        Entrypoint::BeforeWindowReveal,
+                        Entrypoint::SecondInstance,
+                        Entrypoint::ShowMainWindow,
+                        Entrypoint::DeepLink,
+                        Entrypoint::EmergencyFallback,
+                    ] {
+                        assert_eq!(
+                            evaluate_runtime_entrypoint(&lease, &paths, 9, intent, entry).is_ok(),
+                            !automatic || !(quit || optout)
+                        );
+                        let writer = open().writer("update").unwrap();
+                        assert!(evaluate_cold_start(&directory, owner, &paths, 9, intent).is_err());
+                        assert!(
+                            evaluate_runtime_entrypoint(&lease, &paths, 9, intent, entry).is_err()
+                        );
+                        writer.finish().unwrap();
+                    }
+                    // Pure evaluation never clears the per-session veto or opt-out.
+                    assert_eq!(
+                        crate::macos_storage::session_quit_at(&paths, 9).unwrap(),
+                        quit
+                    );
+                    assert_eq!(
+                        crate::macos_storage::autostart_disabled_at(&paths).unwrap(),
+                        optout
+                    );
+                }
+                // Other audit sessions do not inherit this session's Quit.
+                assert!(!crate::macos_storage::session_quit_at(&paths, 10).unwrap());
+            }
+        }
+        crate::macos_storage::lifecycle_marker_at(&paths, "autostart-disabled", Some(false))
+            .unwrap();
+        let marker = paths
+            .window_size
+            .parent()
+            .unwrap()
+            .join(crate::macos_storage::quit_marker_name(9).unwrap());
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        value["body"] = serde_json::json!([0]);
+        std::fs::write(marker, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(crate::macos_storage::session_quit_at(&paths, 9).is_err());
+        assert!(
+            evaluate_cold_start(
+                &directory,
+                owner,
+                &paths,
+                9,
+                StartupIntent::from_args(&["--tray".into()])
+            )
+            .is_err()
+        );
+        drop(lease);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -17,7 +17,15 @@ use std::time::Instant;
 
 /// A stop policy shared by native and deterministic adapters. Every escalation
 /// must revalidate the full captured identity at the syscall boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopAction {
+    GracefulRequested { instance: Instance },
+    SentSigterm { instance: Instance },
+    SentSigkill { instance: Instance },
+    Exited { instance: Instance },
+}
 pub trait StopAdapter {
+    fn record(&mut self, action: StopAction);
     fn graceful(&mut self, instance: Instance) -> Result<()>;
     fn alive(&self, instance: Instance) -> bool;
     fn signal(&mut self, instance: Instance, signal: i32) -> Result<()>;
@@ -25,19 +33,27 @@ pub trait StopAdapter {
 }
 pub fn stop(adapter: &mut dyn StopAdapter, instance: Instance) -> Result<()> {
     adapter.graceful(instance)?;
+    adapter.record(StopAction::GracefulRequested { instance });
     for signal in [libc::SIGTERM, libc::SIGKILL] {
         for _ in 0..50 {
             if !adapter.alive(instance) {
+                adapter.record(StopAction::Exited { instance });
                 return Ok(());
             }
             adapter.wait(Duration::from_millis(100));
         }
         if adapter.alive(instance) {
             adapter.signal(instance, signal)?;
+            adapter.record(if signal == libc::SIGTERM {
+                StopAction::SentSigterm { instance }
+            } else {
+                StopAction::SentSigkill { instance }
+            });
         }
     }
     for _ in 0..20 {
         if !adapter.alive(instance) {
+            adapter.record(StopAction::Exited { instance });
             return Ok(());
         }
         adapter.wait(Duration::from_millis(100));
@@ -246,6 +262,9 @@ impl Session {
 }
 #[cfg(target_os = "macos")]
 impl StopAdapter for Session {
+    fn record(&mut self, action: StopAction) {
+        tracing::info!(?action, "Client lifecycle stop");
+    }
     fn graceful(&mut self, instance: Instance) -> Result<()> {
         if instance != self.before.gui {
             return Err(Error::Deferred("wrong graceful-stop identity".into()));
@@ -368,8 +387,13 @@ mod tests {
         signals: Vec<i32>,
         graceful: usize,
         exit_at: Option<Duration>,
+        reuse_at_signal: Option<i32>,
+        actions: Vec<StopAction>,
     }
     impl StopAdapter for Fake {
+        fn record(&mut self, action: StopAction) {
+            self.actions.push(action);
+        }
         fn graceful(&mut self, i: Instance) -> Result<()> {
             assert_eq!(i, self.instance);
             self.graceful += 1;
@@ -380,7 +404,12 @@ mod tests {
         }
         fn signal(&mut self, i: Instance, s: i32) -> Result<()> {
             assert_eq!(i, self.instance);
-            if self.refuse {
+            // Simulate reuse between alive() and the signal syscall, including
+            // the second escalation after SIGTERM has already been delivered.
+            if self.reuse_at_signal == Some(s) {
+                self.instance.token[7] += 1;
+            }
+            if self.refuse || i != self.instance {
                 return Err(Error::Deferred("identity changed before signal".into()));
             }
             self.signals.push(s);
@@ -406,6 +435,8 @@ mod tests {
             signals: vec![],
             graceful: 0,
             exit_at: None,
+            reuse_at_signal: None,
+            actions: vec![],
         }
     }
     #[test]
@@ -420,6 +451,32 @@ mod tests {
         assert!(stop(&mut f, i).is_err());
         assert_eq!(f.signals, [libc::SIGTERM, libc::SIGKILL]);
         assert_eq!(f.elapsed, Duration::from_secs(12));
+        assert_eq!(
+            f.actions,
+            [
+                StopAction::GracefulRequested { instance: i },
+                StopAction::SentSigterm { instance: i },
+                StopAction::SentSigkill { instance: i }
+            ]
+        );
+    }
+    #[test]
+    fn pid_reuse_at_each_signal_boundary_preserves_stop_trace() {
+        for signal in [libc::SIGTERM, libc::SIGKILL] {
+            let mut f = fake();
+            let i = f.instance;
+            f.reuse_at_signal = Some(signal);
+            assert!(stop(&mut f, i).is_err());
+            let mut expected = vec![StopAction::GracefulRequested { instance: i }];
+            if signal == libc::SIGKILL {
+                assert_eq!(f.signals, [libc::SIGTERM]);
+                expected.push(StopAction::SentSigterm { instance: i });
+            } else {
+                assert!(f.signals.is_empty());
+            }
+            assert_eq!(f.actions, expected);
+            assert_ne!(f.instance.token[7], i.token[7]);
+        }
     }
     #[test]
     fn reused_pid_or_changed_image_is_never_signalled() {
