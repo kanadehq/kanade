@@ -1002,7 +1002,7 @@ fn render_install_ps1(
          }} catch {{\r\n\
          \x20   $failure = $_\r\n\
          \x20   $phase = 'install'\r\n\
-         \x20   try {{ $lastPhase = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-stage') -Tail 1 -ErrorAction Stop; if ($lastPhase -in @('placement','service_start')) {{ $phase = $lastPhase }} }} catch {{ }}\r\n\
+         \x20   try {{ $lastPhase = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-stage') -Tail 1 -ErrorAction Stop; if ($lastPhase -in @('placement','service_start','connection_check')) {{ $phase = $lastPhase }} }} catch {{ }}\r\n\
          \x20   $kind = Get-InstallErrorKind $failure $phase\r\n\
          \x20   try {{ Set-Content -LiteralPath (Join-Path $PSScriptRoot 'install-error-kind') -Value $kind; Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install.log') -Value (\"install failed: \" + $kind) }} catch {{ }}\r\n\
          \x20   Write-Host (\"Installation failed: \" + $kind)\r\n\

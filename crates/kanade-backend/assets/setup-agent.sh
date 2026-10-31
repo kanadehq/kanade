@@ -286,6 +286,31 @@ systemctl enable kanade-agent.service
 # restart swaps to the just-installed binary (and starts it if stopped).
 systemctl restart kanade-agent.service
 
+echo "==> Checking the installed agent's broker connection"
+printf 'connection_check\n' >> "$bundle/install-stage" 2>/dev/null || true
+# Let systemd read the installed EnvironmentFile as data, using exactly the
+# service's quoting rules. Empty defaults prevent a system-manager credential
+# from filling in a pair or token absent from the file; the file overrides them.
+# No credentials enter argv, and neither the caller's environment nor shell
+# evaluation participates in loading the installed secrets.
+check_code=0
+systemd-run --quiet --wait --pipe --service-type=exec \
+	--property="Environment=KANADE_NATS_TOKEN= KANADE_NATS_USER= KANADE_NATS_PASSWORD=" \
+	--property="EnvironmentFile=$agent_env" \
+	/usr/local/bin/kanade-agent --check-connection --config /etc/kanade/agent.toml \
+	>/dev/null 2>&1 || check_code=$?
+if [ "$check_code" -ne 0 ]; then
+	case "$check_code" in
+		3) check_kind=configuration_error ;;
+		4) check_kind=authentication_failed ;;
+		*) check_kind=connection_failed ;;
+	esac
+	printf '%s\n' "$check_kind" > "$bundle/install-error-kind" 2>/dev/null || true
+	printf 'Agent connection check failed: %s.\n' "$check_kind" >&2
+	exit "$check_code"
+fi
+echo "    authenticated broker connection succeeded (not backend registration)"
+
 echo
 echo "==> Done. Checks:"
 echo "    systemctl status kanade-agent"

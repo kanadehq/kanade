@@ -12,7 +12,16 @@ report() {
         case "$2" in
             126) kind=permission_denied ;;
             127) kind=file_not_found ;;
-            *) case "$stage" in download) kind=http_error ;; extract) kind=invalid_archive ;; service_start) kind=service_error ;; esac ;;
+            *) case "$stage" in
+                download) kind=http_error ;;
+                extract) kind=invalid_archive ;;
+                service_start) kind=service_error ;;
+                connection_check) case "$2" in
+                    3) kind=configuration_error ;;
+                    4) kind=authentication_failed ;;
+                    *) kind=connection_failed ;;
+                esac ;;
+            esac ;;
         esac
         body=$(printf '{"seq":%s,"stage":"%s","outcome":"failed","exit_code":%s,"error_kind":"%s"}' "$seq" "$stage" "$2" "$kind")
     fi
@@ -48,7 +57,7 @@ collect_stage() {
         line=$((line + 1))
         [ "$line" -gt "$phase_lines" ] || continue
         case "$next" in
-            placement|service_start) stage=$next; report progress 0 ;;
+            placement|service_start|connection_check) stage=$next; report progress 0 ;;
         esac
         phase_lines=$line
     done < "$TMP/install-stage"

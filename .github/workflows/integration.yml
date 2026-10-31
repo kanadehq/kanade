@@ -140,6 +140,10 @@ jobs:
       - name: NATS auth (user / token fallback) integration tests
         run: cargo test -p kanade-shared --test nats_auth_live -- --ignored
 
+      - name: Installer connection diagnostic against real NATS
+        if: runner.os != 'Windows'
+        run: cargo test --locked -p kanade-agent --test connection_check -- --ignored
+
       - name: NATS authentication-mode switch under injected probe faults
         # Restarts a real broker between `token` and `users` under running
         # supervised role child processes while a proxy drops, holds or
