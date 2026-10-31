@@ -228,55 +228,6 @@ fn save_to(paths: &ClientPaths, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
-    #[test]
-    fn private_storage_rejects_links_permissions_and_corruption() {
-        let root = std::env::current_dir()
-            .unwrap()
-            .join(format!("target/storage-test-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let paths = ClientPaths {
-            uid: unsafe { libc::geteuid() },
-            config: root.join("unused"),
-            log: root.join("unused"),
-            cache: root.join("unused"),
-            window_size: root.join("Kanade/Client/window-size.json"),
-        };
-        let mut f = state_file(&paths, true).unwrap();
-        f.write_all(b"corrupt").unwrap();
-        assert_eq!(load_from(&paths, (640., 420.), None).unwrap(), None);
-        std::fs::set_permissions(&paths.window_size, std::fs::Permissions::from_mode(0o644))
-            .unwrap();
-        assert!(state_file(&paths, true).is_err());
-        std::fs::remove_file(&paths.window_size).unwrap();
-        symlink(root.join("victim"), &paths.window_size).unwrap();
-        assert!(state_file(&paths, true).is_err());
-        assert!(!root.join("victim").exists());
-        std::fs::remove_file(&paths.window_size).unwrap();
-        let bytes = window_size::encode(900., 700., (640., 420.), None)
-            .unwrap()
-            .unwrap();
-        save_to(&paths, &bytes).unwrap();
-        assert_eq!(
-            load_from(&paths, (640., 420.), None).unwrap(),
-            Some(WindowSize {
-                width: 900,
-                height: 700
-            })
-        );
-        std::fs::hard_link(&paths.window_size, root.join("hardlink")).unwrap();
-        assert!(save_to(&paths, &bytes).is_err());
-        std::fs::remove_file(root.join("hardlink")).unwrap();
-        std::fs::rename(root.join("Kanade/Client"), root.join("real-client")).unwrap();
-        symlink(root.join("real-client"), root.join("Kanade/Client")).unwrap();
-        assert!(save_to(&paths, &bytes).is_err());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
-
 /// Lifecycle preferences live independently of window state and pkg payloads.
 /// Quit is scoped to the kernel boot/audit session; opt-out is persistent.
 fn lifecycle_marker(name: &str, value: Option<bool>) -> io::Result<bool> {
@@ -369,4 +320,53 @@ pub(crate) fn quit_marker_name(session: u32) -> io::Result<String> {
         return Err(denied());
     }
     Ok(format!("quit-{boot}-{session}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    #[test]
+    fn private_storage_rejects_links_permissions_and_corruption() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(format!("target/storage-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = ClientPaths {
+            uid: unsafe { libc::geteuid() },
+            config: root.join("unused"),
+            log: root.join("unused"),
+            cache: root.join("unused"),
+            window_size: root.join("Kanade/Client/window-size.json"),
+        };
+        let mut f = state_file(&paths, true).unwrap();
+        f.write_all(b"corrupt").unwrap();
+        assert_eq!(load_from(&paths, (640., 420.), None).unwrap(), None);
+        std::fs::set_permissions(&paths.window_size, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(state_file(&paths, true).is_err());
+        std::fs::remove_file(&paths.window_size).unwrap();
+        symlink(root.join("victim"), &paths.window_size).unwrap();
+        assert!(state_file(&paths, true).is_err());
+        assert!(!root.join("victim").exists());
+        std::fs::remove_file(&paths.window_size).unwrap();
+        let bytes = window_size::encode(900., 700., (640., 420.), None)
+            .unwrap()
+            .unwrap();
+        save_to(&paths, &bytes).unwrap();
+        assert_eq!(
+            load_from(&paths, (640., 420.), None).unwrap(),
+            Some(WindowSize {
+                width: 900,
+                height: 700
+            })
+        );
+        std::fs::hard_link(&paths.window_size, root.join("hardlink")).unwrap();
+        assert!(save_to(&paths, &bytes).is_err());
+        std::fs::remove_file(root.join("hardlink")).unwrap();
+        std::fs::rename(root.join("Kanade/Client"), root.join("real-client")).unwrap();
+        symlink(root.join("real-client"), root.join("Kanade/Client")).unwrap();
+        assert!(save_to(&paths, &bytes).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

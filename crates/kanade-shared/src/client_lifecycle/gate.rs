@@ -27,11 +27,17 @@ pub struct Gate {
     file: File,
     owner: u32,
 }
-pub struct Reader(Gate);
+pub struct Reader {
+    gate: Option<Gate>,
+    path: PathBuf,
+    owner: u32,
+    _bootstrap: Option<File>,
+}
 pub struct Writer {
     gate: Gate,
     _serial: File,
     transaction: String,
+    bootstrap: Option<File>,
 }
 impl Gate {
     /// Every component is no-follow and administrator owned. Test roots must
@@ -55,6 +61,7 @@ impl Gate {
             let mut created = false;
             if create {
                 let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o755) };
+                created = rc == 0;
                 if rc != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
                     return Err(io::Error::last_os_error());
                 }
@@ -101,7 +108,12 @@ impl Gate {
     pub fn reader(self) -> io::Result<Reader> {
         lock(&self.file, libc::LOCK_SH)?;
         self.check_open()?;
-        Ok(Reader(self))
+        Ok(Reader {
+            path: self.path.clone(),
+            owner: self.owner,
+            gate: Some(self),
+            _bootstrap: None,
+        })
     }
     fn state(&self) -> io::Result<Option<State>> {
         let f = match open_file(&self.path.join("closed.json"), self.owner, false, false) {
@@ -148,6 +160,7 @@ impl Gate {
             gate: self,
             _serial: serial,
             transaction: transaction.into(),
+            bootstrap: None,
         };
         // No installer intent has been recorded yet. A repeated writer must
         // preserve its durable mutating bit, including across reboot.
@@ -158,11 +171,71 @@ impl Gate {
     }
 }
 impl Reader {
+    /// Payload-only pkg migration: before root has provisioned the durable gate,
+    /// pin a pre-existing administrator-owned directory. The writer must also
+    /// exclude these readers before recording any installer mutation intent.
+    pub fn startup(path: &Path, owner: u32, bootstrap: &Path) -> io::Result<Self> {
+        let file = bootstrap_file(bootstrap, owner)?;
+        lock(&file, libc::LOCK_SH)?;
+        let gate = match Gate::open(path, owner, false) {
+            Ok(gate) => Some(gate.reader()?.gate.unwrap()),
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(path)
+                        .is_err_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+            {
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        let reader = Self {
+            gate,
+            path: path.into(),
+            owner,
+            _bootstrap: Some(file),
+        };
+        reader.recheck()?;
+        Ok(reader)
+    }
     pub fn recheck(&self) -> io::Result<()> {
-        self.0.check_open()
+        if let Some(gate) = &self.gate {
+            return gate.check_open();
+        }
+        match Gate::open(&self.path, self.owner, false) {
+            Ok(gate) => gate.check_open(),
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(&self.path)
+                        .is_err_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 }
+fn bootstrap_file(path: &Path, owner: u32) -> io::Result<File> {
+    // Canonical equality excludes links in ancestors as well as the leaf.
+    if !path.is_absolute() || path.canonicalize()? != path {
+        return Err(denied());
+    }
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)?;
+    let m = f.metadata()?;
+    if m.uid() != owner || m.mode() & 0o022 != 0 {
+        return Err(denied());
+    }
+    #[cfg(target_os = "macos")]
+    super::macos::no_acl(&f)?;
+    Ok(f)
+}
 impl Writer {
+    pub fn with_bootstrap(mut self, path: &Path, owner: u32) -> io::Result<Self> {
+        self.bootstrap = Some(bootstrap_file(path, owner)?);
+        Ok(self)
+    }
     fn persist(&self, mutating: bool) -> io::Result<()> {
         self.gate.pinned()?;
         let tmp = self
@@ -190,6 +263,9 @@ impl Writer {
     /// Called only after positively identified GUI processes have stopped.
     pub fn exclusive(&self) -> io::Result<()> {
         self.recheck()?;
+        if let Some(file) = &self.bootstrap {
+            lock(file, libc::LOCK_EX)?;
+        }
         lock(&self.gate.file, libc::LOCK_EX)
     }
     pub fn recheck(&self) -> io::Result<()> {
@@ -258,11 +334,83 @@ fn open_file(path: &Path, owner: u32, create: bool, write: bool) -> io::Result<F
     Ok(f)
 }
 
+/// fsync plus the macOS drive-cache barrier for persistent ownership evidence.
+pub fn durable_sync(file: &File) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
+        return Ok(());
+    }
+    file.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn open(root: &Path) -> Gate {
         Gate::open(root, unsafe { libc::geteuid() }, true).unwrap()
+    }
+    #[test]
+    fn payload_only_startup_and_first_provisioning_share_exclusion() {
+        let t = tempfile::tempdir().unwrap();
+        let bootstrap = t.path().canonicalize().unwrap();
+        let root = bootstrap.join("new-gate");
+        let owner = unsafe { libc::geteuid() };
+        let reader = Reader::startup(&root, owner, &bootstrap).unwrap();
+        reader.recheck().unwrap();
+        let writer = open(&root)
+            .writer("first-update")
+            .unwrap()
+            .with_bootstrap(&bootstrap, owner)
+            .unwrap();
+        assert!(reader.recheck().is_err());
+        assert!(Reader::startup(&root, owner, &bootstrap).is_err());
+        assert!(writer.mutation_intent().is_err());
+        drop(reader);
+        writer.mutation_intent().unwrap();
+        drop(writer);
+        // Neither a crash nor a new Client process discards durable exclusion.
+        assert!(Reader::startup(&root, owner, &bootstrap).is_err());
+        let recovery = open(&root)
+            .writer("first-update")
+            .unwrap()
+            .with_bootstrap(&bootstrap, owner)
+            .unwrap();
+        recovery.finish().unwrap();
+        Reader::startup(&root, owner, &bootstrap).unwrap();
+        // A partially provisioned directory never becomes an absent-gate bypass.
+        std::fs::remove_file(root.join("lease")).unwrap();
+        assert!(Reader::startup(&root, owner, &bootstrap).is_err());
+    }
+    #[test]
+    fn newly_created_directories_are_readable_with_private_umask() {
+        const CHILD: &str = "KANADE_GATE_UMASK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "client_lifecycle::gate::tests::newly_created_directories_are_readable_with_private_umask"])
+                .env(CHILD, "1").output().unwrap();
+            // Keep nested harness counts out of the required e2e parser.
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // This process runs only this test; never change the suite's umask.
+        unsafe {
+            libc::umask(0o077);
+        }
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap().join("one/two/gate");
+        let gate = open(&root);
+        assert_eq!(std::fs::metadata(&root).unwrap().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::metadata(root.parent().unwrap()).unwrap().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(gate.file.metadata().unwrap().mode() & 0o777, 0o644);
+        gate.reader().unwrap();
     }
     #[test]
     fn closure_precedes_exclusion_and_crash_never_releases_intent() {
@@ -311,13 +459,4 @@ mod tests {
         std::os::unix::fs::symlink(root.join("old"), root.join("lease")).unwrap();
         assert!(Gate::open(&root, unsafe { libc::geteuid() }, false).is_err());
     }
-}
-
-/// fsync plus the macOS drive-cache barrier for persistent ownership evidence.
-pub fn durable_sync(file: &File) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
-        return Ok(());
-    }
-    file.sync_all()
 }

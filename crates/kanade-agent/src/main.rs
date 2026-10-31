@@ -706,8 +706,11 @@ pub(crate) async fn run_agent() -> Result<()> {
         // closure left by a transaction. No Client process is touched here.
         if unsafe { libc::geteuid() } == 0 {
             kanade_shared::client_lifecycle::gate::Gate::open(
-                std::path::Path::new(kanade_shared::client_lifecycle::gate::DIRECTORY), 0, true,
-            ).context("initialize Client launch exclusion")?;
+                std::path::Path::new(kanade_shared::client_lifecycle::gate::DIRECTORY),
+                0,
+                true,
+            )
+            .context("initialize Client launch exclusion")?;
         }
     }
     #[cfg(target_os = "macos")]

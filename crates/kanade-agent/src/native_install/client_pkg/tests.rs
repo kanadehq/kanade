@@ -321,6 +321,8 @@ struct Fake {
     coordinate: Cell<bool>,
     gate: RefCell<Option<String>>,
     lifecycle_events: RefCell<Vec<String>>,
+    sessions: RefCell<Vec<super::lifecycle::simulation::Session>>,
+    mutation_recorded: Cell<bool>,
     lease_safe: Cell<bool>,
     quiescent: Cell<bool>,
     crash: Cell<Option<Phase>>,
@@ -335,6 +337,8 @@ struct Lease<'a> {
     safe: &'a Cell<bool>,
     gate: &'a RefCell<Option<String>>,
     events: &'a RefCell<Vec<String>>,
+    sessions: &'a RefCell<Vec<super::lifecycle::simulation::Session>>,
+    mutation_recorded: &'a Cell<bool>,
 }
 impl LaunchLease for Lease<'_> {
     fn recheck(&self) -> Result<()> {
@@ -349,12 +353,18 @@ impl LaunchLease for Lease<'_> {
     fn mutation_intent(&self) -> Result<()> {
         self.recheck()?;
         self.events.borrow_mut().push("intent".into());
+        self.mutation_recorded.set(true);
         Ok(())
+    }
+    fn mutation_recorded(&self) -> Result<Option<bool>> {
+        Ok(Some(self.mutation_recorded.get()))
     }
     fn finish(self: Box<Self>) -> Result<super::result::GuiActivation> {
         self.events.borrow_mut().push("finish".into());
         self.gate.borrow_mut().take();
-        Ok(super::result::GuiActivation::UnsupportedNotAttempted)
+        Ok(super::lifecycle::finish_sessions(
+            &mut self.sessions.borrow_mut(),
+        ))
     }
 }
 impl System for Fake {
@@ -392,7 +402,13 @@ impl System for Fake {
         {
             return Err(Error::Deferred("foreign transaction owns gate".into()));
         }
+        if self.gate.borrow().is_none() {
+            self.mutation_recorded.set(false);
+        }
         *self.gate.borrow_mut() = Some(transaction.into());
+        if recovery {
+            self.sessions.borrow_mut().clear();
+        }
         self.lifecycle_events
             .borrow_mut()
             .push(if recovery { "recover" } else { "coordinate" }.into());
@@ -400,6 +416,8 @@ impl System for Fake {
             safe: &self.lease_safe,
             gate: &self.gate,
             events: &self.lifecycle_events,
+            sessions: &self.sessions,
+            mutation_recorded: &self.mutation_recorded,
         }))
     }
     fn resume(&self, transaction: &str) -> Result<Option<Box<dyn LaunchLease + '_>>> {
@@ -537,6 +555,8 @@ impl Fx {
                 coordinate: Cell::new(true),
                 gate: RefCell::new(None),
                 lifecycle_events: RefCell::new(vec![]),
+                sessions: RefCell::new(vec![]),
+                mutation_recorded: Cell::new(false),
                 lease_safe: Cell::new(true),
                 quiescent: Cell::new(true),
                 crash: Cell::new(None),
@@ -662,10 +682,7 @@ fn install_update_and_verified_noop_never_activate_gui() {
     let q = f.pkg("0.98.0");
     let r = f.run(&p).unwrap();
     assert_eq!(r.outcome, Outcome::InstalledVerified);
-    assert_eq!(
-        r.gui_activation,
-        super::result::GuiActivation::UnsupportedNotAttempted
-    );
+    assert_eq!(r.gui_activation, super::result::GuiActivation::NotLaunched);
     let record = super::result::ResultRecord::from_result(&Ok(r));
     assert!(record.installed_verified);
     assert_eq!(record.version.as_deref(), Some("0.97.0"));
@@ -694,6 +711,10 @@ fn current_plan_revocation_and_expiry_are_not_hidden_by_copied_approval() {
         f.auth.refuse.set(Some(boundary));
         assert!(f.run(&p).is_err());
         assert_eq!(f.sys.calls.get(), 0);
+        assert!(f.sys.gate.borrow().is_none());
+        if boundary == Boundary::BeforeInstaller {
+            assert_eq!(f.journal_phase(), "abandoned");
+        }
     }
     let f = Fx::new();
     let p = f.pkg("0.97.0");
@@ -1364,6 +1385,8 @@ fn every_crash_boundary_preserves_gate_until_verified_recovery() {
     let p = f.pkg("0.97.0");
     f.sys.crash.set(Some(Phase::Installing));
     assert!(f.run(&p).is_err());
+    // Simulate a durable invocation intent before losing the OS worker.
+    f.sys.mutation_recorded.set(true);
     f.sys.quiescent.set(false);
     assert!(matches!(
         f.installer().recover(&f.host),
@@ -1395,4 +1418,58 @@ fn terminal_journal_requires_reverification_before_crash_gate_release() {
         Err(Error::RecoveryRequired(_))
     ));
     assert!(f.sys.gate.borrow().is_some());
+}
+
+#[test]
+fn transaction_reports_restore_separately_from_verified_installation() {
+    use super::{lifecycle::simulation::session, result::GuiActivation};
+    for quit in [false, true] {
+        let f = Fx::new();
+        let p = f.pkg("0.97.0");
+        f.run(&p).unwrap();
+        let q = f.pkg("0.98.0");
+        let mut s = session(501, 9, 10);
+        if quit {
+            s.at_launch.quit_generation = 1;
+        }
+        f.sys.sessions.borrow_mut().push(s);
+        let result = f.run(&q).unwrap();
+        assert_eq!(result.outcome, Outcome::InstalledVerified);
+        assert_eq!(
+            result.gui_activation,
+            if quit {
+                GuiActivation::NotLaunched
+            } else {
+                GuiActivation::RestoreLaunchedUnverified
+            }
+        );
+        assert!(f.sys.gate.borrow().is_none());
+        let launched = usize::from(!quit);
+        assert_eq!(f.sys.sessions.borrow()[0].launches, launched);
+        f.run(&q).unwrap(); // Verified no-op never stops or restores again.
+        assert_eq!(f.sys.sessions.borrow()[0].launches, launched);
+        let r = f.pkg("0.99.0");
+        f.sys
+            .exits
+            .borrow_mut()
+            .push_back(InstallerExit::FailedQuiescent("rollback fixture".into()));
+        assert!(matches!(f.run(&r), Err(Error::RolledBack)));
+        assert!(f.sys.gate.borrow().is_none());
+        assert_eq!(f.sys.sessions.borrow()[0].launches, launched * 2);
+    }
+}
+
+#[test]
+fn revoked_approval_after_pre_mutation_crash_does_not_freeze_startup() {
+    let f = Fx::new();
+    let p = f.pkg("0.97.0");
+    f.sys.crash.set(Some(Phase::Installing));
+    assert!(matches!(f.run(&p), Err(Error::Interrupted)));
+    assert!(f.sys.gate.borrow().is_some());
+    assert!(!f.sys.mutation_recorded.get());
+    f.auth.refuse.set(Some(Boundary::Reconcile));
+    f.installer().recover(&f.host).unwrap();
+    assert_eq!(f.sys.calls.get(), 0);
+    assert_eq!(f.journal_phase(), "abandoned");
+    assert!(f.sys.gate.borrow().is_none());
 }

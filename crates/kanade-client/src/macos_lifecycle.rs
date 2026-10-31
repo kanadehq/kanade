@@ -32,7 +32,11 @@ pub fn evaluate_cold_start(
     session: u32,
     intent: crate::startup::StartupIntent,
 ) -> io::Result<Reader> {
-    let lease = Gate::open(directory, owner, false)?.reader()?;
+    let lease = if directory == Path::new(gate::DIRECTORY) {
+        Reader::startup(directory, owner, Path::new("/Library"))?
+    } else {
+        Gate::open(directory, owner, false)?.reader()?
+    };
     evaluate_runtime_entrypoint(
         &lease,
         paths,
@@ -157,9 +161,16 @@ pub fn explicit_quit() -> io::Result<()> {
     let token = macos::current()?;
     crate::macos_storage::session_quit(token[6], Some(true))?;
     if let Some(control) = CONTROL.get() {
-        control.lock().unwrap().write_all(b"Q")?;
+        // The persisted veto is authoritative even after coordinator/helper
+        // disconnect. Notification failure must never trap an explicit Quit.
+        notify_quit(control);
     }
     Ok(())
+}
+fn notify_quit(control: &Mutex<UnixStream>) {
+    if let Ok(mut stream) = control.lock() {
+        let _ = stream.write_all(b"Q");
+    }
 }
 fn state(
     gui: kanade_shared::client_lifecycle::Instance,
@@ -353,7 +364,12 @@ fn restore(session: u32) -> io::Result<bool> {
     {
         return Ok(false);
     }
-    Command::new(macos::EXECUTABLE)
+    restore_command(&home, tmp).spawn()?;
+    Ok(true)
+}
+fn restore_command(home: &Path, tmp: &Path) -> Command {
+    let mut command = Command::new(macos::EXECUTABLE);
+    command
         .arg("--tray")
         .env_clear()
         .env("HOME", home)
@@ -362,9 +378,8 @@ fn restore(session: u32) -> io::Result<bool> {
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(true)
+        .stderr(Stdio::null());
+    command
 }
 
 #[cfg(test)]
@@ -372,6 +387,36 @@ mod tests {
     use super::*;
     use crate::{paths::ClientPaths, startup::StartupIntent};
 
+    #[test]
+    fn quit_notification_tolerates_disconnected_helper() {
+        let (control, helper) = UnixStream::pair().unwrap();
+        drop(helper);
+        notify_quit(&Mutex::new(control));
+    }
+    #[test]
+    fn restore_uses_fixed_hidden_argv_and_only_safe_environment() {
+        let command = restore_command(
+            Path::new("/test-account-home"),
+            Path::new("/test-account-temp"),
+        );
+        assert_eq!(command.get_program(), macos::EXECUTABLE);
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["--tray"]);
+        let vars: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(vars.len(), 3);
+        assert_eq!(
+            vars[std::ffi::OsStr::new("HOME")],
+            Some(std::ffi::OsStr::new("/test-account-home"))
+        );
+        assert_eq!(
+            vars[std::ffi::OsStr::new("TMPDIR")],
+            Some(std::ffi::OsStr::new("/test-account-temp"))
+        );
+        assert_eq!(
+            vars[std::ffi::OsStr::new("PATH")],
+            Some(std::ffi::OsStr::new("/usr/bin:/bin"))
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+    }
     #[test]
     fn entrypoint_matrix_rechecks_gate_and_keeps_quit_separate_from_optout() {
         let root = std::env::temp_dir()

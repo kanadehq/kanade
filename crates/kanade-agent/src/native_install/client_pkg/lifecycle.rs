@@ -2,7 +2,7 @@
 //! never executable basenames or caller-selected PIDs. GUI eligibility is not
 //! KLP admission. Remote typed dispatch remains disabled.
 use super::{Error, Result};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use kanade_shared::client_lifecycle::Presence;
 use kanade_shared::client_lifecycle::{
     Instance,
@@ -63,6 +63,106 @@ pub fn stop(adapter: &mut dyn StopAdapter, instance: Instance) -> Result<()> {
     ))
 }
 
+/// Native exchanges authenticate kernel peers and bound response age before
+/// returning Presence. Restore must recheck session/veto/process facts again at
+/// launch, since Observe alone cannot authorize a later launch.
+#[cfg(any(target_os = "macos", test))]
+pub(super) trait SessionAdapter {
+    fn before(&self) -> Presence;
+    fn observe(&mut self) -> Result<Presence>;
+    fn restore(&mut self) -> Result<bool>;
+    fn release(&mut self);
+}
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn finish_sessions<S: SessionAdapter>(
+    sessions: &mut [S],
+) -> super::result::GuiActivation {
+    use super::result::GuiActivation;
+    let mut launched = 0;
+    for session in sessions.iter_mut() {
+        let before = session.before();
+        if session.observe().is_ok_and(|p| before.may_restore(&p)) {
+            if session.restore().unwrap_or(false) {
+                launched += 1;
+            }
+        } else {
+            session.release();
+        }
+    }
+    match launched {
+        0 => GuiActivation::NotLaunched,
+        n if n == sessions.len() => GuiActivation::RestoreLaunchedUnverified,
+        _ => GuiActivation::RestorePartiallyLaunchedUnverified,
+    }
+}
+#[cfg(any(target_os = "macos", test))]
+trait DiscoveryAdapter {
+    type Session: SessionAdapter;
+    fn observed(&mut self) -> Result<Vec<u32>>;
+    /// Returns only a peer/process/session authenticated session. No endpoint
+    /// means unregistered, never permission to stop by PID alone.
+    fn probe(&mut self, pid: u32) -> Result<Option<Self::Session>>;
+}
+#[cfg(any(target_os = "macos", test))]
+fn discover_sessions<A: DiscoveryAdapter>(adapter: &mut A) -> Result<Vec<A::Session>> {
+    let observed = adapter.observed()?;
+    let mut sessions = Vec::new();
+    for pid in &observed {
+        if let Some(session) = adapter.probe(*pid)? {
+            sessions.push(session);
+        }
+    }
+    verify_coverage(observed, sessions.iter().map(SessionAdapter::before))?;
+    Ok(sessions)
+}
+
+/// Discovery must cover every observed fixed-image process exactly once;
+/// an unregistered legacy GUI defers the whole operation before any stop.
+#[cfg(any(target_os = "macos", test))]
+fn verify_coverage(
+    observed: impl IntoIterator<Item = u32>,
+    sessions: impl IntoIterator<Item = Presence>,
+) -> Result<()> {
+    let mut covered = std::collections::BTreeSet::new();
+    for p in sessions {
+        if p.gui.uid() == 0
+            || p.gui.uid() != p.helper.uid()
+            || p.gui.session() == 0
+            || p.gui.session() != p.helper.session()
+            || !covered.insert(p.gui.pid())
+            || !covered.insert(p.helper.pid())
+        {
+            return Err(Error::Deferred("ambiguous Client session coverage".into()));
+        }
+    }
+    if covered != observed.into_iter().collect() {
+        return Err(Error::Deferred(
+            "legacy/unregistered/ambiguous Client; no signals sent".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_response(
+    before: Presence,
+    sequence: u64,
+    current: Presence,
+    elapsed: Duration,
+) -> Result<()> {
+    if elapsed > Duration::from_secs(2)
+        || current.gui != before.gui
+        || current.helper != before.helper
+        || current.generation != before.generation
+        || current.sequence <= sequence
+    {
+        return Err(Error::Deferred(
+            "stale/replayed/contradictory session presence".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct NativeLease<'a> {
     pub(super) system: &'a super::system::NativeSystem,
     writer: Option<Writer>,
@@ -117,28 +217,7 @@ impl super::system::LaunchLease for NativeLease<'_> {
         self.writer.take().unwrap().finish()?;
         #[cfg(target_os = "macos")]
         {
-            use kanade_shared::client_lifecycle::macos::Request;
-            let mut launched = false;
-            let mut skipped = false;
-            for session in self.sessions.get_mut() {
-                let fresh = session.exchange(Request::Observe);
-                if fresh.is_ok_and(|p| session.before.may_restore(&p)) {
-                    match session.restore() {
-                        Ok(true) => launched = true,
-                        _ => skipped = true,
-                    }
-                } else {
-                    let _ = session.exchange(Request::Release);
-                    skipped = true;
-                }
-            }
-            return Ok(if launched && !skipped {
-                super::result::GuiActivation::RestoreLaunchedUnverified
-            } else if launched {
-                super::result::GuiActivation::RestorePartiallyLaunchedUnverified
-            } else {
-                super::result::GuiActivation::NotLaunched
-            });
+            Ok(finish_sessions(self.sessions.get_mut()))
         }
         #[cfg(not(target_os = "macos"))]
         Ok(super::result::GuiActivation::NotLaunched)
@@ -176,6 +255,13 @@ impl super::system::NativeSystem {
             )?)?;
         }
         let writer = Gate::open(&self.launch_gate(), 0, true)?.writer(transaction)?;
+        // /Library predates the payload-only pkg. Clients installed alongside
+        // an older Agent pin it until their GUI exits, even before provisioning.
+        let writer = if self.target == std::path::Path::new("/") {
+            writer.with_bootstrap(std::path::Path::new("/Library"), 0)?
+        } else {
+            writer
+        };
         #[cfg(target_os = "macos")]
         let sessions = if recovery {
             // Restart never rediscovers restart intent from an arbitrary PID.
@@ -231,16 +317,7 @@ impl Session {
         Ok(response.presence)
     }
     fn validate(&mut self, p: Presence, start: Instant) -> Result<()> {
-        if start.elapsed() > Duration::from_secs(2)
-            || p.gui != self.before.gui
-            || p.helper != self.before.helper
-            || p.generation != self.before.generation
-            || p.sequence <= self.sequence
-        {
-            return Err(Error::Deferred(
-                "stale/replayed/contradictory session presence".into(),
-            ));
-        }
+        validate_response(self.before, self.sequence, p, start.elapsed())?;
         self.sequence = p.sequence;
         self.received = Instant::now();
         Ok(())
@@ -258,6 +335,21 @@ impl Session {
         let response: macos::Response = macos::receive(&mut self.stream)?;
         self.validate(response.presence, start)?;
         Ok(response.launched && self.before.may_restore(&response.presence))
+    }
+}
+#[cfg(target_os = "macos")]
+impl SessionAdapter for Session {
+    fn before(&self) -> Presence {
+        self.before
+    }
+    fn observe(&mut self) -> Result<Presence> {
+        self.exchange(kanade_shared::client_lifecycle::macos::Request::Observe)
+    }
+    fn restore(&mut self) -> Result<bool> {
+        Session::restore(self)
+    }
+    fn release(&mut self) {
+        let _ = self.exchange(kanade_shared::client_lifecycle::macos::Request::Release);
     }
 }
 #[cfg(target_os = "macos")]
@@ -290,22 +382,33 @@ impl StopAdapter for Session {
 }
 #[cfg(target_os = "macos")]
 fn discover(executable: &Path) -> Result<Vec<Session>> {
-    use super::processes::{NativeProcessView, ProcessView};
-    use kanade_shared::client_lifecycle::macos;
-    let snapshot = NativeProcessView {
-        client_exe: executable.into(),
+    discover_sessions(&mut NativeDiscovery { executable })
+}
+#[cfg(target_os = "macos")]
+struct NativeDiscovery<'a> {
+    executable: &'a Path,
+}
+#[cfg(target_os = "macos")]
+impl DiscoveryAdapter for NativeDiscovery<'_> {
+    type Session = Session;
+    fn observed(&mut self) -> Result<Vec<u32>> {
+        use super::processes::{NativeProcessView, ProcessView};
+        let snapshot = NativeProcessView {
+            client_exe: self.executable.into(),
+        }
+        .snapshot()?;
+        if !snapshot.ambiguous.is_empty() || snapshot.installer_active {
+            return Err(Error::Deferred(
+                "ambiguous Client/installer snapshot".into(),
+            ));
+        }
+        Ok(snapshot.clients.into_iter().map(|p| p.pid).collect())
     }
-    .snapshot()?;
-    if !snapshot.ambiguous.is_empty() || snapshot.installer_active {
-        return Err(Error::Deferred(
-            "ambiguous Client/installer snapshot".into(),
-        ));
-    }
-    let mut sessions = Vec::new();
-    for process in &snapshot.clients {
-        let Ok(mut stream) = std::os::unix::net::UnixStream::connect(macos::endpoint(process.pid))
-        else {
-            continue;
+    fn probe(&mut self, pid: u32) -> Result<Option<Session>> {
+        use kanade_shared::client_lifecycle::macos;
+        let executable = self.executable;
+        let Ok(mut stream) = std::os::unix::net::UnixStream::connect(macos::endpoint(pid)) else {
+            return Ok(None);
         };
         macos::configure(&stream)?;
         // Reuse the KLP kernel credential/interactive account trust contract,
@@ -320,7 +423,7 @@ fn discover(executable: &Path) -> Result<Vec<Session>> {
         )
         .map_err(|e| Error::Deferred(e.detail))?;
         let token = macos::peer(&stream)?;
-        if peer.pid != token[5] || peer.uid != token[1] || peer.pid != process.pid {
+        if peer.pid != token[5] || peer.uid != token[1] || peer.pid != pid {
             return Err(Error::Deferred("helper credential mismatch".into()));
         }
         let helper = macos::identity(token, executable)?;
@@ -353,32 +456,226 @@ fn discover(executable: &Path) -> Result<Vec<Session>> {
                 "unverified helper/GUI/session relationship".into(),
             ));
         }
-        sessions.push(Session {
+        Ok(Some(Session {
             stream,
             before: p,
             sequence: p.sequence,
             executable: executable.into(),
             received: Instant::now(),
-        });
+        }))
     }
-    // A legacy Client without participation is a migration deferral. Merely
-    // finding no GUI session is not permission to signal an unregistered app.
-    let covered: std::collections::BTreeSet<_> = sessions
-        .iter()
-        .flat_map(|s| [s.before.gui.pid(), s.before.helper.pid()])
-        .collect();
-    let observed: std::collections::BTreeSet<_> = snapshot.clients.iter().map(|p| p.pid).collect();
-    if covered != observed || covered.len() != sessions.len() * 2 {
-        return Err(Error::Deferred(
-            "legacy/unregistered/ambiguous Client; no signals sent".into(),
-        ));
+}
+
+#[cfg(test)]
+pub(super) mod simulation {
+    use super::*;
+    #[derive(Clone)]
+    pub struct Session {
+        pub before: Presence,
+        pub observed: Option<Presence>,
+        pub at_launch: Presence,
+        pub helper_alive: bool,
+        pub launches: usize,
+        pub released: bool,
     }
-    Ok(sessions)
+    impl SessionAdapter for Session {
+        fn before(&self) -> Presence {
+            self.before
+        }
+        fn observe(&mut self) -> Result<Presence> {
+            self.observed
+                .ok_or_else(|| Error::Deferred("stale/unknown/disconnected session".into()))
+        }
+        fn restore(&mut self) -> Result<bool> {
+            let eligible = self.helper_alive && self.before.may_restore(&self.at_launch);
+            if eligible {
+                self.launches += 1;
+            }
+            Ok(eligible)
+        }
+        fn release(&mut self) {
+            self.released = true;
+        }
+    }
+    pub fn session(uid: u32, audit: u32, pid: u32) -> Session {
+        let mut token = [0; 8];
+        token[1] = uid;
+        token[5] = pid;
+        token[6] = audit;
+        token[7] = 17;
+        let gui = Instance {
+            token,
+            device: 1,
+            inode: 2,
+        };
+        token[5] += 1;
+        let before = Presence {
+            gui,
+            helper: Instance { token, ..gui },
+            generation: 17,
+            sequence: 1,
+            local_active_unlocked: true,
+            quit_generation: 0,
+            opted_out: false,
+        };
+        let fresh = Presence {
+            sequence: 2,
+            ..before
+        };
+        Session {
+            before,
+            observed: Some(fresh),
+            at_launch: fresh,
+            helper_alive: true,
+            launches: 0,
+            released: false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restore_two_uids_fast_switch_and_vetoes_at_launch() {
+        use super::super::result::GuiActivation;
+        use simulation::session;
+        let mut sessions = [session(501, 9, 10), session(502, 11, 20)];
+        // Second UID becomes inactive during update; no console-UID inference.
+        sessions[1].at_launch.local_active_unlocked = false;
+        assert_eq!(
+            finish_sessions(&mut sessions),
+            GuiActivation::RestorePartiallyLaunchedUnverified
+        );
+        assert_eq!((sessions[0].launches, sessions[1].launches), (1, 0));
+        for veto in [
+            "quit_before",
+            "quit_during",
+            "optout_before",
+            "optout_during",
+            "lock",
+            "logout",
+            "ssh",
+            "unknown",
+            "reuse",
+            "switch",
+            "helper_exit",
+        ] {
+            let mut s = session(501, 9, 10);
+            match veto {
+                "quit_before" => s.before.quit_generation = 1,
+                "quit_during" => s.at_launch.quit_generation = 1,
+                "optout_before" => s.before.opted_out = true,
+                "optout_during" => s.at_launch.opted_out = true,
+                "lock" | "logout" => s.at_launch.local_active_unlocked = false,
+                "ssh" => s.before.local_active_unlocked = false,
+                "unknown" => s.observed = None,
+                "reuse" => s.at_launch.gui.token[7] += 1,
+                "switch" => s.at_launch.gui.token[6] += 1,
+                "helper_exit" => s.helper_alive = false,
+                _ => unreachable!(),
+            }
+            let mut sessions = [s];
+            assert_eq!(
+                finish_sessions(&mut sessions),
+                GuiActivation::NotLaunched,
+                "{veto}"
+            );
+            assert_eq!(sessions[0].launches, 0, "{veto}");
+        }
+    }
+    #[test]
+    fn presence_validation_rejects_age_replay_and_changed_identity() {
+        let before = simulation::session(501, 9, 10).before;
+        let fresh = Presence {
+            sequence: 2,
+            ..before
+        };
+        validate_response(before, 1, fresh, Duration::from_millis(100)).unwrap();
+        assert!(validate_response(before, 1, fresh, Duration::from_secs(3)).is_err());
+        assert!(validate_response(before, 2, fresh, Duration::ZERO).is_err());
+        for kind in [
+            "pid_generation",
+            "uid",
+            "audit_session",
+            "inode",
+            "helper",
+            "generation",
+        ] {
+            let mut changed = fresh;
+            match kind {
+                "pid_generation" => changed.gui.token[7] += 1,
+                "uid" => changed.gui.token[1] += 1,
+                "audit_session" => changed.gui.token[6] += 1,
+                "inode" => changed.gui.inode += 1,
+                "helper" => changed.helper.token[7] += 1,
+                "generation" => changed.generation += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_response(before, 1, changed, Duration::ZERO).is_err(),
+                "{kind}"
+            );
+        }
+    }
+    struct FakeDiscovery {
+        observed: Vec<u32>,
+        sessions: Vec<simulation::Session>,
+        ambiguous: bool,
+    }
+    impl DiscoveryAdapter for FakeDiscovery {
+        type Session = simulation::Session;
+        fn observed(&mut self) -> Result<Vec<u32>> {
+            if self.ambiguous {
+                return Err(Error::Deferred("unknown process snapshot".into()));
+            }
+            Ok(self.observed.clone())
+        }
+        fn probe(&mut self, pid: u32) -> Result<Option<Self::Session>> {
+            Ok(self
+                .sessions
+                .iter()
+                .find(|s| s.before.helper.pid() == pid)
+                .cloned())
+        }
+    }
+    #[test]
+    fn discovery_adapter_covers_two_uids_and_refuses_unknown_or_unregistered() {
+        let mut adapter = FakeDiscovery {
+            observed: vec![10, 11, 20, 21],
+            sessions: vec![
+                simulation::session(501, 9, 10),
+                simulation::session(502, 11, 20),
+            ],
+            ambiguous: false,
+        };
+        let mut sessions = discover_sessions(&mut adapter).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            finish_sessions(&mut sessions),
+            super::super::result::GuiActivation::RestoreLaunchedUnverified
+        );
+        adapter.observed.push(99);
+        assert!(discover_sessions(&mut adapter).is_err());
+        assert!(adapter.sessions.iter().all(|s| s.launches == 0));
+        adapter.observed.pop();
+        adapter.ambiguous = true;
+        assert!(discover_sessions(&mut adapter).is_err());
+    }
+    #[test]
+    fn discovery_defers_legacy_unregistered_or_ambiguous_processes() {
+        let a = simulation::session(501, 9, 10).before;
+        let b = simulation::session(502, 11, 20).before;
+        verify_coverage([10, 11, 20, 21], [a, b]).unwrap();
+        assert!(verify_coverage([10, 11, 99], [a]).is_err());
+        assert!(verify_coverage([10, 11], [a, a]).is_err());
+        let mut mismatched = a;
+        mismatched.helper.token[1] = 502;
+        assert!(verify_coverage([10, 11], [mismatched]).is_err());
+        mismatched = a;
+        mismatched.helper.token[6] += 1;
+        assert!(verify_coverage([10, 11], [mismatched]).is_err());
+    }
     struct Fake {
         instance: Instance,
         live: bool,

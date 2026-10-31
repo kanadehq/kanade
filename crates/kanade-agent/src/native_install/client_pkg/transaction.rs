@@ -725,13 +725,20 @@ impl Installer<'_> {
                 }
             }
         })();
+        if result.is_err()
+            && !matches!(result, Err(Error::Interrupted))
+            && matches!(j.phase, Phase::Prepared | Phase::Installing)
+            && lease.mutation_recorded()? == Some(false)
+        {
+            self.reconcile(&ctx, &mut j, req.host, lease.as_ref())?;
+        }
         // An interrupted checkpoint is crash simulation: preserve the gate even
         // when the terminal journal write reached disk. Recovery rechecks it.
         if !matches!(result, Err(Error::Interrupted))
             && j.phase.terminal()
             && j.phase != Phase::RecoveryRequired
         {
-            self.verify_terminal(&ctx, &j, req.host)?;
+            self.verify_terminal(&ctx, &j, req.host, lease.as_ref())?;
             let gui = lease.finish()?;
             return result.map(|mut report| {
                 report.gui_activation = gui;
@@ -752,17 +759,28 @@ impl Installer<'_> {
         if !j.phase.terminal() {
             self.reconcile(ctx, j, host, lease.as_ref())?;
         }
-        if let Err(error) = self.verify_terminal(ctx, j, host) {
+        if let Err(error) = self.verify_terminal(ctx, j, host, lease.as_ref()) {
             return self.freeze(ctx, j, error);
         }
         lease.finish()?;
         Ok(())
     }
-    fn verify_terminal(&self, ctx: &Context, j: &Journal, host: &HostInfo) -> Result<()> {
+    fn verify_terminal(
+        &self,
+        ctx: &Context,
+        j: &Journal,
+        host: &HostInfo,
+        lease: &dyn LaunchLease,
+    ) -> Result<()> {
         match j.phase {
             Phase::Committed => {
                 self.authorize(&j.next, Boundary::Reconcile, true)?;
                 self.installed(ctx, &j.next, host)
+            }
+            // Abandoning a positively unmodified transaction grants no new
+            // mutation authority, including when approval has since expired.
+            Phase::Abandoned if lease.mutation_recorded()? == Some(false) => {
+                self.previous_matches(ctx, j, host)
             }
             Phase::RolledBack | Phase::Abandoned => {
                 self.authorize(&j.next, Boundary::Reconcile, true)?;
@@ -889,12 +907,6 @@ impl Installer<'_> {
         host: &HostInfo,
         lease: &dyn LaunchLease,
     ) -> Result<()> {
-        if let Err(e) = self.authorize(&j.next, Boundary::Reconcile, true) {
-            return self.freeze(ctx, j, e);
-        }
-        if let Err(e) = self.cached(ctx, &j.next, host) {
-            return self.freeze(ctx, j, e);
-        }
         let no_os_intent = lease.mutation_recorded()? == Some(false);
         if j.phase == Phase::Prepared || (j.phase == Phase::Installing && no_os_intent) {
             if let Err(e) = self.previous_matches(ctx, j, host) {
@@ -907,6 +919,12 @@ impl Installer<'_> {
                 "interrupted before durable OS mutation intent; previous state verified",
             )?;
             return Ok(());
+        }
+        if let Err(e) = self.authorize(&j.next, Boundary::Reconcile, true) {
+            return self.freeze(ctx, j, e);
+        }
+        if let Err(e) = self.cached(ctx, &j.next, host) {
+            return self.freeze(ctx, j, e);
         }
         lease.recheck()?;
         if let Err(e) = self

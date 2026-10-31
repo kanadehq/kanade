@@ -80,8 +80,9 @@ pub enum InstallerExit {
 
 /// Held across install AND validation/rollback. Implementations must inhibit
 /// *all* managed launch paths, preserve Quit/opt-out, and prove absence of
-/// active instances by executable path, PID/start time and UID. No stop API is
-/// exposed: uncoordinated or active Client processes cause a deferral.
+/// active instances by executable path, kernel PID generation and UID. Native
+/// coordination stops only authenticated participating instances; unknown or
+/// unregistered instances cause a deferral.
 pub trait LaunchLease {
     fn recheck(&self) -> Result<()>;
     fn mutation_intent(&self) -> Result<()> {
@@ -122,9 +123,9 @@ pub trait System {
     }
 }
 
-/// Read-only validation uses fixed macOS executables. Installation remains
-/// unreachable with this adapter until trustworthy launch coordination exists.
-/// The target is an isolated temporary image root, never the operator's `/`.
+/// Validation and installation use fixed macOS executables and a native launch
+/// lease. Host execution requires an explicitly selected local root constructor;
+/// remote typed dispatch and deploy CLI remain disabled. Tests use image roots.
 pub struct NativeSystem {
     pub(super) target: PathBuf,
 }
