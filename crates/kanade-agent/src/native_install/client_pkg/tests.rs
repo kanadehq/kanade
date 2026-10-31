@@ -1473,3 +1473,14 @@ fn revoked_approval_after_pre_mutation_crash_does_not_freeze_startup() {
     assert_eq!(f.journal_phase(), "abandoned");
     assert!(f.sys.gate.borrow().is_none());
 }
+
+#[test]
+fn approval_refused_after_coordination_releases_launch_exclusion() {
+    let f = Fx::new();
+    let p = f.pkg("0.97.0");
+    f.auth.refuse.set(Some(Boundary::BeforeInstaller));
+    assert!(f.run(&p).is_err());
+    assert!(!f.sys.mutation_recorded.get());
+    assert_eq!(f.sys.calls.get(), 0);
+    assert!(f.sys.gate.borrow().is_none());
+}
