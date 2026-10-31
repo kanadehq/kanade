@@ -74,6 +74,7 @@ pub enum Stage {
     Install,
     Placement,
     ServiceStart,
+    ConnectionCheck,
     Complete,
 }
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -93,6 +94,9 @@ pub enum ErrorKind {
     ServiceError,
     ElevationCancelled,
     HttpError,
+    ConfigurationError,
+    AuthenticationFailed,
+    ConnectionFailed,
     CommandFailed,
 }
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

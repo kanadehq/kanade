@@ -28,7 +28,7 @@ function Read-InstallStage {
         while ($script:phaseLines -lt $lines.Length - 1) {
             $next = $lines[$script:phaseLines]
             $script:phaseLines++
-            if ($next -in @('placement', 'service_start')) {
+            if ($next -in @('placement', 'service_start', 'connection_check')) {
                 $script:stage = $next
                 Report-Install progress 0
             }
@@ -48,7 +48,7 @@ function Wait-Install($process) {
 function Read-InstallErrorKind {
     try {
         $kind = Get-Content -LiteralPath (Join-Path $tmp 'install-error-kind') -Tail 1 -ErrorAction Stop
-        foreach ($allowedKind in @('permission_denied','file_not_found','invalid_archive','io_error','service_error','elevation_cancelled','http_error','command_failed')) {
+        foreach ($allowedKind in @('permission_denied','file_not_found','invalid_archive','io_error','service_error','elevation_cancelled','http_error','command_failed','configuration_error','authentication_failed','connection_failed')) {
             if ($kind -eq $allowedKind) {
                 # Get-Content strings carry provider metadata. Windows PowerShell
                 # serializes it, so retain only the matching literal from this list.

@@ -24,5 +24,6 @@ function Get-InstallErrorKind($record, [string]$stage) {
     if ($record.CategoryInfo.Activity -in @('Start-Service', 'Stop-Service', 'New-Service', 'Get-Service') -or $stage -eq 'service_start') { return 'service_error' }
     if ($stage -eq 'extract') { return 'invalid_archive' }
     if ($stage -eq 'download') { return 'http_error' }
+    if ($stage -eq 'connection_check') { return 'connection_failed' }
     return 'command_failed'
 }

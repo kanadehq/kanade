@@ -643,28 +643,42 @@ fn connection_health(client: &async_nats::Client) -> Option<Arc<ConnectionHealth
 /// It never retries, and neither its traffic nor its errors advance the
 /// original client's progress clock or refusal accounting.
 async fn witness(health: &ConnectionHealth) -> ProbeOutcome {
+    credential_handshake(&health.url, &health.creds, HEALTH_TIMEOUT).await
+}
+
+/// Shared by supervision and the installer diagnostic. No retrying client,
+/// credential-reporting state, subscriptions, or application traffic.
+async fn credential_handshake(
+    url: &str,
+    creds: &NatsCredentials,
+    timeout: Duration,
+) -> ProbeOutcome {
+    install_crypto_provider();
     let attempt = async {
         let mut opts = async_nats::ConnectOptions::new()
             .name("auth-witness")
-            .connection_timeout(HEALTH_TIMEOUT);
-        match &health.creds.user {
-            Some(user) => match probe_user(&health.url, user).await {
-                ProbeOutcome::Accepted => {
-                    opts = opts.user_and_password(user.name.clone(), user.password.clone());
+            .connection_timeout(timeout);
+        match &creds.user {
+            Some(user) => {
+                let outcome = probe_user(url, user).await;
+                match select(outcome, None, creds.token.is_some()) {
+                    Ok(Choice::User) => {
+                        opts = opts.user_and_password(user.name.clone(), user.password.clone());
+                    }
+                    Ok(Choice::Token) => match &creds.token {
+                        Some(token) => opts = opts.token(token.clone()),
+                        None => return ProbeOutcome::Rejected,
+                    },
+                    Err(_) => return outcome,
                 }
-                ProbeOutcome::Rejected => match &health.creds.token {
-                    Some(token) => opts = opts.token(token.clone()),
-                    None => return ProbeOutcome::Rejected,
-                },
-                ProbeOutcome::Unreachable => return ProbeOutcome::Unreachable,
-            },
+            }
             None => {
-                if let Some(token) = &health.creds.token {
+                if let Some(token) = &creds.token {
                     opts = opts.token(token.clone());
                 }
             }
         }
-        match opts.connect(&health.url).await {
+        match opts.connect(url).await {
             Ok(_) => ProbeOutcome::Accepted,
             Err(error) if error.kind() == async_nats::ConnectErrorKind::AuthorizationViolation => {
                 ProbeOutcome::Rejected
@@ -672,9 +686,47 @@ async fn witness(health: &ConnectionHealth) -> ProbeOutcome {
             Err(_) => ProbeOutcome::Unreachable,
         }
     };
-    tokio::time::timeout(HEALTH_TIMEOUT, attempt)
+    tokio::time::timeout(timeout, attempt)
         .await
         .unwrap_or(ProbeOutcome::Unreachable)
+}
+
+/// Safe, value-free failure categories for a one-shot broker handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionCheckError {
+    /// Invalid broker address or incompletely provisioned credentials.
+    Configuration,
+    /// The broker explicitly refused the selected credentials.
+    Authentication,
+    /// No authenticated handshake completed within the bounded attempt.
+    Unreachable,
+}
+
+/// Check the role's installed credentials using the normal user-probe/token
+/// fallback policy, without starting a daemon or changing liveness state.
+///
+/// Success proves only a fresh authenticated NATS handshake, not backend
+/// registration or subject permissions. No subjects are subscribed or published.
+/// The network attempt, including credential selection, is bounded to ten seconds.
+pub async fn check_connection(
+    role: NatsRole,
+    url: &str,
+) -> std::result::Result<(), ConnectionCheckError> {
+    url.parse::<async_nats::ServerAddr>()
+        .map_err(|_| ConnectionCheckError::Configuration)?;
+    let creds = NatsCredentials::resolve(role).map_err(|_| ConnectionCheckError::Configuration)?;
+    match credential_handshake(url, &creds, Duration::from_secs(10)).await {
+        ProbeOutcome::Accepted => Ok(()),
+        ProbeOutcome::Rejected => Err(ConnectionCheckError::Authentication),
+        ProbeOutcome::Unreachable => Err(ConnectionCheckError::Unreachable),
+    }
+}
+
+fn install_crypto_provider() {
+    // Workspace feature unification may enable both ring and aws-lc-rs.
+    // Pick explicitly before either a normal or diagnostic TLS/WSS handshake.
+    // Err means another provider has already been installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// Pick the credential for one attempt from the probe's answer.
@@ -1106,15 +1158,7 @@ where
     F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
 {
-    // #1187: a workspace build unifies rustls features, so any binary built
-    // alongside a reqwest user (the CLI, the backend) links BOTH aws-lc-rs and
-    // ring. rustls 0.23 then cannot auto-pick a process-level provider, and the
-    // first TLS handshake — a `wss://`/`tls://` broker — panics inside
-    // async-nats' connection task. That panic does not surface here: the
-    // client just goes dead. Every production connect funnels through this
-    // function, so installing ring here covers every binary. `install_default`
-    // returns Err when a provider is already installed — ignore it.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    install_crypto_provider();
 
     let health = Arc::new(ConnectionHealth {
         live: live.clone(),

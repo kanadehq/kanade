@@ -36,7 +36,8 @@
   now refuses to start). Implicitly stops the service first.
 
 .PARAMETER NoStart
-  Install + register the service but don't start it.
+  Stage the install and register the service without starting it or checking
+  the broker connection. This is not a verified running installation.
 
 .PARAMETER NatsToken
   If set, write the NATS bearer token to
@@ -238,6 +239,43 @@ function Set-KanadeRegistrySecret {
         [Parameter(Mandatory)][string]$Value
     )
     Set-KanadeRegistrySecrets -Subkey $Subkey -Values @{ $ValueName = $Value }
+}
+
+# Run the installed binary with the normal agent-role registry lookup, but no
+# caller environment fallback for credentials missing from that registry key.
+# Redirect both streams: even an older binary or a process-launch exception
+# must not put raw diagnostic/configuration content in installer reports.
+function Invoke-KanadeConnectionCheck {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [Parameter(Mandatory)][string]$ConfigPath
+    )
+    $process = $null
+    try {
+        $start = [System.Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $ExePath
+        $start.Arguments = "--check-connection --config `"$ConfigPath`""
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        foreach ($name in 'KANADE_NATS_TOKEN', 'KANADE_NATS_USER', 'KANADE_NATS_PASSWORD') {
+            $start.EnvironmentVariables.Remove($name)
+        }
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $start
+        if (-not $process.Start()) { return 3 }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $null = $stdout.GetAwaiter().GetResult()
+        $null = $stderr.GetAwaiter().GetResult()
+        return $process.ExitCode
+    } catch {
+        return 3
+    } finally {
+        if ($process) { $process.Dispose() }
+    }
 }
 
 # Both halves of the per-role NATS user or neither. Called before anything on
@@ -586,6 +624,25 @@ if (-not $NoStart) {
     try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install-stage') -Value 'service_start' -ErrorAction Stop } catch { }
     Start-Service -Name $ServiceName
     (Get-Service -Name $ServiceName).WaitForStatus('Running', '00:00:30')
+    Write-Host "Checking the installed agent's broker connection"
+    try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install-stage') -Value 'connection_check' -ErrorAction Stop } catch { }
+    $checkCode = Invoke-KanadeConnectionCheck -ExePath $exeDst -ConfigPath $configDst
+    if ($checkCode -ne 0) {
+        $checkKind = switch ($checkCode) {
+            3 { 'configuration_error' }
+            4 { 'authentication_failed' }
+            default { 'connection_failed' }
+        }
+        try { Set-Content -LiteralPath (Join-Path $PSScriptRoot 'install-error-kind') -Value $checkKind -Encoding ascii -ErrorAction Stop } catch { }
+        try { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'install.log') -Value ("install failed: " + $checkKind) -ErrorAction Stop } catch { }
+        Write-Host "Agent connection check failed: $checkKind."
+        # Do not throw: the outer installer must retain the child's exit code,
+        # including an older binary's unsupported-flag failure.
+        exit $checkCode
+    }
+    Write-Host 'Authenticated broker connection succeeded (not backend registration).'
+} else {
+    Write-Host 'Staging only (-NoStart): service start and connection check skipped.'
 }
 
 Write-Host ''

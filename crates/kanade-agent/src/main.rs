@@ -118,6 +118,11 @@ struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
 
+    /// Check installed config and authenticate to NATS, then exit without
+    /// starting the agent. Does not prove backend registration.
+    #[arg(long)]
+    check_connection: bool,
+
     /// #855 internal: run as the in-session idle sensor instead of the agent.
     /// Launched by the agent's session supervisor inside the logged-in user's
     /// console session (it reads GetLastInputInfo, truthful only in-session,
@@ -206,6 +211,10 @@ fn main() -> Result<()> {
     // rollback attempt counter in the shared data dir) and must NOT attach to
     // the SCM — so branch out before either. It reads its own argv only.
     let cli = Cli::parse();
+    // Installer diagnostic: no boot sentinel, SCM, tracing, or agent state.
+    if cli.check_connection {
+        std::process::exit(run_connection_check(&cli));
+    }
     #[cfg(target_os = "macos")]
     if let Some(uid) = cli.screen_permission_check {
         return screen_permission_macos::helper(uid);
@@ -619,6 +628,56 @@ fn run_session_agent() -> Result<()> {
         // child is only ever spawned by the Windows session supervisor.
     }
     Ok(())
+}
+
+/// A one-shot installer check with fixed local diagnostics. Never print raw
+/// config/connection errors: they can contain broker URLs or credentials.
+fn run_connection_check(cli: &Cli) -> i32 {
+    use kanade_shared::nats_client::{ConnectionCheckError, NatsRole, check_connection};
+
+    let config = (|| {
+        let path =
+            default_paths::find_config(cli.config.as_deref(), "KANADE_AGENT_CONFIG", "agent.toml")?;
+        let config = load_agent_config(&path)?;
+        subject::validate_pc_id(&config.agent.id)
+            .map_err(|_| anyhow::anyhow!("invalid agent id"))?;
+        Ok::<_, anyhow::Error>(config)
+    })();
+    let result = match config {
+        Ok(config) => match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => {
+                let result =
+                    runtime.block_on(check_connection(NatsRole::Agent, &config.agent.nats_url));
+                // A timed-out DNS lookup may still occupy a blocking worker;
+                // don't let runtime teardown extend the diagnostic's bound.
+                runtime.shutdown_background();
+                result
+            }
+            Err(_) => Err(ConnectionCheckError::Configuration),
+        },
+        Err(_) => Err(ConnectionCheckError::Configuration),
+    };
+    match result {
+        Ok(()) => {
+            println!("connection check succeeded");
+            0
+        }
+        Err(ConnectionCheckError::Configuration) => {
+            eprintln!("connection check failed: configuration_error");
+            3
+        }
+        Err(ConnectionCheckError::Authentication) => {
+            eprintln!("connection check failed: authentication_failed");
+            4
+        }
+        Err(ConnectionCheckError::Unreachable) => {
+            eprintln!("connection check failed: connection_failed");
+            5
+        }
+    }
 }
 
 /// Run the agent's tokio main loop. Called either from console

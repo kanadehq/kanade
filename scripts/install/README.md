@@ -28,16 +28,48 @@ was received without a final result. After the one-hour reporting window,
 either becomes `unknown`. Neither means failure: network loss, forced process
 termination, or failure fetching the initial script can prevent reporting.
 A failure fetching the initial script cannot have a script-generated event.
-`succeeded` means the installer completed, **not** that backend registration
-was observed. `failed` includes the last known stage and the original child
-exit code; PowerShell exceptions (including UAC cancellation) use exit 1.
-Placement and service-start stages are collected from a safe child-process
-file; only complete lines are collected during polling and after exit.
+`succeeded` means installation, service startup and an authenticated NATS
+handshake completed, **not** that backend registration was observed. Starting
+a service alone is not enough: its offline-tolerant NATS client can keep
+retrying rejected credentials while the process appears healthy. Historical
+success records from older installers do not establish this connection check.
+`failed` includes the last known stage and the original child exit code;
+PowerShell exceptions (including UAC cancellation) use exit 1.
+Placement, service-start and `connection_check` stages are collected from a
+safe child-process file; only complete lines are collected during polling
+and after exit.
+
+After service startup, every platform runs the installed binary's
+`--check-connection --config <installed-agent.toml>` diagnostic with the
+installed service credentials, not credentials inherited from the caller.
+Linux uses systemd's EnvironmentFile parser, macOS uses the launcher's
+literal-value reader, and Windows uses the agent-role registry lookup.
+The network check is bounded to ten seconds and neither starts the daemon
+nor writes agent state/logs, subscribes to subjects, or publishes traffic.
+It retains the normal user-credential probe and shared-token fallback policy.
+
+| Diagnostic exit | Meaning | Reported `error_kind` |
+| --- | --- | --- |
+| 0 | Authenticated NATS handshake | None |
+| 3 | Invalid configuration or incomplete credentials | `configuration_error` |
+| 4 | Broker rejected authentication | `authentication_failed` |
+| 5 | Network failure, unreachable broker, or timeout | `connection_failed` |
+
+A failed check leaves the installed service in place, still able to reconnect,
+but the installer exits nonzero and reports failure at `connection_check`.
+Fix the provisioning credentials or network before retrying with a fresh
+one-liner. Windows `-NoStart` is explicitly staging-only and skips both service
+startup and the connection check.
+
+These setup scripts require an agent binary with `--check-connection`.
+Publish matching agent releases for each platform before distributing the
+updated installers. An older binary's unsupported-argument exit is a failure,
+not a silently skipped check.
 
 Only enumerated stages/outcomes/error causes, bounded sequence numbers and
-integer exit codes are accepted. `error_kind` distinguishes permission denial,
-missing files, invalid archives, I/O failures, service failures, UAC cancellation,
-HTTP failures and generic command failure. Windows classifies exception types,
+integer exit codes are accepted. `error_kind` also distinguishes permission
+denial, missing files, invalid archives, I/O failures, service failures, UAC
+cancellation, HTTP failures and generic command failure. Windows classifies exception types,
 fixed categories and numeric native codes; neither the message nor source text
 is retained. The elevated child leaves the same safe classification in
 `install-error-kind` and `install.log`, including manual ZIP installs.

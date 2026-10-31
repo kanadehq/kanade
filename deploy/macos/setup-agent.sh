@@ -315,6 +315,30 @@ launchctl bootstrap system "$plist_dst"
 # no-op for some reason.
 launchctl kickstart -k "system/${label}"
 
+echo "==> Checking the installed agent's broker connection"
+printf 'connection_check\n' >> "$bundle/install-stage" 2>/dev/null || true
+check_code=0
+(
+	# The launchd launcher reads raw values, not shell assignments. Assign all
+	# three, including absent values, so caller credentials cannot fill a gap.
+	# Never source/eval this root-only data file.
+	export KANADE_NATS_TOKEN="$(sed -n 's/^KANADE_NATS_TOKEN=//p' "$agent_env" | head -n 1)"
+	export KANADE_NATS_USER="$(sed -n 's/^KANADE_NATS_USER=//p' "$agent_env" | head -n 1)"
+	export KANADE_NATS_PASSWORD="$(sed -n 's/^KANADE_NATS_PASSWORD=//p' "$agent_env" | head -n 1)"
+	exec /usr/local/bin/kanade-agent --check-connection --config /etc/kanade/agent.toml
+) >/dev/null 2>&1 || check_code=$?
+if [ "$check_code" -ne 0 ]; then
+	case "$check_code" in
+		3) check_kind=configuration_error ;;
+		4) check_kind=authentication_failed ;;
+		*) check_kind=connection_failed ;;
+	esac
+	printf '%s\n' "$check_kind" > "$bundle/install-error-kind" 2>/dev/null || true
+	printf 'Agent connection check failed: %s.\n' "$check_kind" >&2
+	exit "$check_code"
+fi
+echo "    authenticated broker connection succeeded (not backend registration)"
+
 echo
 echo "==> Done. Checks:"
 echo "    sudo launchctl print system/${label}"
