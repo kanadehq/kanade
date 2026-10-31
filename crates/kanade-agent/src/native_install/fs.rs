@@ -66,12 +66,14 @@ impl Stat {
             x if x == libc::S_IFLNK => Kind::Symlink,
             _ => Kind::Other,
         };
-        // Linux already exposes these fields at the normalized widths;
-        // Darwin uses narrower mode/link types and a signed device ID.
+        // Linux mode/device fields are already normalized, but ARM64 uses a
+        // 32-bit link count. Darwin also narrows mode/link and signs dev.
         #[cfg(target_os = "linux")]
         let (mode, dev, nlink) = (st.st_mode, st.st_dev, st.st_nlink);
         #[cfg(not(target_os = "linux"))]
         let (mode, dev, nlink) = (st.st_mode as u32, st.st_dev as u64, st.st_nlink as u64);
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let nlink = u64::from(nlink);
         Stat {
             kind,
             uid: st.st_uid,
@@ -716,6 +718,19 @@ mod tests {
         )
         .unwrap();
         assert!(FileLock::acquire(&d, "l", o, std::time::Duration::from_millis(10)).is_err());
+    }
+
+    #[test]
+    fn a_private_hardlinked_lock_file_is_refused() {
+        let (t, d) = tmp();
+        let owner = Owner::current();
+        d.write_new("lock", b"", 0o600, owner).unwrap();
+        std::fs::hard_link(t.path().join("lock"), t.path().join("alias")).unwrap();
+        assert_eq!(d.stat("lock").unwrap().unwrap().nlink, 2);
+        assert!(matches!(
+            FileLock::acquire(&d, "lock", owner, std::time::Duration::from_millis(10)),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
     }
 }
 

@@ -34,6 +34,17 @@ harness ごとの件数が一致しない場合も失敗にする。Cargo の終
 python3 -m unittest discover -s scripts/ci -p test_magi_e2e.py
 ```
 
+## ARM64 Linux の ABI
+
+ホスト上の gate が成功しても、`aarch64-unknown-linux-musl` の型幅は検証されない。
+Linux ARM64 の `libc::stat.st_nlink` は musl / glibc ともに `u32` で、
+x86-64 Linux の `u64` とは異なる。`native_install/fs.rs` は ARM64 の値を
+`u64` に拡張して `Stat.nlink` に保持する。複数のハードリンクを持つロックの
+拒否は維持し、リンク数を切り詰めたり判定を省略したりしない。
+全バイナリのリリース検証には `release.yml` と同じ ARM64 Linux の musl
+ツールチェーンが必要。別ホストでの対象モジュールの cross-check は ABI の
+型検証であり、ARM64 上での実行やワークスペース全体のリンク成功とは区別する。
+
 ## 空の検証を記録した run の根拠
 
 次の保存済み `run.json` を読み取り専用で確認した。すべて
