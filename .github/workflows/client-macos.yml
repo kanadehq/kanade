@@ -9,6 +9,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Stable release signing identity regressions
+        run: bash scripts/ci/test-macos-codesign.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: oven-sh/setup-bun@v2
       - uses: Swatinem/rust-cache@v2.9.2

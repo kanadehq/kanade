@@ -491,6 +491,28 @@ the catch-up diff will appear as churn in unrelated worktrees after
 any build — `jj restore` it there and fold it into the **next**
 release PR instead.
 
+## macOS agent release code signing
+
+Released `kanade-agent` macOS binaries are signed with a stable self-signed
+code-signing identity (`com.kanade.agent` and certificate leaf SHA-1) so
+that macOS TCC privacy grants survive self-updates.
+
+- `deploy/macos/signing-cert.sha1` pins the expected leaf SHA-1 fingerprint.
+  It is required for official releases; missing, invalid, or mismatched fingerprints
+  fail the release build.
+- The release pipeline calls `scripts/ci/release-post-build.sh sign` after the
+  release build to sign binaries, and `scripts/ci/release-post-build.sh verify-dist`
+  after packaging to verify the contents of the final `dist/*.tar.gz`.
+- `verify-dist` runs **secretless**: it unpacks the distribution tarball and
+  checks `codesign --verify --strict`, `identifier "com.kanade.agent"`, and
+  `certificate leaf = H"<sha1>"`, rejecting unstable `cdhash`-only ad-hoc
+  signatures.
+- `.github/workflows/release.yml` is kata-managed. The hooks calling
+  `scripts/ci/release-post-build.sh` (`sign` and `verify-dist`) must exist in
+  both the workflow and upstream templates (`yukimemi/pj-rust-workspace`,
+  `yukimemi/pj-rust-cli`) so `kata apply` cannot silently strip the signing
+  path.
+
 ## Deploying a built release to a host
 
 The backend's SQLite shutdown budget in
