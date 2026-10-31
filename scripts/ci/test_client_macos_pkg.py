@@ -42,7 +42,7 @@ def make_app(base, *, target="14.0", version=VERSION, bundle_id=m.BUNDLE_ID, arc
     (app / "Contents/Resources/icon.icns").write_bytes(b"icns")
     (app / "Contents/Resources/THIRD-PARTY-NOTICES.md").write_text("notices\n")
     with (app / "Contents/Info.plist").open("wb") as f:
-        plistlib.dump(dict(CFBundleName=m.PRODUCT_NAME, CFBundleDisplayName=m.PRODUCT_NAME,
+        plistlib.dump(dict(KanadeLifecycleProtocol="1", CFBundleName=m.PRODUCT_NAME, CFBundleDisplayName=m.PRODUCT_NAME,
                            CFBundleIdentifier=bundle_id, CFBundleExecutable=m.EXECUTABLE,
                            CFBundleVersion=version, CFBundleShortVersionString=version,
                            CFBundlePackageType="APPL", CFBundleIconFile="icon.icns",

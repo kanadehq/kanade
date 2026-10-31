@@ -2,6 +2,7 @@
 //! reachable from remote typed dispatch. All writable roots must be temporary.
 //! Installer receipts belong to the OS: neither update nor rollback swaps app
 //! files. GUI activation/handshake is explicitly unsupported in this slice.
+pub mod lifecycle;
 pub mod processes;
 pub mod result;
 mod structure;

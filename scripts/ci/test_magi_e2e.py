@@ -48,6 +48,11 @@ class E2eTests(unittest.TestCase):
         for module in ("package_manifest", "publisher_trust", "package_admission"):
             self.assertTrue(any(module + "::tests::" in cmd for cmd in commands))
 
+    def test_client_lifecycle_is_required_nonempty_coverage(self):
+        commands = list(e2e.commands())
+        self.assertTrue(any("client_lifecycle::" in cmd for cmd in commands))
+        self.assertTrue(any("startup::" in cmd and "session::" in cmd for cmd in commands))
+
     def test_nats_version_matches_actual_ci_pin(self):
         for version, valid in (("2.14.1", True), ("0.0.0", False)):
             with self.subTest(version=version), patch.object(

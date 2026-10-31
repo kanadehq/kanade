@@ -184,10 +184,7 @@ impl Installer<'_> {
                 "unsupported or frozen transaction; evidence retained".into(),
             ));
         }
-        if j.phase.terminal() {
-            return Ok(());
-        }
-        self.reconcile(&ctx, &mut j, host)
+        self.recover_journal(&ctx, &mut j, host)
     }
     /// Offline inspection only: independent publisher admission, fixed package
     /// structure, BOM and OS app-signature verification. Grants no deployment
@@ -211,8 +208,7 @@ impl Installer<'_> {
         self.validate_pkg(&ctx, pkg, operation.artifact_identity().version().as_str())
     }
     fn open(&self) -> Result<Context> {
-        self.roots.validate_offline()?;
-        self.system.check_target(&self.roots.install_dir)?;
+        self.system.check_roots(&self.roots)?;
         let owner = self.roots.owner;
         let deploy = Dir::open_absolute(&self.roots.deploy_dir, Some(0o700), owner)?;
         let st = deploy.stat_self()?;
@@ -220,7 +216,7 @@ impl Installer<'_> {
             st.uid == owner.uid && st.gid == owner.gid && st.mode == 0o700,
             "private deploy root",
         )?;
-        let apps = Dir::open_absolute(&self.roots.install_dir, Some(0o755), owner)?;
+        let apps = self.open_applications(Some(0o755))?;
         let cache = deploy.open_dir("client-pkgs", Some(0o700), owner)?;
         let st = cache.stat_self()?;
         require(
@@ -386,9 +382,35 @@ impl Installer<'_> {
         self.admit(&r.operation, &r.manifest, &pkg, host)?;
         Ok(pkg)
     }
+    fn open_applications(&self, create: Option<u32>) -> Result<Dir> {
+        if self.roots.install_dir == Path::new("/Applications")
+            && self.roots.owner == Owner::ROOT_WHEEL
+        {
+            let apps = Dir::open_absolute(Path::new("/"), None, Owner::ROOT_WHEEL)?.open_dir(
+                "Applications",
+                None,
+                Owner::ROOT_WHEEL,
+            )?;
+            let st = apps.stat_self()?;
+            // Stock macOS grants the administrator group access here. Bundle
+            // descendants and executable still require exact root:wheel modes.
+            require(
+                st.uid == 0
+                    && ((st.gid == 80 && st.mode == 0o775) || (st.gid == 0 && st.mode == 0o755)),
+                "system Applications ownership/mode",
+            )?;
+            Ok(apps)
+        } else {
+            Ok(Dir::open_absolute(
+                &self.roots.install_dir,
+                create,
+                self.roots.owner,
+            )?)
+        }
+    }
     fn path_still_pinned(&self, ctx: &Context) -> Result<()> {
         let cache = Dir::open_absolute(&ctx.cache_path, None, ctx.owner)?;
-        let apps = Dir::open_absolute(&self.roots.install_dir, None, ctx.owner)?;
+        let apps = self.open_applications(None)?;
         require(
             cache.stat_self()?.same_file(&ctx.cache.stat_self()?)
                 && apps.stat_self()?.same_file(&ctx.apps.stat_self()?),
@@ -578,9 +600,7 @@ impl Installer<'_> {
                     "transaction frozen; evidence retained".into(),
                 ));
             }
-            if !j.phase.terminal() {
-                self.reconcile(&ctx, &mut j, req.host)?;
-            }
+            self.recover_journal(&ctx, &mut j, req.host)?;
             if j.next.operation == next.operation
                 && j.next.exec_id == next.exec_id
                 && j.next.job_id == next.job_id
@@ -618,8 +638,6 @@ impl Installer<'_> {
             self.absent(&ctx)?;
             None
         };
-        let lease = self.system.coordinate()?;
-        lease.recheck()?;
         let mut j = Journal {
             schema: 1,
             phase: Phase::Prepared,
@@ -631,60 +649,128 @@ impl Installer<'_> {
             evidence: vec![],
         };
         self.journal(&ctx, &mut j, Phase::Prepared, "")?;
-        // This is a mutation intent, NOT a claim of OS transaction atomicity.
-        self.journal(
-            &ctx,
-            &mut j,
-            Phase::Installing,
-            "installer invocation pending; OS transaction may outlive caller",
-        )?;
-        self.previous_matches(&ctx, &j, req.host)?;
-        self.boundary(
-            &ctx,
-            &j.next,
-            req.host,
-            Boundary::BeforeInstaller,
-            lease.as_ref(),
-            true,
-        )?;
-        self.previous_matches(&ctx, &j, req.host)?;
-        self.authorize(&j.next, Boundary::BeforeInstaller, true)?;
-        self.cached(&ctx, &j.next, req.host)?;
-        self.path_still_pinned(&ctx)?;
-        lease.recheck()?;
-        let exit = match self
-            .system
-            .install(&ctx.cache_path.join(j.next.cache_name()))
-        {
-            Ok(exit) => exit,
-            Err(e) => return self.freeze(&ctx, &mut j, e),
+        let lease = match self.system.coordinate(&transaction_id(&j), false) {
+            Ok(lease) => lease,
+            Err(error) => {
+                // No mutation was attempted. Reconcile durable preparation so
+                // a discovery/stop failure does not strand manual startup.
+                if !matches!(error, Error::Interrupted) {
+                    self.recover_journal(&ctx, &mut j, req.host)?;
+                }
+                return Err(error);
+            }
         };
-        match exit {
-            InstallerExit::Uncertain(why) => self.freeze(&ctx, &mut j, why),
-            InstallerExit::Succeeded => {
-                self.journal(
-                    &ctx,
-                    &mut j,
-                    Phase::InstallerReturned,
-                    "installer exited successfully; receipt/files still unverified",
-                )?;
-                match self.installed(&ctx, &j.next, req.host) {
-                    Ok(()) => {
-                        if let Err(e) = self.authorize(&j.next, Boundary::Reconcile, true) {
-                            return self.freeze(&ctx, &mut j, e);
+        if let Err(error) = lease.recheck() {
+            drop(lease);
+            self.recover_journal(&ctx, &mut j, req.host)?;
+            return Err(error);
+        }
+        let result = (|| {
+            // This is a mutation intent, NOT a claim of OS transaction atomicity.
+            self.journal(
+                &ctx,
+                &mut j,
+                Phase::Installing,
+                "installer invocation pending; OS transaction may outlive caller",
+            )?;
+            self.previous_matches(&ctx, &j, req.host)?;
+            self.boundary(
+                &ctx,
+                &j.next,
+                req.host,
+                Boundary::BeforeInstaller,
+                lease.as_ref(),
+                true,
+            )?;
+            self.previous_matches(&ctx, &j, req.host)?;
+            self.authorize(&j.next, Boundary::BeforeInstaller, true)?;
+            self.cached(&ctx, &j.next, req.host)?;
+            self.path_still_pinned(&ctx)?;
+            lease.recheck()?;
+            lease.mutation_intent()?;
+            let exit = match self
+                .system
+                .install(&ctx.cache_path.join(j.next.cache_name()), lease.as_ref())
+            {
+                Ok(exit) => exit,
+                Err(e) => return self.freeze(&ctx, &mut j, e),
+            };
+            match exit {
+                InstallerExit::Uncertain(why) => self.freeze(&ctx, &mut j, why),
+                InstallerExit::Succeeded => {
+                    self.journal(
+                        &ctx,
+                        &mut j,
+                        Phase::InstallerReturned,
+                        "installer exited successfully; receipt/files still unverified",
+                    )?;
+                    match self.installed(&ctx, &j.next, req.host) {
+                        Ok(()) => {
+                            if let Err(e) = self.authorize(&j.next, Boundary::Reconcile, true) {
+                                return self.freeze(&ctx, &mut j, e);
+                            }
+                            if let Err(e) = self.write_state(&ctx, RECEIPT, &j.next) {
+                                return self.freeze(&ctx, &mut j, e);
+                            }
+                            self.journal(&ctx, &mut j, Phase::Committed, "")?;
+                            Ok(report(Outcome::InstalledVerified, j.next.version()))
                         }
-                        if let Err(e) = self.write_state(&ctx, RECEIPT, &j.next) {
-                            return self.freeze(&ctx, &mut j, e);
+                        Err(e) => {
+                            self.rollback(&ctx, &mut j, req.host, lease.as_ref(), &e.to_string())
                         }
-                        self.journal(&ctx, &mut j, Phase::Committed, "")?;
-                        Ok(report(Outcome::InstalledVerified, j.next.version()))
                     }
-                    Err(e) => self.rollback(&ctx, &mut j, req.host, lease.as_ref(), &e.to_string()),
+                }
+                InstallerExit::FailedQuiescent(why) => {
+                    self.rollback(&ctx, &mut j, req.host, lease.as_ref(), &why)
                 }
             }
-            InstallerExit::FailedQuiescent(why) => {
-                self.rollback(&ctx, &mut j, req.host, lease.as_ref(), &why)
+        })();
+        // An interrupted checkpoint is crash simulation: preserve the gate even
+        // when the terminal journal write reached disk. Recovery rechecks it.
+        if !matches!(result, Err(Error::Interrupted))
+            && j.phase.terminal()
+            && j.phase != Phase::RecoveryRequired
+        {
+            self.verify_terminal(&ctx, &j, req.host)?;
+            let gui = lease.finish()?;
+            return result.map(|mut report| {
+                report.gui_activation = gui;
+                report
+            });
+        }
+        result
+    }
+    fn recover_journal(&self, ctx: &Context, j: &mut Journal, host: &HostInfo) -> Result<()> {
+        let lease = if j.phase.terminal() {
+            let Some(lease) = self.system.resume(&transaction_id(j))? else {
+                return Ok(());
+            };
+            lease
+        } else {
+            self.system.coordinate(&transaction_id(j), true)?
+        };
+        if !j.phase.terminal() {
+            self.reconcile(ctx, j, host, lease.as_ref())?;
+        }
+        if let Err(error) = self.verify_terminal(ctx, j, host) {
+            return self.freeze(ctx, j, error);
+        }
+        lease.finish()?;
+        Ok(())
+    }
+    fn verify_terminal(&self, ctx: &Context, j: &Journal, host: &HostInfo) -> Result<()> {
+        match j.phase {
+            Phase::Committed => {
+                self.authorize(&j.next, Boundary::Reconcile, true)?;
+                self.installed(ctx, &j.next, host)
             }
+            Phase::RolledBack | Phase::Abandoned => {
+                self.authorize(&j.next, Boundary::Reconcile, true)?;
+                self.previous_matches(ctx, j, host)
+            }
+            _ => Err(Error::RecoveryRequired(
+                "launch exclusion retained for nonterminal/frozen journal".into(),
+            )),
         }
     }
     fn boundary(
@@ -774,7 +860,11 @@ impl Installer<'_> {
         if let Err(e) = final_check {
             return self.freeze(ctx, j, e);
         }
-        match self.system.install(&ctx.cache_path.join(prev.cache_name())) {
+        lease.mutation_intent()?;
+        match self
+            .system
+            .install(&ctx.cache_path.join(prev.cache_name()), lease)
+        {
             Ok(InstallerExit::Succeeded) => {}
             other => return self.freeze(ctx, j, format!("native rollback failed: {other:?}")),
         }
@@ -792,14 +882,21 @@ impl Installer<'_> {
         )?;
         Err(Error::RolledBack)
     }
-    fn reconcile(&self, ctx: &Context, j: &mut Journal, host: &HostInfo) -> Result<()> {
+    fn reconcile(
+        &self,
+        ctx: &Context,
+        j: &mut Journal,
+        host: &HostInfo,
+        lease: &dyn LaunchLease,
+    ) -> Result<()> {
         if let Err(e) = self.authorize(&j.next, Boundary::Reconcile, true) {
             return self.freeze(ctx, j, e);
         }
         if let Err(e) = self.cached(ctx, &j.next, host) {
             return self.freeze(ctx, j, e);
         }
-        if j.phase == Phase::Prepared {
+        let no_os_intent = lease.mutation_recorded()? == Some(false);
+        if j.phase == Phase::Prepared || (j.phase == Phase::Installing && no_os_intent) {
             if let Err(e) = self.previous_matches(ctx, j, host) {
                 return self.freeze(ctx, j, e);
             }
@@ -807,11 +904,15 @@ impl Installer<'_> {
                 ctx,
                 j,
                 Phase::Abandoned,
-                "interrupted before installer intent; previous state verified",
+                "interrupted before durable OS mutation intent; previous state verified",
             )?;
             return Ok(());
         }
-        if let Err(e) = self.system.recovery_quiescent() {
+        lease.recheck()?;
+        if let Err(e) = self
+            .system
+            .recovery_quiescent(j.phase == Phase::InstallerReturned)
+        {
             return self.freeze(ctx, j, e);
         }
         if self.installed(ctx, &j.next, host).is_ok() && j.phase != Phase::RollingBack {
@@ -851,6 +952,9 @@ impl Installer<'_> {
         }
         self.freeze(ctx,j,"interrupted installer/rollback left ambiguous receipt/files; no overlapping OS transaction or automatic retry")
     }
+}
+fn transaction_id(j: &Journal) -> String {
+    String::from(ArtifactSha256::of(&serde_json::to_vec(&j.next).unwrap()))
 }
 fn tree_digest(payload: &Payload) -> Result<ArtifactSha256> {
     let body: BTreeMap<_, _> = payload

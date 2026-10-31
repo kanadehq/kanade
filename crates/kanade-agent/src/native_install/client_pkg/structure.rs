@@ -876,3 +876,16 @@ pub(super) fn bom_payload(text: &str, payload: &Payload) -> Result<()> {
     }
     bom(&metadata)
 }
+
+/// Native mutation only accepts a participating generation. The general
+/// inspector can still diagnose older signed/cache packages without adopting it.
+pub(super) fn lifecycle_participant(bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::Deferred("legacy Client plist".into()))?;
+    let text = text.replace("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">", "");
+    let doc = xml(text.as_bytes())?;
+    let keys: Vec<_> = doc.descendants().filter(|n| n.has_tag_name("key") && n.text() == Some("KanadeLifecycleProtocol")).collect();
+    if keys.len() != 1 || !keys[0].next_sibling_element().is_some_and(|n| n.has_tag_name("string") && n.text() == Some("1")) {
+        return Err(Error::Deferred("legacy Client cannot observe the common launch gate; migration requires a quiescent managed participating installation".into()));
+    }
+    Ok(())
+}

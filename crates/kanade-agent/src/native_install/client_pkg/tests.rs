@@ -319,6 +319,8 @@ struct Fake {
     calls: Cell<usize>,
     exits: RefCell<VecDeque<InstallerExit>>,
     coordinate: Cell<bool>,
+    gate: RefCell<Option<String>>,
+    lifecycle_events: RefCell<Vec<String>>,
     lease_safe: Cell<bool>,
     quiescent: Cell<bool>,
     crash: Cell<Option<Phase>>,
@@ -329,16 +331,30 @@ struct Fake {
     after_install: RefCell<Option<Box<dyn Fn()>>>,
     checkpoint_hook: RefCell<Option<CheckpointHook>>,
 }
-struct Lease<'a>(&'a Cell<bool>);
+struct Lease<'a> {
+    safe: &'a Cell<bool>,
+    gate: &'a RefCell<Option<String>>,
+    events: &'a RefCell<Vec<String>>,
+}
 impl LaunchLease for Lease<'_> {
     fn recheck(&self) -> Result<()> {
-        if self.0.get() {
+        if self.safe.get() && self.gate.borrow().is_some() {
             Ok(())
         } else {
             Err(Error::Deferred(
                 "managed executable PID/start/UID or launch gate cannot be proven safe".into(),
             ))
         }
+    }
+    fn mutation_intent(&self) -> Result<()> {
+        self.recheck()?;
+        self.events.borrow_mut().push("intent".into());
+        Ok(())
+    }
+    fn finish(self: Box<Self>) -> Result<super::result::GuiActivation> {
+        self.events.borrow_mut().push("finish".into());
+        self.gate.borrow_mut().take();
+        Ok(super::result::GuiActivation::UnsupportedNotAttempted)
     }
 }
 impl System for Fake {
@@ -362,16 +378,38 @@ impl System for Fake {
     fn receipt(&self) -> Result<Option<OsReceipt>> {
         Ok(self.receipt.borrow().clone())
     }
-    fn coordinate(&self) -> Result<Box<dyn LaunchLease + '_>> {
-        if self.coordinate.get() {
-            Ok(Box::new(Lease(&self.lease_safe)))
-        } else {
-            Err(Error::Deferred(
+    fn coordinate(&self, transaction: &str, recovery: bool) -> Result<Box<dyn LaunchLease + '_>> {
+        if !self.coordinate.get() {
+            return Err(Error::Deferred(
                 "process/session coordination unavailable".into(),
-            ))
+            ));
+        }
+        if self
+            .gate
+            .borrow()
+            .as_deref()
+            .is_some_and(|owner| owner != transaction)
+        {
+            return Err(Error::Deferred("foreign transaction owns gate".into()));
+        }
+        *self.gate.borrow_mut() = Some(transaction.into());
+        self.lifecycle_events
+            .borrow_mut()
+            .push(if recovery { "recover" } else { "coordinate" }.into());
+        Ok(Box::new(Lease {
+            safe: &self.lease_safe,
+            gate: &self.gate,
+            events: &self.lifecycle_events,
+        }))
+    }
+    fn resume(&self, transaction: &str) -> Result<Option<Box<dyn LaunchLease + '_>>> {
+        if self.gate.borrow().is_none() {
+            Ok(None)
+        } else {
+            self.coordinate(transaction, true).map(Some)
         }
     }
-    fn recovery_quiescent(&self) -> Result<()> {
+    fn recovery_quiescent(&self, _: bool) -> Result<()> {
         if self.quiescent.get() {
             Ok(())
         } else {
@@ -391,7 +429,8 @@ impl System for Fake {
             Ok(())
         }
     }
-    fn install(&self, pkg: &Path) -> Result<InstallerExit> {
+    fn install(&self, pkg: &Path, lease: &dyn LaunchLease) -> Result<InstallerExit> {
+        lease.mutation_intent()?;
         self.calls.set(self.calls.get() + 1);
         if self.mutate.get() {
             let parts = structure::xar(&std::fs::read(pkg)?)?;
@@ -496,6 +535,8 @@ impl Fx {
                 calls: Cell::new(0),
                 exits: RefCell::new(VecDeque::new()),
                 coordinate: Cell::new(true),
+                gate: RefCell::new(None),
+                lifecycle_events: RefCell::new(vec![]),
                 lease_safe: Cell::new(true),
                 quiescent: Cell::new(true),
                 crash: Cell::new(None),
@@ -1050,7 +1091,10 @@ fn real_productbuild_fixture_shared_with_python_passes_native_readonly_validatio
             "{err}"
         );
     }
-    assert!(matches!(native.coordinate(), Err(Error::Deferred(_))));
+    assert!(matches!(
+        native.coordinate("isolated-test", false),
+        Err(Error::Deferred(_))
+    ));
     assert_eq!(f.sys.calls.get(), 0);
 }
 
@@ -1250,4 +1294,105 @@ fn bom_content_checks_pin_posix_cksum_and_reject_size_or_checksum_divergence() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(structure::bom_payload(&bad, &payload).is_err());
+}
+
+#[test]
+fn transaction_owns_one_gate_through_forward_noop_and_rollback() {
+    let f = Fx::new();
+    let p = f.pkg("0.97.0");
+    let q = f.pkg("0.98.0");
+    f.run(&p).unwrap();
+    assert!(f.sys.gate.borrow().is_none());
+    assert_eq!(
+        f.sys
+            .lifecycle_events
+            .borrow()
+            .iter()
+            .filter(|e| e.as_str() == "coordinate")
+            .count(),
+        1
+    );
+    let events = f.sys.lifecycle_events.borrow().len();
+    f.run(&p).unwrap();
+    assert_eq!(
+        events,
+        f.sys.lifecycle_events.borrow().len(),
+        "no-op must not coordinate/stop/restore"
+    );
+    f.sys
+        .exits
+        .borrow_mut()
+        .push_back(InstallerExit::FailedQuiescent("test failure".into()));
+    assert!(matches!(f.run(&q), Err(Error::RolledBack)));
+    assert!(f.sys.gate.borrow().is_none());
+    assert_eq!(
+        f.sys
+            .lifecycle_events
+            .borrow()
+            .iter()
+            .filter(|e| e.as_str() == "coordinate")
+            .count(),
+        2
+    );
+    assert_eq!(
+        f.sys
+            .lifecycle_events
+            .borrow()
+            .iter()
+            .filter(|e| e.as_str() == "finish")
+            .count(),
+        2
+    );
+}
+#[test]
+fn every_crash_boundary_preserves_gate_until_verified_recovery() {
+    for phase in [
+        Phase::Installing,
+        Phase::InstallerReturned,
+        Phase::Committed,
+    ] {
+        let f = Fx::new();
+        let p = f.pkg("0.97.0");
+        f.sys.crash.set(Some(phase));
+        assert!(matches!(f.run(&p), Err(Error::Interrupted)));
+        assert!(f.sys.gate.borrow().is_some());
+        f.installer().recover(&f.host).unwrap();
+        assert!(f.sys.gate.borrow().is_none());
+        assert_eq!(f.sys.lifecycle_events.borrow().last().unwrap(), "finish");
+    }
+    let f = Fx::new();
+    let p = f.pkg("0.97.0");
+    f.sys.crash.set(Some(Phase::Installing));
+    assert!(f.run(&p).is_err());
+    f.sys.quiescent.set(false);
+    assert!(matches!(
+        f.installer().recover(&f.host),
+        Err(Error::RecoveryRequired(_))
+    ));
+    assert!(
+        f.sys.gate.borrow().is_some(),
+        "unknown OS worker must retain exclusion"
+    );
+    assert!(
+        !f.sys
+            .lifecycle_events
+            .borrow()
+            .iter()
+            .any(|e| e == "finish")
+    );
+}
+#[test]
+fn terminal_journal_requires_reverification_before_crash_gate_release() {
+    let f = Fx::new();
+    let p = f.pkg("0.97.0");
+    f.sys.crash.set(Some(Phase::Committed));
+    assert!(f.run(&p).is_err());
+    f.sys.wrong_receipt.set(true);
+    // Alter actual OS evidence, not the in-memory outcome of the former child.
+    f.sys.receipt.borrow_mut().as_mut().unwrap().version = "0.0.0".into();
+    assert!(matches!(
+        f.installer().recover(&f.host),
+        Err(Error::RecoveryRequired(_))
+    ));
+    assert!(f.sys.gate.borrow().is_some());
 }

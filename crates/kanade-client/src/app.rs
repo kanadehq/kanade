@@ -350,6 +350,10 @@ fn app_version() -> &'static str {
 /// client forward. Best-effort — a missing window just logs.
 #[tauri::command]
 fn show_main_window(app: tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    if !kanade_client::macos_lifecycle::allowed() {
+        return;
+    }
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
@@ -712,6 +716,9 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
 
 #[cfg(target_os = "macos")]
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
+    if !kanade_client::macos_lifecycle::allowed() {
+        return;
+    }
     // Full URL-open/focus queues and session-scoped instance identity are later stages.
     if StartupIntent::from_args(&argv).existing_instance_action() == ExistingInstanceAction::Show {
         if let Some(win) = app.get_webview_window("main") {
@@ -930,6 +937,10 @@ pub fn run() {
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             {
+                kanade_client::macos_lifecycle::watch(app.handle().clone());
+                if !kanade_client::macos_lifecycle::allowed() {
+                    return Err("Client update gate closed".into());
+                }
                 // WKWebView uses a nonpersistent datastore: no unmanaged WebKit
                 // state outside the shared Library policy. History lives in KLP.
                 let config = app
@@ -957,7 +968,16 @@ pub fn run() {
             // normal launch, reveal it immediately; on an emergency
             // launch, leave it hidden until the user clicks the toast
             // (`show_main_window`).
-            if initially_visible {
+            if initially_visible && {
+                #[cfg(target_os = "macos")]
+                {
+                    kanade_client::macos_lifecycle::allowed()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    true
+                }
+            } {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.show();
                     let _ = win.set_focus();
@@ -970,8 +990,21 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running kanade-client tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building kanade-client tauri application")
+        .run(|_app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if code != Some(75) {
+                    if let Err(error) = kanade_client::macos_lifecycle::explicit_quit() {
+                        warn!(%error, "Quit intent could not be saved");
+                        api.prevent_exit();
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = event;
+        });
 }
 
 #[cfg(test)]

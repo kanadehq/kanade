@@ -4,6 +4,7 @@ pub mod bin_platform;
 pub mod boot_sentinel;
 pub mod bootstrap;
 pub mod check_eval;
+pub mod client_lifecycle;
 pub mod config;
 pub mod config_field;
 pub mod default_paths;

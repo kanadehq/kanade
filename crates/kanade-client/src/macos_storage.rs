@@ -18,7 +18,7 @@ fn denied() -> io::Error {
     )
 }
 
-pub fn paths() -> io::Result<ClientPaths> {
+pub fn account_home() -> io::Result<PathBuf> {
     // getpwuid_r copies account data into our buffer; no process-global passwd pointer.
     let uid = unsafe { libc::geteuid() };
     let mut record = std::mem::MaybeUninit::<libc::passwd>::uninit();
@@ -46,6 +46,11 @@ pub fn paths() -> io::Result<ClientPaths> {
     let home = PathBuf::from(std::ffi::OsStr::from_bytes(
         unsafe { CStr::from_ptr(record.pw_dir) }.to_bytes(),
     ));
+    Ok(home)
+}
+pub fn paths() -> io::Result<ClientPaths> {
+    let uid = unsafe { libc::geteuid() };
+    let home = account_home()?;
     ClientPaths::resolve(
         UnixPlatform::MacOs,
         &UserAccount { uid, home },
@@ -270,4 +275,73 @@ mod tests {
         assert!(save_to(&paths, &bytes).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// Lifecycle preferences live independently of window state and pkg payloads.
+/// Quit is scoped to the kernel boot/audit session; opt-out is persistent.
+fn lifecycle_marker(name: &str, value: Option<bool>) -> io::Result<bool> {
+    let paths = paths()?;
+    let dir = directory(&paths, paths.window_size.parent().ok_or_else(denied)?)?;
+    let name = CString::new(name).map_err(|_| denied())?;
+    if value == Some(false) {
+        match open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
+            Ok(f) => validate(&f, &paths, PrivateEntry::File)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        }
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        kanade_shared::client_lifecycle::gate::durable_sync(&dir)?;
+        return Ok(false);
+    }
+    let mut f = match open_at(
+        &dir,
+        &name,
+        if value == Some(true) {
+            libc::O_RDWR | libc::O_CREAT | libc::O_NONBLOCK
+        } else {
+            libc::O_RDONLY | libc::O_NONBLOCK
+        },
+        0o600,
+    ) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    validate(&f, &paths, PrivateEntry::File)?;
+    if value == Some(true) {
+        f.write_all(b"1")?;
+        kanade_shared::client_lifecycle::gate::durable_sync(&f)?;
+        kanade_shared::client_lifecycle::gate::durable_sync(&dir)?;
+    }
+    // Any existing marker, including partial/crashed writes, is a veto.
+    Ok(true)
+}
+pub fn autostart_disabled(value: Option<bool>) -> io::Result<bool> {
+    lifecycle_marker("autostart-disabled", value)
+}
+pub fn session_quit(session: u32, value: Option<bool>) -> io::Result<bool> {
+    let mut boot = [0u8; 128];
+    let mut n = boot.len();
+    if unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            boot.as_mut_ptr().cast(),
+            &mut n,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let boot = CStr::from_bytes_until_nul(&boot)
+        .map_err(|_| denied())?
+        .to_str()
+        .map_err(|_| denied())?;
+    if !boot.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
+        return Err(denied());
+    }
+    lifecycle_marker(&format!("quit-{boot}-{session}"), value)
 }

@@ -67,6 +67,14 @@ fn main() {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() {
+    match kanade_client::macos_lifecycle::prepare() {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            eprintln!("Client launch deferred: {error}");
+            return;
+        }
+    }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "kanade_client=info".into());
     match kanade_client::macos_storage::open_log() {

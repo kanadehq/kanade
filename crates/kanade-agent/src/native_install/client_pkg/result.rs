@@ -9,6 +9,9 @@ use super::{Error, Result};
 #[serde(rename_all = "snake_case")]
 pub enum GuiActivation {
     UnsupportedNotAttempted,
+    NotLaunched,
+    RestoreLaunchedUnverified,
+    RestorePartiallyLaunchedUnverified,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

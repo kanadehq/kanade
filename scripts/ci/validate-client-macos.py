@@ -16,6 +16,7 @@ with (app / "Contents/Info.plist").open("rb") as file:
     info = plistlib.load(file)
 assert info["CFBundleIdentifier"] == config["identifier"]
 assert info["CFBundleName"] == "Kanade Client"
+assert info["KanadeLifecycleProtocol"] == "1"
 assert info["CFBundleVersion"] == info["CFBundleShortVersionString"] == config["version"] == version
 assert info["LSMinimumSystemVersion"] == "14.0"
 assert "CFBundleURLTypes" not in info, "Deep-link registration belongs to a later stage"
