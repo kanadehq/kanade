@@ -66,7 +66,14 @@
       "authentication_failed": "Authentication failed.",
       "connection_failed": "The connection failed.",
       "command_failed": "An installer command failed."
-    }
+    },
+    "unknownNote": "The report key expired before a final result was received. This does not necessarily mean installation failed. The last reported stage is shown above when available.",
+    "receivedAtNote": "Report times are when the backend received each report, not when the installer executed the stage.",
+    "expiresAt": "Report key expires at (local time)",
+    "failedStage": "Failed stage / error kind",
+    "lastReceivedAt": "Last report received at",
+    "staleList": "Showing previously fetched history. It may be out of date.",
+    "staleEvents": "Showing previously fetched reports. They may be out of date."
   },
   "title": "Agent Install",
   "intro": "Install the kanade agent on this machine.",

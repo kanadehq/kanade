@@ -221,13 +221,13 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<serde_json::Valu
 
 async fn history(pool: &SqlitePool) -> Result<serde_json::Value, Error> {
     prune(pool).await?;
-    let rows = sqlx::query("SELECT a.id,a.issuer,a.os,a.created_at,a.expires_at,a.status,a.seq,e.stage AS last_stage,e.outcome AS last_outcome FROM install_attempts a LEFT JOIN install_events e ON e.attempt_id=a.id AND e.seq=a.seq ORDER BY a.created_at DESC,a.id DESC LIMIT 100")
+    let rows = sqlx::query("SELECT a.id,a.issuer,a.os,a.created_at,a.expires_at,a.status,a.seq,e.stage AS last_stage,e.outcome AS last_outcome,e.error_kind AS last_error_kind,e.received_at AS last_received_at FROM install_attempts a LEFT JOIN install_events e ON e.attempt_id=a.id AND e.seq=a.seq ORDER BY a.created_at DESC,a.id DESC LIMIT 100")
         .fetch_all(pool).await.map_err(db_error)?;
     let now = chrono::Utc::now().timestamp();
     Ok(rows.into_iter().map(|r| {
         let status: String = r.get("status");
         let expired = r.get::<i64,_>("expires_at") <= now && !matches!(status.as_str(),"succeeded"|"failed");
-        serde_json::json!({"id":r.get::<String,_>("id"),"issuer":r.get::<Option<String>,_>("issuer"),"os":r.get::<String,_>("os"),"created_at":r.get::<i64,_>("created_at"),"expires_at":r.get::<i64,_>("expires_at"),"status":if expired {"unknown"} else {&status},"seq":r.get::<i64,_>("seq"),"last_stage":r.get::<Option<String>,_>("last_stage"),"last_outcome":r.get::<Option<String>,_>("last_outcome")})
+        serde_json::json!({"id":r.get::<String,_>("id"),"issuer":r.get::<Option<String>,_>("issuer"),"os":r.get::<String,_>("os"),"created_at":r.get::<i64,_>("created_at"),"expires_at":r.get::<i64,_>("expires_at"),"status":if expired {"unknown"} else {&status},"seq":r.get::<i64,_>("seq"),"last_stage":r.get::<Option<String>,_>("last_stage"),"last_outcome":r.get::<Option<String>,_>("last_outcome"),"last_error_kind":r.get::<Option<String>,_>("last_error_kind"),"last_received_at":r.get::<Option<i64>,_>("last_received_at")})
     }).collect::<Vec<_>>().into())
 }
 
@@ -315,9 +315,9 @@ mod tests {
         append(&p, &first, &key, &event(1, Outcome::Progress))
             .await
             .unwrap();
-        append(&p, &first, &key, &event(2, Outcome::Failed))
-            .await
-            .unwrap();
+        let mut failure = event(2, Outcome::Failed);
+        failure.error_kind = Some(ErrorKind::HttpError);
+        append(&p, &first, &key, &failure).await.unwrap();
         let rows = history(&p).await.unwrap();
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -327,9 +327,20 @@ mod tests {
         assert_eq!(reported["last_stage"], "download");
         assert_eq!(reported["last_outcome"], "failed");
         assert_eq!(reported["status"], "failed");
+        assert_eq!(reported["last_error_kind"], "http_error");
+        let received: i64 = sqlx::query_scalar(
+            "SELECT received_at FROM install_events WHERE attempt_id=? AND seq=2",
+        )
+        .bind(&first)
+        .fetch_one(&p)
+        .await
+        .unwrap();
+        assert_eq!(reported["last_received_at"], received);
         let unreported = rows.iter().find(|r| r["id"] == second).unwrap();
         assert!(unreported["last_stage"].is_null());
         assert!(unreported["last_outcome"].is_null());
+        assert!(unreported["last_error_kind"].is_null());
+        assert!(unreported["last_received_at"].is_null());
         assert!(reported.get("key_hash").is_none());
         sqlx::query("UPDATE install_attempts SET expires_at=0 WHERE id=?")
             .bind(second)

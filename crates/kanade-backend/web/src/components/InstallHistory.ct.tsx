@@ -3,7 +3,7 @@ import { InstallHistoryHost } from './InstallHistory.ct.harness';
 
 const oldId = '00000000-0000-0000-0000-000000000001';
 const newId = '00000000-0000-0000-0000-000000000002';
-const old = { id: oldId, created_at: 1793400000, issuer: null, os: 'unix', status: 'unknown', last_stage: null, last_outcome: null };
+const old = { id: oldId, created_at: 1793400000, expires_at: 1793403600, issuer: null, os: 'unix', status: 'unknown', last_stage: 'download', last_outcome: 'progress' };
 const recent = { ...old, id: newId, created_at: old.created_at + 60, os: 'linux', issuer: 'installer account with a long readable name', status: 'succeeded', last_stage: 'complete', last_outcome: 'succeeded' };
 
 for (const width of [360, 1280]) {
@@ -33,6 +33,10 @@ for (const width of [360, 1280]) {
     await expect(rows.nth(1)).toHaveAttribute('aria-expanded', 'true');
     await expect(component.getByText('No reports received.', { exact: false })).toBeVisible();
     await expect(component.getByText(oldId, { exact: true })).toBeVisible();
+    await expect(component.getByText('This does not necessarily mean installation failed.', { exact: false })).toBeVisible();
+    await expect(rows.nth(1)).toContainText('Download installer');
+    await expect(component.getByText('Report key expires at (local time)', { exact: false })).toBeVisible();
+    await expect(component.getByText('Report times are when the backend received', { exact: false })).toBeVisible();
     expect(await rows.nth(1).evaluate((el) => el.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await rows.nth(1).click();
@@ -57,6 +61,8 @@ test('polling retains selection and stale reports, then clears a removed selecti
   fail = true;
   await expect(component.getByText('Could not refresh installation history')).toBeVisible({ timeout: 10000 });
   await expect(component.getByText('Could not refresh reports')).toBeVisible();
+  await expect(component.getByText('Showing previously fetched history.', { exact: false })).toBeVisible();
+  await expect(component.getByText('Showing previously fetched reports.', { exact: false })).toBeVisible();
   await expect(rows.nth(2)).toHaveAttribute('aria-expanded', 'true');
   await expect(component.getByText('future_error', { exact: true }).first()).toBeVisible();
   fail = false;
@@ -88,11 +94,13 @@ test('loading, failure, retry and empty history are distinct', async ({ mount, p
 
 test('Japanese failure stages and technical details remain readable at 375px', async ({ mount, page }, testInfo) => {
   await page.setViewportSize({ width: 375, height: 800 });
-  await page.route('**/api/agents/install-attempts', (r) => r.fulfill({ json: [{ ...recent, status: 'failed', last_stage: 'placement', last_outcome: 'failed' }] }));
+  await page.route('**/api/agents/install-attempts', (r) => r.fulfill({ json: [{ ...recent, status: 'failed', last_stage: 'placement', last_outcome: 'failed', last_error_kind: 'permission_denied', last_received_at: recent.created_at }] }));
   await page.route('**/api/agents/install-attempts/*', (r) => r.fulfill({ json: [{ seq: 1, stage: 'placement', outcome: 'failed', error_kind: 'permission_denied', exit_code: 5, received_at: recent.created_at }] }));
   const component = await mount(<InstallHistoryHost language="ja" />);
   await expect(component.locator('ol')).toContainText('エージェントファイルの配置');
-  await expect(component.getByText('アクセスが拒否されました。権限を確認してください。')).toBeVisible();
+  await expect(component.locator('button[aria-expanded]')).toContainText('失敗した段階 / エラー種別: エージェントファイルの配置 · アクセスが拒否されました。権限を確認してください。');
+  await expect(component.locator('button[aria-expanded]')).toContainText('最終報告の受信時刻');
+  await expect(component.locator('ol').getByText('アクセスが拒否されました。権限を確認してください。')).toBeVisible();
   await component.getByText('技術詳細', { exact: true }).click();
   await expect(component.locator('dd').filter({ hasText: 'permission_denied' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
