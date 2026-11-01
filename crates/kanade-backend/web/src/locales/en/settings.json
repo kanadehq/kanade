@@ -113,7 +113,7 @@
       "userPairHint": "The user and password are the agent role's credential, shared by every agent by design, and are embedded in the installers only when both are set (the token is still embedded too). They are never displayed; saving with both fields blank keeps the stored pair, and replacing it needs both fields typed. Never enter the backend's own or a break-glass credential here.",
       "userPairIncomplete": "Enter both the user and the password, or leave both blank.",
       "requireSignedCommands": "Require signed commands from install",
-      "requireSignedCommandsHint": "Enable signed-command enforcement in generated Windows, Linux and macOS installers so fresh agents reject unsigned commands from first boot. This only takes effect when the backend has a command-signing key (kanade-backend command-key-generate); otherwise the installer README warns about the mismatch and leaves enforcement unset."
+      "requireSignedCommandsHint": "Pass -RequireSignedCommands to the generated Windows installer and set KANADE_REQUIRE_SIGNED_COMMANDS=1 in the Linux/macOS install.sh so fresh agents reject unsigned commands from first boot. This only takes effect when the backend has a command-signing key (kanade-backend command-key-generate); otherwise the installer README warns about the mismatch and leaves enforcement unset."
     },
     "mail": {
       "title": "Email (SMTP) settings",
