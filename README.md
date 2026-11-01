@@ -132,9 +132,9 @@ start, stop it and use the `nats` CLI with an administrative credential
 (not `kanade`) via the operator scripts, then start it again:
 
 ```powershell
-./scripts/ops/jetstream-delete.ps1 -Kind stream -Name RESULTS -Server nats://127.0.0.1:4222 -Creds ./admin.creds
-./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4222 -Creds ./admin.creds        # dry run
-./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4222 -Creds ./admin.creds -Yes   # wipe all kanade resources
+./scripts/ops/jetstream-delete.ps1 -Kind stream -Name RESULTS -Server nats://127.0.0.1:4223 -Creds ./admin.creds
+./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4223 -Creds ./admin.creds        # dry run
+./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4223 -Creds ./admin.creds -Yes   # wipe all kanade resources
 ```
 
 The backend serves the dashboard at <http://127.0.0.1:8081> and the JSON API at
