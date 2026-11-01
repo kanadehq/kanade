@@ -23,10 +23,10 @@
 //! live path would leave the attack it exists to stop running through the
 //! other door.
 //!
-//! # Where enforcement will be configured — deliberately not KV
+//! # Where enforcement is configured — deliberately not KV
 //!
-//! When stage 3 adds "reject unsigned", the switch must live in **local
-//! configuration** (registry / on-disk config, admin-ACL'd), not in the
+//! The "reject unsigned" switch lives in **local configuration**
+//! (registry / on-disk config, admin-ACL'd), not in the
 //! `agent_config` KV bucket.
 //!
 //! KV is the convenient place — fleet-wide, instantly reversible per PC, which

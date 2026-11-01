@@ -29,13 +29,13 @@ In co-located Git and Jujutsu (jj) environments, managing worktrees manually can
 
 ```bash
 # Create an isolated worktree (uses Jujutsu by default if present)
-renri add feat/your-awesome-feature
+renri add feat/your-awesome-feature --from main@origin
 
 # Force a Git-native worktree (bypassing jj)
-renri --vcs git add feat/your-awesome-feature
+renri --vcs git add feat/your-awesome-feature --from origin/main
 
 # Clean up and delete a worktree after merging
-renri remove feat/your-awesome-feature
+renri remove feat/your-awesome-feature -y --non-interactive
 
 # Garbage-collect and prune stale or broken worktrees
 renri prune

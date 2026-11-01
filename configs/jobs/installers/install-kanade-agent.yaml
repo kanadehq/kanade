@@ -13,8 +13,7 @@
 #
 # Workflow (operator side, edit version per release):
 #
-#   1. `kanade app publish kanade-agent 0.43.48 \
-#        dist/agent/kanade-agent.exe`            # target into app-packages
+#   1. `kanade app publish kanade-agent dist/agent/kanade-agent.exe --version 0.43.48`            # target into app-packages
 #   2. Copy `scripts/deploy/agent-emergency-swap.ps1` locally, set:
 #        $AgentSourceUrl     = '<backend URL>'   # e.g. http://127.0.0.1:8080
 #        $AgentSourceVersion = '0.43.48'

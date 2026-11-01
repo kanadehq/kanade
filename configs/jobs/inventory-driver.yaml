@@ -9,14 +9,14 @@
 # on, and when did it last change?" is a normal SQL/Inventory-page
 # lookup instead of an ad-hoc `kanade run`.
 #
-# This file is a Manifest (the shape `kanade exec` / `kanade job
-# create` expect). Same two usage modes as inventory-hw:
+# Register this Manifest before executing its job ID:
 #
-#   * One-shot (no projection — projector only matches registered jobs):
-#         kanade exec configs/jobs/inventory-driver.yaml --pcs <pc-id>
-#   * Register + schedule (facts projected into inventory_facts):
+#   * One-shot (registered facts are projected):
 #         kanade job create configs/jobs/inventory-driver.yaml
-#         # then a schedule yaml referencing id: inventory-driver
+#         kanade exec inventory-driver --pcs <pc-id>
+#   * Register + schedule:
+#         kanade job create configs/jobs/inventory-driver.yaml
+#         kanade schedule create configs/schedules/inventory-driver.yaml
 #
 # Scope: signed drivers in a curated set of DeviceClasses (Net,
 # Bluetooth, Display, System, storage, USB, media, firmware). The full

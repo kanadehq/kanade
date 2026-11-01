@@ -22,23 +22,23 @@ const DEFAULT_BACKEND: &str = "http://127.0.0.1:8080";
 struct Cli {
     /// NATS broker URL (not the backend).
     ///
-    /// Used by the broker subcommands: `run`, `kill`,
-    /// `group` (except `group def`, which is HTTP — see --backend-url),
-    /// `script`, `app`. Its credential is NOT a flag — the CLI reads
+    /// Used by the broker subcommands: `run` and `kill`. Its credential is NOT a flag — the CLI reads
     /// `HKLM\SOFTWARE\kanade\cli\NatsToken` (Windows; no installer
     /// writes this today — a manual reg add), then
     /// `HKLM\SOFTWARE\kanade\agent\NatsToken`, then
     /// `$KANADE_NATS_TOKEN`, and connects unauthenticated if it finds
-    /// none of them.
+    /// none of them. A paired NatsUser/NatsPassword (role registry or
+    /// KANADE_NATS_USER/KANADE_NATS_PASSWORD) is probed first when provisioned;
+    /// token fallback applies when that user is rejected. A half pair is an error.
     #[arg(long, global = true, default_value = DEFAULT_NATS, env = "KANADE_NATS_URL")]
     server: String,
 
     /// Backend HTTP base URL.
     ///
     /// Used by the HTTP subcommands: `job`, `schedule`, `exec`, `view`,
-    /// `query`, `freeze`, `account`, `agent`, `group def`, `config`, `meta`, `ping`,
+    /// `query`, `freeze`, `account`, `agent`, `group`, `app`, `script`, `config`, `meta`, `ping`,
     /// `revoke`, `unrevoke`, `jetstream status`. They authenticate
-    /// WITH `$KANADE_AUTH_TOKEN`, a JWT — a different credential from
+    /// WITH `$KANADE_AUTH_TOKEN`, an account JWT or static service token — a different credential from
     /// the broker token above, which is the usual source of confusion
     /// when one set of subcommands works and the other does not.
     /// `kanade login` also talks to the backend, but PRODUCES that JWT
@@ -65,7 +65,7 @@ enum SubCmd {
     Unrevoke(cmd::revoke::UnrevokeArgs),
     /// Publish kill.{exec_id} so agents running the exec terminate (spec §2.6 Layer 3).
     Kill(cmd::kill::KillArgs),
-    /// Fire a registered job (`kanade job create` it first) at its declared targets.
+    /// Fire a registered job (`kanade job create` it first) at targets specified by --all, --groups or --pcs.
     Exec(cmd::exec::ExecArgs),
     /// CRUD the job catalog (jobs KV). Schedules reference jobs by id.
     Job(cmd::job::JobArgs),

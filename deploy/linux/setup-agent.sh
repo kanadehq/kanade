@@ -148,7 +148,7 @@ elif [ -f "$keys_file" ] && [ "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" = "1" ]; the
 	check_keys "$keys_file" >/dev/null || check_failed "$?" "the existing $keys_file (pass KANADE_COMMAND_KEYS to replace it)"
 fi
 if [ "${KANADE_REQUIRE_SIGNED_COMMANDS:-}" = "1" ] && [ -z "$keys_stage" ] && [ ! -f "$keys_file" ]; then
-	echo "KANADE_REQUIRE_SIGNED_COMMANDS=1 but this host has no keyring (and none was passed). Enforcing with an empty ring is inert — the agent declines to enforce — so pass KANADE_COMMAND_KEYS too." >&2
+	echo "KANADE_REQUIRE_SIGNED_COMMANDS=1 but this host has no keyring (and none was passed). Enforcing with an empty ring refuses commands, so pass KANADE_COMMAND_KEYS too." >&2
 	exit 1
 fi
 

@@ -1,5 +1,9 @@
 # Updating kanade-client
 
+This page covers the **Windows** installer job. The macOS GUI/package build
+and its deferred deployment integration are documented in
+[MACOS.md](https://github.com/kanadehq/kanade/blob/main/crates/kanade-client/MACOS.md).
+
 The Tauri desktop client is shipped to endpoints the same way as
 the backend: binary in `OBJECT_APP_PACKAGES`, script in
 `OBJECT_SCRIPTS`, job in `jobs` KV. The shape mirrors
@@ -38,7 +42,7 @@ Output: `target/release/kanade-client.exe`.
 ### 2. Publish the binary
 
 ```pwsh
-kanade app publish kanade-client 0.42.0 target/release/kanade-client.exe
+kanade app publish kanade-client target/release/kanade-client.exe --version 0.42.0
 ```
 
 ### 3. Edit `configs/jobs/installers/scripts/install-kanade-client.ps1`
@@ -82,7 +86,7 @@ inventory:
 ```
 
 ```pwsh
-kanade job create jobs\install-kanade-client.yaml
+kanade job create configs/jobs/installers/install-kanade-client.yaml
 ```
 
 > The `inventory:` block tells the projector that the script's
@@ -93,7 +97,7 @@ kanade job create jobs\install-kanade-client.yaml
 ### 5. Fire it
 
 ```pwsh
-kanade exec install-kanade-client --pcs <host> [--pcs <host> …]
+kanade exec install-kanade-client --pcs <host1>,<host2>
 ```
 
 Or against a group:

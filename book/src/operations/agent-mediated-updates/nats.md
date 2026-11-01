@@ -68,7 +68,7 @@ Either:
 ### 2. Publish the binary
 
 ```pwsh
-kanade app publish nats-server 2.10.20 .\nats-server.exe
+kanade app publish nats-server .\nats-server.exe --version 2.10.20
 ```
 
 ### 3. Edit deploy-nats.ps1
@@ -87,7 +87,7 @@ $AgentSourceAuthToken = '<bearer for the backend HTTP API>'
 
 ```pwsh
 kanade script publish deploy-nats 2.10.20 .\deploy-nats.edited.ps1
-kanade job create jobs\install-kanade-nats.yaml
+kanade job create configs/jobs/installers/install-kanade-nats.yaml
 kanade exec install-kanade-nats --pcs <broker-host>
 ```
 

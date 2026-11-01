@@ -3,7 +3,13 @@
 **対象**: Windows PC 数千台規模の一元管理基盤
 **設計方針**: pub/sub + 永続化ストリーミングによる軽量分散管理
 **言語**: 全コンポーネント Rust
-**最終更新**: 2026-05-15
+**初期設計時点**: 2026-05-15
+
+**現行実装との関係**: 本書は初期設計、実装済み仕様、将来計画を併記する。
+現行の導入・設定・CLI 手順は [運用ガイド](../book/src/operations/overview.md)、
+[設定リファレンス](../book/src/reference/config.md)、各コマンドの `--help` を参照。
+Postgres / backend レプリカ、旧 Client 専用更新 bucket などの設計記述を
+現行機能とはみなさない。
 
 ---
 
@@ -229,7 +235,11 @@ fn service_main(_args: Vec<OsString>) {
 **設定ファイル**: `/etc/mgmt/backend.toml` (Linux) または `C:\ProgramData\Mgmt\backend.toml` (Windows) — TOML + Tera 変数展開
 **ログ**: `journalctl` / `/var/log/mgmt/*.log` (Linux) または Windows イベントログ + `C:\ProgramData\Mgmt\logs\*.log` (Windows)
 
-### 2.1.3 Admin CLI (`mgmtctl`)
+### 2.1.3 Admin CLI (`mgmtctl`、初期設計名)
+
+以下のコマンドと OIDC 認証は初期案の記録。現行バイナリは `kanade` で、
+`job create` → `exec <job-id> --pcs ...`、`login` と HTTP bearer 認証を使う。
+`deploy plan/apply/status` は将来設計であり、実行可能な CLI 手順ではない。
 
 **役割**: オペレーターの手元で動くツール。YAML 読み込み、Backend API 呼び出し、進捗表示。
 
@@ -292,7 +302,7 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
    - NG 項目には「修復する」 ボタン (該当するトラブルシューティングジョブを起動)
 
 3. **ソフトウェアアップデート (セルフサービス)**
-   - Manifest で `user_invokable: true` かつ `category: software_update` であるジョブを「アップデート」 タブに表示
+   - Manifest に `client` があり `client.category: software_update` であるジョブを「アップデート」 タブに表示
    - ユーザーがクリック → KLP `jobs.execute` → Agent IPC 経由で `commands.pc.{pc_id}` publish → 実行は `LocalSystem` の Agent が行う
    - 進捗バー + 完了通知 + SPA への結果反映 (既存 `results.>` 経路)
 
@@ -523,15 +533,14 @@ execute:
   timeout: 600s
   run_as: system                # system / user
 
-require_approval: true          # 本番配信時に承認必須 (省略時 false)
+require_approval: true          # shell job では宣言のみ。承認 gate にはならない (省略時 false)
 tags: [maintenance, disk]       # オペレーター分類用タグ (省略可)
 
 # --- エンドユーザー Client App カタログ公開 (オプトイン) ---
 client:
-  user_invokable: true          # true なら Client App に表示
   category: troubleshoot        # software_update / troubleshoot / catalog
-  display_name: "Temp フォルダのクリーンアップ"  # Client App での表示名 (省略時は id)
-  display_description: "..."    # Client App でのツールチップ
+  name: "Temp フォルダのクリーンアップ"  # Client App での表示名 (必須)
+  description: "..."            # Client App での補足説明
   icon: "broom"                 # Client App でのアイコン名 (任意)
 
 # --- オプトインヒント・拡張属性一覧 (Manifest の全オプトイン機能) ---
@@ -573,16 +582,16 @@ client:
 
 **`client` ブロック**:
 - 省略時 (= `None`) は operator 起動専用のジョブとなります
-- `client` ブロックが存在し `user_invokable: true` の job のみ KLP `jobs.execute` 経由で実行可能。Agent 側で manifest を必ず再 lookup し、非公開への変更が即時反映されます
+- `client` ブロックが存在する job のみ KLP `jobs.execute` 経由で実行可能。Agent 側で manifest を必ず再 lookup し、非公開への変更が即時反映されます
 - `category` でユーザー向けタブ分け: `software_update` (Chrome 更新等)、`troubleshoot` (Office 修復等)、`catalog` (任意導入アプリ)
-- `display_name` / `display_description` / `icon` は Client App UI 専用フィールド (operator UI には影響なし)
+- `client.name` / `client.description` / `client.icon` は Client App UI 専用フィールド (operator UI には影響なし)
 
 **通知 Manifest** (`notifications/*.yaml`):
 
 ```yaml
 id: maintenance-2026-05-20      # 必須、notification_id として使用
 priority: emergency             # info / warning / emergency
-require_ack: true               # true なら Client App でモーダル + 確認ボタン強制
+require_ack: true               # true なら本文を開いた後の確認ボタンで明示確認（ブロッキングモーダルは使わない）
 title: "緊急: ネットワーク機器メンテ"
 body: |
   本日 22:00 から 30 分間、VPN が停止します。
@@ -604,10 +613,10 @@ Sprint 5 でグループ所属は **サーバ側 KV (`agent_groups` バケット
 オペレータ操作:
 
 ```bash
-kanade agent groups list <pc_id>                 # 現在の所属一覧
-kanade agent groups add  <pc_id> <group>         # 1 つ追加 (idempotent)
-kanade agent groups rm   <pc_id> <group>         # 1 つ削除 (idempotent)
-kanade agent groups set  <pc_id> <g1> <g2> ...   # 全体置換 (sort + dedup)
+kanade group list --pc <pc_id>                 # 現在の所属一覧
+kanade group add  <pc_id> <group>         # 1 つ追加 (idempotent)
+kanade group rm   <pc_id> <group>         # 1 つ削除 (idempotent)
+kanade group set  <pc_id> <g1> <g2> ...   # 全体置換 (sort + dedup)
 ```
 
 または backend HTTP 経由:
@@ -912,6 +921,12 @@ read-only ビューで確認できる（CLI `kanade schedule {preview,status,cov
 ### 2.4.4 Agent / Backend 設定ファイル (TOML + teravars 変数展開)
 
 Agent / Backend 自体の起動設定は **TOML + Tera テンプレート構文** で記述し、`yukimemi/teravars` crate (v0.1.5+) で読み込む。teravars は `[vars]` セクションの自己参照解決 + `system.*` context + クロスプラットフォーム判定 (`is_windows()` / `is_linux()`) + multi-file merge を一気通貫で提供します。
+
+以下の依存・TOML・Rust コード例は初期の設定構想を残したもの。
+`state_db` / `outbox_path` / `[tls]` / `[inventory]` は現行 Agent の TOML 設定項目ではない。
+現行のスキーマ、設定探索順、環境変数は [設定リファレンス](../book/src/reference/config.md)
+と `configs/agent.toml` / `configs/backend.toml` を参照。multi-file merge はライブラリ能力で、
+サービスの起動時は選択された単一ファイルを読み込む。
 
 #### Cargo.toml 依存
 
@@ -1826,7 +1841,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 ### 2.11.7 Client App 配置 (Linux / macOS) — 設計決定記録
 
-本節は Linux / macOS の Client App の設計決定記録。運用者が承認済みの決定 (**確定**) と、実装タスクが検証・具体化する **proposal（提案）** を区別する。いずれも未実装である (本変更は docs のみで、コード・workflow・ジョブ定義は変更しない)。KLP transport / identity / 接続所有の確定事項 (§2.12、§2.12.4.4)、現行 Windows の挙動、既存 Agent の配布・更新、ユーザーデータの分離、通知 click と acknowledgement の分離、tray 不在時の挙動、保守的な GUI session 適格判定は変更しない。
+本節は Linux / macOS の Client App の設計決定記録。運用者が承認済みの決定 (**確定**) と、実装タスクが検証・具体化する **proposal（提案）** を区別する。以下は目標契約であり、全体が実装済みではない。現在は Apple Silicon macOS 14+ GUI、Unix KLP と payload-only pkg のビルドまで実装済み。Linux GUI、Unix 自動起動・ネイティブ通知・運用への配布接続は未実装である（[現行境界](../crates/kanade-client/MACOS.md)）。KLP transport / identity / 接続所有の確定事項 (§2.12、§2.12.4.4)、現行 Windows の挙動、既存 Agent の配布・更新、ユーザーデータの分離、通知 click と acknowledgement の分離、tray 不在時の挙動、保守的な GUI session 適格判定は変更しない。
 フリートデプロイ CLI (`kanade deploy`) および型付き Agent 操作（Typed Native Operations）による Client App の導入・更新・パッケージング契約については、[§2.13 クロスプラットフォーム デプロイ設計](#213-クロスプラットフォーム-デプロイ設計-kanade-deploy-cli--typed-operations) を参照。
 
 **確定した決定（運用者承認済み）**
@@ -2172,7 +2187,7 @@ Windows 実装を調べた結果、peer の Session ID は**認可にも所有�
 
 | Method | 強制する規則 | 依存する identity |
 |---|---|---|
-| `jobs.execute` | manifest に `user_invokable: true` 必須 (false なら `IpcError::Unauthorized`) | `user_key` (監査ログの actor) |
+| `jobs.execute` | manifest に `client` ブロック必須（存在しなければ `IpcError::Unauthorized`） | `user_key` (監査ログの actor) |
 | `jobs.kill` | **自分の接続で投げた `run_id` のみ** kill 可 (それ以外は `Unauthorized`)。cancel は agent プロセス内の kill registry へ直接伝えるため broker に依存せず、agent は `kill.*` を publish しない (broker 越しの `kill.{exec_id}` による remote kill は backend API / CLI 用に従来どおり)。結果は run の終端 `jobs.progress` (status = Killed) で届く。終了済み・未知の run への kill は no-op | **接続** (`Connection::runs`)。user_key は関与しない |
 | `notifications.ack` / `unack` / 既読一覧 | 自分宛 (`pc` / 自分の所属 `group` / `all`) のみ ack 可。既読状態は `user_key` ごとに独立 | `user_key` |
 | `support.unlock` / `lock` / `status`、`jobs.list` の解錠状態 | 解錠グラントは `user_key` ごとに保持 | `user_key` |
@@ -2385,7 +2400,7 @@ A→C {"jsonrpc":"2.0","id":"u4","result":{"acked_at":"2026-05-20T12:00:05Z"}}
 {"jsonrpc":"2.0","id":"u5","error":{
   "code": -32000,
   "message": "Job not user-invokable",
-  "data": {"kind":"Unauthorized","detail":"manifest 'reboot' has user_invokable=false"}
+  "data": {"kind":"Unauthorized","detail":"job 'reboot' is not user-invokable (no client: block)"}
 }}
 ```
 
@@ -2396,7 +2411,7 @@ A→C {"jsonrpc":"2.0","id":"u4","result":{"acked_at":"2026-05-20T12:00:05Z"}}
 | -32601 | MethodNotFound | 未知 method |
 | -32602 | InvalidParams | params の型 mismatch |
 | -32603 | InternalError | Agent 側 panic / 想定外 |
-| -32000 | Unauthorized | 認可エラー (user_invokable=false / 他人の run_id 等) |
+| -32000 | Unauthorized | 認可エラー（client ブロックなし / 他人の run_id 等） |
 | -32001 | NotFound | job_id / run_id / notif_id 不在 |
 | -32002 | AgentDisconnected | Agent ↔ NATS が断、操作不可 |
 | -32003 | RateLimit | 1 接続あたりの req/sec 超過 |
@@ -2524,7 +2539,7 @@ pub struct JobProgress {
 - [x] `agent_groups` KV bucket + AgentGroups wire 型 (sort + dedup invariants)
 - [x] Agent: KV watch + 動的 subscribe/unsubscribe マネージャ (純関数 diff + integration glue)
 - [x] Backend admin API: `/api/agents/{pc_id}/groups` (GET/PUT/POST/DELETE)
-- [x] CLI: `kanade agent groups [list|add|rm|set]`
+- [x] CLI: `kanade group [list|add|rm|set]`
 - [x] `agent.toml::[agent] groups` を deprecate (`#[serde(default)]` で互換維持、v0.4.0 で削除予定)
 - [x] backend が startup で `agent_groups` バケットを auto-bootstrap (v0.3.1)
 
@@ -2554,7 +2569,7 @@ pub struct JobProgress {
 - [ ] `crates/kanade-shared/src/ipc/` — KLP v1 の params / result / error 型定義 + ts-rs export
 - [ ] Agent: KLP listener (Windows: Named Pipe / Linux: UDS `/run/kanade/agent.sock` / macOS: UDS `/var/run/kanade/agent.sock`) + OS peer 認証 (Windows token / Unix peercred) + subscription manager。Agent 側は 3 OS 実装済み、Client 側の Unix 対応は後続
 - [ ] Agent: `klp::handlers` (state / notifications / jobs / support / maintenance)
-- [ ] Manifest schema 拡張: `user_invokable` / `category` / `display_name` / `display_description` / `icon`
+- [ ] 旧 Manifest schema 拡張案: `user_invokable` / `category` / `display_name` / `display_description` / `icon` — 現行は `client` ブロックと `name` / `description` 等へ置換済み (§2.4.1)
 - [ ] Notification Manifest (`notifications/*.yaml`) + `NOTIFICATIONS` Stream + `notifications_read` KV bucket
 - [ ] Backend HTTP API: `POST /api/notifications` (publish), `GET /api/notifications/{id}/ack_status` (確認状況)
 - [ ] SPA に通知タブ追加 (作成・送信先指定・確認状況一覧)
@@ -2565,7 +2580,7 @@ pub struct JobProgress {
 - [ ] MSI パッケージング (WiX) + ActiveSetup によるユーザー初回ログオン時の自動展開 (Windows)
 - [ ] (後続段階) Linux / macOS の Client GUI・配置・自動起動・通知配送 (§2.11.7)
 - [ ] (後続段階) Linux / macOS の Client の job ベース導入・更新・復旧 (既存 Kanade ジョブ + app-packages、macOS pkg / Ubuntu apt、§2.11.7.9)
-- [ ] Client App 自己アップデート (`client_releases` Object Store bucket) (Windows のみ。Unix は §2.11.7.9 の job ベースで、この bucket を使わない)
+- [ ] 旧 Client App 自己アップデート案 (`client_releases` Object Store bucket) — **置換済み**。全 OS で jobs / app-packages 経路へ統一する (§2.13)。専用 bucket は実装しない。
 
 ### Sprint 8.5: Client App 拡張機能 (順次)
 
@@ -2869,7 +2884,7 @@ admission も fail closed とする。手動 ACL 設定や管理操作の直列�
 
 #### 2.13.4.4 不変性 (Immutability) の保証と実版検出
 1. **新 identity 経路の不変性と互換移行**:
-   - **Stage 1b 実装済み**: 明示 identity / integrity を先頭 metadata とする認証 multipart publication、metadata lookup、検証後 streamed download。独立 staging chunks の read-back 検証後、ObjectInfo + identity metadata を NATS expected-last-subject-sequence=0 で一度だけ確定する。並行同一 publish は冪等、異なる integrity は409。旧 list は有効な2 segment key のみ。直接 NATS writer を backend に隔離した構成だけ明示 opt-in で publication を有効化（既定無効）、保持設定も検査する。署名・publisher trust・alias snapshot・producer 移行は未実装で deploy-ready を主張しない。plan 永続化・参照追跡が未実装のため、新 namespace の変更・delete / GC は一律無効。クラッシュ残骸は全 writer 停止後の参照照合による保守回収のみ。詳細は [API と運用境界](app-artifacts.md)。
+   - **Stage 1b 実装済み**: 明示 identity / integrity を先頭 metadata とする認証 multipart publication、metadata lookup、検証後 streamed download。独立 staging chunks の read-back 検証後、ObjectInfo + identity metadata を NATS expected-last-subject-sequence=0 で一度だけ確定する。並行同一 publish は冪等、異なる integrity は409。旧 list は有効な2 segment key のみ。直接 NATS writer を backend に隔離した構成だけ明示 opt-in で publication を有効化（既定無効）、保持設定も検査する。署名・publisher trust・alias snapshot・producer 移行は未実装で deploy-ready を主張しない。artifact と plan 永続化の連携・参照追跡が未実装のため、新 namespace の変更・delete / GC は一律無効。クラッシュ残骸は全 writer 停止後の参照照合による保守回収のみ。詳細は [API と運用境界](app-artifacts.md)。
    - 新 identity API および CLI は、同一の `ArtifactIdentity` に対して、既存オブジェクトと異なるバイト列のアップロードを試みた場合、即座に `409 Conflict` を返して拒否する。
    - 同一 identity・bytes・署名 metadata の再アップロードだけを 200 OK (Idempotent no-op) とする。metadata の不一致も衝突として拒否する。
    - **残る proposal（Stage 1b は未署名 integrity record の atomic commit のみ実装）**: payload / manifest の途中失敗や並行 publish で不完全な組を公開しない。検証済み組だけを可視化する commit marker と conditional create を推奨する。HTTP / CLI / CI / direct Object Store principal を含む全書込経路で新 identity の上書きを防ぐ必要があり、read-back / Range / If-Match だけでは不変性を保証しない。権限制約と競合・中断・再試行を試験する。承認済み / 実行中 plan の参照先は delete / GC から保護し、旧 API からも新 identity を変更・削除できないよう分離する。保持期間・参照解除は実装時に確定する。

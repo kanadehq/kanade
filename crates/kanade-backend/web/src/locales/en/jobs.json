@@ -81,10 +81,10 @@
     "killDescription_other": "{{count}} runs currently in flight (running: {{running}}, pending: {{pending}}). Each agent will terminate its child process and report back with exit_code -1.\n\nNote: this does NOT block the next schedule tick from firing a fresh run — if you want to stop new fires too, click \"revoke\" alongside.",
     "killLabel": "Kill",
     "revokeTitle": "Revoke {{id}}?",
-    "revokeDescription": "Blocks the script from running on agents. Any pending or in-flight run for this job will be skipped instead of executed, and new fires will refuse to run until you unrevoke it.\n\nReversible — click \"unrevoke\" to undo.",
+    "revokeDescription": "Marks the job revoked so agents skip it when they check execution gates. This does not terminate a child process already running; use Kill to request that separately.\n\nReversible — click \"unrevoke\" to undo.",
     "revokeLabel": "Revoke",
     "deleteTitle": "Delete job {{id}}?",
-    "deleteDescription": "Removes the script from the catalog. Any pending or in-flight run for this job will also be blocked (auto-revoke).\n\nRefused if any schedule still references this job — delete the schedule first.",
+    "deleteDescription": "Removes the job from the catalog and marks it revoked for subsequent agent execution checks. Already-running child processes are not terminated.\n\nRefused if any schedule still references this job — delete the schedule first.",
     "deleteLabel": "Delete"
   },
   "toast": {

@@ -20,12 +20,14 @@
 > carries inventory polling, fleet-wide rollouts, and ad-hoc emergency
 > commands on a single channel.
 
-**Status: 0.1.0 — Sprint 4 shipped.** Agent + backend (axum + SQLite
-projector + JetStream KV watcher + cron scheduler) + admin CLI + an
-embedded SPA dashboard + JWT-gated `/api/*` + agent self-update via the
-JetStream Object Store. Full design lives in
-[docs/SPEC.md](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md) (Japanese, ~1150 lines covering Part 1
-overview and Part 2 detailed design).
+**Current implementation:** agent, backend (axum + SQLite + JetStream),
+admin CLI, embedded administration SPA, and an optional desktop client.
+Agents run on Windows, Linux (x86_64 / aarch64), and Apple Silicon macOS;
+capabilities differ by platform. The client GUI runs on Windows and Apple
+Silicon macOS 14+, with [macOS integration limits](crates/kanade-client/MACOS.md).
+See the [operations guides](book/src/operations/overview.md) for current
+procedures. [docs/SPEC.md](docs/SPEC.md) also contains historical designs and
+explicitly deferred work; it is not a list of enabled features.
 
 ## Why
 
@@ -42,26 +44,26 @@ broker" — which everyone reinvents from scratch.
   inventory and results. No AD, no client-pull-from-server, no opening
   inbound ports on user PCs.
 - **Declarative job manifests in Git.** Review, history, rollback all
-  come for free; the YAML schema (`jobs/*.yaml`) is the same input
-  whether you `kanade exec` ad-hoc or wire it onto a cron `kanade
-  schedule`.
+  come for free; register YAML manifests from `configs/jobs/` with `kanade job create`,
+  then execute a job ID with explicit targets or reference it from a
+  schedule in `configs/schedules/`.
 - **Three layers of stop-the-bleed.** Stream max-msgs-per-subject
   replaces stale rollouts in the broker; consumer-side version checks
-  guard execution; `kanade kill <job_id>` terminates running children.
+  guard execution; `kanade kill <exec_id>` terminates running children.
   The emergency-stop path is wired from MVP, not bolted on later (see
   [SPEC.md §2.6](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md)).
 - **Phased build-out.** One server is enough for a few hundred
-  endpoints; the same code scales to a 3-node NATS cluster + replicated
-  backend + Postgres for several thousand.
+  endpoints; a 3-node NATS cluster, replicated
+  backend and Postgres are scaling designs, not the current SQLite runtime.
 
 ## Crates
 
 | crate            | kind | role |
 |------------------|------|------|
 | `kanade-shared`  | lib  | wire types (`Command` / `ExecResult` / `Heartbeat` / `HwInventory`), NATS subject + KV helpers, YAML manifest schema, [teravars]-backed config loader |
-| `kanade-agent`   | bin  | Windows-side resident daemon: subscribes to `commands.*`, runs child processes, publishes results + heartbeats + WMI inventory; watches the layered `agent_config` + `agent_groups` KV buckets and reacts live to cadence / membership / target_version changes |
+| `kanade-agent`   | bin  | Cross-platform resident daemon: subscribes to `commands.*`, runs child processes, publishes results + heartbeats + platform-specific inventory; watches the layered `agent_config` + `agent_groups` KV buckets and reacts live to cadence / membership / target_version changes |
 | `kanade-backend` | bin  | axum HTTP server: `/health`, `/api/{agents,results,audit,deploy,schedules,config,…}`, embedded SPA at `/`. Auto-bootstraps every required JetStream resource at startup, runs durable projectors (INVENTORY/RESULTS/AUDIT → SQLite) and a `tokio-cron-scheduler` driven by the schedules KV |
-| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`kill`/`jetstream` and to the backend over HTTP for `agent`/`ping`/`revoke`/`config`/`deploy`/`schedule` |
+| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`kill` and to the backend over HTTP for `agent`/`ping`/`revoke`/`config`/`exec`/`schedule`/`jetstream` |
 
 ## Install
 
@@ -70,7 +72,7 @@ For backend one-liner agent installation diagnostics, see
 
 You'll need:
 
-- Rust 1.85+ (the workspace pins `edition = "2024"`)
+- The pinned stable Rust toolchain (edition 2024; backend WebAuthn dependencies require at least Rust 1.88)
 - A NATS server (Go binary, ~15 MB)
 
 ```powershell
@@ -85,7 +87,7 @@ cargo install kanade kanade-agent kanade-backend
 (under `~/.cargo/bin/`).
 
 You'll also want the sample configs (`configs/agent.toml` / `configs/backend.toml`) and
-the example manifests (`jobs/*.yaml`). The fastest way is a shallow
+the example manifests (`configs/jobs/*.yaml`). The fastest way is a shallow
 clone of this repo:
 
 ```powershell
@@ -98,28 +100,28 @@ cd kanade
 own working dir if you'd rather not clone).
 
 > **Build it yourself from source.** Skip the `cargo install` step,
-> `git clone` the full repo, and run `cargo install --path crates/kanade
-> --path crates/kanade-agent --path crates/kanade-backend` (one
-> `--path` at a time, or repeat the command three times). That path
+> `git clone` the full repo, and run `cargo install --path crates/kanade`,
+> `cargo install --path crates/kanade-agent`, and
+> `cargo install --path crates/kanade-backend`. That path
 > matters if you're hacking on the crates.
 
 ## Quick start (4 terminals, ~2 minutes)
 
 Run each step in its own PowerShell window so the daemons stay up. All
 of them assume `cd` into the repo root (which holds `configs/agent.toml`
-/ `configs/backend.toml` / `jobs/`).
+/ `configs/backend.toml` / `configs/jobs/`).
 
 ### 1 — start NATS
 
 ```powershell
-nats-server -js -p 4222
+nats-server -js -p 4223
 ```
 
 ### 2 — start the backend
 
 ```powershell
 $env:KANADE_AUTH_DISABLE = "1"   # JWT off for development
-kanade-backend
+kanade-backend --config configs/backend.dev.toml
 ```
 
 The first time it starts against a broker it creates every stream, KV
@@ -135,17 +137,20 @@ start, stop it and use the `nats` CLI with an administrative credential
 ./scripts/ops/jetstream-reset.ps1 -Server nats://127.0.0.1:4222 -Creds ./admin.creds -Yes   # wipe all kanade resources
 ```
 
-The backend serves the dashboard at <http://127.0.0.1:8080> and the JSON API at
-`/api/*`. SQLite is created at `./backend.db`. Both projectors and the
+The backend serves the dashboard at <http://127.0.0.1:8081> and the JSON API at
+`/api/*`. This dev config connects to NATS on `:4223` and creates SQLite at
+`./target/dev-data/backend.db`. Both projectors and the
 cron scheduler start in the background.
 
 ### 3 — start the agent
 
 ```powershell
-kanade-agent
+$env:KANADE_AGENT_DATA_DIR = "$PWD/target/dev-data/agent"
+kanade-agent --config configs/agent.dev.toml
 ```
 
-Loads `./configs/agent.toml`, picks `$env:COMPUTERNAME` as `pc_id`,
+Loads `./configs/agent.dev.toml`, uses the hostname as `pc_id` (or
+`KANADE_DEV_AGENT_ID` when set),
 subscribes to `commands.all` + `commands.pc.{pc_id}`, then spawns the
 config_supervisor (watches `agent_config` + `agent_groups` KV) plus
 the heartbeat / inventory / self-update / groups-manager loops. Group
@@ -155,23 +160,27 @@ membership and cadence settings are read from the KV buckets — see
 ### 4 — drive it
 
 ```powershell
+# Point this operator shell at the same dev services.
+$env:KANADE_NATS_URL = "nats://127.0.0.1:4223"
+$env:KANADE_BACKEND_URL = "http://127.0.0.1:8081"
+
 # Round-trip a script via NATS, request/reply.
 kanade run $env:COMPUTERNAME -- 'echo hello from kanade'
 
-# Or via the backend's YAML deploy path (writes a row to deployments,
-# emits an audit event, broadcasts the Command).
-kanade exec jobs/echo-test.yaml
+# Register a job, then execute its ID with a target.
+kanade job create configs/jobs/check-disk-space.yaml
+kanade exec check-disk-space --pcs $env:COMPUTERNAME
 
-# Liveness probe (the backend asks the agent; needs KANADE_AUTH_TOKEN).
+# Liveness probe (auth is disabled in this dev example).
 kanade ping $env:COMPUTERNAME
 
 # Inspect via curl…
-curl http://127.0.0.1:8080/api/agents
-curl http://127.0.0.1:8080/api/results
-curl http://127.0.0.1:8080/api/audit
+curl http://127.0.0.1:8081/api/agents
+curl http://127.0.0.1:8081/api/results
+curl http://127.0.0.1:8081/api/audit
 
 # …or open the dashboard.
-start http://127.0.0.1:8080
+start http://127.0.0.1:8081
 ```
 
 ## CLI cheat sheet
@@ -182,7 +191,7 @@ Identity-addressed immutable app publication is an explicit opt-in; see the
 ```text
 kanade run    <pc_id> -- <script>                # request/reply via NATS
 kanade ping   <pc_id> [--wait N]                 # ask the agent for a fresh heartbeat (via backend API)
-kanade kill   <job_id>                           # publish kill.{job_id}
+kanade kill   <exec_id>                          # publish kill.{exec_id}
 kanade revoke <cmd_id>                           # script_status = REVOKED (via backend API)
 kanade unrevoke <cmd_id>                         # → ACTIVE (via backend API)
 
@@ -194,7 +203,7 @@ kanade job export --all --out-dir <dir>          # dump every registered job to 
 kanade job list                                  # every registered job
 kanade job delete <id>                           # refuses if any schedule references it
 
-kanade exec     <job-id>                         # fire a registered job ad-hoc (POST /api/exec/<id>)
+kanade exec     <job-id> --pcs <pc_id>           # fire a registered job ad-hoc (POST /api/exec/<id>)
 
 kanade app    publish <name> <file> [--version V] # upload an installer to the app-packages store (via backend API; operator role)
 kanade app    publish-artifact --identity identity.json <file> # explicit identity; integrity + HTTP read-back, no publisher trust claim
@@ -202,7 +211,7 @@ kanade app    list | delete <name> <version>     # (via backend API)
 kanade script publish <name> <version> <file>    # upload a manifest script body, 4 MB max (via backend API; operator role)
 kanade script list | delete <name> <version>     # (via backend API)
 
-kanade schedule create <path...>                 # cron yaml { id, cron, job_id, enabled }; accepts files / dirs / globs
+kanade schedule create <path...>                 # schedule YAML { id, when, job_id, target, enabled }; accepts files / dirs / globs
 kanade schedule export <id> [--out-dir <dir>]    # dump registered YAML to stdout (or <dir>/<id>.yaml)
 kanade schedule export --all --out-dir <dir>     # dump every registered schedule
 kanade schedule list
@@ -251,32 +260,16 @@ kanade meta clear <pc_id>                        # drop every key
 
 ## Authoring jobs
 
-YAML manifests in `jobs/*.yaml` (see [spec §2.4.1](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md)).
-Sample manifests in the repo cover:
+YAML manifests in `configs/jobs/*.yaml` (see [spec §2.4.1](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md)).
+Examples include `configs/jobs/check-disk-space.yaml` and its schedule
+`configs/schedules/check-disk-space.yaml`. Jobs define execution; schedules
+hold targets, timing, jitter and rollout waves. Ad-hoc `exec` requires
+`--pcs`, `--groups` or `--all`.
 
-- `jobs/echo-test.yaml` — minimal ad-hoc command
-- `jobs/wave-test.yaml` — `rollout.waves` rollout (canary → wave1 with delay)
-- `jobs/schedule-test.yaml` — cron-driven echo every 10 s
-
-A wave manifest sketch:
-
-```yaml
-id: cleanup-disk-temp
-version: 1.0.1
-target:
-  pcs: [PC1234]
-execute:
-  shell: powershell
-  script: |
-    $temp = [System.IO.Path]::GetTempPath()
-    Remove-Item "$temp\*" -Recurse -Force -ErrorAction SilentlyContinue
-  timeout: 600s
-  jitter: 5m
-rollout:
-  strategy: wave
-  waves:
-    - { group: canary, delay: 0s  }
-    - { group: wave1,  delay: 30m }
+```powershell
+kanade job create configs/jobs/check-disk-space.yaml
+kanade exec check-disk-space --pcs PC1234
+kanade schedule create configs/schedules/check-disk-space.yaml
 ```
 
 ## Config files
@@ -285,7 +278,7 @@ Both use [teravars] templating — `{{ system.host }}`, `{{ env(name="X", defaul
 
 `agent.toml` (intentionally minimal — fleet policy lives in the
 `agent_config` + `agent_groups` KV buckets, edited via
-`kanade config` / `kanade agent groups`):
+`kanade config` / `kanade group`):
 
 ```toml
 [agent]
@@ -297,10 +290,9 @@ path = 'logs/agent.log'
 level = 'info'
 ```
 
-Older agent.toml files that still carry `[agent] groups = […]` or an
-`[inventory]` section keep loading — both fields are parsed via
-`#[serde(default)]` — but the values are logged-and-ignored at
-startup. Removal is scheduled for v0.4.0.
+Older `[agent] groups = […]` is parsed for compatibility and logged as
+ignored at startup. An obsolete `[inventory]` section is ignored by the
+current config decoder. Use layered server configuration for both policies.
 
 `backend.toml`:
 
@@ -321,17 +313,20 @@ level = 'info'
 
 ## Authentication & RBAC
 
-`/api/*` is protected by a single middleware (`crates/kanade-backend/src/auth.rs`).
+Most `/api/*` routes use authentication middleware (`crates/kanade-backend/src/auth.rs`).
+Login, passkey login, password setup/reset and installer reporting have their
+own public or capability-based entry points; route-specific role and feature
+gates still apply.
 A request is admitted by the first of these that matches:
 
 | Mode | Selector | Use for |
 |---|---|---|
 | open | `KANADE_AUTH_DISABLE=1` | local dev, `cargo run` (synthesises an admin) |
 | service token | `StaticToken` registry value or `$KANADE_AUTH_STATIC_TOKEN` | CI / non-interactive automation — **admin-equivalent**, no account row |
-| account JWT | username + password → `POST /api/auth/login` mints an HS256 token | the normal path for humans; carries the caller's role |
+| account JWT | username + password (and TOTP when enrolled) → `POST /api/auth/login` mints an HS256 token | the normal path for humans; carries the caller's role |
 
 A non-matching bearer falls through from the service token to JWT validation,
-so a service token and per-user JWTs coexist. With none of the three set the
+so a service token and per-user JWTs coexist. Without a configured JWT secret the
 backend falls back to a hard-coded dev secret and logs a loud warning — fine
 for one-shot debugging, **never** for production.
 
@@ -342,13 +337,13 @@ account has one hierarchical role — `admin ⊇ operator ⊇ viewer`:
 
 | Role | Can |
 |---|---|
-| `viewer` | read-only — every `GET /api/*` (dashboards, inventory, logs, audit) |
+| `viewer` | read-only routes permitted by the account’s feature allow-list; some GET routes (accounts, SQL query, NATS evidence) require admin |
 | `operator` | viewer **+** fleet mutations (exec / kill / schedules / jobs / config / releases / uploads) |
 | `admin` | operator **+** account management (create / role / disable / delete) |
 
 Enforcement is server-side (`route_layer` guards reject 403); the SPA also
 hides controls above the caller's role. **Role and `disabled` are re-read from
-the DB on every request**, so disabling an account or changing its role takes
+the DB on every authenticated account request**, so disabling an account or changing its role takes
 effect immediately — existing tokens don't stay valid until expiry.
 
 ### Secrets
@@ -400,7 +395,7 @@ Clients send `Authorization: Bearer <token>` on every `/api/*` request:
 # Operator side (CLI) — log in, then run fleet commands
 $env:KANADE_AUTH_TOKEN = (kanade login --username admin --token-only)
 kanade account create alice --role operator      # admin only
-kanade exec jobs\echo-test.yaml                  # operator+
+kanade exec check-disk-space --pcs PC1234         # registered job; operator+
 
 # CI / automation — admin-equivalent service token, no login round-trip
 $env:KANADE_AUTH_TOKEN = "<your-fleet-token>"   # matches backend StaticToken
@@ -707,7 +702,7 @@ C:\ProgramData\Kanade\logs\                /var/log/kanade/
 
 ### Config discovery
 
-Every binary looks up its config file in this exact order (no cwd
+The agent and backend look up their service config file in this order (no cwd
 fallback — too easy to load the wrong file by accident):
 
 1. `--config <path>` CLI flag (always honored, even if the file
@@ -717,7 +712,7 @@ fallback — too easy to load the wrong file by accident):
    wins.
 3. `<config_dir>/<basename>`:
    - Windows: `%ProgramData%\Kanade\config\agent.toml`
-   - Linux: `/etc/kanade/agent.toml`
+   - Linux / macOS: `/etc/kanade/agent.toml` (or `backend.toml`)
 
 If none of the three is reachable, the binary exits with a message
 listing every option an operator can use to fix it.
@@ -819,7 +814,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now kanade-backend.service
 ```
 
-The agent unit is symmetric (`kanade-agent.service`, `ExecStart=/usr/local/bin/kanade-agent`).
+For the agent, use the shipped `deploy/linux/systemd/kanade-agent.service`: it
+runs as root and sets `KANADE_AGENT_DATA_DIR=/var/lib/kanade-agent`. The backend
+unit above is a minimal manual example; the deployment bundle includes its own
+service hardening and environment-file wiring.
 
 ## Scaffolded with kata
 

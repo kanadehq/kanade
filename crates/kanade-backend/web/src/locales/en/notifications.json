@@ -22,7 +22,7 @@
     "requireAck": "Require acknowledgement",
     "requireAckHint": "When enabled, the notification shows a modal the user must acknowledge to dismiss, regardless of priority.",
     "toast": "Show OS toast",
-    "toastHint": "When enabled, surfaces an OS toast regardless of priority — launches the Client App even when it's closed, and lands in the Action Center while locked. When off, it only appears in the in-app list.",
+    "toastHint": "On Windows, requests an OS toast and can launch a closed Client App; delivery also depends on session and OS notification policy. macOS currently keeps notifications in history without native toast delivery or automatic Client launch. When off, the notification only appears in the in-app list.",
     "invalidExpiresAt": "Invalid expiry date — fix or clear the field before sending.",
     "publish": "Send notification"
   },

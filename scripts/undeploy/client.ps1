@@ -14,17 +14,15 @@
   The client is just a binary launched by the user — there's no
   Windows service, no firewall rule, no registry secrets. So
   undeploy-client is structurally simpler than the other three
-  undeploy-* scripts and -Purge today is a near-no-op (no
-  per-user state currently lives outside the binary itself; will
-  grow if the client starts persisting settings under %APPDATA%).
+  undeploy-* scripts. -Purge is currently a placeholder: it keeps
+  per-user state (including persisted window size), protocol registration
+  and shortcuts; this script removes only the binary and swap artifacts.
 
   Idempotent — safe to re-run.
 
 .PARAMETER Purge
-  Reserved. Today the client has no per-user state to purge; the
-  flag is accepted (for shape-symmetry with the other undeploy-*
-  scripts and for forward-compat once kanade-client gains a
-  settings directory under %APPDATA% or similar).
+  Reserved. The flag is accepted for shape-symmetry with the other
+  undeploy-* scripts, but per-user state is not currently removed.
 
 .EXAMPLE
   PS> .\undeploy-client.ps1
@@ -32,8 +30,7 @@
 
 .EXAMPLE
   PS> .\undeploy-client.ps1 -Purge
-  # Same as default today. Will purge per-user settings once the
-  # client gains a settings dir (none yet).
+  # Same binary-only cleanup as the default; per-user state is kept.
 #>
 
 [CmdletBinding()]
@@ -62,10 +59,8 @@ if ($removed -eq 0) {
 
 # --- Per-user state ----------------------------------------------------------
 if ($Purge) {
-    # Placeholder: client currently has no per-user settings dir.
-    # Once it grows one (e.g. %APPDATA%\kanade-client\settings.toml),
-    # iterate user profiles here and remove the per-user state.
-    Write-Host "-Purge: no per-user state to remove yet (placeholder)"
+    # Placeholder: no per-user cleanup is implemented here.
+    Write-Host "-Purge: per-user state is kept (cleanup not implemented)"
 }
 
 Write-Host ''

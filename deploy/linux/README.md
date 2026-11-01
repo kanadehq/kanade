@@ -25,9 +25,8 @@ The backend already targets Linux: `default_paths.rs` resolves
 `/etc/kanade`, `/var/lib/kanade`, `/var/log/kanade`; the Windows SCM
 module is `#[cfg]`-gated off; the registry secret reader is a
 `None`-returning stub off Windows, so every secret falls back to an env
-var. CI builds + tests it on `ubuntu-latest` every PR. What has **never**
-been exercised is a real Linux *deployment* — expect to iron out first-run
-details (systemd cwd, file perms, JetStream provisioning).
+var. CI builds + tests it on `ubuntu-latest` every PR. The scripts provide the deployment path below; CI compilation alone does not
+prove acceptance on a particular distribution or host.
 
 ## Layout
 
@@ -36,25 +35,24 @@ details (systemd cwd, file perms, JetStream provisioning).
 | `bundle.sh` | build/staging box, **Linux/mac** (internet) | Collect backend + nats-server + caddy + configs into one offline tarball |
 | `bundle.ps1` | build/staging box, **Windows** (internet) | Same, PowerShell-native — no Git Bash needed |
 | `setup.sh` | server (offline) | Install everything from the bundle; generate secrets; enable services |
-| `build-aarch64.sh` | build box (interim) | Produce the aarch64 backend artifact until the release target lands |
+| `build-aarch64.sh` | build box (interim) | Optional local aarch64 backend build |
 | `nats-server.conf` | — | NATS: localhost `:4222` for the backend + localhost WS `:8443` for agents behind Caddy; token from env; JetStream under `/var/lib/kanade` |
 | `Caddyfile` | — | `:443` auto-HTTPS → backend; `nats.<domain>` → NATS WebSocket |
 | `systemd/*.service` | — | backend / nats-server / caddy units; `Restart=on-failure` replicates the Windows self-restart |
 
 ## Getting the backend binary
 
-The backend artifact should come from a GitHub Release, the same way the
-Windows binaries do — but `release.yml` currently builds **x86_64-linux**
-only, so an **aarch64-linux release target still needs adding** (tracked
-separately). Until then, build the artifact once on any ARM64 build box:
+GitHub Releases build backend and agent artifacts for both
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
+Use `build-release.sh` / `build-release.ps1` below to collect them, or build
+locally on an ARM64 build host:
 
 ```bash
 ./deploy/linux/build-aarch64.sh          # SPA + backend → target/release/kanade-backend
 ```
 
-`web/dist` is gitignored and CI artifacts are x86_64, which is why an
-interim build step exists at all. Once the release target lands, point
-`bundle.sh --backend` at the downloaded Release asset instead.
+Pass either the downloaded backend binary or the locally built binary to
+`bundle.sh --backend` for manual assembly.
 
 ## Quick path: one command (symmetric with the Windows `build-release.ps1`)
 
@@ -100,7 +98,7 @@ Like the Windows `fleet-deploy.ps1`, the agent has two paths:
 
 ```bash
 # Roll a version out to a scope over NATS (needs `kanade` on PATH, pointed
-# at the deployment via KANADE_NATS_URL / KANADE_NATS_TOKEN):
+# at the backend via KANADE_BACKEND_URL / KANADE_AUTH_TOKEN):
 ./deploy/linux/fleet-deploy.sh --role agent --mode update --arch x86_64 \
     --version 0.44.36 --group canary --jitter 5m       # or --pc <id> / --all
 ```
@@ -108,9 +106,9 @@ Like the Windows `fleet-deploy.ps1`, the agent has two paths:
 This works because the agent's self-update (`self_update.rs`) is
 OS-neutral — a three-step binary swap then `exit(64)`, which the
 `kanade-agent.service` `Restart`/`RestartForceExitStatus=64` turns into a
-restart, exactly as SCM failure-actions do on Windows. The one Linux-only
-enabler is `kanade agent publish --version` label, which must match the version
-embedded in the agent (see the book's *Agent release admission* page).
+restart, exactly as SCM failure-actions do on Windows. `kanade agent publish` derives the version from embedded release metadata on
+every platform; optional `--version` must match it (see the book's *Agent
+release admission* page).
 
 The rest of this doc is the **manual, step-by-step** path the one-command
 tools automate — useful for closed networks where the collector can't
@@ -341,15 +339,15 @@ sudo KANADE_COMMAND_KEYS='[{"kid":"backend-1","public_key":"<base64>"}]' \
 - `KANADE_REQUIRE_SIGNED_COMMANDS=1` writes `1` to
   `/etc/kanade/require-signed-commands` (root-owned, 0600); `0` removes
   it; unset keeps the current setting. It is read once at agent start and
-  is deliberately not settable through KV / `agent_config`. An empty
-  keyring never enforces, and the script refuses `=1` without a keyring.
+  is deliberately not settable through KV / `agent_config`. Enforcement fails closed even with an empty
+  keyring; the script refuses `=1` without a keyring to avoid locking out commands.
 - `/etc/kanade` is root-owned so the shared `kanade` account cannot
   replace these files; the agent also refuses a keyring file that is
   group/other-writable.
 
-Note: `sh` / `pwsh` command execution on the Linux agent needs #1198
-(older agent builds can register and be monitored but fail exec at
-`spawn powershell`).
+Linux jobs can use `shell: sh` or `shell: pwsh` (`pwsh`,
+which must be installed separately). Older agents predating #1198 could
+register but failed execution at `spawn powershell`.
 
 macOS agents install the same way (backend-generated `?os=macos`
 tarball, or the same `installer.sh` one-liner, which branches on
@@ -358,9 +356,6 @@ tarball, or the same `installer.sh` one-liner, which branches on
 
 ## Open items
 
-- **aarch64-linux release target** (add to `release.yml`) so the backend
-  artifact ships from a Release like the Windows binaries — tracked
-  separately; `build-aarch64.sh` is the interim producer.
 - This bundle is the #1172 floor (TLS, real secrets, one public surface).
   The fast-follow — per-agent identity (#1162), update signing — is not
   wired here.

@@ -99,7 +99,7 @@
         "three": "Run <code>sudo ./install.sh</code> on the target host."
       },
       "systemdNote": "The installer registers a systemd service (running as root). Re-running it later upgrades the agent in place.",
-      "signingNote": "Command-signing keyring provisioning is Windows-only for now — signed-command verification is inactive on Linux."
+      "signingNote": "When this backend signs commands, the installer provisions its public key in /etc/kanade/command-keys.json. Signed-command enforcement is enabled only when requested in server settings and a backend signing key is available."
     },
     "macos": {
       "steps": {
@@ -109,7 +109,7 @@
       },
       "launchdNote": "The installer registers a launchd daemon (<code>com.kanade.agent</code>, running as root) that starts at boot and restarts on failure; logs go to <code>/var/log/kanade/agent.*.log</code>. Re-running it later upgrades the agent in place.",
       "gatekeeperNote": "The agent binary is not notarized: run the installer from Terminal as shown rather than opening files from Finder. It clears the download quarantine flag on the binary so Gatekeeper doesn't block the service.",
-      "signingNote": "Command-signing keyring provisioning is Windows-only for now — signed-command verification is inactive on macOS."
+      "signingNote": "When this backend signs commands, the installer provisions its public key in /etc/kanade/command-keys.json. Signed-command enforcement is enabled only when requested in server settings and a backend signing key is available."
     }
   },
   "download": {
@@ -142,7 +142,7 @@
   },
   "signing": {
     "errorTitle": "Failed to load command-signing status",
-    "enabled": "This backend signs commands (kid <code>{{kid}}</code>, fingerprint <code>{{fingerprint}}</code>) — the public key is embedded into the Windows installer automatically.",
+    "enabled": "This backend signs commands (kid <code>{{kid}}</code>, fingerprint <code>{{fingerprint}}</code>) — its public key is embedded automatically into Windows, Linux and macOS installers.",
     "disabled": "This backend is not signing commands, so the installer will not provision command keys."
   }
 }

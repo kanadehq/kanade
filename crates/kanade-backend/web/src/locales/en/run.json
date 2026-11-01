@@ -1,6 +1,6 @@
 {
   "title": "Run a script on one PC",
-  "description": "Posts to <code>/api/run</code>; backend forwards over NATS and waits for the agent's <code>ExecResult</code>. Same surface as <code>kanade run &lt;pc_id&gt; -- &lt;script&gt;</code>.",
+  "description": "Posts to <code>/api/run</code>; the backend forwards over NATS and waits for the agent’s <code>ExecResult</code>. Uses backend HTTP authentication and backend command signing when configured. <code>kanade run &lt;pc_id&gt; -- &lt;script&gt;</code> instead connects directly to NATS and uses an optional break-glass signing key.",
   "fields": {
     "pcId": "pc_id",
     "shell": "shell",

@@ -4,7 +4,8 @@ Stage 1 of SPEC §2.11.7 provides host-independent library policies. Stage 2
 wires the real GUI on Apple Silicon macOS 14+ alongside Windows. Linux and Intel
 macOS retain the exit-fast shim. See [MACOS.md](MACOS.md) for building and manual
 acceptance. No Unix session discovery, notification adapter, launch helper,
-installer or updater is provided here.
+operational installer integration or updater is provided here. A payload-only
+macOS pkg build artifact exists; see the packaging boundary in MACOS.md.
 
 - `paths::ClientPaths::resolve` takes an explicit account UID/home and target-user
   XDG values. Linux accepts only Unix absolute nonempty overrides; unset, empty,

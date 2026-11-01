@@ -1,11 +1,13 @@
 # kanade — macOS agent
 
 Runs `kanade-agent` on a Mac as a **launchd daemon** (`com.kanade.agent`),
-the counterpart of the Linux systemd unit and the Windows service. Only the
-agent is supported on macOS; the backend + NATS stay on Linux/Windows.
+the counterpart of the Linux systemd unit and the Windows service. This guide installs the
+agent; the backend + NATS deployment bundles target Linux/Windows. The optional
+[Client GUI](../../crates/kanade-client/MACOS.md) also builds on Apple Silicon
+macOS 14+, with native notifications and automatic startup still deferred.
 
 **Apple Silicon (arm64) Macs only.** Intel (x86_64) Macs are not supported
-— macOS 27 dropped Intel, and no `x86_64-apple-darwin` agent is built:
+— no `x86_64-apple-darwin` agent is built:
 `kanade agent publish` rejects an x86_64 Mach-O, the installer endpoint
 rejects `?os=macos&arch=x86_64`, and the one-liner refuses Intel Macs.
 
@@ -189,6 +191,8 @@ rejected when the schedule is created — the agent decides at run time.
   per-PC timeline stay empty — both samplers are Windows-only.
 - **`last_logon`** (last signed-in user / display name) is empty — it is
   read from the Windows registry.
-- **Client App features** (the KLP listener: notifications, self-service
-  job catalog, Health tab, support unlock, desktop shortcut) are
-  Windows-only.
+- **Client integration is partial.** The agent starts a Unix KLP listener and
+  the Apple Silicon macOS 14+ Client GUI can connect for manual navigation,
+  notification history, read/ack and jobs. Native notification delivery,
+  desktop shortcut / URL integration and automatic startup remain deferred;
+  see [Client runtime boundaries](../../crates/kanade-client/MACOS.md#runtime-boundaries).

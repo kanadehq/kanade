@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generic release hook, called by .github/workflows/release.yml:
+# Available release hook (not currently invoked by release.yml):
 #   release-post-build.sh sign         # after the build, before packaging
 #   release-post-build.sh verify-dist  # after packaging, before upload
 # Kept in the repo (release.yml is kata-managed and overwritten on apply)

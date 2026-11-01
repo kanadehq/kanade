@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # Produce an aarch64 kanade-backend artifact WITH the real SPA embedded.
 #
-# This is an INTERIM artifact producer, not part of the deployment. The
-# proper source is a GitHub Release asset, once the aarch64-linux target
-# is added to release.yml (tracked separately). Until then, run this on
-# any ARM64 BUILD box (NOT the deployment server — the server installs a
-# prebuilt binary offline via setup.sh) and feed the result to bundle.sh:
+# Optional local build on an ARM64 BUILD host. GitHub Releases already ship
+# aarch64-unknown-linux-musl backend artifacts; use build-release.sh to collect
+# those without a local build. The deployment server only installs prebuilt
+# artifacts offline via setup.sh.
 #
 #   ./deploy/linux/build-aarch64.sh
 #   ./deploy/linux/bundle.sh --backend target/release/kanade-backend
 #
-# Why a build step at all: CI release artifacts are currently x86_64 only,
-# and web/dist is gitignored so a plain `cargo build` embeds a placeholder.
+# web/dist is gitignored; this script builds the SPA before the backend so
+# the local artifact embeds the real dashboard rather than a placeholder.
 set -euo pipefail
 
 # cargo builds for the host by default, so on an x86_64 box this would

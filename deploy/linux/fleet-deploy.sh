@@ -84,8 +84,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # object store and flips target_version on a scope; the on-box agents
 # self-update on their next watch tick (self_update.rs) and systemd
 # Restart brings each back on the new binary. `kanade` must be on PATH and
-# pointed at the deployment (KANADE_NATS_URL / KANADE_NATS_TOKEN /
-# KANADE_BACKEND_URL), exactly as the Windows script expects.
+# pointed at the backend (KANADE_BACKEND_URL / KANADE_AUTH_TOKEN), exactly as the Windows script expects.
 # --------------------------------------------------------------------------
 if [ "$MODE" = "update" ]; then
 	[ "$ROLE" = "agent" ] || {

@@ -3,7 +3,7 @@
   "intro": "Two-step: upload a binary, then flip <code>target_version</code> on one scope.",
   "upload": {
     "title": "1. Upload a binary",
-    "description": "POSTs to <code>/api/agents/publish</code> (64 MB body limit). The Object Store key is auto-extracted from the binary's embedded VERSIONINFO resource — no label to type, no chance of a label/binary mismatch. CLI: <code>kanade agent publish &lt;binary&gt;</code>.",
+    "description": "POSTs to <code>/api/agents/publish</code> (64 MB body limit). Version and platform come from embedded kanade-agent release metadata on Windows PE, Linux ELF and macOS Mach-O. Binaries without that metadata are rejected. CLI: <code>kanade agent publish &lt;binary&gt;</code>.",
     "fileLabel": "binary (.exe / Linux / macOS)",
     "uploadButton": "Upload",
     "noFileError": "pick a file first",

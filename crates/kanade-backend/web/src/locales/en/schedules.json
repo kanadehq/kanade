@@ -94,7 +94,7 @@
     "softDisable": "Soft disable",
     "softDisableHint": "stops firing on the next tick; in-flight runs continue",
     "hardDisable": "Hard disable (cascade revoke)",
-    "hardDisableHint": "stops firing AND blocks pending / in-flight runs",
+    "hardDisableHint": "stops firing and revokes the job; running children continue",
     "enableTitle": "enable — re-enable this schedule",
     "enableAria": "enable schedule {{id}}",
     "deleteTitle": "delete — remove this schedule",
@@ -102,7 +102,7 @@
   },
   "confirm": {
     "hardDisableTitle": "Hard-disable schedule {{id}}?",
-    "hardDisableDescription": "Stops the schedule from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\nThe referenced job ({{jobId}}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.",
+    "hardDisableDescription": "Stops this schedule and marks its job ({{jobId}}) revoked for subsequent agent execution checks, including executions from other schedules using the same job. Already-running child processes continue; use Kill on the Jobs page to request their termination separately. You can unrevoke the job later.",
     "hardDisableLabel": "Hard disable",
     "deleteTitle": "Delete schedule {{id}}?",
     "deleteDescription": "The schedule is removed from the catalog. In-flight runs are unaffected.",

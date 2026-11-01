@@ -99,7 +99,7 @@
         "three": "対象のホストで <code>sudo ./install.sh</code> を実行します。"
       },
       "systemdNote": "systemd サービスとして登録されます (root で動作)。 後で再実行すると、そのままエージェントがアップグレードされます。",
-      "signingNote": "コマンド署名キーリングのプロビジョニングは現時点では Windows のみです (Linux では署名付きコマンドの検証は無効です)。"
+      "signingNote": "このバックエンドがコマンドに署名する場合、インストーラは公開鍵を /etc/kanade/command-keys.json に配置します。署名検証による拒否を有効にするのは、サーバー設定で要求され、バックエンドの署名鍵が利用できる場合のみです。"
     },
     "macos": {
       "steps": {
@@ -109,7 +109,7 @@
       },
       "launchdNote": "launchd デーモン (<code>com.kanade.agent</code>、 root で動作) として登録され、 起動時に開始し、 異常終了時は自動で再起動します。 ログは <code>/var/log/kanade/agent.*.log</code> に出力されます。 後で再実行すると、そのままエージェントがアップグレードされます。",
       "gatekeeperNote": "エージェントのバイナリは公証 (notarization) されていません。 Finder からファイルを開かず、 上記のとおりターミナルからインストーラを実行してください。 インストーラがバイナリのダウンロード検疫フラグを解除するため、 Gatekeeper にサービスがブロックされることはありません。",
-      "signingNote": "コマンド署名キーリングのプロビジョニングは現時点では Windows のみです (macOS では署名付きコマンドの検証は無効です)。"
+      "signingNote": "このバックエンドがコマンドに署名する場合、インストーラは公開鍵を /etc/kanade/command-keys.json に配置します。署名検証による拒否を有効にするのは、サーバー設定で要求され、バックエンドの署名鍵が利用できる場合のみです。"
     }
   },
   "download": {
@@ -142,7 +142,7 @@
   },
   "signing": {
     "errorTitle": "コマンド署名の状態取得に失敗しました",
-    "enabled": "このバックエンドはコマンドに署名しています (kid <code>{{kid}}</code>、フィンガープリント <code>{{fingerprint}}</code>)。公開鍵は Windows インストーラに自動で埋め込まれます。",
+    "enabled": "このバックエンドはコマンドに署名しています (kid <code>{{kid}}</code>、フィンガープリント <code>{{fingerprint}}</code>)。公開鍵は Windows・Linux・macOS のインストーラに自動で埋め込まれます。",
     "disabled": "このバックエンドはコマンド署名を行っていないため、インストーラにはコマンドキーがプロビジョニングされません。"
   }
 }

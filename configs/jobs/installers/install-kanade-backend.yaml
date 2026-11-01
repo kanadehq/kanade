@@ -9,8 +9,7 @@
 #
 # Workflow (operator side, edit version per release):
 #
-#   1. `kanade app publish kanade-backend 0.43.0 \
-#        target/release/kanade-backend.exe`
+#   1. `kanade app publish kanade-backend target/release/kanade-backend.exe --version 0.43.0`
 #   2. Copy `scripts/deploy/backend.ps1` locally, set:
 #        $AgentSourceUrl     = '<backend URL>'
 #        $AgentSourceVersion = '0.43.0'

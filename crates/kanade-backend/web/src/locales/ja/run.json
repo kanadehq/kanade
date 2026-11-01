@@ -1,6 +1,6 @@
 {
   "title": "1 台の PC でスクリプトを実行",
-  "description": "<code>/api/run</code> に POST します。バックエンドが NATS 経由で転送し、エージェントの <code>ExecResult</code> を待ち受けます。<code>kanade run &lt;pc_id&gt; -- &lt;script&gt;</code> と同等です。",
+  "description": "<code>/api/run</code> に POST し、バックエンドが NATS 経由で転送してエージェントの <code>ExecResult</code> を待ちます。バックエンドの HTTP 認証と、設定済みの場合はバックエンドのコマンド署名を使います。一方 <code>kanade run &lt;pc_id&gt; -- &lt;script&gt;</code> は NATS に直接接続し、任意の break-glass 署名鍵を使います。",
   "fields": {
     "pcId": "pc_id",
     "shell": "shell",
