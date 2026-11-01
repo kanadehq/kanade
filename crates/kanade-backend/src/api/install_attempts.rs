@@ -216,15 +216,19 @@ pub async fn report(
 }
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<serde_json::Value>, Error> {
-    prune(&state.pool).await?;
-    let rows = sqlx::query("SELECT id,issuer,os,created_at,expires_at,status,seq FROM install_attempts ORDER BY created_at DESC LIMIT 100")
-        .fetch_all(&state.pool).await.map_err(db_error)?;
+    Ok(Json(history(&state.pool).await?))
+}
+
+async fn history(pool: &SqlitePool) -> Result<serde_json::Value, Error> {
+    prune(pool).await?;
+    let rows = sqlx::query("SELECT a.id,a.issuer,a.os,a.created_at,a.expires_at,a.status,a.seq,e.stage AS last_stage,e.outcome AS last_outcome FROM install_attempts a LEFT JOIN install_events e ON e.attempt_id=a.id AND e.seq=a.seq ORDER BY a.created_at DESC,a.id DESC LIMIT 100")
+        .fetch_all(pool).await.map_err(db_error)?;
     let now = chrono::Utc::now().timestamp();
-    Ok(Json(rows.into_iter().map(|r| {
+    Ok(rows.into_iter().map(|r| {
         let status: String = r.get("status");
         let expired = r.get::<i64,_>("expires_at") <= now && !matches!(status.as_str(),"succeeded"|"failed");
-        serde_json::json!({"id":r.get::<String,_>("id"),"issuer":r.get::<Option<String>,_>("issuer"),"os":r.get::<String,_>("os"),"created_at":r.get::<i64,_>("created_at"),"expires_at":r.get::<i64,_>("expires_at"),"status":if expired {"unknown"} else {&status},"seq":r.get::<i64,_>("seq")})
-    }).collect::<Vec<_>>().into()))
+        serde_json::json!({"id":r.get::<String,_>("id"),"issuer":r.get::<Option<String>,_>("issuer"),"os":r.get::<String,_>("os"),"created_at":r.get::<i64,_>("created_at"),"expires_at":r.get::<i64,_>("expires_at"),"status":if expired {"unknown"} else {&status},"seq":r.get::<i64,_>("seq"),"last_stage":r.get::<Option<String>,_>("last_stage"),"last_outcome":r.get::<Option<String>,_>("last_outcome")})
+    }).collect::<Vec<_>>().into())
 }
 
 pub async fn detail(
@@ -297,6 +301,50 @@ mod tests {
             error_kind: None,
         }
     }
+    #[tokio::test]
+    async fn history_exposes_persisted_time_and_last_report_in_stable_order() {
+        let p = pool().await;
+        let (first, key) = issue(&p, &Caller::default(), "unix").await.unwrap();
+        let (second, _) = issue(&p, &Caller::default(), "windows").await.unwrap();
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query("UPDATE install_attempts SET created_at=?")
+            .bind(now)
+            .execute(&p)
+            .await
+            .unwrap();
+        append(&p, &first, &key, &event(1, Outcome::Progress))
+            .await
+            .unwrap();
+        append(&p, &first, &key, &event(2, Outcome::Failed))
+            .await
+            .unwrap();
+        let rows = history(&p).await.unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0]["id"].as_str().unwrap() > rows[1]["id"].as_str().unwrap());
+        let reported = rows.iter().find(|r| r["id"] == first).unwrap();
+        assert_eq!(reported["created_at"], now);
+        assert_eq!(reported["last_stage"], "download");
+        assert_eq!(reported["last_outcome"], "failed");
+        assert_eq!(reported["status"], "failed");
+        let unreported = rows.iter().find(|r| r["id"] == second).unwrap();
+        assert!(unreported["last_stage"].is_null());
+        assert!(unreported["last_outcome"].is_null());
+        assert!(reported.get("key_hash").is_none());
+        sqlx::query("UPDATE install_attempts SET expires_at=0 WHERE id=?")
+            .bind(second)
+            .execute(&p)
+            .await
+            .unwrap();
+        let rows = history(&p).await.unwrap();
+        assert!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["status"] == "unknown")
+        );
+    }
+
     #[tokio::test]
     async fn install_keys_identity_expiry_and_retention() {
         let p = pool().await;
