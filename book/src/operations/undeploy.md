@@ -56,13 +56,13 @@ Adds:
 | Agent | `config\agent.toml`, `logs\agent.*.log`, `outbox\`, `HKLM:\SOFTWARE\kanade\agent\` |
 | Backend | `config\backend.toml`, `data\*.db*` (**SQLite — historical results / inventory wiped**), `logs\backend.*.log`, `HKLM:\SOFTWARE\kanade\backend\` |
 | NATS | `config\nats-server.conf`, `nats\` (**JetStream — all KV / Object Store / streams wiped**), `logs\nats*.log` |
-| Client | Nothing extra (no per-user state yet) |
+| Client | Nothing extra: `-Purge` is a placeholder; persisted per-user window size and other user state are kept. |
 
 > ⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1
 > -Purge` are the dangerous ones. The first wipes the fleet's
 > entire JetStream state (agent_releases, app_packages, scripts,
 > jobs, agent_config, results stream); the second wipes the
-> projector's historical SQLite. **Both are unrecoverable
+> backend SQLite, including durable accounts, approvals and scheduler completions. **Both are unrecoverable
 > without out-of-band backups.** The scripts print a loud banner
 > before running.
 
@@ -90,7 +90,7 @@ Adds:
 .\scripts\undeploy\backend.ps1 -Purge   # ⚠️ SQLite gone
 .\scripts\undeploy\nats.ps1 -Purge      # ⚠️ JetStream gone
 .\scripts\undeploy\client.ps1
-# Now nothing about kanade exists on the box.
+# Client user state and registration/shortcut artifacts may remain.
 ```
 
 ### Rebuild a single bad service without touching state
@@ -112,8 +112,10 @@ Adds:
   "remove entirely"; if you want to swap to an older version,
   re-run the matching `deploy-*.ps1` against a folder containing
   the older binary.
-- It doesn't touch NATS-side state when you remove the agent —
-  the agent's `target_version` entry under `agent_config.pcs.<pc>`
-  stays in the KV. Clean those up server-side with
-  `nats kv del agent_config pcs.<pc>.target_version` (using an
-  administrative broker credential) if needed.
+- It doesn't touch NATS-side state when you remove the agent. Clear the
+  per-PC target pin with `kanade config unset --pc <pc> target_version`,
+  or remove that entire scope with `kanade config clear --pc <pc>`.
+  These commands use the authenticated backend API and require operator access.
+- The client script removes the executable and swap artifacts only. It does
+  not remove per-user window state, protocol registration or shortcuts;
+  `-Purge` does not currently implement that cleanup.

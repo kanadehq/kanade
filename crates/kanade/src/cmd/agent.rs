@@ -33,20 +33,15 @@ pub enum AgentSub {
     /// some scope (global / group / pc). Two-step on purpose, so a
     /// typo doesn't fan a half-baked binary out to the whole fleet.
     ///
-    /// v0.13.1+: the Object Store key is auto-extracted from the
-    /// binary's embedded VERSIONINFO resource — no chance of a
-    /// label/binary mismatch. Cross-arch publish works too (the
-    /// extractor is pure-Rust `pelite`, no spawn).
-    ///
-    /// A non-PE binary (a Linux ELF or macOS Mach-O) carries no VERSIONINFO
-    /// resource, so it can't be auto-labelled — pass `--version` for
-    /// those. When a PE version AND `--version` are both present they
-    /// must agree, preserving the no-mismatch guarantee.
+    /// The version and platform are read from embedded kanade-agent release
+    /// metadata on Windows PE, Linux ELF and macOS Mach-O alike. Binaries
+    /// without that metadata are rejected. If --version is supplied it must
+    /// match the embedded version; a label never substitutes for metadata.
     Publish {
         /// Path to the new agent binary (e.g. `target/release/kanade-agent.exe`).
         binary: PathBuf,
-        /// Explicit version label. Omit for a Windows PE (read from its
-        /// VERSIONINFO); required for a non-PE binary (Linux ELF / macOS Mach-O).
+        /// Optional version assertion; must match the binary’s embedded
+        /// kanade-agent release metadata on every platform.
         #[arg(long)]
         version: Option<String>,
     },

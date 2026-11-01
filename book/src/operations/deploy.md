@@ -1,18 +1,18 @@
 # Installation and Deployment
 
-The cross-platform `kanade deploy` design and script retirement gates are in [SPEC §2.13](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md#213-クロスプラットフォーム-デプロイ設計-kanade-deploy-cli--typed-operations). This is an unimplemented design; keep using the current procedures below during migration. It targets enrolled agents only and leaves the Agent Installation screen one-liners unchanged.
+The cross-platform `kanade deploy` design and script retirement gates are in [SPEC §2.13](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md#213-クロスプラットフォーム-デプロイ設計-kanade-deploy-cli--typed-operations). Typed schema/validation and plan persistence are implemented, but production typed dispatch and the deploy CLI are unavailable; keep using the current procedures below during migration. It targets enrolled agents only and leaves the Agent Installation screen one-liners unchanged.
 
 This section details how to bootstrap `kanade` components as native Windows services in production or staging environments.
 
 ## Deployment Model
 
-Production hosts and target endpoints run `kanade` components as background Windows services. This ensures high availability and automatic startup.
+Production hosts and target endpoints run `kanade` components as background Windows services, providing automatic startup and configured service-manager recovery.
 
 | Service Name | Triple / Binary | Config Source | Typical Target |
 |---|---|---|---|
-| **KanadeNats** | `nats-server.exe` | Hardened Registry / Registry-baked CLI flags | Central server |
+| **KanadeNats** | `nats-server.exe` | Config file with token substitution / ACLs | Central server |
 | **KanadeBackend** | `kanade-backend.exe` | Hardened Registry / Config file | Central server |
-| **KanadeAgent** | `kanade-agent.exe` | Hardened Registry / Local state DB | Managed endpoints |
+| **KanadeAgent** | `kanade-agent.exe` | Config file / hardened Registry / local state DB | Managed endpoints |
 
 ---
 
@@ -34,7 +34,7 @@ The NATS server acts as the messaging core.
    # Elevated PowerShell prompt
    & "dist\nats\deploy-nats.ps1" -NatsToken "your-secure-nats-token" -Recreate
    ```
-This installs the **KanadeNats** service, configures it to run under the local system account, sets up JetStream data directories, and locks down the secure authorization token in the Windows registry.
+This installs the **KanadeNats** service, configures it to run under the local system account, sets up JetStream data directories, and substitutes the token into the installed NATS configuration file, and restricts that file to SYSTEM and Administrators.
 
 ### Optional: per-role users instead of the shared token
 

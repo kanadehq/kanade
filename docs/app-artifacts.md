@@ -125,7 +125,8 @@ overwrites and legacy download/list/delete semantics are preserved. Other backen
 Object Store APIs operate on different buckets. Agent release/rollout keys,
 fleet scripts, bootstrap flows, and shell jobs are unchanged.
 
-Plan persistence/reference tracking is absent. Consequently **all** new-namespace
+Typed deployment plan persistence exists separately; artifact reference tracking
+and publication integration are absent. Consequently **all** new-namespace
 mutation/deletion is disabled, including replacement of an existing identity.
 This is conservative retention, not implemented referenced-plan GC protection.
 No signed publisher metadata or additional metadata update interface is accepted.

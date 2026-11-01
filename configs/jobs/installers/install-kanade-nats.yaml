@@ -11,7 +11,7 @@
 #
 # Workflow (operator side, edit version per nats-server release):
 #
-#   1. `kanade app publish nats-server 2.10.20 .\nats-server.exe`
+#   1. `kanade app publish nats-server .\nats-server.exe --version 2.10.20`
 #      (nats-server.exe is upstream's — `build-release.ps1 -Roles nats`
 #      fetches it from github.com/nats-io/nats-server/releases)
 #   2. Copy `scripts/deploy/nats.ps1` locally, set:

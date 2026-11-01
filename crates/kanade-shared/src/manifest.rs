@@ -34,7 +34,8 @@ pub struct Manifest {
     pub require_approval: bool,
     /// Plan reference of a typed native-deployment job. Required for (and
     /// only valid on) `kind: typed_operation`. A reference is not an approval:
-    /// the shared approval gate does not exist yet.
+    /// the shared plan gate checks current authorization, while typed
+    /// dispatch remains unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_authorization: Option<crate::typed_operation::DeployAuthorizationRef>,
     /// Opt-in marker that this job produces a JSON inventory fact
@@ -540,7 +541,7 @@ pub struct CheckHint {
     /// Optional remediation job id →
     /// [`Check.troubleshoot`](crate::ipc::state::Check). The Client
     /// App shows a "修復する" button when present; that job must be
-    /// `user_invokable`.
+    /// published with a `client` block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub troubleshoot: Option<String>,
     /// #290 PR-E: when `true` (default), the backend also projects this
@@ -615,7 +616,8 @@ pub struct CheckAlert {
     /// Groups page). Opt-in: defaults to `false`, so an existing alert
     /// never starts emailing on its own. Requires `notify_groups` to be
     /// non-empty (there is no per-PC user email) and the backend's
-    /// `[mail]` config to be present; otherwise the email is a logged
+    /// `server_settings.mail` configuration to be present at backend startup;
+    /// otherwise the email is a logged
     /// no-op while the in-app/toast notification still fires.
     #[serde(default)]
     pub email: bool,

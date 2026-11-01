@@ -6,33 +6,43 @@
 
 ## 1. Agent Configuration
 
-The agent searches for its configuration via the `KANADE_AGENT_CONFIG` environment variable or falls back to native paths.
+Both services resolve config in this order: `--config <path>`, a nonempty
+`KANADE_AGENT_CONFIG` / `KANADE_BACKEND_CONFIG`, then the existing native file
+(`%ProgramData%\Kanade\config\agent.toml` / `backend.toml` on Windows,
+`/etc/kanade/agent.toml` / `backend.toml` on Unix). There is no current-directory
+fallback or synthesized default config; missing configuration is an error.
+TOML templates use teravars, so an environment variable changes a field only
+when the template explicitly reads it.
 
 ### Dev Configuration (`configs/agent.dev.toml`)
 
 ```toml
-# Dev configuration schema
+[vars]
+hostname = '{{ system.host }}'
+pc_id = '{{ env(name="KANADE_DEV_AGENT_ID", default=vars.hostname) }}'
+
 [agent]
-id = "dev-pc"
-nats_url = "nats://localhost:4223"
-data_dir = "target/dev-data/agent"
+id = '{{ vars.pc_id }}'
+nats_url = 'nats://127.0.0.1:4223'
 
 [log]
-level = "debug"
-file = "target/dev-data/agent/logs/agent.log"
+path = './target/dev-data/agents/{{ vars.pc_id }}/agent.log'
+level = 'info'
 ```
 
 ### Configuration Parameters
 
-| Field | Type | Description | Environment Override |
-|---|---|---|---|
-| `agent.id` | String | Unique hardware identifier (`pc_id`). | `KANADE_DEV_AGENT_ID` (templated) |
-| `agent.nats_url` | String | Network address of the NATS broker. | `KANADE_NATS_URL` |
-| `agent.data_dir` | Path | Root path to cache outbox scripts, state database, and local completions. | `KANADE_AGENT_DATA_DIR` |
-| `log.level` | String | Logging verbosity (`error`, `warn`, `info`, `debug`, `trace`). | `RUST_LOG` |
-| `log.file` | Path | Filepath destination for rolling logs. | - |
+| Field | Type | Description |
+|---|---|---|
+| `agent.id` | String | Exact, case-sensitive host identity (`pc_id`), not a hardware UUID. The dev template accepts `KANADE_DEV_AGENT_ID`. |
+| `agent.nats_url` | String | Broker address. `KANADE_NATS_URL` controls the CLI's `--server`; it does not override this service field. |
+| `log.level` | String | Log filter; `RUST_LOG` overrides it. |
+| `log.path` | Path | Destination for daily rotated logs. |
+| `log.keep_days` | Integer | Retained daily files, including today; default 14, 0 disables on-disk logging. |
 
----
+The data directory is **not** a TOML field. `KANADE_AGENT_DATA_DIR` overrides
+`%ProgramData%\Kanade\data` on Windows or `/var/lib/kanade` on Unix.
+The Linux and macOS setup scripts explicitly use `/var/lib/kanade-agent`.
 
 ### Per-PC job concurrency
 
@@ -104,37 +114,58 @@ limit. This setting does not fix its jitter accounting issue (#1373).
 
 ## 2. Backend Configuration
 
-The backend coordination layer retrieves its configurations from the file specified by `KANADE_BACKEND_CONFIG` or registers default structures.
+The backend uses the same discovery rules above. For development, pass
+`--config configs/backend.dev.toml` (or use `cargo make backend-dev`).
 
 ### Dev Configuration (`configs/backend.dev.toml`)
 
 ```toml
-[backend]
-listen_addr = "127.0.0.1:8081"
-nats_url = "nats://localhost:4223"
-database_url = "sqlite://target/dev-data/backend/state.db"
+[server]
+bind = '127.0.0.1:8081'
 
-[auth]
-# Auth settings
+[nats]
+url = 'nats://127.0.0.1:4223'
+
+[db]
+sqlite_path = './target/dev-data/backend.db'
+
+[log]
+path = './target/dev-data/backend.log'
+level = 'info'
 ```
 
 ### Configuration Parameters
 
-| Field | Type | Description | Environment Override |
-|---|---|---|---|
-| `backend.listen_addr` | String | Network bind address for HTTP/WebSocket traffic. | `KANADE_BIND_ADDR` |
-| `backend.nats_url` | String | Target NATS broker URL. | `KANADE_NATS_URL` |
-| `backend.database_url`| String | SQLite database connection string. | `DATABASE_URL` |
-| `auth.disable` | Boolean| Set to true to disable operator token validation (dev environment only). | `KANADE_AUTH_DISABLE` |
+| Field | Type | Description |
+|---|---|---|
+| `server.bind` | String | HTTP/WebSocket bind address. |
+| `server.public_url` | Optional String | Public SPA base URL for account emails; set it behind a proxy and to avoid deriving links from request headers. |
+| `server.webauthn` | Table | Passkey RP ID/origins/name; omitted or empty disables passkeys. See `configs/backend.toml`. |
+| `nats.url` | String | Broker address. |
+| `nats.monitor_url` | Optional String | Monitoring base URL; defaults to HTTP on the broker host, port 8222. |
+| `db.sqlite_path` | Path | SQLite file path. |
+| `log.path`, `log.level`, `log.keep_days` | | Same logging fields as the agent. |
+
+`KANADE_BIND_ADDR`, `DATABASE_URL` and `KANADE_NATS_URL` do not override these
+service fields. Authentication is not an `[auth]` TOML section:
+`KANADE_AUTH_DISABLE` disables authentication whenever present (even `0`),
+for development only. Production uses backend secrets such as `JwtSecret` /
+`KANADE_JWT_SECRET`, `StaticToken` / `KANADE_AUTH_STATIC_TOKEN`, and
+`BootstrapAdminPassword` / `KANADE_BOOTSTRAP_ADMIN_PASSWORD`.
+
+SMTP connection settings live in `server_settings.mail` (Settings → Server),
+not a `[mail]` TOML section. They take effect after backend restart. The SMTP
+password remains a separate `MailPassword` / `KANADE_MAIL_PASSWORD` secret.
 
 ---
 
 ## 3. Windows Registry Integration
 
-In production environments, security-sensitive tokens (like NATS client tokens and administrative API bearer tokens) are stored in the secure Windows Registry rather than plaintext files.
+In production environments, security-sensitive tokens (like NATS client tokens and administrative API bearer tokens) are stored in the Windows Registry values protected by ACLs. These are plaintext REG_SZ values,
+not encrypted storage; non-Windows hosts use the corresponding environment variables.
 
 ### Key Paths
 - **Agent Settings**: `HKLM:\SOFTWARE\Kanade\agent`
 - **Backend Settings**: `HKLM:\SOFTWARE\Kanade\backend`
 
-These registry paths are protected with local ACL configurations, allowing read permissions strictly to `SYSTEM` and designated operators.
+These registry paths are protected with local ACL configurations, allowing read permissions strictly to `SYSTEM` and Administrators in the deployment scripts.

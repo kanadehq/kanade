@@ -3,7 +3,7 @@
   "intro": "2段階方式: バイナリをアップロードしてから、対象スコープの <code>target_version</code> を切り替えます。",
   "upload": {
     "title": "1. バイナリをアップロード",
-    "description": "<code>/api/agents/publish</code> に POST します (本文上限 64 MB)。 オブジェクトストアのキーはバイナリ内蔵の VERSIONINFO リソースから自動抽出されるため、 ラベルを入力する必要はなく、ラベルとバイナリの不一致も発生しません。 CLI: <code>kanade agent publish &lt;binary&gt;</code>。",
+    "description": "<code>/api/agents/publish</code> に POST します (本文上限 64 MB)。Windows PE・Linux ELF・macOS Mach-O とも、kanade-agent 内蔵のリリースメタデータからバージョンとプラットフォームを取得します。メタデータのないバイナリは拒否されます。CLI: <code>kanade agent publish &lt;binary&gt;</code>。",
     "fileLabel": "バイナリ (.exe / Linux / macOS)",
     "uploadButton": "アップロード",
     "noFileError": "先にファイルを選択してください",

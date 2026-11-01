@@ -93,7 +93,7 @@
     },
     "agentInstall": {
       "title": "エージェントインストーラ",
-      "description": "「エージェント導入」ページで配布するインストーラ ZIP に組み込む接続設定です。 新規 Windows PC の初回インストールで使われます。",
+      "description": "エージェント導入ページで配布する Windows インストーラ ZIP と Linux/macOS インストーラ tarball に組み込む接続設定です。",
       "natsUrl": "NATS URL",
       "natsUrlPlaceholder": "空欄 = このバックエンドに設定された NATS URL",
       "natsUrlHint": "URL を空欄にすると、 このバックエンドに設定された NATS URL が使われます。 リモート PC からは到達可能なブローカーのアドレスが必要です。",
@@ -113,7 +113,7 @@
       "userPairHint": "このユーザーとパスワードは agent ロールの資格情報で、 設計上すべてのエージェントで共有されます。 両方が設定されている場合のみインストーラに埋め込まれます (トークンも引き続き埋め込まれます)。 値は表示されません。 両方を空欄のまま保存すると保存済みのペアが保持され、 差し替えには両方の入力が必要です。 バックエンド自身の資格情報や break-glass 資格情報は決して入力しないでください。",
       "userPairIncomplete": "ユーザーとパスワードは両方入力するか、 両方空欄にしてください。",
       "requireSignedCommands": "インストール時にコマンド署名の必須化を有効にする",
-      "requireSignedCommandsHint": "生成される Windows インストーラに -RequireSignedCommands を渡し、新規エージェントが初回起動時から未署名コマンドを拒否するようにします。 このバックエンドにコマンド署名鍵が設定されている場合のみ有効になります (kanade-backend command-key-generate)。 鍵が無い場合はインストーラの README.txt に不整合の警告が表示され、空のキーリングのまま強制が有効化されることはありません。"
+      "requireSignedCommandsHint": "生成される Windows インストーラには -RequireSignedCommands を渡し、Linux/macOS の install.sh には KANADE_REQUIRE_SIGNED_COMMANDS=1 を設定して、新規エージェントが初回起動時から未署名コマンドを拒否するようにします。バックエンドにコマンド署名鍵がある場合のみ有効です (kanade-backend command-key-generate)。鍵がない場合はインストーラの README に不整合の警告を表示し、必須化は設定しません。"
     },
     "mail": {
       "title": "メール (SMTP) 設定",

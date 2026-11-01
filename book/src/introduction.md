@@ -1,6 +1,6 @@
 # Introduction
 
-**kanade — 奏** is an endpoint management system for Windows fleets. It
+**kanade — 奏** is an endpoint management system for Windows, Linux and Apple Silicon macOS fleets. It
 gives an operator a single CLI / SPA to run scripts, install
 software, gather inventory, and stream live perf data from hundreds
 of PCs at once. The pieces:
@@ -9,8 +9,8 @@ of PCs at once. The pieces:
 |-----------|------------|
 | **kanade-agent** | Service that runs on each managed PC. Subscribes to NATS, executes commands, ships results. |
 | **kanade-backend** | HTTP API + projector. Persists state, serves the SPA, exposes operator endpoints. |
-| **kanade-client** | Optional Tauri desktop app. End-user-facing surface. |
-| **NATS server** | Message broker for command fan-out + result aggregation. The agent talks NATS-only; the backend reads NATS too. |
+| **kanade-client** | Optional end-user Tauri app on Windows and Apple Silicon macOS 14+; macOS native notification/startup integration is deferred. |
+| **NATS server** | Message broker for command fan-out + result aggregation. Agents use NATS for commands and telemetry; installer jobs can also fetch artifacts over backend HTTP. |
 | **kanade CLI** | Operator-facing command line: publish binaries, fire jobs, query state. |
 
 This site covers two audiences:

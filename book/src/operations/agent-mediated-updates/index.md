@@ -1,9 +1,11 @@
 # Agent-mediated updates
 
-The agent is the universal installer. Once it's running on a
-target host, the operator never needs to touch the host directly
-to update any other component — including the backend it talks
-to, the broker that carries its messages, and the agent itself.
+The existing Windows installer jobs update the backend, client and broker
+through an enrolled agent. Agent self-update also supports Linux and Apple
+Silicon macOS. Linux backend deployment uses the separate bundle/setup flow;
+macOS Client deployment integration is deferred. These flows still require
+working credentials, connectivity and a running agent; offline recovery may
+require direct host access.
 
 This chapter has one page per component:
 
@@ -46,7 +48,7 @@ and checks its digest before reporting success.
 | `kanade app publish <name> <file> [--version <version>]` | Upload to `OBJECT_APP_PACKAGES` through the backend API. |
 | `kanade script publish <name> <version> <file>` | Upload to `OBJECT_SCRIPTS` through the backend API. |
 | `kanade job create <yaml>` | Upsert a job manifest into the `jobs` KV. |
-| `kanade exec <job-id> --pcs <pc> [--pcs <pc> …]` | Fire a registered job at a set of PCs. |
+| `kanade exec <job-id> --pcs <pc1>,<pc2>` | Fire a registered job at a set of PCs. |
 | `kanade agent publish <file> [--version <version>]` | Upload an agent binary through the backend API (must be an official `kanade-agent` carrying release metadata; the version is read from it and `--version`, if given, must match — see [Agent release admission](../agent-release-admission.md)). |
 | `kanade agent rollout <version> --pc \| --group \| --global` | Flip `target_version` on the chosen scope; agents pick it up via their self-update watcher. Goes through the backend API. |
 | `kanade agent current` | Print the global `target_version` (group / pc overlays are not shown; use `kanade config get --group/--pc`). |

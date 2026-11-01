@@ -1,12 +1,17 @@
 # macOS code signing (stable identity)
 
-macOS TCC (Files and Folders, Documents, Photos, Full Disk Access) keys
-grants on the binary's code identity. The release build only carries the
-linker's ad-hoc signature, whose identity is the cdhash — it changes on
-every build, so every self-update looks like a new app and prompts again.
+macOS TCC (Files and Folders, Documents, Photos, Full Disk Access) uses the
+binary's code identity. A build with only the linker's ad-hoc signature has
+a cdhash that changes on every build; updates can invalidate grants or require
+renewed approval. Verify grant persistence on the actual installed launch path.
 
-The release workflow therefore signs `kanade-agent` (and any other shipped
-macOS binary) with a **stable self-signed code-signing certificate**. The
+The repository provides a helper to sign `kanade-agent` (and other built
+macOS binaries) with a **stable self-signed code-signing certificate**.
+**Current wiring:** `.github/workflows/release.yml` does not invoke
+`scripts/ci/release-post-build.sh` or `macos-codesign.sh`. Configuring secrets
+alone does not activate release signing. The procedure below describes the
+helper; connecting it to the kata-managed release workflow requires upstream
+template work. Check each artifact rather than assuming it was signed. The
 designated requirement stays the same across versions, so a one-time grant
 (or an MDM PPPC profile) survives updates. No Apple Developer ID or
 notarization is involved; `spctl` still rejects the binary, which is fine
@@ -22,12 +27,13 @@ for a launchd-run command-line tool.
   designated requirement contains `identifier "com.kanade.agent"` and
   `certificate leaf = H"<sha1>"`. A mere `--verify` would pass an ad-hoc
   signature, so the DR check is what fails an unsigned artifact.
-- After packaging, the same check runs against the unpacked `.tar.gz`, still
-  inside the `build` job, so `release` / `publish` (`needs: build`) are blocked
-  on failure.
-- Without the secrets the step prints a notice and skips (forks keep
-  building). With only one of the two secrets, or on any import/sign/verify
-  failure, the build fails.
+- Invoking `verify-dist` checks the unpacked `.tar.gz`. A future workflow
+  integration must run it before upload and propagate failure to the release
+  gate; the current workflow does not run this check.
+- When invoked without secrets and without a pinned certificate, the helper
+  prints a notice and skips. A pinned certificate with missing secrets fails.
+  With only one of the two secrets, or on any import/sign/verify failure,
+  the helper returns nonzero.
 
 ## One-time setup
 
@@ -73,9 +79,9 @@ openssl x509 -in cert.pem -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' \
   > deploy/macos/signing-cert.sha1
 ```
 
-Commit `deploy/macos/signing-cert.sha1`. The release then fails if the
+Commit `deploy/macos/signing-cert.sha1`. When invoked, the helper fails if the
 imported certificate or a signed binary does not match it. Until the file
-exists the build only prints the imported SHA-1 and checks the binaries
+exists the helper only prints the imported SHA-1 and checks the binaries
 against it.
 
 ## Granting access on devices
@@ -118,6 +124,6 @@ System Settings → Privacy & Security → Full Disk Access → `+` → add
   the device re-signs or strips. Neither `setup-agent.sh` (xattr removal only)
   nor the release → object-store publish touches the binary.
 - `release.yml` is kata-managed (`.kata/applied.toml`) and overwritten on
-  `kata apply`. The two hook steps calling `scripts/ci/release-post-build.sh`
+  `kata apply`. The missing hook steps for `scripts/ci/release-post-build.sh`
   must also exist in the upstream templates (`yukimemi/pj-rust-cli`,
   `yukimemi/pj-rust-workspace`); otherwise a re-apply silently drops signing.

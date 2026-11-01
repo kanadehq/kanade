@@ -58,8 +58,10 @@ writes this today (a manual reg add)\n\
 predates roles\n\
   3. $KANADE_NATS_TOKEN                   — the operator-shell path\n\
 \n\
-With none of the three it connects UNAUTHENTICATED, and a broker that \
-requires a token then refuses at connect time. Which value to use: the \
+When a NatsUser/NatsPassword pair is provisioned for the CLI (role \
+registry or KANADE_NATS_USER/KANADE_NATS_PASSWORD), the client probes it \
+first and falls back to the token on rejection. A half pair is an error. \
+Without a user pair or token it connects UNAUTHENTICATED. Which value to use: the \
 DEPLOYMENT's NATS token — written by setup.sh into /etc/kanade/nats.env \
 on Linux, or stored by the Windows installer — and the literal `dev` on a \
 dev deployment:\n\
@@ -68,7 +70,7 @@ dev deployment:\n\
 \n\
 This subcommand uses neither --backend-url nor $KANADE_AUTH_TOKEN; those \
 belong to the HTTP subcommands (`job`, `schedule`, `exec`, `account`, …), \
-which authenticate WITH a JWT. `kanade login` PRODUCES that JWT, it does \
+which authenticate WITH an account JWT or static service token. `kanade login` PRODUCES that JWT, it does \
 not consume one. Two different credentials — a broker token here, a \
 login JWT there — which is why one set of subcommands can work while \
 the other does not.\n\
@@ -83,7 +85,9 @@ SIGNING (optional)\n\
 \n\
 Set KANADE_BREAK_GLASS_KEY and KANADE_BREAK_GLASS_KID together to sign \
 the command with the break-glass key; both or neither, since half a pair \
-is an error. Unsigned commands are still accepted by agents today.\n\
+is an error. Agents with local signed-command enforcement enabled reject \
+unsigned or unverifiable commands; provision a trusted break-glass public key \
+before relying on this recovery path.\n\
 \n\
 EXAMPLES\n\
 \n\

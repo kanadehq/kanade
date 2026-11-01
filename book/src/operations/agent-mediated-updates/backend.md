@@ -10,7 +10,7 @@ that host stops the service, swaps the binary, starts it back up
 ```text
 ┌── operator host ──────────────────────────────────────────┐
 │  1. build kanade-backend.exe                              │
-│  2. kanade app publish kanade-backend <v> <exe>           │
+│  2. kanade app publish kanade-backend <exe> --version <v>           │
 │  3. edit deploy-backend.ps1 (set $AgentSource* knobs)     │
 │  4. kanade script publish deploy-backend <v> <edited.ps1> │
 │  5. kanade job create install-kanade-backend.yaml         │
@@ -57,7 +57,7 @@ Output: `target/release/kanade-backend.exe`.
 ### 2. Publish the binary
 
 ```pwsh
-kanade app publish kanade-backend 0.43.0 target/release/kanade-backend.exe
+kanade app publish kanade-backend target/release/kanade-backend.exe --version 0.43.0
 ```
 
 This uploads the binary to `OBJECT_APP_PACKAGES/kanade-backend/0.43.0`
@@ -128,7 +128,7 @@ require_approval: true
 ```
 
 ```pwsh
-kanade job create jobs\install-kanade-backend.yaml
+kanade job create configs/jobs/installers/install-kanade-backend.yaml
 ```
 
 > `run_as: system` is required: `Stop-Service` / `Start-Service` /
@@ -165,4 +165,4 @@ ends with `kanade-backend <new-version>`.
 | `Start-BitsTransfer : HTTP status 401` | `$AgentSourceAuthToken` empty but backend requires auth | Set it. |
 | `Start-BitsTransfer : The transfer encountered an error` / job state `TransientError` | BITS service not running, or target machine's WinHTTP can't reach `$AgentSourceUrl` | `Get-Service BITS`; check WinHTTP proxy with `netsh winhttp show proxy` (BITS uses WinHTTP, not IE/WinINet). |
 | `sha256 mismatch — expected=<x> actual=<y>` | Hash in script doesn't match the published binary | Re-publish or recompute the hash. The script aborts BEFORE the swap, so the existing install is intact. |
-| Job runs but kanade-backend doesn't come back up | Service-failure / config drift on target | Read `C:\ProgramData\Kanade\log\backend.*.log` on the target. The agent can fetch it via `kanade logs <pc>` (when implemented) or you can pull the file directly. |
+| Job runs but kanade-backend doesn't come back up | Service-failure / config drift on target | Read `C:\ProgramData\Kanade\logs\backend.*.log` on the target. `kanade agent logs <pc>` tails the agent log only; retrieve the backend log locally if the backend is down. |

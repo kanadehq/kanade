@@ -53,7 +53,7 @@
       ]
     },
     "deploy_authorization": {
-      "description": "Plan reference of a typed native-deployment job. Required for (and\nonly valid on) `kind: typed_operation`. A reference is not an approval:\nthe shared approval gate does not exist yet.",
+      "description": "Plan reference of a typed native-deployment job. Required for (and\nonly valid on) `kind: typed_operation`. A reference is not an approval:\nthe shared plan gate checks current authorization, while typed\ndispatch remains unavailable.",
       "anyOf": [
         {
           "$ref": "#/$defs/DeployAuthorizationRef"
@@ -467,7 +467,7 @@
           ]
         },
         "email": {
-          "description": "Also send the alert by email, to every address mapped to the\n`notify_groups` (via the `group_contacts` KV, edited on the SPA\nGroups page). Opt-in: defaults to `false`, so an existing alert\nnever starts emailing on its own. Requires `notify_groups` to be\nnon-empty (there is no per-PC user email) and the backend's\n`[mail]` config to be present; otherwise the email is a logged\nno-op while the in-app/toast notification still fires.",
+          "description": "Also send the alert by email, to every address mapped to the\n`notify_groups` (via the `group_contacts` KV, edited on the SPA\nGroups page). Opt-in: defaults to `false`, so an existing alert\nnever starts emailing on its own. Requires `notify_groups` to be\nnon-empty (there is no per-PC user email) and the backend's\n`server_settings.mail` configuration to be present at backend startup;\notherwise the email is a logged\nno-op while the in-app/toast notification still fires.",
           "type": "boolean",
           "default": false
         },
@@ -574,7 +574,7 @@
           "default": "status"
         },
         "troubleshoot": {
-          "description": "Optional remediation job id →\n[`Check.troubleshoot`](crate::ipc::state::Check). The Client\nApp shows a \"修復する\" button when present; that job must be\n`user_invokable`.",
+          "description": "Optional remediation job id →\n[`Check.troubleshoot`](crate::ipc::state::Check). The Client\nApp shows a \"修復する\" button when present; that job must be\npublished with a `client` block.",
           "type": [
             "string",
             "null"

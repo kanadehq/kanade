@@ -1,7 +1,9 @@
 # macOS remote viewing (phase 1)
 
 The browser Remote Screen page can view the logged-in user's **primary display
-only**, on **macOS 14 Sonoma or later** (Apple Silicon and Intel). This uses
+only**, on **macOS 14 Sonoma or later**. Release distribution and the installer
+support Apple Silicon only; the capture implementation also has Intel code
+paths, which do not establish a supported Intel agent deployment. This uses
 [ScreenCaptureKit's SCScreenshotManager](https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager),
 not the deprecated CGDisplayCreateImage API. Older macOS agents keep working for
 other operations, but report remote viewing as unsupported.
@@ -51,8 +53,8 @@ On the target Mac, as the logged-in user:
    reconnect. Honor any macOS restart instruction.
 
 Attempts are deduplicated by session and persistent history per UID, installed
-path and signing identity. Pre-request failures have a finite three-launch budget
-with 60-second then 600-second retry delays; recorded request intent suppresses
+path and signing identity. Pre-request failures retry after a persisted backoff of 60 seconds, 10 minutes,
+one hour and then six hours (capped, without a finite attempt budget); recorded request intent suppresses
 further requests across service restarts, including after refusal or a crash.
 The daemon stops the helper on logout, switching or a 30-second timeout; pending
 OS dialogs may outlive it. Normal agent work continues. Do not delete history to

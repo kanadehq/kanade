@@ -517,9 +517,10 @@ agent + nats) is a separate, agent-driven step:
    breakdown and the manual fallback.
 
    `-Role cli` installs the admin CLI itself (`install-kanade-cli`) —
-   target operator hosts with `-Pc`, not `-All`. It's the one component
-   with no self-update path, so without this an operator host silently
-   drifts behind the backend until `job validate` and `job create`
+   target operator hosts with `-Pc`, not `-All`. The CLI also supports
+   `kanade self-update` and per-user background update settings (`notify`
+   by default); use fleet deployment for managed operator hosts so they
+   do not drift behind the backend until `job validate` and `job create`
    disagree about the manifest schema.
 
 Gotchas (each has cost a session): the exec target is `--pcs <id>` /

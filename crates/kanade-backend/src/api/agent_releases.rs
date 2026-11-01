@@ -1,7 +1,7 @@
 //! HTTP surface for the staged self-update flow.
 //!
 //! * `POST /api/agents/publish` — multipart upload (`file` =
-//!   binary, `version` = label, required for non-PE binaries) →
+//!   binary, `version` = optional assertion matching embedded release metadata) →
 //!   puts the bytes in the `agent_releases` Object Store under a
 //!   platform-derived key (bare `<version>` for Windows,
 //!   `<version>-linux-<arch>` for Linux, `<version>-macos-aarch64`

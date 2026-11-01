@@ -551,7 +551,7 @@ description = "Dev agent #3 — pc_id=dev-pc-3."
 env = { "KANADE_DEV_AGENT_ID" = "dev-pc-3", "KANADE_AGENT_DATA_DIR" = "${CARGO_MAKE_WORKING_DIRECTORY}/target/dev-data/agents/dev-pc-3" }
 
 [tasks.dev-fleet]
-description = "Multi-agent sandbox: nats-dev (:4223) + backend-dev (:8081) + web-dev (:5173) + agent-dev-{1,2,3} in parallel. Reproduces fan-out scenarios (`kanade exec --target all`) on a single host so you can spot bugs that only surface with N>1 agents (e.g. request_id collisions in execution_results)."
+description = "Multi-agent sandbox: nats-dev (:4223) + backend-dev (:8081) + web-dev (:5173) + agent-dev-{1,2,3} in parallel. Reproduces fan-out scenarios (`kanade exec <job-id> --all`) on a single host so you can spot bugs that only surface with N>1 agents (e.g. request_id collisions in execution_results)."
 run_task = { name = ["nats-dev", "backend-dev", "web-dev", "agent-dev-1", "agent-dev-2", "agent-dev-3"], parallel = true }
 
 [tasks.hook-install]

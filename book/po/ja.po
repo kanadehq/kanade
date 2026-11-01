@@ -100,16 +100,16 @@ msgid "Configuration Reference"
 msgstr "設定リファレンス"
 
 #: src\introduction.md:3
-msgid ""
-"**kanade — 奏** is an endpoint management system for Windows fleets. It "
-"gives an operator a single CLI / SPA to run scripts, install software, "
-"gather inventory, and stream live perf data from hundreds of PCs at once. "
-"The pieces:"
-msgstr ""
-"**kanade — 奏** は多数の Windows 端末を一元管理するシステムです。operator は"
-"ひとつの CLI / SPA から、数百台規模の PC に対してスクリプト実行・ソフトウェア"
-"配布・インベントリ収集・ライブのパフォーマンスデータ取得を一気にこなせます。"
-"構成要素:"
+#~ msgid ""
+#~ "**kanade — 奏** is an endpoint management system for Windows fleets. It "
+#~ "gives an operator a single CLI / SPA to run scripts, install software, "
+#~ "gather inventory, and stream live perf data from hundreds of PCs at once. "
+#~ "The pieces:"
+#~ msgstr ""
+#~ "**kanade — 奏** は多数の Windows 端末を一元管理するシステムです。operator は"
+#~ "ひとつの CLI / SPA から、数百台規模の PC に対してスクリプト実行・ソフトウェア"
+#~ "配布・インベントリ収集・ライブのパフォーマンスデータ取得を一気にこなせます。"
+#~ "構成要素:"
 
 #: src\introduction.md:8 src\operations/undeploy.md:9
 #: src\operations/undeploy.md:54
@@ -149,20 +149,20 @@ msgid "**kanade-client**"
 msgstr "**kanade-client**"
 
 #: src\introduction.md:12
-msgid "Optional Tauri desktop app. End-user-facing surface."
-msgstr "オプションの Tauri デスクトップアプリ。エンドユーザー向け UI。"
+#~ msgid "Optional Tauri desktop app. End-user-facing surface."
+#~ msgstr "オプションの Tauri デスクトップアプリ。エンドユーザー向け UI。"
 
 #: src\introduction.md:13
 msgid "**NATS server**"
 msgstr "**NATS server**"
 
 #: src\introduction.md:13
-msgid ""
-"Message broker for command fan-out + result aggregation. The agent talks "
-"NATS-only; the backend reads NATS too."
-msgstr ""
-"コマンドのファンアウトと結果集約を担うメッセージブローカー。agent は NATS と"
-"のみ通信し、backend も NATS から読みます。"
+#~ msgid ""
+#~ "Message broker for command fan-out + result aggregation. The agent talks "
+#~ "NATS-only; the backend reads NATS too."
+#~ msgstr ""
+#~ "コマンドのファンアウトと結果集約を担うメッセージブローカー。agent は NATS と"
+#~ "のみ通信し、backend も NATS から読みます。"
 
 #: src\introduction.md:14
 msgid "**kanade CLI**"
@@ -1139,12 +1139,12 @@ msgstr ""
 "いるか、どう足すかは `crates/kanade-backend/web/demo/README.md` にあります。"
 
 #: src\getting-started/architecture.md:3
-msgid ""
-"`kanade` is designed to manage hundreds of Windows endpoints concurrently, "
-"safely, and asynchronously."
-msgstr ""
-"`kanade` は、数百台の Windows エンドポイントを並行して、安全に、そして非同期"
-"で管理するように設計されています。"
+#~ msgid ""
+#~ "`kanade` is designed to manage hundreds of Windows endpoints concurrently, "
+#~ "safely, and asynchronously."
+#~ msgstr ""
+#~ "`kanade` は、数百台の Windows エンドポイントを並行して、安全に、そして非同期"
+#~ "で管理するように設計されています。"
 
 #: src\getting-started/architecture.md:5
 msgid "Component Topology"
@@ -1163,8 +1163,8 @@ msgid "1. kanade-agent"
 msgstr "1. kanade-agent"
 
 #: src\getting-started/architecture.md:36
-msgid "A high-performance Windows service running on each managed host."
-msgstr "各管理対象ホスト上で動作する高性能な Windows サービスです。"
+#~ msgid "A high-performance Windows service running on each managed host."
+#~ msgstr "各管理対象ホスト上で動作する高性能な Windows サービスです。"
 
 #: src\getting-started/architecture.md:37
 msgid "**Role**: Core executor."
@@ -1179,14 +1179,14 @@ msgstr ""
 "かないため、ファイアウォールに優しい設計です。"
 
 #: src\getting-started/architecture.md:39
-msgid ""
-"**Capabilities**: Launches secure, isolated PowerShell subprocesses, "
-"inventories hardware/software specs, streams live performance data (CPU, RSS "
-"memory, disk I/O), and manages local packages."
-msgstr ""
-"**機能**: 安全に隔離された PowerShell サブプロセスを起動し、ハードウェア/ソフ"
-"トウェアのスペック情報の収集、ライブパフォーマンスデータ（CPU、RSSメモリ、"
-"ディスクI/O）のストリーミング、およびローカルパッケージの管理を行います。"
+#~ msgid ""
+#~ "**Capabilities**: Launches secure, isolated PowerShell subprocesses, "
+#~ "inventories hardware/software specs, streams live performance data (CPU, RSS "
+#~ "memory, disk I/O), and manages local packages."
+#~ msgstr ""
+#~ "**機能**: 安全に隔離された PowerShell サブプロセスを起動し、ハードウェア/ソフ"
+#~ "トウェアのスペック情報の収集、ライブパフォーマンスデータ（CPU、RSSメモリ、"
+#~ "ディスクI/O）のストリーミング、およびローカルパッケージの管理を行います。"
 
 #: src\getting-started/architecture.md:41
 msgid "2. kanade-backend"
@@ -1305,34 +1305,34 @@ msgid "Outbound-only Connections"
 msgstr "アウトバウンド専用接続"
 
 #: src\getting-started/architecture.md:67
-msgid ""
-"Agents strictly communicate with the NATS broker by initiating outbound TCP "
-"connections. No firewall ports need to be opened on endpoints, neutralizing "
-"the risk of lateral traversal or external port scanning."
-msgstr ""
-"エージェントは、アウトバウンド TCP 接続を開始することによってのみ NATS ブロー"
-"カーと通信します。エンドポイント側でファイアウォールポートを開く必要がないた"
-"め、横移動や外部からのポートスキャンのリスクを排除できます。"
+#~ msgid ""
+#~ "Agents strictly communicate with the NATS broker by initiating outbound TCP "
+#~ "connections. No firewall ports need to be opened on endpoints, neutralizing "
+#~ "the risk of lateral traversal or external port scanning."
+#~ msgstr ""
+#~ "エージェントは、アウトバウンド TCP 接続を開始することによってのみ NATS ブロー"
+#~ "カーと通信します。エンドポイント側でファイアウォールポートを開く必要がないた"
+#~ "め、横移動や外部からのポートスキャンのリスクを排除できます。"
 
 #: src\getting-started/architecture.md:69
-msgid "Agent Job Sandboxing"
-msgstr "エージェントジョブのサンドボックス化"
+#~ msgid "Agent Job Sandboxing"
+#~ msgstr "エージェントジョブのサンドボックス化"
 
 #: src\getting-started/architecture.md:70
-msgid ""
-"When executing scripts, the agent stages commands in `%ProgramData%"
-"\\Kanade\\agent-scripts` and executes them using customized launcher "
-"templates. Administrators can enforce identity configurations via job "
-"manifests, specifying `run_as: system` (for elevated system management) or "
-"`run_as: user` (to run safely under the active user's credentials with "
-"restricted directory ACLs)."
-msgstr ""
-"スクリプトを実行する際、エージェントは `%ProgramData%\\Kanade\\agent-"
-"scripts` 内にコマンドを配置（ステージング）し、カスタマイズされたランチャテン"
-"プレートを使用して実行します。管理者はジョブマニフェストを介して実行アイデン"
-"ティティの設定を強制でき、`run_as: system`（昇格したシステム管理用）または "
-"`run_as: user`（制限されたディレクトリ ACL を使用して、アクティブなユーザーの"
-"資格情報の下で安全に実行する用）を指定できます。"
+#~ msgid ""
+#~ "When executing scripts, the agent stages commands in `%ProgramData%"
+#~ "\\Kanade\\agent-scripts` and executes them using customized launcher "
+#~ "templates. Administrators can enforce identity configurations via job "
+#~ "manifests, specifying `run_as: system` (for elevated system management) or "
+#~ "`run_as: user` (to run safely under the active user's credentials with "
+#~ "restricted directory ACLs)."
+#~ msgstr ""
+#~ "スクリプトを実行する際、エージェントは `%ProgramData%\\Kanade\\agent-"
+#~ "scripts` 内にコマンドを配置（ステージング）し、カスタマイズされたランチャテン"
+#~ "プレートを使用して実行します。管理者はジョブマニフェストを介して実行アイデン"
+#~ "ティティの設定を強制でき、`run_as: system`（昇格したシステム管理用）または "
+#~ "`run_as: user`（制限されたディレクトリ ACL を使用して、アクティブなユーザーの"
+#~ "資格情報の下で安全に実行する用）を指定できます。"
 
 #: src\operations/overview.md:1
 msgid "Operations overview"
@@ -1426,13 +1426,13 @@ msgid "Deployment Model"
 msgstr "デプロイモデル"
 
 #: src\operations/deploy.md:7
-msgid ""
-"Production hosts and target endpoints run `kanade` components as background "
-"Windows services. This ensures high availability and automatic startup."
-msgstr ""
-"本番ホストと管理対象エンドポイントは、`kanade` コンポーネントをバックグラウン"
-"ドの Windows サービスとして実行します。これにより、高可用性と自動起動が保証さ"
-"れます。"
+#~ msgid ""
+#~ "Production hosts and target endpoints run `kanade` components as background "
+#~ "Windows services. This ensures high availability and automatic startup."
+#~ msgstr ""
+#~ "本番ホストと管理対象エンドポイントは、`kanade` コンポーネントをバックグラウン"
+#~ "ドの Windows サービスとして実行します。これにより、高可用性と自動起動が保証さ"
+#~ "れます。"
 
 #: src\operations/deploy.md:9
 msgid "Service Name"
@@ -1459,8 +1459,8 @@ msgid "`nats-server.exe`"
 msgstr "`nats-server.exe`"
 
 #: src\operations/deploy.md:11
-msgid "Hardened Registry / Registry-baked CLI flags"
-msgstr "保護されたレジストリ / レジストリ保存の CLI フラグ"
+#~ msgid "Hardened Registry / Registry-baked CLI flags"
+#~ msgstr "保護されたレジストリ / レジストリ保存の CLI フラグ"
 
 #: src\operations/deploy.md:11 src\operations/deploy.md:12
 msgid "Central server"
@@ -1487,8 +1487,8 @@ msgid "`kanade-agent.exe`"
 msgstr "`kanade-agent.exe`"
 
 #: src\operations/deploy.md:13
-msgid "Hardened Registry / Local state DB"
-msgstr "保護されたレジストリ / ローカル状態 DB"
+#~ msgid "Hardened Registry / Local state DB"
+#~ msgstr "保護されたレジストリ / ローカル状態 DB"
 
 #: src\operations/deploy.md:13
 msgid "Managed endpoints"
@@ -1548,14 +1548,14 @@ msgstr ""
 "```"
 
 #: src\operations/deploy.md:35
-msgid ""
-"This installs the **KanadeNats** service, configures it to run under the "
-"local system account, sets up JetStream data directories, and locks down the "
-"secure authorization token in the Windows registry."
-msgstr ""
-"これにより、**KanadeNats** サービスがインストールされ、ローカルシステムアカウ"
-"ントで実行されるよう構成され、JetStream データディレクトリがセットアップさ"
-"れ、安全な認証トークンが Windows レジストリ内にロックダウンされます。"
+#~ msgid ""
+#~ "This installs the **KanadeNats** service, configures it to run under the "
+#~ "local system account, sets up JetStream data directories, and locks down the "
+#~ "secure authorization token in the Windows registry."
+#~ msgstr ""
+#~ "これにより、**KanadeNats** サービスがインストールされ、ローカルシステムアカウ"
+#~ "ントで実行されるよう構成され、JetStream データディレクトリがセットアップさ"
+#~ "れ、安全な認証トークンが Windows レジストリ内にロックダウンされます。"
 
 #: src\operations/deploy.md:39
 msgid "3. Deploying the Backend API & SPA"
@@ -1688,16 +1688,16 @@ msgid "Agent-mediated updates"
 msgstr "agent 経由のアップデート"
 
 #: src\operations/agent-mediated-updates/index.md:3
-msgid ""
-"The agent is the universal installer. Once it's running on a target host, "
-"the operator never needs to touch the host directly to update any other "
-"component — including the backend it talks to, the broker that carries its "
-"messages, and the agent itself."
-msgstr ""
-"agent は万能インストーラーです。対象ホストで動き出してしまえば、他のどのコン"
-"ポーネントをアップデートするときも operator がホストに直接触る必要はありませ"
-"ん — agent が話している backend も、メッセージを運ぶブローカーも、agent 自身"
-"も対象です。"
+#~ msgid ""
+#~ "The agent is the universal installer. Once it's running on a target host, "
+#~ "the operator never needs to touch the host directly to update any other "
+#~ "component — including the backend it talks to, the broker that carries its "
+#~ "messages, and the agent itself."
+#~ msgstr ""
+#~ "agent は万能インストーラーです。対象ホストで動き出してしまえば、他のどのコン"
+#~ "ポーネントをアップデートするときも operator がホストに直接触る必要はありませ"
+#~ "ん — agent が話している backend も、メッセージを運ぶブローカーも、agent 自身"
+#~ "も対象です。"
 
 #: src\operations/agent-mediated-updates/index.md:8
 msgid "This chapter has one page per component:"
@@ -1826,8 +1826,8 @@ msgid "Upsert a job manifest into the `jobs` KV."
 msgstr "`jobs` KV にジョブマニフェストを upsert。"
 
 #: src\operations/agent-mediated-updates/index.md:32
-msgid "`kanade exec <job-id> --pcs <pc> [--pcs <pc> …]`"
-msgstr "`kanade exec <job-id> --pcs <pc> [--pcs <pc> …]`"
+#~ msgid "`kanade exec <job-id> --pcs <pc> [--pcs <pc> …]`"
+#~ msgstr "`kanade exec <job-id> --pcs <pc> [--pcs <pc> …]`"
 
 #: src\operations/agent-mediated-updates/index.md:32
 msgid "Fire a registered job at a set of PCs."
@@ -2224,13 +2224,13 @@ msgid "Service-failure / config drift on target"
 msgstr "対象ホストでのサービス起動失敗 / config の不整合"
 
 #: src\operations/agent-mediated-updates/backend.md:168
-msgid ""
-"Read `C:\\ProgramData\\Kanade\\log\\backend.*.log` on the target. The agent "
-"can fetch it via `kanade logs <pc>` (when implemented) or you can pull the "
-"file directly."
-msgstr ""
-"対象ホストの `C:\\ProgramData\\Kanade\\log\\backend.*.log` を読む。agent 経由"
-"で `kanade logs <pc>` で取れる (実装後) か、直接ファイルを引き上げる。"
+#~ msgid ""
+#~ "Read `C:\\ProgramData\\Kanade\\log\\backend.*.log` on the target. The agent "
+#~ "can fetch it via `kanade logs <pc>` (when implemented) or you can pull the "
+#~ "file directly."
+#~ msgstr ""
+#~ "対象ホストの `C:\\ProgramData\\Kanade\\log\\backend.*.log` を読む。agent 経由"
+#~ "で `kanade logs <pc>` で取れる (実装後) か、直接ファイルを引き上げる。"
 
 #: src\operations/agent-mediated-updates/client.md:3
 msgid ""
@@ -2794,12 +2794,12 @@ msgid "Bucket / Key"
 msgstr "バケット / キー"
 
 #: src\operations/agent-mediated-updates/agent-self.md:12
-msgid ""
-"Agent binaries, keyed by `<version>`. Separate from `OBJECT_APP_PACKAGES` so "
-"the rollout watcher only fires on agent updates."
-msgstr ""
-"agent バイナリ。キーは `<version>`。rollout watcher が agent アップデートだけ"
-"に反応するように、`OBJECT_APP_PACKAGES` とは別バケット。"
+#~ msgid ""
+#~ "Agent binaries, keyed by `<version>`. Separate from `OBJECT_APP_PACKAGES` so "
+#~ "the rollout watcher only fires on agent updates."
+#~ msgstr ""
+#~ "agent バイナリ。キーは `<version>`。rollout watcher が agent アップデートだけ"
+#~ "に反応するように、`OBJECT_APP_PACKAGES` とは別バケット。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:13
 msgid "`agent_config.<scope>.target_version`"
@@ -2901,12 +2901,12 @@ msgid "Typo or wrong scope"
 msgstr "typo もしくはスコープ違い"
 
 #: src\operations/agent-mediated-updates/agent-self.md:94
-msgid ""
-"Re-check with `kanade agent current` and `kanade jetstream object list "
-"agent_releases`."
-msgstr ""
-"`kanade agent current` と `kanade jetstream object list agent_releases` で再"
-"確認。"
+#~ msgid ""
+#~ "Re-check with `kanade agent current` and `kanade jetstream object list "
+#~ "agent_releases`."
+#~ msgstr ""
+#~ "`kanade agent current` と `kanade jetstream object list agent_releases` で再"
+#~ "確認。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:95
 msgid "`kanade ping <host>` still shows the old version after several minutes"
@@ -2921,14 +2921,14 @@ msgstr ""
 "か、ホストが broker に到達できない"
 
 #: src\operations/agent-mediated-updates/agent-self.md:95
-msgid ""
-"Check `%ProgramData%\\Kanade\\log\\agent.*.log` on the target. If "
-"self_update is silent (no \"checking target_version\" log lines), the agent "
-"is too old; bootstrap manually with `deploy-agent.ps1`."
-msgstr ""
-"対象ホストの `%ProgramData%\\Kanade\\log\\agent.*.log` をチェック。"
-"self_update が無言なら (「checking target_version」ログがない)、agent が古す"
-"ぎる; `deploy-agent.ps1` で手動ブートストラップ。"
+#~ msgid ""
+#~ "Check `%ProgramData%\\Kanade\\log\\agent.*.log` on the target. If "
+#~ "self_update is silent (no \"checking target_version\" log lines), the agent "
+#~ "is too old; bootstrap manually with `deploy-agent.ps1`."
+#~ msgstr ""
+#~ "対象ホストの `%ProgramData%\\Kanade\\log\\agent.*.log` をチェック。"
+#~ "self_update が無言なら (「checking target_version」ログがない)、agent が古す"
+#~ "ぎる; `deploy-agent.ps1` で手動ブートストラップ。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:96
 msgid "Agent flaps: starts, immediately exits with `exit_code: 1`"
@@ -2945,12 +2945,12 @@ msgstr ""
 "Viewer に Service Control Manager のエラーが連続して記録される"
 
 #: src\operations/agent-mediated-updates/agent-self.md:96
-msgid ""
-"Roll back: `kanade agent rollout <prev-version> --pcs <host>`. The host will "
-"swap back at the next watcher tick."
-msgstr ""
-"ロールバック: `kanade agent rollout <prev-version> --pcs <host>`。次の "
-"watcher tick でホストは元のバージョンに戻ります。"
+#~ msgid ""
+#~ "Roll back: `kanade agent rollout <prev-version> --pcs <host>`. The host will "
+#~ "swap back at the next watcher tick."
+#~ msgstr ""
+#~ "ロールバック: `kanade agent rollout <prev-version> --pcs <host>`。次の "
+#~ "watcher tick でホストは元のバージョンに戻ります。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:98
 msgid "Why a separate bucket / scope?"
@@ -3208,23 +3208,23 @@ msgid "Client"
 msgstr "Client"
 
 #: src\operations/undeploy.md:59
-msgid "Nothing extra (no per-user state yet)"
-msgstr "追加なし (per-user な state はまだ存在しない)"
+#~ msgid "Nothing extra (no per-user state yet)"
+#~ msgstr "追加なし (per-user な state はまだ存在しない)"
 
 #: src\operations/undeploy.md:61
-msgid ""
-"⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1 -Purge` are the "
-"dangerous ones. The first wipes the fleet's entire JetStream state "
-"(agent_releases, app_packages, scripts, jobs, agent_config, results stream); "
-"the second wipes the projector's historical SQLite. **Both are unrecoverable "
-"without out-of-band backups.** The scripts print a loud banner before "
-"running."
-msgstr ""
-"⚠️  危険なのは `undeploy-nats.ps1 -Purge` と `undeploy-backend.ps1 -Purge`。前"
-"者は fleet 全体の JetStream state (agent_releases、app_packages、scripts、"
-"jobs、agent_config、results stream) を消し、後者は projector の過去の SQLite "
-"を消します。**どちらも out-of-band バックアップ無しではリカバリ不能**。スクリ"
-"プトは実行前に目立つバナーを出します。"
+#~ msgid ""
+#~ "⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1 -Purge` are the "
+#~ "dangerous ones. The first wipes the fleet's entire JetStream state "
+#~ "(agent_releases, app_packages, scripts, jobs, agent_config, results stream); "
+#~ "the second wipes the projector's historical SQLite. **Both are unrecoverable "
+#~ "without out-of-band backups.** The scripts print a loud banner before "
+#~ "running."
+#~ msgstr ""
+#~ "⚠️  危険なのは `undeploy-nats.ps1 -Purge` と `undeploy-backend.ps1 -Purge`。前"
+#~ "者は fleet 全体の JetStream state (agent_releases、app_packages、scripts、"
+#~ "jobs、agent_config、results stream) を消し、後者は projector の過去の SQLite "
+#~ "を消します。**どちらも out-of-band バックアップ無しではリカバリ不能**。スクリ"
+#~ "プトは実行前に目立つバナーを出します。"
 
 #: src\operations/undeploy.md:69
 msgid "Rollback recipes"
@@ -4545,42 +4545,42 @@ msgid "1. Agent Configuration"
 msgstr "1. エージェント設定"
 
 #: src\reference/config.md:9
-msgid ""
-"The agent searches for its configuration via the `KANADE_AGENT_CONFIG` "
-"environment variable or falls back to native paths."
-msgstr ""
-"エージェントは `KANADE_AGENT_CONFIG` 環境変数を介して設定を検索し、存在しない"
-"場合はネイティブパスにフォールバックします。"
+#~ msgid ""
+#~ "The agent searches for its configuration via the `KANADE_AGENT_CONFIG` "
+#~ "environment variable or falls back to native paths."
+#~ msgstr ""
+#~ "エージェントは `KANADE_AGENT_CONFIG` 環境変数を介して設定を検索し、存在しない"
+#~ "場合はネイティブパスにフォールバックします。"
 
 #: src\reference/config.md:11
 msgid "Dev Configuration (`configs/agent.dev.toml`)"
 msgstr "開発用設定 (`configs/agent.dev.toml`)"
 
 #: src\reference/config.md:13
-msgid ""
-"```toml\n"
-"# Dev configuration schema\n"
-"[agent]\n"
-"id = \"dev-pc\"\n"
-"nats_url = \"nats://localhost:4223\"\n"
-"data_dir = \"target/dev-data/agent\"\n"
-"\n"
-"[log]\n"
-"level = \"debug\"\n"
-"file = \"target/dev-data/agent/logs/agent.log\"\n"
-"```"
-msgstr ""
-"```toml\n"
-"# 開発用設定スキーマ\n"
-"[agent]\n"
-"id = \"dev-pc\"\n"
-"nats_url = \"nats://localhost:4223\"\n"
-"data_dir = \"target/dev-data/agent\"\n"
-"\n"
-"[log]\n"
-"level = \"debug\"\n"
-"file = \"target/dev-data/agent/logs/agent.log\"\n"
-"```"
+#~ msgid ""
+#~ "```toml\n"
+#~ "# Dev configuration schema\n"
+#~ "[agent]\n"
+#~ "id = \"dev-pc\"\n"
+#~ "nats_url = \"nats://localhost:4223\"\n"
+#~ "data_dir = \"target/dev-data/agent\"\n"
+#~ "\n"
+#~ "[log]\n"
+#~ "level = \"debug\"\n"
+#~ "file = \"target/dev-data/agent/logs/agent.log\"\n"
+#~ "```"
+#~ msgstr ""
+#~ "```toml\n"
+#~ "# 開発用設定スキーマ\n"
+#~ "[agent]\n"
+#~ "id = \"dev-pc\"\n"
+#~ "nats_url = \"nats://localhost:4223\"\n"
+#~ "data_dir = \"target/dev-data/agent\"\n"
+#~ "\n"
+#~ "[log]\n"
+#~ "level = \"debug\"\n"
+#~ "file = \"target/dev-data/agent/logs/agent.log\"\n"
+#~ "```"
 
 #: src\reference/config.md:25 src\reference/config.md:53
 msgid "Configuration Parameters"
@@ -4599,8 +4599,8 @@ msgid "Description"
 msgstr "説明"
 
 #: src\reference/config.md:27 src\reference/config.md:55
-msgid "Environment Override"
-msgstr "環境変数による上書き"
+#~ msgid "Environment Override"
+#~ msgstr "環境変数による上書き"
 
 #: src\reference/config.md:29
 msgid "`agent.id`"
@@ -4613,170 +4613,170 @@ msgid "String"
 msgstr "String"
 
 #: src\reference/config.md:29
-msgid "Unique hardware identifier (`pc_id`)."
-msgstr "ユニークなハードウェア識別子 (`pc_id`)。"
+#~ msgid "Unique hardware identifier (`pc_id`)."
+#~ msgstr "ユニークなハードウェア識別子 (`pc_id`)。"
 
 #: src\reference/config.md:29
-msgid "`KANADE_DEV_AGENT_ID` (templated)"
-msgstr "`KANADE_DEV_AGENT_ID` (テンプレート化)"
+#~ msgid "`KANADE_DEV_AGENT_ID` (templated)"
+#~ msgstr "`KANADE_DEV_AGENT_ID` (テンプレート化)"
 
 #: src\reference/config.md:30
 msgid "`agent.nats_url`"
 msgstr "`agent.nats_url`"
 
 #: src\reference/config.md:30
-msgid "Network address of the NATS broker."
-msgstr "NATS ブローカー of ネットワークアドレス。"
+#~ msgid "Network address of the NATS broker."
+#~ msgstr "NATS ブローカー of ネットワークアドレス。"
 
 #: src\reference/config.md:30 src\reference/config.md:58
-msgid "`KANADE_NATS_URL`"
-msgstr "`KANADE_NATS_URL`"
+#~ msgid "`KANADE_NATS_URL`"
+#~ msgstr "`KANADE_NATS_URL`"
 
 #: src\reference/config.md:31
-msgid "`agent.data_dir`"
-msgstr "`agent.data_dir`"
+#~ msgid "`agent.data_dir`"
+#~ msgstr "`agent.data_dir`"
 
 #: src\reference/config.md:31 src\reference/config.md:33
 msgid "Path"
 msgstr "Path"
 
 #: src\reference/config.md:31
-msgid ""
-"Root path to cache outbox scripts, state database, and local completions."
-msgstr ""
-"送信トレイのスクリプト、状態データベース、およびローカルの補完データをキャッ"
-"シュするルートパス。"
+#~ msgid ""
+#~ "Root path to cache outbox scripts, state database, and local completions."
+#~ msgstr ""
+#~ "送信トレイのスクリプト、状態データベース、およびローカルの補完データをキャッ"
+#~ "シュするルートパス。"
 
 #: src\reference/config.md:31
-msgid "`KANADE_AGENT_DATA_DIR`"
-msgstr "`KANADE_AGENT_DATA_DIR`"
+#~ msgid "`KANADE_AGENT_DATA_DIR`"
+#~ msgstr "`KANADE_AGENT_DATA_DIR`"
 
 #: src\reference/config.md:32
 msgid "`log.level`"
 msgstr "`log.level`"
 
 #: src\reference/config.md:32
-msgid "Logging verbosity (`error`, `warn`, `info`, `debug`, `trace`)."
-msgstr "ログ出力レベルの冗長度 (`error`, `warn`, `info`, `debug`, `trace`)。"
+#~ msgid "Logging verbosity (`error`, `warn`, `info`, `debug`, `trace`)."
+#~ msgstr "ログ出力レベルの冗長度 (`error`, `warn`, `info`, `debug`, `trace`)。"
 
 #: src\reference/config.md:32
-msgid "`RUST_LOG`"
-msgstr "`RUST_LOG`"
+#~ msgid "`RUST_LOG`"
+#~ msgstr "`RUST_LOG`"
 
 #: src\reference/config.md:33
-msgid "`log.file`"
-msgstr "`log.file`"
+#~ msgid "`log.file`"
+#~ msgstr "`log.file`"
 
 #: src\reference/config.md:33
-msgid "Filepath destination for rolling logs."
-msgstr "ローリングログの書き出し先ファイルパス。"
+#~ msgid "Filepath destination for rolling logs."
+#~ msgstr "ローリングログの書き出し先ファイルパス。"
 
 #: src\reference/config.md:33
-msgid "\\-"
-msgstr "\\-"
+#~ msgid "\\-"
+#~ msgstr "\\-"
 
 #: src\reference/config.md:37
 msgid "2. Backend Configuration"
 msgstr "2. バックエンド設定"
 
 #: src\reference/config.md:39
-msgid ""
-"The backend coordination layer retrieves its configurations from the file "
-"specified by `KANADE_BACKEND_CONFIG` or registers default structures."
-msgstr ""
-"バックエンドの調整レイヤーは `KANADE_BACKEND_CONFIG` で指定されたファイルから"
-"設定を取得し、指定がない場合はデフォルトの構造体を登録します。"
+#~ msgid ""
+#~ "The backend coordination layer retrieves its configurations from the file "
+#~ "specified by `KANADE_BACKEND_CONFIG` or registers default structures."
+#~ msgstr ""
+#~ "バックエンドの調整レイヤーは `KANADE_BACKEND_CONFIG` で指定されたファイルから"
+#~ "設定を取得し、指定がない場合はデフォルトの構造体を登録します。"
 
 #: src\reference/config.md:41
 msgid "Dev Configuration (`configs/backend.dev.toml`)"
 msgstr "開発用設定 (`configs/backend.dev.toml`)"
 
 #: src\reference/config.md:43
-msgid ""
-"```toml\n"
-"[backend]\n"
-"listen_addr = \"127.0.0.1:8081\"\n"
-"nats_url = \"nats://localhost:4223\"\n"
-"database_url = \"sqlite://target/dev-data/backend/state.db\"\n"
-"\n"
-"[auth]\n"
-"# Auth settings\n"
-"```"
-msgstr ""
-"```toml\n"
-"[backend]\n"
-"listen_addr = \"127.0.0.1:8081\"\n"
-"nats_url = \"nats://localhost:4223\"\n"
-"database_url = \"sqlite://target/dev-data/backend/state.db\"\n"
-"\n"
-"[auth]\n"
-"# 認証設定\n"
-"```"
+#~ msgid ""
+#~ "```toml\n"
+#~ "[backend]\n"
+#~ "listen_addr = \"127.0.0.1:8081\"\n"
+#~ "nats_url = \"nats://localhost:4223\"\n"
+#~ "database_url = \"sqlite://target/dev-data/backend/state.db\"\n"
+#~ "\n"
+#~ "[auth]\n"
+#~ "# Auth settings\n"
+#~ "```"
+#~ msgstr ""
+#~ "```toml\n"
+#~ "[backend]\n"
+#~ "listen_addr = \"127.0.0.1:8081\"\n"
+#~ "nats_url = \"nats://localhost:4223\"\n"
+#~ "database_url = \"sqlite://target/dev-data/backend/state.db\"\n"
+#~ "\n"
+#~ "[auth]\n"
+#~ "# 認証設定\n"
+#~ "```"
 
 #: src\reference/config.md:57
-msgid "`backend.listen_addr`"
-msgstr "`backend.listen_addr`"
+#~ msgid "`backend.listen_addr`"
+#~ msgstr "`backend.listen_addr`"
 
 #: src\reference/config.md:57
-msgid "Network bind address for HTTP/WebSocket traffic."
-msgstr "HTTP/WebSocket トラフィック用のネットワークバインド文字列。"
+#~ msgid "Network bind address for HTTP/WebSocket traffic."
+#~ msgstr "HTTP/WebSocket トラフィック用のネットワークバインド文字列。"
 
 #: src\reference/config.md:57
-msgid "`KANADE_BIND_ADDR`"
-msgstr "`KANADE_BIND_ADDR`"
+#~ msgid "`KANADE_BIND_ADDR`"
+#~ msgstr "`KANADE_BIND_ADDR`"
 
 #: src\reference/config.md:58
-msgid "`backend.nats_url`"
-msgstr "`backend.nats_url`"
+#~ msgid "`backend.nats_url`"
+#~ msgstr "`backend.nats_url`"
 
 #: src\reference/config.md:58
-msgid "Target NATS broker URL."
-msgstr "対象とする NATS ブローカーの URL。"
+#~ msgid "Target NATS broker URL."
+#~ msgstr "対象とする NATS ブローカーの URL。"
 
 #: src\reference/config.md:59
-msgid "`backend.database_url`"
-msgstr "`backend.database_url`"
+#~ msgid "`backend.database_url`"
+#~ msgstr "`backend.database_url`"
 
 #: src\reference/config.md:59
-msgid "SQLite database connection string."
-msgstr "SQLite データベースへの接続文字列。"
+#~ msgid "SQLite database connection string."
+#~ msgstr "SQLite データベースへの接続文字列。"
 
 #: src\reference/config.md:59
-msgid "`DATABASE_URL`"
-msgstr "`DATABASE_URL`"
+#~ msgid "`DATABASE_URL`"
+#~ msgstr "`DATABASE_URL`"
 
 #: src\reference/config.md:60
-msgid "`auth.disable`"
-msgstr "`auth.disable`"
+#~ msgid "`auth.disable`"
+#~ msgstr "`auth.disable`"
 
 #: src\reference/config.md:60
-msgid "Boolean"
-msgstr "Boolean"
+#~ msgid "Boolean"
+#~ msgstr "Boolean"
 
 #: src\reference/config.md:60
-msgid ""
-"Set to true to disable operator token validation (dev environment only)."
-msgstr ""
-"オペレーターのトークン検証を無効にするには true を設定します (開発環境でのみ"
-"有効)。"
+#~ msgid ""
+#~ "Set to true to disable operator token validation (dev environment only)."
+#~ msgstr ""
+#~ "オペレーターのトークン検証を無効にするには true を設定します (開発環境でのみ"
+#~ "有効)。"
 
 #: src\reference/config.md:60
-msgid "`KANADE_AUTH_DISABLE`"
-msgstr "`KANADE_AUTH_DISABLE`"
+#~ msgid "`KANADE_AUTH_DISABLE`"
+#~ msgstr "`KANADE_AUTH_DISABLE`"
 
 #: src\reference/config.md:64
 msgid "3. Windows Registry Integration"
 msgstr "3. Windows レジストリ統合"
 
 #: src\reference/config.md:66
-msgid ""
-"In production environments, security-sensitive tokens (like NATS client "
-"tokens and administrative API bearer tokens) are stored in the secure "
-"Windows Registry rather than plaintext files."
-msgstr ""
-"本番環境では、セキュリティに敏感なトークン（NATS クライアントトークンや管理"
-"用 API ベアラートークンなど）は、プレーンテキストファイルではなく、保護され"
-"た Windows レジストリに保存されます。"
+#~ msgid ""
+#~ "In production environments, security-sensitive tokens (like NATS client "
+#~ "tokens and administrative API bearer tokens) are stored in the secure "
+#~ "Windows Registry rather than plaintext files."
+#~ msgstr ""
+#~ "本番環境では、セキュリティに敏感なトークン（NATS クライアントトークンや管理"
+#~ "用 API ベアラートークンなど）は、プレーンテキストファイルではなく、保護され"
+#~ "た Windows レジストリに保存されます。"
 
 #: src\reference/config.md:68
 msgid "Key Paths"
@@ -4791,12 +4791,12 @@ msgid "**Backend Settings**: `HKLM:\\SOFTWARE\\Kanade\\backend`"
 msgstr "**バックエンド設定**: `HKLM:\\SOFTWARE\\Kanade\\backend`"
 
 #: src\reference/config.md:72
-msgid ""
-"These registry paths are protected with local ACL configurations, allowing "
-"read permissions strictly to `SYSTEM` and designated operators."
-msgstr ""
-"これらのレジストリパスはローカルの ACL 設定で保護されており、`SYSTEM` および"
-"指定されたオペレーターにのみ読み取り権限が厳密に制限されます。"
+#~ msgid ""
+#~ "These registry paths are protected with local ACL configurations, allowing "
+#~ "read permissions strictly to `SYSTEM` and designated operators."
+#~ msgstr ""
+#~ "これらのレジストリパスはローカルの ACL 設定で保護されており、`SYSTEM` および"
+#~ "指定されたオペレーターにのみ読み取り権限が厳密に制限されます。"
 
 #~ msgid "`Invoke-WebRequest : missing bearer token`"
 #~ msgstr "`Invoke-WebRequest : missing bearer token`"
@@ -4857,3 +4857,283 @@ msgstr ""
 
 #~ msgid "# Elevated PowerShell prompt"
 #~ msgstr "# 管理者権限の PowerShell プロンプト"
+
+#: src/introduction.md:3
+msgid "**kanade — 奏** is an endpoint management system for Windows, Linux and Apple Silicon macOS fleets. It gives an operator a single CLI / SPA to run scripts, install software, gather inventory, and stream live perf data from hundreds of PCs at once. The pieces:"
+msgstr "**kanade — 奏** は Windows・Linux・Apple Silicon macOS フリート向けの端末管理システムです。運用者は単一の CLI / SPA からスクリプト実行、ソフトウェア導入、インベントリ収集、数百台の PC のライブ性能データ表示を行えます。構成要素は次のとおりです。"
+
+#: src/introduction.md:12
+msgid "Optional end-user Tauri app on Windows and Apple Silicon macOS 14+; macOS native notification/startup integration is deferred."
+msgstr "Windows と Apple Silicon macOS 14+ 向けの任意導入の Tauri エンドユーザーアプリ。macOS のネイティブ通知・自動起動連携は未実装です。"
+
+#: src/introduction.md:13
+msgid "Message broker for command fan-out + result aggregation. Agents use NATS for commands and telemetry; installer jobs can also fetch artifacts over backend HTTP."
+msgstr "コマンド配信と結果集約のメッセージブローカー。エージェントはコマンドとテレメトリに NATS を使い、インストーラジョブはバックエンドの HTTP 経由で成果物を取得する場合もあります。"
+
+#: src/getting-started/architecture.md:3
+msgid "`kanade` is designed to manage Windows, Linux and Apple Silicon macOS endpoints asynchronously. Available inventory, session and desktop features differ by platform."
+msgstr "`kanade` は Windows・Linux・Apple Silicon macOS 端末を非同期に管理します。利用可能なインベントリ、セッション、デスクトップ機能はプラットフォームごとに異なります。"
+
+#: src/getting-started/architecture.md:37
+msgid "A resident executor: Windows service, Linux systemd service or macOS launchd daemon."
+msgstr "各ホストの常駐実行エンジンです。Windows サービス、Linux systemd サービス、macOS launchd デーモンとして動作します。"
+
+#: src/getting-started/architecture.md:40
+msgid "**Capabilities**: Executes jobs, reports inventory and performance data, and performs self-update. Shells include Windows PowerShell, PowerShell 7 (`pwsh`) and `sh`; install the selected host on the target. Windows-specific sensors and jobs do not become portable automatically."
+msgstr "**機能**: ジョブ実行、インベントリ・性能データの報告、自己更新を行います。Windows PowerShell、PowerShell 7 (`pwsh`)、`sh` に対応し、選択したシェルは対象ホストへの導入が必要です。Windows 固有のセンサーやジョブが自動的に他の OS で動くわけではありません。"
+
+#: src/getting-started/architecture.md:68
+msgid "Agents initiate outbound NATS connections (including WebSocket deployments). Package installation jobs may also download artifacts through the backend HTTP API. No inbound network listener is needed on managed endpoints; local KLP IPC is separate. Broker authentication, permissions and command-signing policy still determine who can issue commands."
+msgstr "エージェントは外向きの NATS 接続を開始します（WebSocket 構成も含みます）。パッケージ導入ジョブはバックエンドの HTTP API から成果物を取得することもあります。管理対象端末に受信用ネットワークリスナーは不要ですが、ローカル KLP IPC は別です。誰がコマンドを発行できるかは、ブローカーの認証・権限とコマンド署名ポリシーに依存します。"
+
+#: src/getting-started/architecture.md:70
+msgid "Agent Job Identity"
+msgstr "エージェントのジョブ実行ユーザー"
+
+#: src/getting-started/architecture.md:71
+msgid "PowerShell scripts use private per-execution staging directories, under `%ProgramData%\\Kanade\\agent-scripts` on Windows, or the platform-specific macOS staging root / Unix temporary directory. Job manifests select `run_as: system`, `user` or `system_gui`; identity support differs by OS. These are process identity and staging protections, not a sandbox for untrusted scripts: production system jobs run as LocalSystem / root. See the [macOS identity rules](https://github.com/kanadehq/kanade/blob/main/deploy/macos/README.md#job-identity-run_as)."
+msgstr "PowerShell スクリプトは実行ごとのステージングディレクトリを使います。Windows では `%ProgramData%\\Kanade\\agent-scripts`、macOS では専用のステージングルート、それ以外の Unix では一時ディレクトリです。ジョブは `run_as: system`、`user`、`system_gui` を指定でき、対応範囲は OS ごとに異なります。実行ユーザーとステージングの保護であり、信頼できないスクリプトのサンドボックスではありません。本番の system ジョブは LocalSystem / root で動きます。[macOS の実行ユーザー規則](https://github.com/kanadehq/kanade/blob/main/deploy/macos/README.md#job-identity-run_as) を参照してください。"
+
+#: src/operations/overview.md:34
+msgid "The diagram shows the Windows installer jobs. Linux has bundle/setup scripts and cross-platform agent rollout; see [Linux deployment](https://github.com/kanadehq/kanade/blob/main/deploy/linux/README.md) and [macOS agent deployment](https://github.com/kanadehq/kanade/blob/main/deploy/macos/README.md)."
+msgstr "図は Windows のインストーラジョブを示しています。Linux には bundle/setup スクリプトと複数 OS に対応するエージェントのロールアウトがあります。[Linux 導入](https://github.com/kanadehq/kanade/blob/main/deploy/linux/README.md) と [macOS エージェント導入](https://github.com/kanadehq/kanade/blob/main/deploy/macos/README.md) を参照してください。"
+
+#: src/operations/deploy.md:3
+msgid "The cross-platform `kanade deploy` design and script retirement gates are in [SPEC §2.13](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md#213-クロスプラットフォーム-デプロイ設計-kanade-deploy-cli--typed-operations). Typed schema/validation and plan persistence are implemented, but production typed dispatch and the deploy CLI are unavailable; keep using the current procedures below during migration. It targets enrolled agents only and leaves the Agent Installation screen one-liners unchanged."
+msgstr "複数 OS 向けの `kanade deploy` 設計とスクリプト廃止の条件は [SPEC §2.13](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md#213-クロスプラットフォーム-デプロイ設計-kanade-deploy-cli--typed-operations) にあります。型付きスキーマ・検証と計画の永続化は実装済みですが、本番の型付き配送と deploy CLI は未提供です。移行中は以下の現行手順を使ってください。設計の対象は登録済みエージェントで、エージェント導入画面のワンライナーは変更しません。"
+
+#: src/operations/deploy.md:13
+msgid "Config file with token substitution / ACLs"
+msgstr "トークンを埋め込んだ設定ファイル / ACL"
+
+#: src/operations/deploy.md:15
+msgid "Config file / hardened Registry / local state DB"
+msgstr "設定ファイル / ACL で保護されたレジストリ / ローカル状態 DB"
+
+#: src/operations/deploy.md:37
+msgid "This installs the **KanadeNats** service, configures it to run under the local system account, sets up JetStream data directories, and substitutes the token into the installed NATS configuration file, and restricts that file to SYSTEM and Administrators."
+msgstr "**KanadeNats** サービスを LocalSystem で登録し、JetStream データディレクトリを作成します。導入先の NATS 設定ファイルにトークンを埋め込み、アクセスを SYSTEM と Administrators に制限します。"
+
+#: src/operations/agent-mediated-updates/index.md:3
+msgid "The existing Windows installer jobs update the backend, client and broker through an enrolled agent. Agent self-update also supports Linux and Apple Silicon macOS. Linux backend deployment uses the separate bundle/setup flow; macOS Client deployment integration is deferred. These flows still require working credentials, connectivity and a running agent; offline recovery may require direct host access."
+msgstr "既存の Windows インストーラジョブは、登録済みエージェント経由でバックエンド、クライアント、ブローカーを更新します。エージェント自身の更新は Linux と Apple Silicon macOS にも対応します。Linux バックエンドは別の bundle/setup 経路を使い、macOS Client の配布連携は未実装です。資格情報、接続性、稼働中のエージェントが必要で、オフライン復旧にはホストへの直接アクセスが必要な場合があります。"
+
+#: src/operations/agent-mediated-updates/index.md:51
+msgid "`kanade exec <job-id> --pcs <pc1>,<pc2>`"
+msgstr "`kanade exec <job-id> --pcs <pc1>,<pc2>`"
+
+#: src/operations/agent-mediated-updates/backend.md:168
+msgid "Read `C:\\ProgramData\\Kanade\\logs\\backend.*.log` on the target. `kanade agent logs <pc>` tails the agent log only; retrieve the backend log locally if the backend is down."
+msgstr "対象ホストの `C:\\ProgramData\\Kanade\\logs\\backend.*.log` を確認してください。`kanade agent logs <pc>` が取得するのはエージェントのログのみです。バックエンド停止中はそのログをホスト上で取得してください。"
+
+#: src/operations/agent-mediated-updates/client.md:3
+msgid "This page covers the **Windows** installer job. The macOS GUI/package build and its deferred deployment integration are documented in [MACOS.md](https://github.com/kanadehq/kanade/blob/main/crates/kanade-client/MACOS.md)."
+msgstr "本ページは **Windows** インストーラジョブの手順です。macOS GUI / パッケージのビルドと未実装の配布連携は [MACOS.md](https://github.com/kanadehq/kanade/blob/main/crates/kanade-client/MACOS.md) を参照してください。"
+
+#: src/operations/agent-mediated-updates/agent-self.md:12
+msgid "Agent binaries, keyed by `<version>` on Windows, `<version>-linux-<arch>` on Linux and `<version>-macos-aarch64` on macOS. Separate from `OBJECT_APP_PACKAGES` so the rollout watcher only fires on agent updates."
+msgstr "エージェントバイナリ。キーは Windows が `<version>`、Linux が `<version>-linux-<arch>`、macOS が `<version>-macos-aarch64` です。専用の更新 watcher のため `OBJECT_APP_PACKAGES` と分離しています。"
+
+#: src/operations/agent-mediated-updates/agent-self.md:101
+msgid "Re-check with `kanade agent current` and `GET /api/agents/releases` (authenticated HTTP API)."
+msgstr "`kanade agent current` と認証付き HTTP API の `GET /api/agents/releases` で再確認してください。"
+
+#: src/operations/agent-mediated-updates/agent-self.md:102
+msgid "Check `%ProgramData%\\Kanade\\logs\\agent.*.log` on the target. If self_update is silent (no \"checking target_version\" log lines), the agent is too old; bootstrap manually with `deploy-agent.ps1`."
+msgstr "対象ホストの `%ProgramData%\\Kanade\\logs\\agent.*.log` を確認してください。self_update のログ（\"checking target_version\"）がなければ古いエージェントの可能性があります。`deploy-agent.ps1` で手動導入してください。"
+
+#: src/operations/agent-mediated-updates/agent-self.md:103
+msgid "Roll back: `kanade agent rollout <prev-version> --pc <host>`. This requires the agent to remain running long enough to process the target. If it cannot boot, repair locally using the previous binary; rollout cannot recover an agent that never reaches its watcher."
+msgstr "ロールバックは `kanade agent rollout <prev-version> --pc <host>` です。ただし、対象を処理できるまでエージェントが稼働する必要があります。起動できない場合はホスト上で以前のバイナリへ修復してください。watcher に到達しないエージェントは rollout では復旧できません。"
+
+#: src/operations/agent-release-admission.md:53
+msgid "`crates/kanade-agent/build.rs` renders the envelope (`KNAGMETA`, schema 1, JSON `{product, version, platform}` from `CARGO_PKG_VERSION` and the Cargo target) and `src/release_metadata.rs` links it into the dedicated section; `main` reads it so LTO, `--gc-sections`/`-dead_strip` and `strip` keep it. Only the agent crate embeds it. The available helper `scripts/ci/release-post-build.sh` re-reads the built (and, on macOS, signed) binary after the build and the packaged archive before upload with `scripts/ci/verify-agent-dist.py`, read-only, and returns nonzero if the metadata is missing or wrong. Installed binaries are never modified or re-signed."
+msgstr "`crates/kanade-agent/build.rs` がエンベロープ（`KNAGMETA`、schema 1、`CARGO_PKG_VERSION` と Cargo target から得た JSON `{product, version, platform}`）を生成し、`src/release_metadata.rs` が専用セクションへリンクします。`main` から読み取るため LTO、`--gc-sections` / `-dead_strip`、`strip` でも保持されます。埋め込むのは agent crate のみです。補助スクリプト `scripts/ci/release-post-build.sh` はビルド済みバイナリ（macOS では署名後）と配布アーカイブを `scripts/ci/verify-agent-dist.py` で読み取り専用検証し、メタデータの欠落や不整合時に非ゼロを返します。導入済みバイナリの変更や再署名は行いません。"
+
+#: src/operations/agent-release-admission.md:63
+msgid "The current kata-managed `release.yml` does not invoke that helper. Release admission at CLI/backend upload remains enforced, but a successful release workflow alone is not evidence that the packaged metadata check ran."
+msgstr "現在の kata 管理 `release.yml` はこの補助スクリプトを呼びません。CLI / バックエンドへのアップロード時の検証は有効ですが、release workflow の成功だけでは配布アーカイブのメタデータ検査が実行された証拠になりません。"
+
+#: src/operations/undeploy.md:59
+msgid "Nothing extra: `-Purge` is a placeholder; persisted per-user window size and other user state are kept."
+msgstr "追加削除なし。`-Purge` は未実装のプレースホルダーで、ユーザーごとのウィンドウサイズなどの状態を保持します。"
+
+#: src/operations/undeploy.md:61
+msgid "⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1 -Purge` are the dangerous ones. The first wipes the fleet's entire JetStream state (agent_releases, app_packages, scripts, jobs, agent_config, results stream); the second wipes the backend SQLite, including durable accounts, approvals and scheduler completions. **Both are unrecoverable without out-of-band backups.** The scripts print a loud banner before running."
+msgstr "⚠️ `undeploy-nats.ps1 -Purge` と `undeploy-backend.ps1 -Purge` は破壊的です。前者はフリート全体の JetStream 状態（agent_releases、app_packages、scripts、jobs、agent_config、results stream）を消し、後者は永続アカウント、承認、スケジューラ完了記録を含むバックエンド SQLite を消します。**別途バックアップがなければ復旧できません。** スクリプトは実行前に警告を表示します。"
+
+#: src/operations/undeploy.md:115
+msgid "It doesn't touch NATS-side state when you remove the agent. Clear the per-PC target pin with `kanade config unset --pc <pc> target_version`, or remove that entire scope with `kanade config clear --pc <pc>`. These commands use the authenticated backend API and require operator access."
+msgstr "エージェント削除時に NATS 側の状態は変更しません。PC ごとの target pin は `kanade config unset --pc <pc> target_version`、そのスコープ全体は `kanade config clear --pc <pc>` で削除します。認証付きバックエンド API を使い、operator 権限が必要です。"
+
+#: src/operations/undeploy.md:119
+msgid "The client script removes the executable and swap artifacts only. It does not remove per-user window state, protocol registration or shortcuts; `-Purge` does not currently implement that cleanup."
+msgstr "client スクリプトが削除するのは実行ファイルと swap 残骸のみです。ユーザー状態、プロトコル登録、ショートカットは削除せず、`-Purge` もこれらの削除を実装していません。"
+
+#: src/operations/macos-code-signing.md:8
+msgid "The repository provides a helper to sign `kanade-agent` (and other built macOS binaries) with a **stable self-signed code-signing certificate**. **Current wiring:** `.github/workflows/release.yml` does not invoke `scripts/ci/release-post-build.sh` or `macos-codesign.sh`. Configuring secrets alone does not activate release signing. The procedure below describes the helper; connecting it to the kata-managed release workflow requires upstream template work. Check each artifact rather than assuming it was signed. The designated requirement stays the same across versions, so a one-time grant (or an MDM PPPC profile) survives updates. No Apple Developer ID or notarization is involved; `spctl` still rejects the binary, which is fine for a launchd-run command-line tool."
+msgstr "リポジトリには `kanade-agent` などの macOS バイナリを **安定した自己署名コード署名証明書** で署名する補助スクリプトがあります。**現行の接続状態:** `.github/workflows/release.yml` は `scripts/ci/release-post-build.sh` や `macos-codesign.sh` を呼びません。secret の設定だけではリリース署名は有効になりません。以下は補助スクリプトの手順で、kata 管理 workflow への接続には上流テンプレートの対応が必要です。署名済みと推測せず、成果物ごとに確認してください。この証明書で署名した場合、designated requirement がバージョン間で維持され、一度の許可や MDM PPPC プロファイルを更新後も使えます。Apple Developer ID や notarization は使わず、`spctl` は拒否します。launchd 用コマンドラインツール向けの手順です。"
+
+#: src/operations/macos-code-signing.md:30
+msgid "Invoking `verify-dist` checks the unpacked `.tar.gz`. A future workflow integration must run it before upload and propagate failure to the release gate; the current workflow does not run this check."
+msgstr "`verify-dist` を呼ぶと展開した `.tar.gz` を検査します。将来の workflow 連携ではアップロード前に実行し、失敗をリリースの gate へ伝える必要があります。現行 workflow はこの検査を行いません。"
+
+#: src/operations/macos-code-signing.md:33
+msgid "When invoked without secrets and without a pinned certificate, the helper prints a notice and skips. A pinned certificate with missing secrets fails. With only one of the two secrets, or on any import/sign/verify failure, the helper returns nonzero."
+msgstr "secret も証明書 pin もない場合、補助スクリプトは通知してスキップします。証明書 pin があるのに secret がなければ失敗します。secret が片方だけ、または import / 署名 / 検証が失敗した場合も非ゼロを返します。"
+
+#: src/operations/macos-code-signing.md:82
+msgid "Commit `deploy/macos/signing-cert.sha1`. When invoked, the helper fails if the imported certificate or a signed binary does not match it. Until the file exists the helper only prints the imported SHA-1 and checks the binaries against it."
+msgstr "`deploy/macos/signing-cert.sha1` をコミットしてください。補助スクリプトを呼び出した際、import した証明書または署名済みバイナリが一致しなければ失敗します。ファイルがない場合は import した SHA-1 を表示し、その値でバイナリを検査します。"
+
+#: src/operations/macos-code-signing.md:126
+msgid "`release.yml` is kata-managed (`.kata/applied.toml`) and overwritten on `kata apply`. The missing hook steps for `scripts/ci/release-post-build.sh` must also exist in the upstream templates (`yukimemi/pj-rust-cli`, `yukimemi/pj-rust-workspace`); otherwise a re-apply silently drops signing."
+msgstr "`release.yml` は kata 管理（`.kata/applied.toml`）で、`kata apply` が上書きします。不足している `scripts/ci/release-post-build.sh` の呼び出しは上流テンプレート（`yukimemi/pj-rust-cli`、`yukimemi/pj-rust-workspace`）にも必要です。ローカルだけの変更では再適用時に署名処理が消えます。"
+
+#: src/operations/remote-viewing-macos.md:3
+msgid "The browser Remote Screen page can view the logged-in user's **primary display only**, on **macOS 14 Sonoma or later**. Release distribution and the installer support Apple Silicon only; the capture implementation also has Intel code paths, which do not establish a supported Intel agent deployment. This uses [ScreenCaptureKit's SCScreenshotManager](https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager), not the deprecated CGDisplayCreateImage API. Older macOS agents keep working for other operations, but report remote viewing as unsupported."
+msgstr "ブラウザーの Remote Screen は、ログインユーザーの **主ディスプレイのみ** を **macOS 14 Sonoma 以降** で表示できます。リリース配布とインストーラの対応は Apple Silicon のみです。キャプチャ実装には Intel 用コードもありますが、Intel エージェントの配備をサポートするという意味ではありません。[ScreenCaptureKit の SCScreenshotManager](https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager) を使い、非推奨の CGDisplayCreateImage API は使いません。古い macOS エージェントは他の操作を継続できますが、リモート表示は未対応と報告します。"
+
+#: src/operations/remote-viewing-macos.md:55
+msgid "Attempts are deduplicated by session and persistent history per UID, installed path and signing identity. Pre-request failures retry after a persisted backoff of 60 seconds, 10 minutes, one hour and then six hours (capped, without a finite attempt budget); recorded request intent suppresses further requests across service restarts, including after refusal or a crash. The daemon stops the helper on logout, switching or a 30-second timeout; pending OS dialogs may outlive it. Normal agent work continues. Do not delete history to force another request. Kanade cannot grant permission or modify TCC consent. TCC may attribute capture to a responsible launcher depending on launch context; inspect the entry macOS actually presents. Terminal permission alone does not establish that the LaunchDaemon path works. Use the existing [stable code signing procedure](macos-code-signing.md) for releases; ad-hoc development builds and identity/path changes may need new grants. Do not change signing identity, entitlements or privacy database settings just to bypass a refusal."
+msgstr "試行はセッションと、UID・導入パス・署名 identity ごとの永続履歴で重複を抑制します。要求前の失敗は 60 秒、10 分、1 時間、その後は最大 6 時間の永続 backoff で再試行し、有限の試行回数上限はありません。要求 intent を記録した後は、拒否やクラッシュ、サービス再起動後も再要求しません。ログアウト、ユーザー切替、30 秒の timeout で helper を停止しますが、OS ダイアログは残る場合があります。通常のエージェント処理は継続します。再要求のために履歴を削除しないでください。Kanade は権限を付与したり TCC 同意を変更したりできません。TCC の対象は起動経路に依存するため、OS が示す実際の項目を確認してください。Terminal への許可だけでは LaunchDaemon 経路の確認になりません。リリース向けには [安定したコード署名手順](macos-code-signing.md) を参照してください。ad-hoc 開発ビルドや identity / パス変更には再許可が必要な場合があります。拒否の回避目的で署名 identity、entitlement、プライバシー DB を変更しないでください。"
+
+#: src/reference/config.md:9
+msgid "Both services resolve config in this order: `--config <path>`, a nonempty `KANADE_AGENT_CONFIG` / `KANADE_BACKEND_CONFIG`, then the existing native file (`%ProgramData%\\Kanade\\config\\agent.toml` / `backend.toml` on Windows, `/etc/kanade/agent.toml` / `backend.toml` on Unix). There is no current-directory fallback or synthesized default config; missing configuration is an error. TOML templates use teravars, so an environment variable changes a field only when the template explicitly reads it."
+msgstr "両サービスの設定探索順は `--config <path>`、空でない `KANADE_AGENT_CONFIG` / `KANADE_BACKEND_CONFIG`、存在する標準ファイルの順です（Windows は `%ProgramData%\\Kanade\\config\\agent.toml` / `backend.toml`、Unix は `/etc/kanade/agent.toml` / `backend.toml`）。作業ディレクトリへの fallback や既定設定の自動生成はなく、設定がなければエラーです。TOML は teravars テンプレートなので、環境変数が項目を変えるのはテンプレートが明示的に参照した場合のみです。"
+
+#: src/reference/config.md:19
+msgid "```toml\n[vars]\nhostname = '{{ system.host }}'\npc_id = '{{ env(name=\"KANADE_DEV_AGENT_ID\", default=vars.hostname) }}'\n\n[agent]\nid = '{{ vars.pc_id }}'\nnats_url = 'nats://127.0.0.1:4223'\n\n[log]\npath = './target/dev-data/agents/{{ vars.pc_id }}/agent.log'\nlevel = 'info'\n```"
+msgstr "```toml\n[vars]\nhostname = '{{ system.host }}'\npc_id = '{{ env(name=\"KANADE_DEV_AGENT_ID\", default=vars.hostname) }}'\n\n[agent]\nid = '{{ vars.pc_id }}'\nnats_url = 'nats://127.0.0.1:4223'\n\n[log]\npath = './target/dev-data/agents/{{ vars.pc_id }}/agent.log'\nlevel = 'info'\n```"
+
+#: src/reference/config.md:37
+msgid "Exact, case-sensitive host identity (`pc_id`), not a hardware UUID. The dev template accepts `KANADE_DEV_AGENT_ID`."
+msgstr "大文字小文字を区別する正確なホスト識別子 (`pc_id`) です。ハードウェア UUID ではありません。開発テンプレートは `KANADE_DEV_AGENT_ID` を受け付けます。"
+
+#: src/reference/config.md:38
+msgid "Broker address. `KANADE_NATS_URL` controls the CLI's `--server`; it does not override this service field."
+msgstr "ブローカーのアドレス。`KANADE_NATS_URL` は CLI の `--server` を指定するもので、このサービス設定項目を上書きしません。"
+
+#: src/reference/config.md:39
+msgid "Log filter; `RUST_LOG` overrides it."
+msgstr "ログフィルター。`RUST_LOG` が上書きします。"
+
+#: src/reference/config.md:40
+msgid "`log.path`"
+msgstr "`log.path`"
+
+#: src/reference/config.md:40
+msgid "Destination for daily rotated logs."
+msgstr "日次ローテーションするログの出力先。"
+
+#: src/reference/config.md:41
+msgid "`log.keep_days`"
+msgstr "`log.keep_days`"
+
+#: src/reference/config.md:41
+msgid "Integer"
+msgstr "整数"
+
+#: src/reference/config.md:41
+msgid "Retained daily files, including today; default 14, 0 disables on-disk logging."
+msgstr "当日を含む日次ファイルの保持数。既定は 14、0 はファイルへのログ出力を無効にします。"
+
+#: src/reference/config.md:43
+msgid "The data directory is **not** a TOML field. `KANADE_AGENT_DATA_DIR` overrides `%ProgramData%\\Kanade\\data` on Windows or `/var/lib/kanade` on Unix. The Linux and macOS setup scripts explicitly use `/var/lib/kanade-agent`."
+msgstr "データディレクトリは TOML の項目ではありません。`KANADE_AGENT_DATA_DIR` が Windows の `%ProgramData%\\Kanade\\data` または Unix の `/var/lib/kanade` を上書きします。Linux / macOS の setup スクリプトは明示的に `/var/lib/kanade-agent` を使います。"
+
+#: src/reference/config.md:117
+msgid "The backend uses the same discovery rules above. For development, pass `--config configs/backend.dev.toml` (or use `cargo make backend-dev`)."
+msgstr "バックエンドも上記と同じ探索順です。開発時は `--config configs/backend.dev.toml` を渡すか、`cargo make backend-dev` を使ってください。"
+
+#: src/reference/config.md:122
+msgid "```toml\n[server]\nbind = '127.0.0.1:8081'\n\n[nats]\nurl = 'nats://127.0.0.1:4223'\n\n[db]\nsqlite_path = './target/dev-data/backend.db'\n\n[log]\npath = './target/dev-data/backend.log'\nlevel = 'info'\n```"
+msgstr "```toml\n[server]\nbind = '127.0.0.1:8081'\n\n[nats]\nurl = 'nats://127.0.0.1:4223'\n\n[db]\nsqlite_path = './target/dev-data/backend.db'\n\n[log]\npath = './target/dev-data/backend.log'\nlevel = 'info'\n```"
+
+#: src/reference/config.md:141
+msgid "`server.bind`"
+msgstr "`server.bind`"
+
+#: src/reference/config.md:141
+msgid "HTTP/WebSocket bind address."
+msgstr "HTTP / WebSocket の待受アドレス。"
+
+#: src/reference/config.md:142
+msgid "`server.public_url`"
+msgstr "`server.public_url`"
+
+#: src/reference/config.md:142 src/reference/config.md:145
+msgid "Optional String"
+msgstr "任意の文字列"
+
+#: src/reference/config.md:142
+msgid "Public SPA base URL for account emails; set it behind a proxy and to avoid deriving links from request headers."
+msgstr "アカウントメール用の公開 SPA ベース URL。プロキシ経由の場合やリクエストヘッダー由来のリンク生成を避ける場合に設定してください。"
+
+#: src/reference/config.md:143
+msgid "`server.webauthn`"
+msgstr "`server.webauthn`"
+
+#: src/reference/config.md:143
+msgid "Table"
+msgstr "テーブル"
+
+#: src/reference/config.md:143
+msgid "Passkey RP ID/origins/name; omitted or empty disables passkeys. See `configs/backend.toml`."
+msgstr "パスキーの RP ID / origins / name。省略または空ならパスキーは無効です。`configs/backend.toml` を参照してください。"
+
+#: src/reference/config.md:144
+msgid "`nats.url`"
+msgstr "`nats.url`"
+
+#: src/reference/config.md:144
+msgid "Broker address."
+msgstr "ブローカーのアドレス。"
+
+#: src/reference/config.md:145
+msgid "`nats.monitor_url`"
+msgstr "`nats.monitor_url`"
+
+#: src/reference/config.md:145
+msgid "Monitoring base URL; defaults to HTTP on the broker host, port 8222."
+msgstr "監視エンドポイントのベース URL。既定はブローカーホストの HTTP、ポート 8222 です。"
+
+#: src/reference/config.md:146
+msgid "`db.sqlite_path`"
+msgstr "`db.sqlite_path`"
+
+#: src/reference/config.md:146
+msgid "SQLite file path."
+msgstr "SQLite ファイルのパス。"
+
+#: src/reference/config.md:147
+msgid "`log.path`, `log.level`, `log.keep_days`"
+msgstr "`log.path`, `log.level`, `log.keep_days`"
+
+#: src/reference/config.md:147
+msgid "Same logging fields as the agent."
+msgstr "エージェントと同じログ設定項目。"
+
+#: src/reference/config.md:149
+msgid "`KANADE_BIND_ADDR`, `DATABASE_URL` and `KANADE_NATS_URL` do not override these service fields. Authentication is not an `[auth]` TOML section: `KANADE_AUTH_DISABLE` disables authentication whenever present (even `0`), for development only. Production uses backend secrets such as `JwtSecret` / `KANADE_JWT_SECRET`, `StaticToken` / `KANADE_AUTH_STATIC_TOKEN`, and `BootstrapAdminPassword` / `KANADE_BOOTSTRAP_ADMIN_PASSWORD`."
+msgstr "`KANADE_BIND_ADDR`、`DATABASE_URL`、`KANADE_NATS_URL` はこれらのサービス設定を上書きしません。認証設定は `[auth]` TOML セクションではありません。`KANADE_AUTH_DISABLE` は値に関係なく存在するだけで認証を無効にします（`0` でも無効化）。開発専用です。本番では `JwtSecret` / `KANADE_JWT_SECRET`、`StaticToken` / `KANADE_AUTH_STATIC_TOKEN`、`BootstrapAdminPassword` / `KANADE_BOOTSTRAP_ADMIN_PASSWORD` などのバックエンド secret を使います。"
+
+#: src/reference/config.md:156
+msgid "SMTP connection settings live in `server_settings.mail` (Settings → Server), not a `[mail]` TOML section. They take effect after backend restart. The SMTP password remains a separate `MailPassword` / `KANADE_MAIL_PASSWORD` secret."
+msgstr "SMTP 接続設定は `[mail]` TOML セクションではなく `server_settings.mail`（設定 → サーバー）にあり、バックエンド再起動後に反映されます。SMTP パスワードは別の `MailPassword` / `KANADE_MAIL_PASSWORD` secret のままです。"
+
+#: src/reference/config.md:164
+msgid "In production environments, security-sensitive tokens (like NATS client tokens and administrative API bearer tokens) are stored in the Windows Registry values protected by ACLs. These are plaintext REG_SZ values, not encrypted storage; non-Windows hosts use the corresponding environment variables."
+msgstr "本番の NATS トークンや管理 API bearer トークンなどは、ACL で保護された Windows レジストリ値に保存します。暗号化保存ではなく平文 REG_SZ です。Windows 以外では対応する環境変数を使います。"
+
+#: src/reference/config.md:171
+msgid "These registry paths are protected with local ACL configurations, allowing read permissions strictly to `SYSTEM` and Administrators in the deployment scripts."
+msgstr "導入スクリプトはレジストリの ACL を設定し、読み取りを `SYSTEM` と Administrators に制限します。"
+
+#: src/operations/deploy.md:9
+msgid "Production hosts and target endpoints run `kanade` components as background Windows services, providing automatic startup and configured service-manager recovery."
+msgstr "本ページでは、本番ホストと対象端末の `kanade` コンポーネントを Windows サービスとして動かし、自動起動と設定済みのサービスマネージャーによる回復を利用します。"
+
+#: src/operations/macos-code-signing.md:3
+msgid "macOS TCC (Files and Folders, Documents, Photos, Full Disk Access) uses the binary's code identity. A build with only the linker's ad-hoc signature has a cdhash that changes on every build; updates can invalidate grants or require renewed approval. Verify grant persistence on the actual installed launch path."
+msgstr "macOS TCC（ファイルとフォルダ、書類、写真、フルディスクアクセス）はバイナリのコード identity を使います。リンカーの ad-hoc 署名だけのビルドはビルドごとに cdhash が変わり、更新で許可が無効になったり再承認が必要になったりする場合があります。実際の導入済み起動経路で許可の保持を確認してください。"

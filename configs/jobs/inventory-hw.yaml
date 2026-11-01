@@ -1,19 +1,15 @@
 # Sample inventory probe — operator-customisable hardware snapshot
 # delivered through the regular deploy + ExecResult pipeline.
 #
-# This file is a Manifest (the shape that `kanade exec` and
-# `kanade job create` both expect).
+# Register this Manifest before executing its job ID:
 #
-# Two ways to use it:
-#
-#   * One-shot — fires immediately against every targeted PC:
-#         kanade exec configs/jobs/inventory-hw.yaml
-#     (Not registered in the catalog; inventory facts are NOT projected
-#     because the projector only matches against registered jobs.)
+#   * One-shot — register, then fire at explicit targets:
+#         kanade job create configs/jobs/inventory-hw.yaml
+#         kanade exec inventory-hw --pcs <pc-id>
 #
 #   * Register + schedule — periodic, fact projection enabled:
 #         kanade job create configs/jobs/inventory-hw.yaml
-#         kanade schedule create configs/schedules/hourly-inventory.yaml
+#         kanade schedule create configs/schedules/inventory-hw.yaml
 #     The schedule yaml just references this job by id; editing this
 #     file and re-running `kanade job create` rewrites what every
 #     downstream schedule fires from the next tick.

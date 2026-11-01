@@ -19,7 +19,7 @@ The agent-mediated flow has the same shape regardless of what
 you're updating:
 
 ```text
-operator host ─► kanade CLI ─► NATS broker ─► agent (on target host)
+operator host ─► kanade CLI ─► backend HTTP API ─► NATS ─► agent
                     │                              │
                     ├── publish binary ────────────► fetches from
                     │   to OBJECT_APP_PACKAGES        OBJECT_APP_PACKAGES
@@ -30,6 +30,11 @@ operator host ─► kanade CLI ─► NATS broker ─► agent (on target host)
                     └── exec job ──────────────────► PowerShell child
                                                       runs the script
 ```
+
+The diagram shows the Windows installer jobs. Linux has bundle/setup scripts
+and cross-platform agent rollout; see
+[Linux deployment](https://github.com/kanadehq/kanade/blob/main/deploy/linux/README.md) and
+[macOS agent deployment](https://github.com/kanadehq/kanade/blob/main/deploy/macos/README.md).
 
 Component-specific guides:
 

@@ -40,6 +40,9 @@ jobs:
           echo "$RUNNER_TEMP/mdbook" >> "$GITHUB_PATH"
 
       - name: Install mdbook-i18n-helpers
+        env:
+          # The locked onig_sys uses pre-C23 function declarations; GCC 15 defaults to C23.
+          CFLAGS: -std=gnu17
         run: cargo install mdbook-i18n-helpers --version "${MDBOOK_I18N_HELPERS_VERSION}" --locked
 
       - name: Build English (default, source language)

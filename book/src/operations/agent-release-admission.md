@@ -54,11 +54,15 @@ version, rebuild it from a source tree that embeds the metadata.
 JSON `{product, version, platform}` from `CARGO_PKG_VERSION` and the Cargo
 target) and `src/release_metadata.rs` links it into the dedicated section;
 `main` reads it so LTO, `--gc-sections`/`-dead_strip` and `strip` keep it.
-Only the agent crate embeds it. `scripts/ci/release-post-build.sh` re-reads
+Only the agent crate embeds it. The available helper `scripts/ci/release-post-build.sh` re-reads
 the built (and, on macOS, signed) binary after the build and the packaged
 archive before upload with `scripts/ci/verify-agent-dist.py`, read-only, and
-fails the release if the metadata is missing or wrong. Installed binaries are
+returns nonzero if the metadata is missing or wrong. Installed binaries are
 never modified or re-signed.
+
+The current kata-managed `release.yml` does not invoke that helper.
+Release admission at CLI/backend upload remains enforced, but a successful
+release workflow alone is not evidence that the packaged metadata check ran.
 
 ## Upgrade / release ordering
 

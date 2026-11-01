@@ -9,7 +9,7 @@ without ssh — a tighter loop than the generic install jobs.
 
 | Bucket / Key | Purpose |
 |--------------|---------|
-| `OBJECT_AGENT_RELEASES` | Agent binaries, keyed by `<version>`. Separate from `OBJECT_APP_PACKAGES` so the rollout watcher only fires on agent updates. |
+| `OBJECT_AGENT_RELEASES` | Agent binaries, keyed by `<version>` on Windows, `<version>-linux-<arch>` on Linux and `<version>-macos-aarch64` on macOS. Separate from `OBJECT_APP_PACKAGES` so the rollout watcher only fires on agent updates. |
 | `agent_config.<scope>.target_version` | The version each scope (global / group / pc) should be on. Watched by the agent's `self_update` loop. |
 
 Flow:
@@ -17,9 +17,9 @@ Flow:
 ```text
 1. agent.self_update watches agent_config for target_version
 2. If target_version != my agent_version:
-   a. Pull `OBJECT_AGENT_RELEASES/<target_version>` to <exe>.new
+   a. Pull the platform-specific agent_releases key to staging
    b. Sha-verify against the bucket's recorded digest
-   c. Atomic swap: <exe> ← <exe>.new (via SCM stop/start)
+   c. Copy to <exe>.new, rename the old/new binary, exit(64); the service supervisor restarts it
    d. New binary boots, watcher arms again, loop closes
 ```
 
@@ -61,7 +61,7 @@ agents are published the same way.
 Pick a scope. Start with one canary host:
 
 ```pwsh
-kanade agent rollout 0.42.2 --pcs canary-01
+kanade agent rollout 0.42.2 --pc canary-01
 ```
 
 Watch via ping:
@@ -74,7 +74,7 @@ kanade ping canary-01     # agent_version should flip to 0.42.2
 If happy, widen:
 
 ```pwsh
-kanade agent rollout 0.42.2 --groups office --jitter 5m
+kanade agent rollout 0.42.2 --group office --jitter 5m
 # or fleet-wide
 kanade agent rollout 0.42.2 --global --jitter 30m
 ```
@@ -98,9 +98,9 @@ the new version within `jitter` + ~30s heartbeat cadence.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `kanade agent rollout` says "version not in OBJECT_AGENT_RELEASES" | Typo or wrong scope | Re-check with `kanade agent current` and `kanade jetstream object list agent_releases`. |
-| `kanade ping <host>` still shows the old version after several minutes | Agent didn't self-update — either the watcher's dead (pre-#226 agent) or the host can't reach the broker | Check `%ProgramData%\Kanade\log\agent.*.log` on the target. If self_update is silent (no "checking target_version" log lines), the agent is too old; bootstrap manually with `deploy-agent.ps1`. |
-| Agent flaps: starts, immediately exits with `exit_code: 1` | The new binary is bad on this host (config drift, missing dep, etc.). SCM's failure-actions restart it, it crashes again — observable in Event Viewer as a Service Control Manager error cluster | Roll back: `kanade agent rollout <prev-version> --pcs <host>`. The host will swap back at the next watcher tick. |
+| `kanade agent rollout` says "version not in OBJECT_AGENT_RELEASES" | Typo or wrong scope | Re-check with `kanade agent current` and `GET /api/agents/releases` (authenticated HTTP API). |
+| `kanade ping <host>` still shows the old version after several minutes | Agent didn't self-update — either the watcher's dead (pre-#226 agent) or the host can't reach the broker | Check `%ProgramData%\Kanade\logs\agent.*.log` on the target. If self_update is silent (no "checking target_version" log lines), the agent is too old; bootstrap manually with `deploy-agent.ps1`. |
+| Agent flaps: starts, immediately exits with `exit_code: 1` | The new binary is bad on this host (config drift, missing dep, etc.). SCM's failure-actions restart it, it crashes again — observable in Event Viewer as a Service Control Manager error cluster | Roll back: `kanade agent rollout <prev-version> --pc <host>`. This requires the agent to remain running long enough to process the target. If it cannot boot, repair locally using the previous binary; rollout cannot recover an agent that never reaches its watcher. |
 
 ## Why a separate bucket / scope?
 
