@@ -516,6 +516,15 @@ enum ProbeOutcome {
 }
 
 impl ProbeOutcome {
+    /// Stable diagnostic codes; never include a broker error or destination.
+    fn code(self) -> &'static str {
+        match self {
+            Self::Accepted => "nats_probe_accepted",
+            Self::Rejected => "nats_probe_rejected",
+            Self::Unreachable => "nats_probe_inconclusive",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             ProbeOutcome::Accepted => "accepted",
@@ -532,12 +541,23 @@ impl ProbeOutcome {
 #[derive(Default)]
 struct Live {
     decision: Mutex<Option<Choice>>,
+    /// Diagnostic state only, including inconclusive attempts. This must not
+    /// become credential-mode evidence in `decision`.
+    last_probe: Mutex<Option<ProbeOutcome>>,
     /// Consecutive authentication refusals: when the first one happened and
     /// how many there have been. Cleared by a successful connect.
     refusals: Mutex<Option<(std::time::Instant, usize)>>,
 }
 
 impl Live {
+    fn probe_changed(&self, outcome: ProbeOutcome) -> bool {
+        self.last_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(outcome)
+            != Some(outcome)
+    }
+
     /// Track the connection's events for [`Live::auth_failed`].
     fn observe(&self, ev: &async_nats::Event) {
         let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
@@ -787,6 +807,16 @@ where
     Fut: std::future::Future<Output = ProbeOutcome>,
 {
     let outcome = probe().await;
+    // Record before selection: rejection without a fallback and TLS/proxy/
+    // reachability failures return early, but still need a safe diagnostic.
+    // Only AuthorizationViolation is a rejection (see `probe_user`).
+    if live.probe_changed(outcome) {
+        info!(
+            role = role.as_str(),
+            code = outcome.code(),
+            "NATS credential probe state changed"
+        );
+    }
     let previous = live.get();
     let choice = select(outcome, previous, have_token).inspect_err(|_| {
         if outcome == ProbeOutcome::Rejected {
@@ -1863,6 +1893,33 @@ mod tests {
         assert!(select(Unreachable, None, true).is_err());
         assert!(select(Unreachable, Some(Token), true).is_err());
         assert!(select(Unreachable, Some(User), true).is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_probe_transitions_are_recorded_without_becoming_evidence() {
+        let live = Live::default();
+        for outcome in [
+            ProbeOutcome::Rejected,
+            ProbeOutcome::Unreachable,
+            ProbeOutcome::Rejected,
+        ] {
+            assert!(
+                choose(NatsRole::Cli, false, &live, || async { outcome })
+                    .await
+                    .is_err()
+            );
+            assert_eq!(*live.last_probe.lock().unwrap(), Some(outcome));
+            assert_eq!(live.get(), None);
+            // Repeated failures are quiet, but recovery and later regressions
+            // must each produce a transition even without credential fallback.
+            assert!(!live.probe_changed(outcome));
+        }
+        assert!(live.probe_changed(ProbeOutcome::Accepted));
+        assert!(!live.probe_changed(ProbeOutcome::Accepted));
+        assert!(live.probe_changed(ProbeOutcome::Unreachable));
+        assert_eq!(ProbeOutcome::Accepted.code(), "nats_probe_accepted");
+        assert_eq!(ProbeOutcome::Rejected.code(), "nats_probe_rejected");
+        assert_eq!(ProbeOutcome::Unreachable.code(), "nats_probe_inconclusive");
     }
 
     #[tokio::test]

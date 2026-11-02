@@ -66,6 +66,13 @@ authorization timeout. Client-side probe/connect timeouts are a suspected
 amplifier, still requiring separate investigation. The cost 8 results above
 are not a guarantee for the shipped 2 s timeout or for 200 clients.
 
+The probe logs state changes using fixed codes: `nats_probe_accepted`,
+`nats_probe_rejected` (broker authorization violation only), and
+`nats_probe_inconclusive` (including TLS, proxy, timeout and reachability
+failures). Inconclusive attempts do not count as credential refusals. These
+diagnostics contain no destination or broker error text, and acceptance alone
+does not establish a WebSocket connection's authenticated username.
+
 A collapse looks like `Authentication Timeout` in both client and broker logs,
 clients repeatedly retrying, and heartbeats absent for minutes after a broker
 restart. Do not interpret that as a successful switch merely because the
