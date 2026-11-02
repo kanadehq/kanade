@@ -217,10 +217,27 @@ impl super::system::LaunchLease for NativeLease<'_> {
         self.writer.take().unwrap().finish()?;
         #[cfg(target_os = "macos")]
         {
-            Ok(finish_sessions(self.sessions.get_mut()))
+            let activation = finish_sessions(self.sessions.get_mut());
+            // Consumed: Drop must not hand them to a later recovery lease.
+            self.sessions.get_mut().clear();
+            Ok(activation)
         }
         #[cfg(not(target_os = "macos"))]
         Ok(super::result::GuiActivation::NotLaunched)
+    }
+}
+#[cfg(target_os = "macos")]
+impl Drop for NativeLease<'_> {
+    /// Any coordination failure after a successful stop (post-stop recheck,
+    /// approval or evidence failures) keeps the authenticated, already-stopped
+    /// sessions for the recovery lease instead of silently losing them.
+    fn drop(&mut self) {
+        let sessions = std::mem::take(self.sessions.get_mut());
+        if !sessions.is_empty() {
+            if let Ok(mut carried) = self.system.carried.lock() {
+                carried.extend(sessions);
+            }
+        }
     }
 }
 impl super::system::NativeSystem {

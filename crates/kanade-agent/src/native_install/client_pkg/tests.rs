@@ -324,6 +324,7 @@ struct Fake {
     sessions: RefCell<Vec<super::lifecycle::simulation::Session>>,
     mutation_recorded: Cell<bool>,
     lease_safe: Cell<bool>,
+    carry_sessions: Cell<bool>,
     quiescent: Cell<bool>,
     crash: Cell<Option<Phase>>,
     bad_bom: Cell<bool>,
@@ -406,7 +407,9 @@ impl System for Fake {
             self.mutation_recorded.set(false);
         }
         *self.gate.borrow_mut() = Some(transaction.into());
-        if recovery {
+        // Real recovery keeps only sessions this process already stopped;
+        // a crash (default) loses every authenticated channel.
+        if recovery && !self.carry_sessions.get() {
             self.sessions.borrow_mut().clear();
         }
         self.lifecycle_events
@@ -558,6 +561,7 @@ impl Fx {
                 sessions: RefCell::new(vec![]),
                 mutation_recorded: Cell::new(false),
                 lease_safe: Cell::new(true),
+                carry_sessions: Cell::new(false),
                 quiescent: Cell::new(true),
                 crash: Cell::new(None),
                 bad_bom: Cell::new(false),
@@ -1483,4 +1487,19 @@ fn approval_refused_after_coordination_releases_launch_exclusion() {
     assert!(!f.sys.mutation_recorded.get());
     assert_eq!(f.sys.calls.get(), 0);
     assert!(f.sys.gate.borrow().is_none());
+}
+
+#[test]
+fn post_stop_recheck_failure_restores_stopped_eligible_sessions() {
+    use super::lifecycle::simulation::session;
+    let f = Fx::new();
+    f.run(&f.pkg("0.97.0")).unwrap();
+    let q = f.pkg("0.98.0");
+    f.sys.carry_sessions.set(true);
+    f.sys.lease_safe.set(false);
+    f.sys.sessions.borrow_mut().push(session(501, 9, 10));
+    assert!(f.run(&q).is_err());
+    assert!(f.sys.gate.borrow().is_none());
+    assert!(!f.sys.mutation_recorded.get());
+    assert_eq!(f.sys.sessions.borrow()[0].launches, 1);
 }
