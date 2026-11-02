@@ -30,6 +30,8 @@ const LOOK: Record<
   // On the broker, but the backend cannot prove what it authenticated as.
   // Grey — nothing to provision here; the gap is in the evidence.
   unproven: { variant: 'default', Icon: ShieldAlert },
+  pending: { variant: 'default', Icon: HelpCircle },
+  acceptanceUnproven: { variant: 'default', Icon: ShieldAlert },
   // Never correlated. NOT "on the old credential" — this host has said
   // nothing, and provisioning it would be answering a question nobody asked.
   unseen: { variant: 'default', Icon: HelpCircle },

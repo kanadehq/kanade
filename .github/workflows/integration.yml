@@ -137,6 +137,12 @@ jobs:
           KANADE_APP_ARTIFACT_PUBLICATION: backend-exclusive
         run: cargo test -p kanade-backend -- api::agent_releases api::app_artifacts api::exec::typed_gate_e2e --ignored
 
+      - name: Broker connection identity and WSS credential evidence
+        if: runner.os != 'Windows'
+        # The WSS fixture uses Python's standard-library TLS byte tunnel and
+        # an OpenSSL test certificate; no production credentials or endpoints are used.
+        run: cargo test --locked -p kanade-backend --bin kanade-backend projector::nats_conns::tests::live_connz_ -- --ignored
+
       - name: NATS auth (user / token fallback) integration tests
         run: cargo test -p kanade-shared --test nats_auth_live -- --ignored
 

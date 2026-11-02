@@ -77,7 +77,11 @@
     "noAuth": "no auth",
     "noAuthTitle": "The broker required no credential at all. Expected on a dev broker with no `authorization` block; anywhere else it means the broker is open to anyone who can reach it.",
     "unproven": "unproven",
-    "unprovenTitle": "On the broker, but the backend cannot prove what it was authenticated as — so the value is not recorded, in case it is the credential itself. Nothing to provision here; check the backend's own broker connection.",
+    "unprovenTitle": "The connection is visible, but its credential name is not proven. WebSocket listeners can have independent token, anonymous-user and cookie policies; the backend’s TCP connection or a successful credential probe cannot establish the identity of this connection. This does not mean authentication failed. Command signing is a separate check.",
+    "pending": "auth pending",
+    "pendingTitle": "The connection was observed before authentication acceptance, within the broker’s authentication deadline. Wait for a new observation. This is not a named identity or an authentication failure. Command signing is a separate check.",
+    "acceptanceUnproven": "acceptance unproven",
+    "acceptanceUnprovenTitle": "Monitoring cannot establish whether this connection completed authentication. A WebSocket listener may have independent authentication settings; an expired authentication deadline or old traffic does not prove acceptance. Check listener-specific evidence. This does not establish authentication failure. Command signing is a separate check.",
     "unseen": "not seen",
     "unseenTitle": "No live connection has been correlated to this host: it has not been seen since the backend started polling, or its agent predates the pc_id in the connection name and cannot be joined on. Unknown — NOT 'still on the old credential'.",
     "since": "since {{at}}"

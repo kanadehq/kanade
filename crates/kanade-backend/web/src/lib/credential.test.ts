@@ -64,6 +64,11 @@ describe('credentialState', () => {
     expect(credentialState(row({ nats_user: 'unknown' }))).not.toBe(credentialState(row()));
   });
 
+  test('acceptance uncertainty never becomes a named credential', () => {
+    expect(credentialState(row({ nats_user: 'auth-pending' }))).toBe('pending');
+    expect(credentialState(row({ nats_user: 'auth-unproven' }))).toBe('acceptanceUnproven');
+  });
+
   test('an empty string is not a credential', () => {
     // No classifier produces it, but a hand-edited row could hold one, and a
     // blank badge claiming a state is worse than saying nothing is known.
@@ -75,7 +80,7 @@ describe('translations', () => {
   // A missing key does not throw — i18next renders the key itself, so the
   // cell would read `credential.unproven` and look like a state rather than a
   // bug. Cheap to pin, and the badge asks for exactly these names.
-  const STATES: CredentialState[] = ['named', 'shared', 'noAuth', 'unproven', 'unseen'];
+  const STATES: CredentialState[] = ['named', 'shared', 'noAuth', 'unproven', 'pending', 'acceptanceUnproven', 'unseen'];
 
   for (const [lang, bundle] of [
     ['en', en],
@@ -104,7 +109,7 @@ describe('credentialUser', () => {
   });
 
   test('never echoes a sentinel — the badge already says it', () => {
-    for (const u of ['shared-token', 'no-auth', 'unknown']) {
+    for (const u of ['shared-token', 'no-auth', 'unknown', 'auth-pending', 'auth-unproven']) {
       expect(credentialUser(row({ nats_user: u }))).toBeNull();
     }
     expect(credentialUser(row())).toBeNull();

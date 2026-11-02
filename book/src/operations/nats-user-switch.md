@@ -404,6 +404,46 @@ exit and the service manager's restart. Persistent wrong credentials log
 logs `NATS connection task has terminated`. A live, silent process after the
 deadline is a defect requiring investigation, not an expected switch state.
 
+## Credential badges on WebSocket connections
+
+The Agents table distinguishes a named identity from `unknown` (the
+credential name is unproven), `auth-pending` (observed before authentication
+acceptance within the broker deadline), and `auth-unproven` (acceptance itself
+cannot be established). None of these uncertainty states is an authentication
+failure, and none changes command-signing status. The acceptance sentinels
+must never appear as green named-user badges.
+
+A successful user/password handshake through the actual WSS reverse-proxy URL
+establishes acceptance of that probe. It does not prove another connection's
+identity or the complete listener policy. WebSocket token, `no_auth_user` and
+cookie overrides are independent of the backend's TCP connection. The badge
+therefore remains unproven when listener-specific identity evidence is absent;
+do not reinstall an agent, rotate credentials or change broker settings just
+to change that badge.
+
+Even validating the effective configuration and matching its digest is
+insufficient to treat arbitrary `authorized_user` values as authenticated
+identities. On the tested broker, a users-authenticated WebSocket client can
+also supply an ignored `nkey` CONNECT field. `/connz` reports that field in
+preference to the username actually checked, including another configured
+username (see the upstream
+[`getRawAuthUser`](https://github.com/nats-io/nats-server/blob/v2.14.1/server/client.go)
+and [user/password validation](https://github.com/nats-io/nats-server/blob/v2.14.1/server/auth.go)). The real-broker WSS regression test authenticates as one user while
+reporting another, then checks that SQLite, credential health and evidence
+history retain only the safe `unknown` classification. Negative handshakes
+are checked for broker authorization errors through the same TLS proxy; TLS
+verification uses a disposable trusted certificate and is never disabled.
+
+An authoritative naming path needs the broker's **validated identity and
+acceptance state**, independently of CONNECT option reporting, as well as a
+verified effective listener policy. It must bind observations to broker
+identity/start, reload epoch, transport, cid and connection start, expire
+missing/stale evidence and reject credential/name collisions before a name
+can leave memory. Neither a successful probe, a configured username allowlist,
+a connection name nor an expected-mode setting provides that metadata. This
+implementation deliberately keeps the conservative WebSocket fallback; a
+named WebSocket proof path remains pending an authoritative metadata source.
+
 ## Telling a locked-out host from an offline one
 
 From the backend alone you cannot (the script says so every time). Use

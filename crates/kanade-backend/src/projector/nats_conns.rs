@@ -338,6 +338,10 @@ fn classify_connection(c: &ConnInfo, probe: &CredentialProbe, ev: Evidence) -> S
     }
     // A WS listener may use a different token even while TCP uses users.
     // Never extend TCP's proof that a value is a username to another listener.
+    // Nor does a WS users-mode config/username allowlist establish the
+    // authenticated user: getRawAuthUser prefers the client-supplied nkey
+    // option even when the broker validated a different username/password.
+    // The live WSS test exercises that with successful authentication.
     let ev = if c.transport.as_deref() != Some("nats") {
         Evidence::Unproven
     } else {
@@ -1976,6 +1980,112 @@ mod tests {
             server.wait().await.unwrap();
         }).await.expect("live websocket test deadline");
     }
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server, Python, OpenSSL and loopback sockets"]
+    async fn live_connz_wss_users_acceptance_does_not_prove_reported_identity() {
+        use tokio::io::AsyncBufReadExt;
+        tokio::time::timeout(Duration::from_secs(40), async {
+            let ws_port = portpicker::pick_unused_port().unwrap();
+            let config = format!(
+                "authorization {{ users: [{{user: agent, password: test-password}}, {{user: backend, password: other-password}}] }}\nwebsocket {{ port: {ws_port}, no_tls: true }}"
+            );
+            let (mut server, dir, port, base) = disposable_broker(&config).await;
+            let cert = dir.path().join("cert.pem");
+            let key = dir.path().join("key.pem");
+            let cert_config = dir.path().join("cert.cnf");
+            std::fs::write(&cert_config,
+                "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n"
+            ).unwrap();
+            assert!(tokio::process::Command::new("openssl")
+                .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config"])
+                .arg(&cert_config).arg("-keyout").arg(&key).arg("-out").arg(&cert)
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .status().await.unwrap().success());
+            let mut proxy = tokio::process::Command::new("python3")
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/ci/nats-wss-proxy.py"))
+                .arg(ws_port.to_string()).arg(&cert).arg(&key)
+                .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
+                .kill_on_drop(true).spawn().unwrap();
+            let mut output = tokio::io::BufReader::new(proxy.stdout.take().unwrap());
+            let mut line = String::new();
+            output.read_line(&mut line).await.unwrap();
+            let proxy_port: u16 = line.trim().parse().unwrap();
+            let url = format!("wss://127.0.0.1:{proxy_port}");
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            // The disposable certificate must not work without explicit trust.
+            assert!(async_nats::ConnectOptions::new()
+                .user_and_password("agent".into(), "test-password".into())
+                .connect(&url).await.is_err());
+            // These are actual broker authentication errors through the TLS
+            // proxy, not HTTP errors or success inferred from TCP policy.
+            for opts in [
+                async_nats::ConnectOptions::new(),
+                async_nats::ConnectOptions::new().user_and_password("agent".into(), "wrong-password".into()),
+                async_nats::ConnectOptions::new().token("test-token".into()),
+            ] {
+                let err = opts.add_root_certificates(cert.clone()).connect(&url).await.unwrap_err();
+                assert_eq!(err.kind(), async_nats::ConnectErrorKind::AuthorizationViolation);
+            }
+            let tcp = async_nats::ConnectOptions::new()
+                .user_and_password("agent".into(), "test-password".into())
+                .connect(format!("nats://127.0.0.1:{port}")).await.unwrap();
+            tcp.flush().await.unwrap();
+            let pool = pool_with(&["PC001"]).await;
+            // Even a configured username allowlist would accept "backend".
+            // Yet this client authenticates with the agent password: the
+            // ignored nkey CONNECT field controls getRawAuthUser/connz.
+            for reported in [None, Some("backend"), Some("credential-canary-not-a-username")] {
+                let injected = reported.map(str::to_string);
+                let ws = async_nats::ConnectOptions::with_auth_callback(move |_| {
+                    let injected = injected.clone();
+                    async move {
+                        let mut auth = async_nats::Auth::new();
+                        auth.username = Some("agent".into());
+                        auth.password = Some("test-password".into());
+                        auth.nkey = injected;
+                        Ok(auth)
+                    }
+                })
+                .name("kanade-agent/PC001").add_root_certificates(cert.clone())
+                .connect(&url).await.unwrap();
+                ws.flush().await.unwrap();
+                let cid = ws.server_info().client_id;
+                let conns = fetch_all(&http, &base).await.unwrap();
+                let c = conns.iter().find(|c| c.cid == cid).unwrap();
+                assert_eq!(c.transport.as_deref(), Some("websocket"));
+                assert_eq!(c.authorized_user.as_deref(), Some(reported.unwrap_or("agent")));
+                assert_eq!(classify_connection(c, &probe_holding(None), Evidence::UsersMode), LABEL_UNKNOWN);
+                let tcp_conn = conns.iter().find(|c| c.cid == tcp.server_info().client_id).unwrap();
+                assert_eq!(classify_connection(tcp_conn, &probe_holding(None), Evidence::UsersMode), "agent");
+                let (labels, _) = correlate(&conns, &probe_holding(None), Evidence::UsersMode);
+                apply(&pool, &labels).await.unwrap();
+                assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+                let settings = kanade_shared::wire::ServerSettings {
+                    nats_auth_mode: Some(kanade_shared::wire::NatsAuthMode::Users),
+                    ..Default::default()
+                };
+                let observed = observe(&conns, &probe_holding(None), Evidence::UsersMode);
+                nats_auth_audit::run_poll(&pool, Ok(settings.clone()), &nats_auth_audit::Poll {
+                    observed: &observed, registered: &HashSet::from(["PC001".into()]),
+                    complete: true, uncertainty_reasons: None,
+                }, Utc::now()).await.unwrap();
+                let health = nats_auth_audit::health_block(&pool, Some(&settings), Utc::now()).await;
+                assert!(health.findings.iter().any(|f| f.kind == "credential_unnameable"));
+                let history = super::super::nats_auth_evidence::history(&pool, None).await.unwrap();
+                let safe = serde_json::to_string(&(health, history)).unwrap();
+                for secret in ["credential-canary-not-a-username", "test-password", "other-password", "127.0.0.1"] {
+                    assert!(!safe.contains(secret));
+                }
+                drop(ws);
+            }
+            drop(tcp);
+            proxy.kill().await.unwrap();
+            proxy.wait().await.unwrap();
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+        }).await.expect("live WSS identity test deadline");
+    }
+
     #[tokio::test]
     #[ignore = "requires disposable nats-server and loopback sockets"]
     async fn live_connz_websocket_no_auth_user_has_a_broker_assigned_identity() {

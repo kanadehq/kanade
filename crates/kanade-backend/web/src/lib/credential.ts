@@ -40,6 +40,10 @@ export type CredentialState =
    *  (see `Evidence` in the projector). Nothing to provision here; the gap is
    *  in what can be proven, not in what the host holds. */
   | 'unproven'
+  /** Observed before CONNECT, within the broker's authentication deadline. */
+  | 'pending'
+  /** The monitoring observation does not establish connection acceptance. */
+  | 'acceptanceUnproven'
   /** Authenticated as a named NATS user. The end state of the migration. */
   | 'named';
 
@@ -47,7 +51,7 @@ export type CredentialState =
  * Classify one row.
  *
  * Deliberately total over the string space: any value that is not one of the
- * three sentinels IS a username, because the backend only ever stores a
+ * reserved sentinels IS a username, because the backend only ever stores a
  * verbatim value when it has proven the broker deals in usernames. So the
  * default arm is `named` rather than a fallback state — an unrecognised label
  * here would mean the projector changed, not that the host is in trouble.
@@ -58,6 +62,8 @@ export function credentialState(a: AgentRow): CredentialState {
   if (u === SHARED) return 'shared';
   if (u === NO_AUTH) return 'noAuth';
   if (u === UNPROVEN) return 'unproven';
+  if (u === 'auth-pending') return 'pending';
+  if (u === 'auth-unproven') return 'acceptanceUnproven';
   return 'named';
 }
 
