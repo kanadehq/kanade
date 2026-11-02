@@ -170,12 +170,12 @@ System Settings → Privacy & Security → Full Disk Access → `+` → add
 
 ### Kata template integration
 
-- `.github/workflows/release.yml` is kata-managed. The post-build `sign` and
-  post-package `verify-dist` hooks calling `scripts/ci/release-post-build.sh`
-  must also be preserved in upstream templates (`yukimemi/pj-rust-workspace`
-  and `yukimemi/pj-rust-cli`) so `kata apply` cannot overwrite or remove them.
-- Prepared upstream patches and their exact source blob IDs are recorded in
-  `scripts/ci/kata-signing/README.md`. These patches are pending upstream
-  application, not evidence of completed integration. Do not mark the repair
-  complete until the upstream changes are reviewed, applied, and the workspace
-  source revision in `.kata/applied.toml` is updated by `kata apply`.
+- `.github/workflows/release.yml` is kata-managed. The missing-hook guard, the
+  post-build `sign` hook and the post-package `verify-dist` hook calling
+  `scripts/ci/release-post-build.sh` are part of the upstream release templates
+  (`yukimemi/pj-rust-workspace` and `yukimemi/pj-rust-cli`), and the workspace
+  revision recorded in `.kata/applied.toml` includes them, so `kata apply`
+  regenerates them instead of removing them.
+- `crates/kanade-shared/tests/check_release_signing.rs` still asserts the guard
+  and the sign → package → verify → upload order, so a future template change
+  that drops the integration fails CI.
