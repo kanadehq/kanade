@@ -638,6 +638,9 @@ impl Installer<'_> {
             self.absent(&ctx)?;
             None
         };
+        // Reject non-participating generations before any Client stop or
+        // journalled mutation; nothing durable exists yet to freeze.
+        self.system.require_participant(req.pkg)?;
         let mut j = Journal {
             schema: 1,
             phase: Phase::Prepared,

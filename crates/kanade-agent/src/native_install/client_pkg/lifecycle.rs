@@ -265,8 +265,10 @@ impl super::system::NativeSystem {
         #[cfg(target_os = "macos")]
         let sessions = if recovery {
             // Restart never rediscovers restart intent from an arbitrary PID.
-            // Lost authenticated helper channels mean no automatic GUI launch.
-            Vec::new()
+            // Only sessions this process already stopped and still holds an
+            // authenticated channel for are carried over; after a crash the
+            // channels are gone and no automatic GUI launch happens.
+            std::mem::take(&mut *self.carried.lock().unwrap())
         } else {
             discover(&self.executable())?
         };
@@ -279,9 +281,28 @@ impl super::system::NativeSystem {
             sessions: std::cell::RefCell::new(sessions),
         };
         #[cfg(target_os = "macos")]
-        for session in lease.sessions.borrow_mut().iter_mut() {
-            let gui = session.before.gui;
-            stop(session, gui)?;
+        if !recovery {
+            let pending: Vec<_> = lease.sessions.borrow_mut().drain(..).collect();
+            let mut stopped = Vec::new();
+            let mut failure = None;
+            for mut session in pending {
+                if failure.is_some() {
+                    // Never stopped: its GUI keeps running; dropping the
+                    // channel only disconnects the helper.
+                    continue;
+                }
+                let gui = session.before.gui;
+                match stop(&mut session, gui) {
+                    Ok(()) => stopped.push(session),
+                    Err(e) => failure = Some(e),
+                }
+            }
+            if let Some(e) = failure {
+                // Keep already-stopped sessions for the recovery lease.
+                self.carried.lock().unwrap().extend(stopped);
+                return Err(e);
+            }
+            *lease.sessions.borrow_mut() = stopped;
         }
         if !recovery {
             super::system::LaunchLease::recheck(&lease)?;
@@ -291,7 +312,7 @@ impl super::system::NativeSystem {
 }
 
 #[cfg(target_os = "macos")]
-struct Session {
+pub(super) struct Session {
     stream: std::os::unix::net::UnixStream,
     before: Presence,
     sequence: u64,

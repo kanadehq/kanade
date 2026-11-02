@@ -114,6 +114,10 @@ pub trait System {
     fn resume(&self, _transaction: &str) -> Result<Option<Box<dyn LaunchLease + '_>>> {
         Ok(None)
     }
+    /// Checked before any Client stop or mutation intent is recorded.
+    fn require_participant(&self, _pkg: &[u8]) -> Result<()> {
+        Ok(())
+    }
     fn install(&self, pkg: &Path, lease: &dyn LaunchLease) -> Result<InstallerExit>;
     /// Restart recovery must establish OS transaction quiescence independently
     /// of the former installer's PID. Native support is deliberately absent.
@@ -128,6 +132,11 @@ pub trait System {
 /// remote typed dispatch and deploy CLI remain disabled. Tests use image roots.
 pub struct NativeSystem {
     pub(super) target: PathBuf,
+    /// Authenticated sessions whose GUI was already stopped when a later stop
+    /// failed. The recovery lease adopts them so they are restored (or
+    /// released) after the gate is verifiably reopened.
+    #[cfg(target_os = "macos")]
+    pub(super) carried: std::sync::Mutex<Vec<super::lifecycle::Session>>,
 }
 impl NativeSystem {
     /// Local authenticated executor boundary only; no CLI/remote route calls
@@ -140,6 +149,8 @@ impl NativeSystem {
         )?;
         Ok(Self {
             target: PathBuf::from("/"),
+            #[cfg(target_os = "macos")]
+            carried: Default::default(),
         })
     }
     pub fn for_image(target: PathBuf) -> Result<Self> {
@@ -149,7 +160,11 @@ impl NativeSystem {
             root.starts_with(&temp) && root != temp && root == target,
             "native adapter requires canonical temporary image root",
         )?;
-        Ok(Self { target })
+        Ok(Self {
+            target,
+            #[cfg(target_os = "macos")]
+            carried: Default::default(),
+        })
     }
 }
 
@@ -358,6 +373,13 @@ impl System for NativeSystem {
     }
     fn coordinate(&self, transaction: &str, recovery: bool) -> Result<Box<dyn LaunchLease + '_>> {
         self.coordinate_native(transaction, recovery)
+    }
+    fn require_participant(&self, pkg: &[u8]) -> Result<()> {
+        let parts = structure::xar(pkg)?;
+        let payload = structure::payload(&parts[&format!("{}/Payload", structure::PART)])?;
+        structure::lifecycle_participant(
+            &payload[&format!("{}/Contents/Info.plist", structure::APP)].data,
+        )
     }
     fn resume(&self, transaction: &str) -> Result<Option<Box<dyn LaunchLease + '_>>> {
         use kanade_shared::client_lifecycle::gate::Gate;
