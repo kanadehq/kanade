@@ -6,6 +6,7 @@ NATS over loopback, like a TLS-terminating reverse proxy. No authentication
 policy is implemented in the proxy. The client must trust the supplied CA.
 """
 
+import os
 import select
 import socket
 import socketserver
@@ -19,6 +20,20 @@ class Tunnel(socketserver.BaseRequestHandler):
             with CONTEXT.wrap_socket(self.request, server_side=True) as downstream:
                 with socket.create_connection(("127.0.0.1", TARGET), timeout=5) as upstream:
                     upstream.settimeout(None)
+                    cookie = os.environ.get("KANADE_TEST_WS_COOKIE")
+                    if cookie:
+                        # Fixture-only cookie injection exercises the broker's
+                        # real WebSocket cookie authorization, without a client
+                        # library dependency. Never log the header or payload.
+                        request = bytearray()
+                        while b"\r\n\r\n" not in request:
+                            chunk = downstream.recv(4096)
+                            if not chunk or len(request) + len(chunk) > 16384:
+                                return
+                            request.extend(chunk)
+                        headers, remainder = request.split(b"\r\n\r\n", 1)
+                        upstream.sendall(headers + b"\r\nCookie: " + cookie.encode("ascii")
+                                         + b"\r\n\r\n" + remainder)
                     while True:
                         ready, _, _ = select.select(
                             [downstream, upstream], [], [],

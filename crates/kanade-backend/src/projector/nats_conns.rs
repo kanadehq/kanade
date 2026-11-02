@@ -1980,37 +1980,71 @@ mod tests {
             server.wait().await.unwrap();
         }).await.expect("live websocket test deadline");
     }
+    async fn wss_proxy(
+        ws_port: u16,
+        dir: &std::path::Path,
+        cookie: Option<&str>,
+    ) -> (tokio::process::Child, std::path::PathBuf, String) {
+        use tokio::io::AsyncBufReadExt;
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        let cert_config = dir.join("cert.cnf");
+        std::fs::write(&cert_config,
+            "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n"
+        ).unwrap();
+        assert!(
+            tokio::process::Command::new("openssl")
+                .args([
+                    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config"
+                ])
+                .arg(&cert_config)
+                .arg("-keyout")
+                .arg(&key)
+                .arg("-out")
+                .arg(&cert)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+        let mut command = tokio::process::Command::new("python3");
+        command.env_remove("KANADE_TEST_WS_COOKIE");
+        if let Some(cookie) = cookie {
+            command.env("KANADE_TEST_WS_COOKIE", cookie);
+        }
+        let mut proxy = command
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/ci/nats-wss-proxy.py"
+            ))
+            .arg(ws_port.to_string())
+            .arg(&cert)
+            .arg(&key)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut output = tokio::io::BufReader::new(proxy.stdout.take().unwrap());
+        let mut line = String::new();
+        output.read_line(&mut line).await.unwrap();
+        let proxy_port: u16 = line.trim().parse().unwrap();
+        let url = format!("wss://127.0.0.1:{proxy_port}");
+        (proxy, cert, url)
+    }
+
     #[tokio::test]
     #[ignore = "requires disposable nats-server, Python, OpenSSL and loopback sockets"]
     async fn live_connz_wss_users_acceptance_does_not_prove_reported_identity() {
-        use tokio::io::AsyncBufReadExt;
         tokio::time::timeout(Duration::from_secs(40), async {
             let ws_port = portpicker::pick_unused_port().unwrap();
             let config = format!(
                 "authorization {{ users: [{{user: agent, password: test-password}}, {{user: backend, password: other-password}}] }}\nwebsocket {{ port: {ws_port}, no_tls: true }}"
             );
             let (mut server, dir, port, base) = disposable_broker(&config).await;
-            let cert = dir.path().join("cert.pem");
-            let key = dir.path().join("key.pem");
-            let cert_config = dir.path().join("cert.cnf");
-            std::fs::write(&cert_config,
-                "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n"
-            ).unwrap();
-            assert!(tokio::process::Command::new("openssl")
-                .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config"])
-                .arg(&cert_config).arg("-keyout").arg(&key).arg("-out").arg(&cert)
-                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-                .status().await.unwrap().success());
-            let mut proxy = tokio::process::Command::new("python3")
-                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/ci/nats-wss-proxy.py"))
-                .arg(ws_port.to_string()).arg(&cert).arg(&key)
-                .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
-                .kill_on_drop(true).spawn().unwrap();
-            let mut output = tokio::io::BufReader::new(proxy.stdout.take().unwrap());
-            let mut line = String::new();
-            output.read_line(&mut line).await.unwrap();
-            let proxy_port: u16 = line.trim().parse().unwrap();
-            let url = format!("wss://127.0.0.1:{proxy_port}");
+            let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), None).await;
             let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
             // The disposable certificate must not work without explicit trust.
             assert!(async_nats::ConnectOptions::new()
@@ -2084,6 +2118,239 @@ mod tests {
             server.kill().await.unwrap();
             server.wait().await.unwrap();
         }).await.expect("live WSS identity test deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server, Python, OpenSSL and loopback sockets"]
+    async fn live_connz_wss_anonymous_and_cookie_overrides_do_not_prove_a_name() {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            let users = "authorization { users: [{user: guest, password: cookie-password}] }";
+            for (auth, ws_auth, cookie, expected) in [
+                (users, "no_auth_user: guest", None, LABEL_UNKNOWN),
+                (
+                    users,
+                    "user_cookie: fixture_user, pass_cookie: fixture_pass",
+                    Some("fixture_user=guest; fixture_pass=cookie-password"),
+                    LABEL_UNKNOWN,
+                ),
+                (
+                    "",
+                    "authorization { token: cookie-token }, token_cookie: fixture_token",
+                    Some("fixture_token=cookie-token"),
+                    LABEL_SHARED_TOKEN,
+                ),
+            ] {
+                let ws_port = portpicker::pick_unused_port().unwrap();
+                let config =
+                    format!("{auth}\nwebsocket {{ port: {ws_port}, no_tls: true, {ws_auth} }}");
+                let (mut server, dir, _port, base) = disposable_broker(&config).await;
+                if cookie.is_some() {
+                    // Without the cookie, the same TLS/WebSocket listener
+                    // must reject CONNECT with a broker authorization error.
+                    let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), None).await;
+                    let err = async_nats::ConnectOptions::new()
+                        .add_root_certificates(cert)
+                        .connect(&url)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        err.kind(),
+                        async_nats::ConnectErrorKind::AuthorizationViolation
+                    );
+                    proxy.kill().await.unwrap();
+                    proxy.wait().await.unwrap();
+                }
+                let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), cookie).await;
+                let client = async_nats::ConnectOptions::new()
+                    .name("kanade-agent/PC001")
+                    .add_root_certificates(cert)
+                    .connect(&url)
+                    .await
+                    .unwrap();
+                let sub = client.subscribe("audit.test").await.unwrap();
+                client.flush().await.unwrap();
+                let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+                let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+                let c = conns
+                    .iter()
+                    .find(|c| c.cid == client.server_info().client_id)
+                    .unwrap();
+                assert_eq!(c.transport.as_deref(), Some("websocket"));
+                assert!(c.subscriptions.is_some_and(|n| n > 0));
+                assert_eq!(
+                    classify_connection(c, &probe_holding(None), Evidence::UsersMode),
+                    expected
+                );
+                let pool = pool_with(&["PC001"]).await;
+                let (labels, _) = correlate(&conns, &probe_holding(None), Evidence::UsersMode);
+                apply(&pool, &labels).await.unwrap();
+                assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(expected));
+                let settings = kanade_shared::wire::ServerSettings {
+                    nats_auth_mode: Some(kanade_shared::wire::NatsAuthMode::Users),
+                    ..Default::default()
+                };
+                let observed = observe(&conns, &probe_holding(None), Evidence::UsersMode);
+                nats_auth_audit::run_poll(
+                    &pool,
+                    Ok(settings.clone()),
+                    &nats_auth_audit::Poll {
+                        observed: &observed,
+                        registered: &HashSet::from(["PC001".into()]),
+                        complete,
+                        uncertainty_reasons: None,
+                    },
+                    Utc::now(),
+                )
+                .await
+                .unwrap();
+                let health =
+                    nats_auth_audit::health_block(&pool, Some(&settings), Utc::now()).await;
+                let history = super::super::nats_auth_evidence::history(&pool, None)
+                    .await
+                    .unwrap();
+                let safe = serde_json::to_string(&(health, history)).unwrap();
+                for forbidden in [
+                    "cookie-password",
+                    "cookie-token",
+                    "fixture_user",
+                    "fixture_pass",
+                    "fixture_token",
+                    "127.0.0.1",
+                ] {
+                    assert!(!safe.contains(forbidden));
+                }
+                drop(sub);
+                drop(client);
+                proxy.kill().await.unwrap();
+                proxy.wait().await.unwrap();
+                if let Some(cookie) = cookie {
+                    let invalid = cookie
+                        .replace("cookie-password", "wrong-password")
+                        .replace("cookie-token", "wrong-token");
+                    let (mut bad_proxy, cert, url) =
+                        wss_proxy(ws_port, dir.path(), Some(&invalid)).await;
+                    let err = async_nats::ConnectOptions::new()
+                        .add_root_certificates(cert)
+                        .connect(&url)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        err.kind(),
+                        async_nats::ConnectErrorKind::AuthorizationViolation
+                    );
+                    bad_proxy.kill().await.unwrap();
+                    bad_proxy.wait().await.unwrap();
+                }
+                server.kill().await.unwrap();
+                server.wait().await.unwrap();
+            }
+        })
+        .await
+        .expect("live WSS override deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server, Python, OpenSSL and loopback sockets"]
+    async fn live_connz_wss_reload_restart_and_expiry_do_not_reuse_identity_evidence() {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            let ws_port = portpicker::pick_unused_port().unwrap();
+            let config = format!("authorization {{ users: [{{user: agent, password: first-password}}] }}\nwebsocket {{ port: {ws_port}, no_tls: true }}");
+            let (mut server, dir, _port, base) = disposable_broker(&config).await;
+            let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), None).await;
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            let opts = |password: &str| async_nats::ConnectOptions::new()
+                .user_and_password("agent".into(), password.into())
+                .name("kanade-agent/PC001").max_reconnects(1)
+                .add_root_certificates(cert.clone());
+            let first = opts("first-password").connect(&url).await.unwrap();
+            first.flush().await.unwrap();
+            let first_cid = first.server_info().client_id;
+            let (_, _, before) = fetch_walk(&http, &base).await.unwrap();
+            let config_path = dir.path().join("nats.conf");
+            let text = std::fs::read_to_string(&config_path).unwrap();
+            std::fs::write(&config_path, text.replace("first-password", "second-password")).unwrap();
+            assert!(tokio::process::Command::new("nats-server")
+                .arg("--signal").arg(format!("reload={}", server.id().unwrap()))
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .status().await.unwrap().success());
+            let mut reloaded = None;
+            for _ in 0..100 {
+                let after: Varz = fetch_json(&http, &format!("{base}/varz")).await.unwrap();
+                if after.config_load_time > before.config_load_time {
+                    reloaded = Some(after);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let after = reloaded.expect("broker reload observed");
+            assert!(!before.same_epoch(&after));
+            assert_eq!(before.server_id, after.server_id);
+            let err = opts("first-password").connect(&url).await.unwrap_err();
+            assert_eq!(err.kind(), async_nats::ConnectErrorKind::AuthorizationViolation);
+            let second = opts("second-password").connect(&url).await.unwrap();
+            second.flush().await.unwrap();
+            let second_cid = second.server_info().client_id;
+            assert_ne!(first_cid, second_cid);
+            let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+            assert!(!conns.iter().any(|c| c.cid == first_cid));
+            let current = conns.iter().find(|c| c.cid == second_cid).unwrap();
+            assert_eq!(classify_connection(current, &probe_holding(None), Evidence::UsersMode), LABEL_UNKNOWN);
+            let pool = pool_with(&["PC001"]).await;
+            let settings = kanade_shared::wire::ServerSettings {
+                nats_auth_mode: Some(kanade_shared::wire::NatsAuthMode::Users),
+                ..Default::default()
+            };
+            let observed = observe(&conns, &probe_holding(None), Evidence::UsersMode);
+            let now = Utc::now();
+            nats_auth_audit::run_poll(&pool, Ok(settings.clone()), &nats_auth_audit::Poll {
+                observed: &observed, registered: &HashSet::from(["PC001".into()]),
+                complete, uncertainty_reasons: None,
+            }, now).await.unwrap();
+            let stale = nats_auth_audit::health_block(&pool, Some(&settings), now + chrono::Duration::minutes(4)).await;
+            assert_eq!(stale.poll_status, "stale");
+            assert!(stale.uncertainty_reasons.is_none());
+            drop(first);
+            drop(second);
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+            server = tokio::process::Command::new("nats-server").arg("-c").arg(&config_path)
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .kill_on_drop(true).spawn().unwrap();
+            let mut restarted = None;
+            for _ in 0..100 {
+                if let Ok(v) = fetch_json::<Varz>(&http, &format!("{base}/varz")).await {
+                    restarted = Some(v);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let restart = restarted.expect("restarted broker ready");
+            assert_ne!(after.server_id, restart.server_id);
+            assert_ne!(after.start, restart.start);
+            assert!(!after.same_epoch(&restart));
+            let third = opts("second-password").connect(&url).await.unwrap();
+            third.flush().await.unwrap();
+            let conns = fetch_all(&http, &base).await.unwrap();
+            let current = conns.iter().find(|c| c.cid == third.server_info().client_id).unwrap();
+            // A CID may be reused after restart. A stale server id cannot
+            // establish evidence even if the numeric id happens to match.
+            assert_eq!(monitor_evidence(&CredentialProbe::from_user("agent"), true,
+                &after.server_id, current.cid, &restart, &conns), Evidence::Unproven);
+            assert_eq!(classify_connection(current, &probe_holding(None), Evidence::UsersMode), LABEL_UNKNOWN);
+            let (labels, _) = correlate(&conns, &probe_holding(None), Evidence::UsersMode);
+            apply(&pool, &labels).await.unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+            let history = super::super::nats_auth_evidence::history(&pool, None).await.unwrap();
+            let safe = serde_json::to_string(&(stale, history)).unwrap();
+            for forbidden in ["first-password", "second-password", "127.0.0.1"] {
+                assert!(!safe.contains(forbidden));
+            }
+            drop(third);
+            proxy.kill().await.unwrap();
+            proxy.wait().await.unwrap();
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+        }).await.expect("live WSS lifecycle deadline");
     }
 
     #[tokio::test]

@@ -441,6 +441,15 @@ history retain only the safe `unknown` classification. Negative handshakes
 are checked for broker authorization errors through the same TLS proxy; TLS
 verification uses a disposable trusted certificate and is never disabled.
 
+The WSS override regression also exercises anonymous `no_auth_user`, the
+broker's `user_cookie`/`pass_cookie` and `token_cookie` paths, and broker
+rejection of missing or incorrect cookies. The WSS lifecycle regression
+changes a password with a real broker reload, rejects the old password,
+checks the replacement connection id, and restarts the broker behind the
+same proxy. Old broker identities and expired credential-health observations
+remain unusable as identity evidence. These cases run in the existing
+integration CI job alongside the other `live_connz_` tests.
+
 An authoritative naming path needs the broker's **validated identity and
 acceptance state**, independently of CONNECT option reporting, as well as a
 verified effective listener policy. It must bind observations to broker
