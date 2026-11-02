@@ -54,23 +54,46 @@ Japanese` step.
 
 ### Verifying locally
 
+Install the pinned tools below, then build both languages with the same
+site paths as CI (leave `MDBOOK_BOOK__LANGUAGE` unset for English):
+
 ```sh
 cd book
-MDBOOK_BOOK__LANGUAGE=ja mdbook build -d build/ja
-# Then open book/build/ja/index.html in a browser.
+MDBOOK_OUTPUT__HTML__SITE_URL=/kanade/en/ mdbook build -d build/en
+MDBOOK_BOOK__LANGUAGE=ja MDBOOK_OUTPUT__HTML__SITE_URL=/kanade/ja/ \
+  mdbook build -d build/ja
 ```
+
+Check `book/build/en/index.html` and `book/build/ja/index.html`: the
+Japanese page should have `lang="ja"` and show existing `ja.po`
+translations such as **はじめに** and **クイックスタート**. Serve the
+output under `/kanade/` when checking the CI site paths in a browser.
 
 `MDBOOK_BOOK__LANGUAGE` not set → English source renders directly,
 no .po consulted.
 
 ## Tooling
 
-- [`mdbook-i18n-helpers`](https://github.com/google/mdbook-i18n-helpers)
-  — provides `mdbook-gettext` (preprocessor) and `mdbook-xgettext`
-  (extractor). Install via:
+- [`mdBook`](https://github.com/rust-lang/mdBook) **0.4.40** — match
+  `MDBOOK_VERSION` in `.github/workflows/docs.yml`:
   ```sh
-  cargo install mdbook-i18n-helpers --locked
+  cargo install mdbook --version 0.4.40 --locked
   ```
+- [`mdbook-i18n-helpers`](https://github.com/google/mdbook-i18n-helpers)
+  **0.3.6** — match `MDBOOK_I18N_HELPERS_VERSION` in the same workflow.
+  Provides `mdbook-gettext` (preprocessor) and `mdbook-xgettext`
+  (extractor). Install with the same C language standard as CI:
+  ```sh
+  CFLAGS=-std=gnu17 cargo install mdbook-i18n-helpers --version 0.3.6 --locked
+  ```
+  The locked `onig_sys` bundles Oniguruma with pre-C23 function
+  declarations. [GCC 15 defaults to C23](https://gcc.gnu.org/gcc-15/porting_to.html#c23),
+  which changes their meaning and causes incompatible function-pointer
+  errors. Selecting GNU C17 for this installation preserves the expected
+  declarations without suppressing type diagnostics. Keep this tool pair
+  aligned with CI when extracting messages or checking translations;
+  upgrading across mdBook compatibility versions requires validating the
+  existing `.po` files as well as both language builds.
 - `msgmerge` from GNU gettext — for the sync step.
   - Linux: `apt install gettext`
   - macOS: `brew install gettext`
