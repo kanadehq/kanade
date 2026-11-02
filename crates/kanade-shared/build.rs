@@ -41,6 +41,8 @@ fn main() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=client_lifecycle");
+    // audit_token_to_asid lives in libbsm, not libSystem.
+    println!("cargo:rustc-link-lib=bsm");
     for framework in ["Foundation", "AppKit", "CoreGraphics", "Security"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
