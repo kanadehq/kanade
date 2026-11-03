@@ -198,6 +198,7 @@ def validate_app(app, version=None, *, root=ROOT):
         info = plistlib.load(f)
     require(info.get("CFBundleIdentifier") == BUNDLE_ID, f"bundle id {info.get('CFBundleIdentifier')!r}")
     require(info.get("CFBundleName") == PRODUCT_NAME, "bundle name")
+    require(info.get("KanadeLifecycleProtocol") == "1", "Client lifecycle participation marker")
     require(info.get("CFBundlePackageType") == "APPL", "package type")
     require(info.get("CFBundleExecutable") == EXECUTABLE, "executable name")
     require(info.get("CFBundleVersion") == info.get("CFBundleShortVersionString") == version,

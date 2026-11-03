@@ -1,7 +1,8 @@
 //! Local macOS Client pkg transaction foundation. Not registered, advertised or
-//! reachable from remote typed dispatch. All writable roots must be temporary.
+//! reachable from remote typed dispatch. Native host execution is local only.
 //! Installer receipts belong to the OS: neither update nor rollback swaps app
-//! files. GUI activation/handshake is explicitly unsupported in this slice.
+//! files. GUI restoration is distinct from verified activation/KLP handshake.
+pub mod lifecycle;
 pub mod processes;
 pub mod result;
 mod structure;

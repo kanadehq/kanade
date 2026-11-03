@@ -1909,6 +1909,15 @@ Client が自身の UID で directory 0700 / file 0600 を作る。log は日次
 
 **受入条件**: 既存 / 新規の全 GUI user が login 時に `--tray` で非表示起動し、opt-out が更新後も保持されることを確認する。Quit 後に通常の再起動 loop が無く、緊急 fallback では再起動され得ることがユーザー向けに説明されている。GUI logout / SSH-only / lingering では Client を起動しない。自動起動を無効化してもアプリ一覧から起動できる。
 
+macOS の実装追補（ローカル lifecycle slice）: Client は GUI 起動前と既存の再表示・
+second-instance・deep-link・緊急 fallback で機械共通ゲートを確認する。
+ゲート未作成の payload-only 導入では `/Library` の共有 flock で初回 provisioning と協調する。
+Quit は audit session 別 marker、永続 opt-out は別 marker としてユーザー所有 state に保存する。
+helper 切断後も保存できた Quit を認める。更新はどちらもリセットしない。
+これは LaunchAgent による全ユーザー login 登録や native 通知の実装完了を示さない。
+認証済み session-presence helper は更新前に稼働した Client が user context で作成するもので、
+上記の将来の常設通知 helper とは範囲が異なる。KLP UID admission に GUI 条件を追加しない。
+
 #### 2.11.7.5 緊急通知を正しいユーザーへ配送する
 
 **proposal（提案）**: 通知用の `GuiSessionResolver` / launcher を idle sampler、KLP peer identity とは別に設ける。KLP の UID 認可は §2.12.4.4 のまま。GUI session 情報は表示可否にのみ使う。root Agent 自身から OS toast を送らない。既存 KLP の session fan-out / 履歴取得は維持し、OS toast と自動起動だけに表示可否を適用する。SSH から起動した Client の購読者がいるだけで fallback を抑制しない。session helper の登録・presence 配送は新しい内部契約として後続タスクで定義し、peer credentials / OS process 所属を検証する。KLP の認可用 session を追加する契約ではない。
@@ -3182,8 +3191,25 @@ Client App (`kanade-client`) のデプロイ・更新における重要な安全
    - 更新後の Client App 自動起動は、**更新前に稼働していた現在もアクティブな GUI セッション**（macOS: Aqua コンソールユーザー、Linux: GNOME ログインセッション）に限定する。
    - SSH セッション、ヘッドレス環境、画面ロック中、未ログイン状態では Client App を起動しない。
 2. **ユーザー Opt-out の尊重**:
-   - 明示 Quit は当該 session の通常常駐の停止であり、永続 opt-out に変換しない (§2.11.7.4)。Quit 済みの Client は更新の自動復帰対象外。永続 opt-out は別設定として更新・再導入をまたいで保持する。保存・検出方法は §2.11.7.4 の未解決事項のまま。
+   - 明示 Quit は当該 session の通常常駐の停止であり、永続 opt-out に変換しない (§2.11.7.4)。Quit 済みの Client は更新の自動復帰対象外。永続 opt-out は別設定として更新・再導入をまたいで保持する。macOS ローカル実装の保存方式は §2.11.7.4 の追補を参照。OS login 項目との連動は未実装。
    - 更新中の新規 launch と緊急通知 fallback は共通 launch gate と協調させる。解放後の緊急通知 fallback は §2.11.7.4–5 の別判定に従い、Quit 後も再起動し得る既存契約を維持する。deploy に opt-out の強制解除を追加しない。
+
+ローカル macOS handler の実装追補: transaction に束縛した durable closure と flock を使い、
+停止前に新規起動を抑止する。固定 app の kernel audit token・inode・UID/session・helper の
+親子関係を確認できる instance だけを graceful stop し、有界 escalation の各 signal 直前に
+再検証する。legacy/未登録/曖昧な instance があれば延期する。
+復帰は生存する認証済み helper が現在も local active unlocked で、Quit/opt-out がない場合だけ
+元の user context と固定 `--tray` argv で行う。console UID だけでは判断しない。
+helper の応答は鮮度と sequence を検証し、logout/lock/unknown では起動しない。
+導入検証と GUI spawn は別結果であり、GUI/KLP 接続検証済みとは扱わない。
+OS mutation 未着手が durable bit と旧状態照合で証明できる失敗は承認失効後でも抑止解除できる。
+mutation 後の trust/approval/rollback 検証と `recovery_required` freeze は維持する。
+クラッシュ・再起動で失った helper から restart intent を再生成しない。
+
+詳細・検証範囲は [local handler](native-client-pkg-handler.md)、使い捨て clean-Mac の
+受入手順は [coordination smoke](client-macos-coordination-smoke.md) を参照。
+本番 remote typed dispatch と deploy CLI は別の認証・承認・replay・結果統合まで無効。
+実際の pkg + GUI 停止/復帰 smoke は未実施であり、偽 adapter 試験と区別する。
 
 ---
 

@@ -4,30 +4,51 @@
 Client pkg transaction state machine for SPEC §2.11.7/§2.13. It uses the
 payload-only packaging contract and the native CLI installer's Unix filesystem
 primitives, without reusing the CLI's executable swaps or rollback logic.
-The launcher-provided fetched base was
-`bdfb416df16ddb45bdeddc9f8017fe58a2d5d2ef`; no additional fetch was required or
-performed. This records a snapshot, not remote freshness after that fetch.
+今回の launcher 検証済み base は
+`01eff06f3f00690551e69367536f6f0c67e05a7d`（2026-10-31 の fetch snapshot）。
+その後の remote の不変性を示すものではない。
 
-## Readiness boundary
+## 実装境界
 
-There is no production entry point. Writable roots must be isolated temporary
-directories. `NativeSystem::for_image` accepts only a canonical temporary image
-root; its target must match the handler's Applications directory. The native
-adapter cannot acquire trustworthy launch inhibition or prove an interrupted
-system installer transaction quiescent. It therefore defers **all native
-mutations**, including fresh install, rather than claiming safe sessions from
-an empty process list. The installer invocation is represented by fixed
-`/usr/sbin/installer` with structured `-pkg`/`-target` arguments and a bounded
-runner; no native installer invocation was exercised. The eventual live
-contract remains the fixed system volume and expected Client app location.
+ローカルの `NativeSystem::managed_host` と Client の起動前処理に、macOS の
+launch exclusion、認証済み session helper、管理対象だけの停止・復帰を実装した。
+本番 backend の typed dispatch、deploy CLI、heartbeat handler registry、
+`HandlerUnavailable` と `END_TO_END_DEPLOY_READY = false` は維持する。
+認証済み command・承認・replay・結果送信の接続を完了したとは主張しない。
+汎用 shell install の過去の受入は、この handler の実行承認にもならない。
 
-`HandlerUnavailable`, backend typed dispatch, the empty heartbeat handler
-registry and `END_TO_END_DEPLOY_READY = false` remain in force. No generic
-shell fallback, deploy CLI, artifact-store connection, live keys, bootstrap
-changes, LaunchAgents, notifications, tray integration or GUI restart were
-added. Successful generic-shell operational installation of a previously built
-Client package is background evidence only; it does not authorize this handler
-or substitute for its approval, admission and coordination gates.
+pkg は引き続き app だけの payload であり、root script や LaunchAgent を追加しない。
+新 Agent を再起動していない環境でも手動起動できるよう、Client は durable gate
+作成前には既存の管理者所有 `/Library` directory の共有 flock を保持する。
+root coordinator は durable closure を先に保存し、Client 停止後に通常の lease と
+この移行用 flock の両方を排他取得してから mutation intent を記録する。
+作成と起動が競合しても reader の再確認と二つの排他が installer との競合を防ぐ。
+部分作成・不正 owner/mode/ACL・読取不能を「ゲート無し」として許可しない。
+
+`client-lifecycle/closed.json` は transaction digest と mutation bit を持ち、fsync
+して保存する。writer の drop、Agent 終了、再起動、PID 消失だけでは解除しない。
+同一 transaction の journal と実際の bundle/receipt を再照合して解除する。
+変更意図のない失敗では、承認失効後でも旧状態の一致を確認して abandoned にできる。
+変更意図のある処理には既存の承認・trust・quiescence・rollback 検証が必要であり、
+`recovery_required` は自動解除しない。復旧時に失った helper 接続から復帰意図を
+再構成することはない。
+
+固定 bundle/executable の owner・inode と kernel audit token（UID、session、PID
+世代）を検証する。helper の peer は既存 KLP UID admission を再利用するが、
+KLP に GUI session admission を追加しない。helper/GUI の親子関係と同一 UID/session、
+応答の鮮度・単調 sequence を検証し、未登録/legacy Client が一つでもあれば停止前に延期する。
+停止は helper 経由で要求し、5 秒後に SIGTERM、さらに 5 秒後に SIGKILL、最後に 2 秒待つ。
+各 signal は捕捉した正確な identity を syscall 境界で再検証する。
+
+復帰は更新前に稼働した session の helper だけが判断する。Observe と launch 直前に
+active/unlocked・Quit・opt-out を再確認し、失効・不明・logout・SSH/headless は起動しない。
+helper は最初から対象 user の UID/GID/groups と bootstrap context で動作し、root の
+`launchctl asuser` だけで GUI を作らない。固定 argv `--tray`、空環境に account 由来
+HOME と検証した Darwin TMPDIR と固定 PATH だけを設定する。
+Quit marker と永続 opt-out はユーザー所有 state 内の別ファイルで保持し、更新で消さない。
+Quit marker 保存後の helper 通知失敗は Quit を阻止しない。
+既存の startup/reveal、second-instance、deep-link、emergency fallback の入口で同じ
+ゲートを再確認する。未実装の login 登録や native 通知全体を制御するとは主張しない。
 
 ## Authorization and validation
 
@@ -96,15 +117,8 @@ Journal phases are `prepared`, `installing` (intent), `installer_returned`,
 `rolling_back` (intent), `committed`, `rolled_back`, `abandoned` and
 `recovery_required`. Installer success alone is insufficient. Installed/no-op
 verification reads the OS receipt and full bundle, including ownership, modes,
-bytes, signature and inode continuity. The result's GUI field is always
-`unsupported_not_attempted`; it makes no GUI eligibility, launch or KLP claim.
-
-A LaunchLease must inhibit all managed launch/fallback paths for its lifetime,
-respect Quit/opt-out, and positively establish that no active managed instance
-can race the mutation. Path, PID/start time and UID are required for any real
-process evidence. This slice has no process termination or session launch API.
-The fake lease is deterministic test evidence only. Native coordination is
-unavailable, so users' processes and preferences are never changed.
+bytes, signature and inode continuity. 結果は導入検証と GUI activation を分離する。`not_launched`、
+`restore_launched_unverified`、部分復帰を記録し、spawn 成功を GUI/KLP 検証済みにしない。
 
 On a positively quiescent failed update, rollback is attempted only if the new
 installation is fully identifiable. It re-admits the retained previous pkg and
@@ -118,13 +132,13 @@ There is at most one rollback attempt and at most three forward attempts for
 the same approved execution; a rolled-back execution is not automatically
 reinstalled. No automatic installer retry loop is used.
 
-Timeout, unknown worker lifetime, partial/divergent files or receipts, revoked
-approval/trust, or failed rollback become `recovery_required`. The journal and
+OS mutation intent 記録後の timeout、unknown worker lifetime、部分的/不一致の
+bundle/receipt、approval/trust 失効、rollback 失敗は `recovery_required` となる。 The journal and
 cached evidence remain and subsequent calls freeze. Fresh failure never
 removes an app or OS receipt to emulate uninstall. `recover` can record revoked
 approval/trust without a still-valid copy of the original request. Restart
-reconciliation requires current authorization/trust and independent OS
-transaction quiescence before interpreting observed old/new state. It can
+reconciliation は OS mutation intent 記録後、現在の authorization/trust と独立した
+OS transaction quiescence を要求してから旧/新状態を解釈する。 It can
 commit an exactly verified new state or record a verified previous state;
 ambiguous or interrupted rollback is frozen rather than layered with another
 installer transaction. These transactions are **not atomic**.
@@ -133,69 +147,33 @@ Successful validation currently retains private scratch evidence as well as
 packages; there is no automatic cache/scratch garbage collection or operator
 unfreeze API. Both require explicit integration policy before live use.
 
-## Verification and pending acceptance
+## 検証と未実施の受入
 
-Focused checks for this change:
+使い捨て環境の手順と記録項目は
+[macOS Client pkg + coordination smoke](client-macos-coordination-smoke.md) を参照。
 
-```sh
-cargo test -p kanade-agent --bin kanade-agent native_install:: --locked
-cargo clippy -p kanade-agent --all-targets --locked -- -D warnings
-python3 -B -m unittest discover -s scripts/ci -p 'test_client_macos_pkg.py'
-python3 -B -m unittest discover -s scripts/ci -p 'test_magi_e2e.py'
-```
+必須 e2e の `scripts/ci/magi-e2e.py` は Client pkg 全体、shared gate、Client の
+startup/storage/lifecycle を nonempty harness として実行する。追加した adapter 試験も
+同じフィルタに含まれる。親 run が complete suite、e2e、最終 gate と最終 head を所有する。
+この修正席は対象 test と clippy/format を実行し、実際の結果を応答に記録する。
 
-The required `scripts/ci/magi-e2e.py` pipeline now runs the Client module as its
-own nonempty harness, in addition to the existing CLI foundation checks. The
-repository's nonempty gate commands in `magi.toml` remain unchanged. The parent
-run owns full e2e, complete verification, review and the final gate; these are
-not replaced by the focused checks above.
+ネイティブに実行する対象は一時ディレクトリでの flock、no-follow、権限、永続 state、
+Unix socket 切断処理と spawn しない command 構築試験。加えて shared lifecycle の
+既存 native 試験は、一時 synthetic bundle に複製したテスト専用子プロセスだけに
+audit-token signal を送信し、PID 世代の不一致を拒否することを確認した。
+セッションの二 UID/fast switching、
+lock/logout、Quit/opt-out、PID 再利用、未登録 Client、graceful timeout、installer/receipt と
+transaction の復帰結果は偽アダプターで検証する。これは本物の Aqua session や pkg
+installer transaction の検証ではない。
 
-Observed focused results on the implementation host: 103 native-installer
-Rust tests (25 Client pkg tests), two capability-barrier tests, 26 Python
-packaging tests and 14 e2e-runner unit tests passed; agent all-target clippy
-with warnings denied and targeted rustfmt checks passed. The e2e-runner unit
-tests use mocked broker downloads; they are not the full e2e run. The parent
-run must report its final reviewed/tested commit and gate outcome separately.
+この修正では operator の Client/Agent の停止・復帰、実 pkg 導入、live key provisioning、
+queue/question の変更を実施していない。使い捨て VM での native pkg + GUI smoke は未実施。
 
-Real checks: no-follow filesystem operations, macOS ACL tests, flock, durable
-JSON/cache writes, signed publisher trust/admission, shared plan evaluation,
-real `pkgbuild`/`productbuild`/BOM and ad-hoc app-signature validation through the
-existing packaging fixture. Mutated native package resources are rejected by
-the additional BOM size/checksum check before installer.
-
-Simulated checks: installer and OS receipts, process/launch lease, clocks,
-install/update/no-op/rollback, trust revocation at mutation boundaries, current
-approval revocation/expiry, unmanaged ownership conflicts, drift, symlink/path
-replacement, lock contention, interruptions and failed recovery. Temporary
-keys are fixture keys only. These do not demonstrate OS installer transaction
-behavior or real user sessions.
-
-No native install/update/rollback smoke was run: no genuinely disposable VM or
-image with an isolated OS receipt database was provided. Clean macOS 14+
-Apple Silicon acceptance remains pending, including real production pkg fresh
-install/update/recovery and system receipt reconciliation, root:wheel/ACL and
-quarantine behavior, native process/launch inhibition, opt-out/Quit preservation,
-and separately verified eligible-user GUI/KLP behavior. No operator app,
-process, receipt database or deployment job was changed.
-
-## 追加した結果・境界試験
-
-`client_pkg::result::ResultRecord` は既存の `Report` / `Error` を構造化し、
-導入検証状態、バージョン、GUI 状態、`FailureClass` を個別に記録する。
-成功と no-op の双方で receipt/bundle の検証を示すが、GUI 起動や KLP 接続は
-示さない。中断や段階不明の I/O エラーは保守的に `recovery_required` と分類する。
-これはローカルの結果モデルであり、結果送信経路は追加していない。
-
-ネイティブの `ProcessView` は実行パスが一致する Client の PID・UID・開始時刻を
-読み取る。同名の別パスは Client と判定せず、実行パスや Client の識別情報が
-取得できない場合は defer する。空の観測結果も launch lease の代わりにはならず、
-既存の launch coordination 不足による全ネイティブ変更の defer は維持する。
-プロセス分類試験は決定的な観測データを使う。
-
-runner 試験は実際の `/bin/sleep`、`/usr/bin/yes`、`/usr/bin/env`、
-`/usr/bin/printf`、`/usr/bin/false` を使い、時間・出力上限、空環境、
-特殊文字を含む argv の保持、終了失敗と起動失敗を確認する。これは OS installer
-の試験ではなく、receipt データベースや `/Applications` を変更しない。
-既存 e2e の `native_install::client_pkg::` フィルタが追加試験も対象にする。
-実 pkg の新規導入・更新・復旧については、引き続き使い捨ての clean-Mac 環境での
-受け入れ確認が必要である。
+この修正席での最終 focused 結果: Client pkg 42 件、Client lifecycle 3 件、
+Client storage 1 件、shared lifecycle 8 件、e2e runner 単体 15 件が成功。
+shared の実出力は required e2e の nonempty/count 検査も成功した。
+対象三 crate の all-target clippy（`-D warnings`、`--locked`）、workspace format、
+`git diff --check` も成功した。Client pkg の native fixture 試験は test-owned の
+pkgbuild/productbuild/BOM/ad-hoc signature の読取検証であり、OS installer は実行しない。
+初回の fixture/lint エラーは修正して再試験した。全 e2e・最終 gate・修正後の再レビューは
+親 run の担当であり、この focused 結果だけで完了したとは扱わない。

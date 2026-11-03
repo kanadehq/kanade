@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::processes::{NativeProcessView, ProcessView};
 use super::structure::{self, BUNDLE, COMPONENT, require};
 use super::{Error, Result};
 
@@ -81,36 +80,79 @@ pub enum InstallerExit {
 
 /// Held across install AND validation/rollback. Implementations must inhibit
 /// *all* managed launch paths, preserve Quit/opt-out, and prove absence of
-/// active instances by executable path, PID/start time and UID. No stop API is
-/// exposed: uncoordinated or active Client processes cause a deferral.
+/// active instances by executable path, kernel PID generation and UID. Native
+/// coordination stops only authenticated participating instances; unknown or
+/// unregistered instances cause a deferral.
 pub trait LaunchLease {
     fn recheck(&self) -> Result<()>;
+    fn mutation_intent(&self) -> Result<()> {
+        self.recheck()
+    }
+    fn mutation_recorded(&self) -> Result<Option<bool>> {
+        Ok(None)
+    }
+    fn native(&self) -> Option<&super::lifecycle::NativeLease<'_>> {
+        None
+    }
+    fn finish(self: Box<Self>) -> Result<super::result::GuiActivation> {
+        Ok(super::result::GuiActivation::UnsupportedNotAttempted)
+    }
 }
 
 /// Trusted OS boundary; deterministic tests implement it against isolated
 /// filesystems. Methods must be bounded and must never evaluate shell text.
 pub trait System {
+    fn check_roots(&self, roots: &crate::native_install::model::Roots) -> Result<()> {
+        roots.validate_offline()?;
+        self.check_target(&roots.install_dir)
+    }
     fn check_target(&self, applications: &Path) -> Result<()>;
     fn bom(&self, path: &Path) -> Result<String>;
     fn signature(&self, app: &Path) -> Result<()>;
     fn receipt(&self) -> Result<Option<OsReceipt>>;
-    fn coordinate(&self) -> Result<Box<dyn LaunchLease + '_>>;
-    fn install(&self, pkg: &Path) -> Result<InstallerExit>;
+    fn coordinate(&self, transaction: &str, recovery: bool) -> Result<Box<dyn LaunchLease + '_>>;
+    fn resume(&self, _transaction: &str) -> Result<Option<Box<dyn LaunchLease + '_>>> {
+        Ok(None)
+    }
+    /// Checked before any Client stop or mutation intent is recorded.
+    fn require_participant(&self, _pkg: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    fn install(&self, pkg: &Path, lease: &dyn LaunchLease) -> Result<InstallerExit>;
     /// Restart recovery must establish OS transaction quiescence independently
     /// of the former installer's PID. Native support is deliberately absent.
-    fn recovery_quiescent(&self) -> Result<()>;
+    fn recovery_quiescent(&self, installer_returned: bool) -> Result<()>;
     fn checkpoint(&self, _: super::transaction::Phase) -> Result<()> {
         Ok(())
     }
 }
 
-/// Read-only validation uses fixed macOS executables. Installation remains
-/// unreachable with this adapter until trustworthy launch coordination exists.
-/// The target is an isolated temporary image root, never the operator's `/`.
+/// Validation and installation use fixed macOS executables and a native launch
+/// lease. Host execution requires an explicitly selected local root constructor;
+/// remote typed dispatch and deploy CLI remain disabled. Tests use image roots.
 pub struct NativeSystem {
-    target: PathBuf,
+    pub(super) target: PathBuf,
+    /// Authenticated sessions whose GUI was already stopped when a later stop
+    /// failed. The recovery lease adopts them so they are restored (or
+    /// released) after the gate is verifiably reopened.
+    #[cfg(target_os = "macos")]
+    pub(super) carried: std::sync::Mutex<Vec<super::lifecycle::Session>>,
 }
 impl NativeSystem {
+    /// Local authenticated executor boundary only; no CLI/remote route calls
+    /// this constructor. It grants neither deployment approval nor admission.
+    pub fn managed_host() -> Result<Self> {
+        require(
+            cfg!(all(target_os = "macos", target_arch = "aarch64"))
+                && unsafe { libc::geteuid() } == 0,
+            "managed Client installer requires native macOS root",
+        )?;
+        Ok(Self {
+            target: PathBuf::from("/"),
+            #[cfg(target_os = "macos")]
+            carried: Default::default(),
+        })
+    }
     pub fn for_image(target: PathBuf) -> Result<Self> {
         let root = target.canonicalize()?;
         let temp = std::env::temp_dir().canonicalize()?;
@@ -118,7 +160,11 @@ impl NativeSystem {
             root.starts_with(&temp) && root != temp && root == target,
             "native adapter requires canonical temporary image root",
         )?;
-        Ok(Self { target })
+        Ok(Self {
+            target,
+            #[cfg(target_os = "macos")]
+            carried: Default::default(),
+        })
     }
 }
 
@@ -208,6 +254,20 @@ fn run_bounded(program: &str, args: &[&std::ffi::OsStr], timeout: Duration) -> R
 }
 
 impl System for NativeSystem {
+    fn check_roots(&self, roots: &crate::native_install::model::Roots) -> Result<()> {
+        if self.target == Path::new("/") {
+            require(
+                roots.install_dir == Path::new("/Applications")
+                    && roots.deploy_dir == Path::new("/Library/Application Support/Kanade/deploy")
+                    && roots.owner == crate::native_install::fs::Owner::ROOT_WHEEL,
+                "fixed managed Client layout required",
+            )?;
+            kanade_shared::client_lifecycle::gate::Gate::open(&self.launch_gate(), 0, true)?;
+        } else {
+            roots.validate_offline()?;
+        }
+        self.check_target(&roots.install_dir)
+    }
     fn check_target(&self, applications: &Path) -> Result<()> {
         require(
             applications == self.target.join("Applications")
@@ -311,23 +371,48 @@ impl System for NativeSystem {
             files: files.stdout.lines().map(str::to_owned).collect(),
         }))
     }
-    fn coordinate(&self) -> Result<Box<dyn LaunchLease + '_>> {
-        let processes = NativeProcessView {
-            client_exe: self
-                .target
-                .join("Applications")
-                .join(structure::APP)
-                .join("Contents/MacOS/kanade-client"),
-        };
-        processes.snapshot()?.require_inactive()?;
-        Err(Error::Deferred("trustworthy Client launch inhibition/session coordination unavailable; GUI restart unsupported".into()))
+    fn coordinate(&self, transaction: &str, recovery: bool) -> Result<Box<dyn LaunchLease + '_>> {
+        self.coordinate_native(transaction, recovery)
     }
-    fn install(&self, pkg: &Path) -> Result<InstallerExit> {
+    fn require_participant(&self, pkg: &[u8]) -> Result<()> {
+        let parts = structure::xar(pkg)?;
+        let payload = structure::payload(&parts[&format!("{}/Payload", structure::PART)])?;
+        structure::lifecycle_participant(
+            &payload[&format!("{}/Contents/Info.plist", structure::APP)].data,
+        )
+    }
+    fn resume(&self, transaction: &str) -> Result<Option<Box<dyn LaunchLease + '_>>> {
+        use kanade_shared::client_lifecycle::gate::Gate;
+        let gate = match Gate::open(&self.launch_gate(), 0, false) {
+            Ok(g) => g,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        match gate.closed_transaction()? {
+            None => Ok(None),
+            Some(owner) if owner == transaction => {
+                self.coordinate_native(transaction, true).map(Some)
+            }
+            _ => Err(Error::RecoveryRequired(
+                "launch gate owner differs from durable journal".into(),
+            )),
+        }
+    }
+    fn install(&self, pkg: &Path, lease: &dyn LaunchLease) -> Result<InstallerExit> {
         require(pkg.is_absolute(), "installer pkg path")?;
-        // NativeSystem is intentionally incapable of acquiring a LaunchLease;
-        // do not turn this low-level method into a generic production bypass.
-        let lease = self.coordinate()?;
-        lease.recheck()?;
+        let native = lease.native().ok_or_else(|| {
+            Error::Deferred("native installer requires its acquired transaction lease".into())
+        })?;
+        require(
+            std::ptr::eq(native.system, self),
+            "foreign transaction lease",
+        )?;
+        lease.mutation_intent()?;
+        let parts = structure::xar(&std::fs::read(pkg)?)?;
+        let payload = structure::payload(&parts[&format!("{}/Payload", structure::PART)])?;
+        structure::lifecycle_participant(
+            &payload[&format!("{}/Contents/Info.plist", structure::APP)].data,
+        )?;
         match run(
             "/usr/sbin/installer",
             &[
@@ -346,9 +431,21 @@ impl System for NativeSystem {
             Err(e) => Ok(InstallerExit::Uncertain(e.to_string())),
         }
     }
-    fn recovery_quiescent(&self) -> Result<()> {
+    fn recovery_quiescent(&self, installer_returned: bool) -> Result<()> {
+        if installer_returned {
+            // A durable InstallerReturned journal proves our successful child
+            // returned. Still exclude any currently observed installer before
+            // interpreting its receipt; unknown intent never takes this path.
+            let snapshot =
+                super::processes::ProcessView::snapshot(&super::processes::NativeProcessView {
+                    client_exe: self.executable(),
+                })?;
+            if !snapshot.installer_active && snapshot.ambiguous.is_empty() {
+                return Ok(());
+            }
+        }
         Err(Error::RecoveryRequired(
-            "OS installer transaction quiescence cannot be proven".into(),
+            "interrupted OS installer transaction quiescence cannot be proven".into(),
         ))
     }
 }

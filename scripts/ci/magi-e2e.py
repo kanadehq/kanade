@@ -51,6 +51,8 @@ def commands():
     if os.name == "posix":
         yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--",
                "native_install::client_pkg::"]
+    yield ["cargo", "test", "-p", "kanade-shared", "--lib", "--", "client_lifecycle::"]
+    yield ["cargo", "test", "-p", "kanade-client", "--lib", "--", "startup::", "session::", "macos_storage::", "macos_lifecycle::"]
     yield ["cargo", "test", "-p", "kanade-agent", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--bins", "--", "typed"]
     yield ["cargo", "test", "-p", "kanade", "--test", "app_manifest_cli",

@@ -701,6 +701,19 @@ pub(crate) async fn run_agent() -> Result<()> {
         .with_context(|| format!("init tracing from [log] in {cfg_path:?}"))?;
 
     #[cfg(target_os = "macos")]
+    {
+        // Provision the stable machine gate without altering any durable
+        // closure left by a transaction. No Client process is touched here.
+        if unsafe { libc::geteuid() } == 0 {
+            kanade_shared::client_lifecycle::gate::Gate::open(
+                std::path::Path::new(kanade_shared::client_lifecycle::gate::DIRECTORY),
+                0,
+                true,
+            )
+            .context("initialize Client launch exclusion")?;
+        }
+    }
+    #[cfg(target_os = "macos")]
     let _screen_permission = screen_permission_macos::start();
 
     kanade_shared::subject::validate_pc_id(&cfg.agent.id)

@@ -13,3 +13,6 @@ pub mod window_size;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod macos_storage;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod macos_lifecycle;

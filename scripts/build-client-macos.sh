@@ -31,7 +31,7 @@ with (contents / 'Info.plist').open('wb') as out:
         CFBundleVersion=version, CFBundleShortVersionString=version,
         CFBundlePackageType='APPL', CFBundleIconFile='icon.icns',
         LSMinimumSystemVersion=mac['bundle']['macOS']['minimumSystemVersion'],
-        NSHighResolutionCapable=True), out)
+        KanadeLifecycleProtocol='1', NSHighResolutionCapable=True), out)
 print(app)
 PY
 app='target/aarch64-apple-darwin/release/bundle/macos/Kanade Client.app'
