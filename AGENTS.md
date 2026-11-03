@@ -794,7 +794,7 @@ not that CI or review did not run.
   実行する。成功件数が 0、ignored が残る、または harness ごとの実行件数と
   成功件数が一致しなければ失敗する。stage 2a/2b のフィルタは
   `package_manifest::tests::`、`publisher_trust::tests::`、
-  `package_admission::tests::` を個別に指定する。Python 3 が必要。
+  `package_admission::tests::` を個別に指定する。native package fixture が tomllib を使うため Python 3.11 以上が必要。
 - **Prerequisites**: loopback の bind 権限と、`integration.yml` の
   `NATS_SERVER_VERSION` に一致する broker が必要。e2e runner は同版の
   PATH 上のバイナリをコピーするか、公式リリースから取得して
@@ -808,3 +808,10 @@ not that CI or review did not run.
   the local toolchain), and the Windows/Linux/macOS matrix legs other than
   the host OS (`check`, `test`, `clippy`, `offline-boot` and the rest of
   `integration.yml`). Those are verified by CI only.
+
+ローカル E2E の Python はグローバル設定を変更せず選択する。このホストでは
+以下でサポート済みの Homebrew Python 3.14 を子プロセスにも適用できる。
+
+```sh
+env MISE_PYTHON_VERSION=path:/opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14 python3 scripts/ci/magi-e2e.py
+```

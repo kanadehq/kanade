@@ -145,7 +145,7 @@ pub const LABEL_UNKNOWN: &str = "unknown";
 pub const LABEL_PENDING: &str = "auth-pending";
 /// Authentication acceptance cannot be established from this observation.
 pub const LABEL_UNPROVEN: &str = "auth-unproven";
-/// Broker-produced v1 proof of authentication rejection. Never a username.
+/// Broker-produced v2 proof of authentication rejection. Never a username.
 pub const LABEL_REJECTED: &str = "auth-rejected";
 /// Acceptance is proven, but a safe public credential name is unavailable.
 pub const LABEL_ACCEPTED_UNNAMED: &str = "auth-accepted-unnameable";
@@ -222,11 +222,6 @@ fn uncertainty_reasons(conns: &[ConnInfo]) -> BTreeMap<EvidenceReason, usize> {
 #[derive(Deserialize)]
 struct AuthIdentity {
     version: u32,
-    server_id: String,
-    server_start: DateTime<Utc>,
-    cid: u64,
-    connection_start: DateTime<Utc>,
-    transport: String,
     generation: u64,
     sequence: u64,
     state: String,
@@ -259,7 +254,7 @@ fn public_identity(name: &str) -> bool {
         )
 }
 
-/// The administrative monitoring endpoint is the authority. v1 is emitted
+/// The administrative monitoring endpoint is the authority. v2 is emitted
 /// only by the reviewed producer patch, after the broker checks credentials;
 /// CONNECT names, authorized_user and expected-mode settings never enter it.
 fn verified_identity(c: &ConnInfo, broker: &Varz, observed: DateTime<Utc>) -> Option<String> {
@@ -268,22 +263,19 @@ fn verified_identity(c: &ConnInfo, broker: &Varz, observed: DateTime<Utc>) -> Op
         None if broker.auth_identity_version.is_none() => return None,
         None => return Some(LABEL_UNKNOWN.into()),
     };
-    let valid = a.version == 1
-        && broker.auth_identity_version == Some(1)
+    // v2 inherits broker/start from the checked Connz envelope, and
+    // cid/start/transport from the containing connection copied under c.mu.
+    let valid = a.version == 2
+        && broker.auth_identity_version == Some(2)
         && ((a.state == "pending" && a.generation == 0)
             || (a.generation != 0
                 && Some(a.generation) == broker.auth_identity_generation
                 && a.sequence != 0))
-        && a.server_id == broker.server_id
-        && a.server_start == broker.start
-        && a.cid != 0
-        && a.cid == c.cid
-        && Some(a.connection_start) == c.start
+        && c.cid != 0
         && c.kind.as_deref() == Some("Client")
-        && c.transport.as_deref() == Some(a.transport.as_str())
-        && matches!(a.transport.as_str(), "nats" | "websocket")
-        && a.connection_start >= broker.start
-        && a.connection_start <= broker.now
+        && matches!(c.transport.as_deref(), Some("nats" | "websocket"))
+        && c.start
+            .is_some_and(|start| start >= broker.start && start <= broker.now)
         && (observed - broker.now).num_seconds().abs() <= 60;
     Some(if !valid {
         LABEL_UNKNOWN.into()
@@ -316,6 +308,7 @@ fn verified_identity(c: &ConnInfo, broker: &Varz, observed: DateTime<Utc>) -> Op
 /// The subset of `/connz` this projector reads.
 #[derive(Debug, Deserialize)]
 struct Connz {
+    auth_identity_server_start: Option<DateTime<Utc>>,
     /// Connections matching the query across ALL pages — the paging bound.
     total: usize,
     connections: Vec<ConnInfo>,
@@ -868,6 +861,11 @@ async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>
         let at = z.now.context("connz missing timestamp")?;
         if z.server_id != before.server_id || at < last_now || at < before.start {
             bail!("broker identity or time changed during connz walk");
+        }
+        if before.auth_identity_version == Some(2)
+            && z.auth_identity_server_start != Some(before.start)
+        {
+            bail!("identity envelope start missing or mismatched");
         }
         last_now = at;
         if z.offset != Some(offset) || z.num_connections != Some(z.connections.len()) {
@@ -1992,20 +1990,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identity_v2_requires_the_broker_envelope_and_connection_binding() {
+        let mut broker: serde_json::Value = serde_json::from_str(&varz_fixture()).unwrap();
+        broker["now"] = serde_json::to_value(Utc::now()).unwrap();
+        broker["auth_identity_version"] = 2.into();
+        broker["auth_identity_generation"] = 7.into();
+        let page = serde_json::json!({
+            "server_id":broker["server_id"], "auth_identity_server_start":broker["start"],
+            "now":broker["now"], "offset":0,"num_connections":1,"total":1,
+            "connections":[{
+                "cid":1,"start":"2026-10-18T02:24:57Z","kind":"Client","type":"websocket",
+                "auth_identity":{"version":2,"generation":7,"sequence":2,
+                    "state":"accepted","mechanism":"user_password","source":"connect","public_user":"agent"}
+            }]
+        });
+        let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let (base, _) = canned_http(vec![
+            broker.to_string(),
+            page.to_string(),
+            broker.to_string(),
+        ])
+        .await;
+        let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+        assert!(complete);
+        assert_eq!(conns[0].identity_label.as_deref(), Some("agent"));
+        // Every broker binding lives in the checked enclosing response in v2.
+        for (field, value) in [
+            ("server_id", serde_json::json!("other")),
+            ("auth_identity_server_start", serde_json::Value::Null),
+            (
+                "auth_identity_server_start",
+                serde_json::json!("2026-10-18T01:00:00Z"),
+            ),
+        ] {
+            let mut broken = page.clone();
+            broken[field] = value;
+            let (base, _) = canned_http(vec![
+                broker.to_string(),
+                broken.to_string(),
+                broker.to_string(),
+            ])
+            .await;
+            assert!(fetch_walk(&http, &base).await.is_err());
+        }
+        for (field, value) in [
+            ("cid", serde_json::json!(0)),
+            ("start", serde_json::json!("2026-10-18T01:00:00Z")),
+            ("start", serde_json::Value::Null),
+            ("type", serde_json::json!("unsupported")),
+            ("kind", serde_json::json!("Leaf")),
+        ] {
+            let mut broken = page.clone();
+            broken["connections"][0][field] = value;
+            let (base, _) = canned_http(vec![
+                broker.to_string(),
+                broken.to_string(),
+                broker.to_string(),
+            ])
+            .await;
+            if let Ok((conns, _, _)) = fetch_walk(&http, &base).await {
+                assert!(
+                    conns
+                        .iter()
+                        .all(|c| c.identity_label.as_deref() != Some("agent"))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn inconsistent_monitoring_never_proves_a_clean_poll() {
         let page = serde_json::json!({
             "server_id":"TESTSERVER","now":"2026-10-18T02:24:58Z",
             "offset":0,"num_connections":0,"total":0,"connections":[]
         });
         let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
-        for field in [
-            "server_id",
-            "offset",
-            "num_connections",
-            "now",
-            "connections",
-            "total",
-        ] {
+        for field in ["offset", "num_connections", "now", "connections", "total"] {
             let mut broken = page.clone();
             broken.as_object_mut().unwrap().remove(field);
             let (base, _) =
@@ -2279,20 +2339,13 @@ mod tests {
         let now = Utc::now();
         let mut broker = snapshot_fixture();
         broker.now = now;
-        broker.auth_identity_version = Some(1);
+        broker.auth_identity_version = Some(2);
         broker.auth_identity_generation = Some(7);
         let mut c = connection_fixture();
-        let fixture = serde_json::json!({"version":1,"server_id":broker.server_id,
-            "server_start":broker.start,"cid":c.cid,"connection_start":c.start,
-            "transport":"nats","generation":7,"sequence":2,"state":"accepted",
+        let fixture = serde_json::json!({"version":2,"generation":7,"sequence":2,"state":"accepted",
             "mechanism":"user_password","source":"connect","public_user":"agent"});
         for field in [
             "version",
-            "server_id",
-            "server_start",
-            "cid",
-            "connection_start",
-            "transport",
             "generation",
             "sequence",
             "state",
@@ -2301,8 +2354,7 @@ mod tests {
         ] {
             let mut broken = fixture.clone();
             broken[field] = match field {
-                "version" | "cid" | "generation" | "sequence" => 0.into(),
-                "server_start" | "connection_start" => serde_json::to_value(now).unwrap(),
+                "version" | "generation" | "sequence" => 0.into(),
                 "public_user" => "credential canary".into(),
                 _ => "unsupported".into(),
             };
@@ -2321,7 +2373,7 @@ mod tests {
             verified_identity(&c, &broker, now + chrono::Duration::minutes(2)).as_deref(),
             Some(LABEL_UNKNOWN)
         );
-        broker.auth_identity_version = Some(2);
+        broker.auth_identity_version = Some(1);
         assert_eq!(
             verified_identity(&c, &broker, now).as_deref(),
             Some(LABEL_UNKNOWN)
@@ -2369,7 +2421,7 @@ mod tests {
                 client.flush().await.unwrap();
                 let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
                 let (conns, _, broker) = fetch_walk(&http, &base).await.unwrap();
-                assert_eq!(broker.auth_identity_version, Some(1), "a real producer is mandatory");
+                assert_eq!(broker.auth_identity_version, Some(2), "a real producer is mandatory");
                 let c = conns.iter().find(|c| c.cid == client.server_info().client_id).unwrap();
                 let expected = match case { "token" => LABEL_SHARED_TOKEN,
                     "no_auth_user" | "anonymous" => LABEL_NO_AUTH, _ => "agent" };
@@ -2405,7 +2457,7 @@ mod tests {
             let client = opts().connect(&url).await.unwrap();client.flush().await.unwrap();
             let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
             let (mut conns, complete, before) = fetch_walk(&http, &base).await.unwrap();
-            assert_eq!(before.auth_identity_version, Some(1));
+            assert_eq!(before.auth_identity_version, Some(2));
             let pool = pool_with(&["PC001"]).await;
             apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
             assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));

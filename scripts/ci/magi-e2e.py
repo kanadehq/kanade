@@ -175,6 +175,8 @@ def prepare_nats(env):
 
 
 def main():
+    if sys.version_info < (3, 11):
+        raise ValueError("ローカル E2E には tomllib を備えた Python 3.11 以上が必要です。")
     env = prepare_nats(os.environ.copy())
     env["KANADE_APP_ARTIFACT_PUBLICATION"] = "backend-exclusive"
     env["CARGO_TERM_COLOR"] = "never"

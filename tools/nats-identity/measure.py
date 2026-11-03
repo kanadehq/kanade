@@ -1,42 +1,120 @@
 #!/usr/bin/env python3
-"""Same-source, repeated reference/fork workloads; only aggregate metrics leave."""
+"""Interleaved same-source comparisons; retain raw samples and provenance."""
+import hashlib
 import json
 import os
 import platform
 import re
 import statistics
 import subprocess
-from pathlib import Path
+
 import build
+
+WORKLOADS = {
+    'BenchmarkIdentityChurn', 'BenchmarkIdentityConnz',
+    'BenchmarkIdentityMessagingMonitored', 'BenchmarkIdentityConfigBcrypt',
+    'BenchmarkIdentityConfigBcryptDistinct', 'BenchmarkIdentityWSSBcryptChurn',
+}
+SAMPLES = 5
+PROFILES = [('default', '4', 'off'), ('constrained', '1', '768MiB')]
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def parse_sample(output):
+    rows = {}
+    for line in output.splitlines():
+        if not line.startswith('BenchmarkIdentity'):
+            continue
+        cells = line.split()
+        name = re.sub(r'-\d+$', '', cells[0])
+        if name not in WORKLOADS or name in rows or int(cells[1]) <= 0:
+            raise ValueError('unexpected, duplicate or empty benchmark')
+        metrics = {cells[i + 1]: float(cells[i]) for i in range(2, len(cells) - 1, 2)}
+        required = {'ns/op', 'B/op', 'allocs/op'}
+        if name == 'BenchmarkIdentityConnz':
+            required |= {'client_bytes', 'identity_state_bytes', 'response_bytes'}
+        if not required <= metrics.keys() or metrics['ns/op'] <= 0:
+            raise ValueError('missing benchmark metric')
+        if name == 'BenchmarkIdentityConnz' and (
+                metrics['client_bytes'] <= 0 or metrics['response_bytes'] <= 0
+                or metrics['identity_state_bytes'] < 0):
+            raise ValueError('invalid retained-memory or response-size metric')
+        rows[name] = metrics
+    if rows.keys() != WORKLOADS or not re.search(r'^PASS$', output, re.MULTILINE):
+        raise ValueError('benchmark comparison did not execute every workload successfully')
+    return rows
 
 
 def measure():
-    # Build first with build.py. Go benchmark sources are identical in both trees.
-    results = {'environment': {'os': platform.system(), 'arch': platform.machine(),
-                               'cpu_count': os.cpu_count(), 'go': subprocess.check_output(['go','version'], text=True).strip()},
-               'samples': {}, 'medians': {}}
-    for profile, procs, limit in [('default','4','off'), ('constrained','1','768MiB')]:
-        for variant in ['baseline','patched']:
-            env = build.environment()
-            env.update(GOMAXPROCS=procs, GOMEMLIMIT=limit)
-            src = build.OUT / variant / f'nats-server-{build.VERSION}'
-            output = subprocess.check_output(['go','test','./server','-run','^$',
-                '-bench','^BenchmarkIdentity','-benchmem','-benchtime=500ms','-count=5'], cwd=src, env=env, text=True)
+    # Build first with build.py; refuse differing benchmark code.
+    bench = build.ROOT / 'tools/nats-identity/identity_bench_test.go'
+    for variant in ['baseline', 'patched']:
+        copied = build.OUT / variant / f'nats-server-{build.VERSION}/server/identity_bench_test.go'
+        if sha256(copied) != sha256(bench):
+            raise SystemExit('rebuild both variants with identical benchmark code first')
+    results = {
+        'environment': {'os': platform.system(), 'arch': platform.machine(),
+                        'cpu_count': os.cpu_count(),
+                        'go': subprocess.check_output(['go', 'version'], text=True).strip()},
+        'provenance': {
+            'nats_version': build.VERSION, 'source_sha256': build.SHA256,
+            'patch_sha256': sha256(build.ROOT / 'tools/nats-identity/producer.patch'),
+            'producer_sha256': sha256(build.ROOT / 'tools/nats-identity/auth_identity.go'),
+            'benchmark_sha256': sha256(bench),
+            'initial_results': 'measurements-initial.json',
+            'initial_results_sha256': sha256(build.ROOT / 'tools/nats-identity/measurements-initial.json'),
+            'initial_revision': 'd0d12836d4b70facc59691f21346b5a0f920348f',
+        },
+        'methodology': {
+            'samples_per_variant': SAMPLES, 'benchtime': '500ms', 'count_per_process': 1,
+            'order': 'within each profile, baseline/patched on rounds 1/3/5; patched/baseline on rounds 2/4',
+            'profiles': {name: {'GOMAXPROCS': procs, 'GOMEMLIMIT': limit}
+                         for name, procs, limit in PROFILES},
+            'cold_config': 'new server/policy per op, hash/certificate generation outside timed regions',
+            'wss': 'direct broker TLS with verified disposable P-256 certificate, one bcrypt cost-8 user; no proxy',
+            'limits': 'single Darwin host; GOMEMLIMIT is Go soft heap limit, not VM/RSS cap; no production load',
+        },
+        'runs': [], 'samples': {}, 'medians': {}, 'delta_percent': {},
+    }
+    for profile, procs, limit in PROFILES:
+        for round_index in range(SAMPLES):
+            order = ['baseline', 'patched'] if round_index % 2 == 0 else ['patched', 'baseline']
+            for variant in order:
+                env = build.environment()
+                env.update(GOMAXPROCS=procs, GOMEMLIMIT=limit)
+                src = build.OUT / variant / f'nats-server-{build.VERSION}'
+                output = subprocess.check_output(
+                    ['go', 'test', './server', '-run', '^$', '-bench', '^BenchmarkIdentity',
+                     '-benchmem', '-benchtime=500ms', '-count=1'], cwd=src, env=env, text=True)
+                rows = parse_sample(output)
+                key = profile + '/' + variant
+                samples = results['samples'].setdefault(key, {})
+                for name, metrics in rows.items():
+                    samples.setdefault(name, []).append(metrics)
+                results['runs'].append({'profile': profile, 'variant': variant,
+                                        'round': round_index + 1, 'raw_output': output})
+                print(f'{key} round {round_index + 1}: {len(rows)} workloads passed', flush=True)
+        for variant in ['baseline', 'patched']:
             key = profile + '/' + variant
-            rows = {}
-            for line in output.splitlines():
-                if not line.startswith('BenchmarkIdentity'): continue
-                cells=line.split(); name=re.sub(r'-\d+$','',cells[0])
-                metrics={cells[i+1]:float(cells[i]) for i in range(2,len(cells)-1,2)}
-                rows.setdefault(name,[]).append(metrics)
-            if len(rows)!=4 or any(len(v)!=5 for v in rows.values()):
-                raise SystemExit('benchmark comparison did not execute every sample')
-            results['samples'][key]=rows
-            results['medians'][key]={name:{metric:statistics.median(s[metric] for s in samples)
-                for metric in samples[0]} for name,samples in rows.items()}
+            samples = results['samples'][key]
+            if samples.keys() != WORKLOADS or any(len(v) != SAMPLES for v in samples.values()):
+                raise SystemExit('missing repeated benchmark samples')
+            results['medians'][key] = {
+                name: {metric: statistics.median(row[metric] for row in rows)
+                       for metric in rows[0]}
+                for name, rows in samples.items()}
             print(key, json.dumps(results['medians'][key]), flush=True)
-    dest=build.ROOT/'tools/nats-identity/measurements.json'
-    dest.write_text(json.dumps(results,indent=2)+'\n')
+        results['delta_percent'][profile] = {
+            name: {metric: (value / results['medians'][profile + '/baseline'][name][metric] - 1) * 100
+                   for metric, value in metrics.items()
+                   if results['medians'][profile + '/baseline'][name][metric] != 0}
+            for name, metrics in results['medians'][profile + '/patched'].items()}
+    (build.ROOT / 'tools/nats-identity/measurements.json').write_text(
+        json.dumps(results, indent=2) + '\n')
 
 
-if __name__=='__main__': measure()
+if __name__ == '__main__':
+    measure()

@@ -450,67 +450,190 @@ same proxy. Old broker identities and expired credential-health observations
 remain unusable as identity evidence. These cases run in the existing
 integration CI job alongside the other `live_connz_` tests.
 
-### Broker-produced identity proof (v1)
+### broker が生成する identity proof（v2）
 
-A named WebSocket badge needs the broker's own **validated authentication
-result**; CONNECT option reporting, a connection name, a username allowlist, an
-expected-mode setting and probe results are never substitutes. The reference
-producer is the patch in `tools/nats-identity/producer.patch`, applied to
-nats-server v2.14.1 (source tarball pinned by SHA-256 in
-`tools/nats-identity/build.py`). It records a small snapshot only when the
-broker authenticates or revalidates a connection, and exposes it additively on
-the authorized `/connz` (`auth_identity`) and `/varz`
-(`auth_identity_version`, `auth_identity_generation`) monitoring responses.
-The snapshot carries: version, server id and start, cid, connection start,
-transport, authentication generation (bumped on every config reload), a
-sequence, state (`pending`/`accepted`/`rejected`), mechanism (user_password,
-token, anonymous, no_auth_user, nkey, jwt, ...), source (connect or cookie)
-and a public user name only when it is a validated configured username that
-collides with no configured secret. Passwords, tokens, keys, JWTs, raw client
-claims and peer addresses are never part of it.
+WSS 接続の名前には broker が**認証に成功した結果**を使う。CONNECT の
+nkey/name、旧 authorized_user、期待する認証モード、名前の allowlist、
+probe の成否を認証結果の代用にはしない。producer は
+tools/nats-identity/producer.patch と auth_identity.go にあり、
+build.py の SHA-256 で固定した nats-server 2.14.1 のソースに適用する。
+クライアントの wire protocol、認証判断、権限、JetStream、Caddy は変更しない。
 
-Kanade accepts the proof only if every binding matches the same `/varz`
-epoch (server id, start, generation, version 1), the connection (cid, start,
-transport) and a poll that is no more than 60 s from the broker clock.
-Anything else (absent, old, newer, mismatched or malformed evidence) becomes
-`unknown`. Named projections also carry a 90 s expiry that the Agents API
-enforces on read, and a failed poll invalidates them immediately, so a lost
-or stale monitor can never leave a green name. Anonymous and `no_auth_user`
-show as no-auth, tokens as `shared-token`, NKey/JWT/delegated mechanisms as
-`auth-accepted-unnameable` and rejections as `auth-rejected`.
+v2 は認証結果と一緒に取得する情報の重複を除いた契約である。v1 の
+接続ごとの server id/start、cid/start/transport のコピーを廃止し、
+既存の監視応答の外側で共有する。情報の結び付けは次のとおり。
 
-Rollout and rollback. A new Kanade against an unmodified or older broker is
-safe: the version fields are absent, nothing is named and the badge stays
-`auth-unproven`/`unknown` without any startup error. Rolling the broker back
-to an unmodified build revokes names on the next poll. Replacing the broker
-binary is a restart: every client reconnects (agents already reconnect
-automatically), and the new epoch is unproven until clients re-authenticate.
-Because the producer is a patch rather than upstream code, a patched broker
-must be built and distributed by the operator (or the patch upstreamed);
-`python3 tools/nats-identity/verify.py` builds it from the pinned source,
-runs its Go race tests, and then the real-broker WSS/TCP tests plus the
-Agents browser test against it. It does not touch production services.
+| 場所 | 結び付けと検証 |
+| --- | --- |
+| /varz | server_id、start、auth_identity_version=2、auth_identity_generation。同じ epoch が監視 walk の前後で一致すること |
+| /connz の共通部分 | server_id と auth_identity_server_start が /varz の id/start に一致すること。時刻・ページ境界も既存の検査を通す |
+| 各 connections 要素 | broker 発行の cid、start、type。認証結果と同じ既存の接続ロック内でコピーし、cid が非ゼロ、start が broker 開始以降・現在以前、type が nats/websocket であること |
+| 各要素の auth_identity | version=2、generation、sequence、state、mechanism、source、任意の public_user。accepted の generation は /varz と一致し、sequence は非ゼロであること |
 
-Measured impact (`tools/nats-identity/measure.py`, committed results in
-`measurements.json`; Go 1.27.2, an 8-core arm64 laptop, 5 samples per
-workload, median shown, `GOMAXPROCS=4` unconstrained and `GOMAXPROCS=1` with
-`GOMEMLIMIT=768MiB` as a constrained approximation, not a 1 GiB VM):
-connection churn with a handshake and flush ranged from 0.48 to 0.64 ms/op
-against 0.48 to 0.53 ms/op for the reference (allocations unchanged, about
-2 % more bytes; the unconstrained difference was within sample noise in the
-other profile); a monitored request/reply workload showed 1.0 to 1.1x the
-reference latency with identical allocation counts; `/connz` for 128
-connections allocates about 55 % more per call and the response doubles from
-about 46 KB to 91 KB (roughly 350 bytes per connection) and takes about 1.5x as
-long to produce. The hot PUB/SUB path is not touched. The material cost is
-**configuration load and reload**: the producer verifies at load time that a
-public name does not equal any configured secret, including bcrypt hashes. For
-three bcrypt (cost 8) users this raised config load from about 0.3 ms to about
-0.4 s. The work is capped (more than 64 users, cost above 12 or excessive
-total work disables naming rather than blocking), but operators with large
-bcrypt user lists should treat this as an explicit tradeoff. These are
-single-machine micro-benchmarks; no sustained or 1 GiB-VM load test has been
-run, and none was run against production.
+public_user は認証で検証されたサーバー側の username のみである。
+構成内の全 secret との平文・bcrypt 衝突検査を通し、ASCII の英数字と
+._- のみ、最大64文字、予約ラベル以外に制限する。User オブジェクト、
+パスワード、token、JWT、鍵、CONNECT の任意の主張、peer address は
+この metadata に含めない。cookie 経由でも認証結果を使い、source=cookie
+で区別する。token は shared-token、anonymous/no_auth_user は no-auth、
+NKey/JWT/TLS mapping/delegated/custom は auth-accepted-unnameable とし、
+pending/validated、rejected、stale を名前に変換しない。
+
+設定の検査は設定構築時だけ行う。今回の最適化は、同じ設定内の同一 secret
+を重複除去し、各bcryptハッシュを一度解析し、平文衝突を先に除外する。
+ハッシュ比較の結果や secret をグローバルにキャッシュしない。
+認証時には小さな結果を保存し、監視時には既存の接続ロックで値をコピーする。
+v2 は ConnInfo に値を直接保持するため、監視時の接続ごとの別ヒープ
+割り当てを減らせる。PUB/SUB の通常配送経路には処理を追加しない。
+設定・認証・監視が無費用になるわけではない。
+
+観測時刻と broker 時計との差は60秒以内に制限する。名前と90秒の期限は
+同じ選択済み接続に由来し、失効処理とともに同じトランザクションで保存する。
+Agents API は期限を読取時にも検査する。poll 失敗時には名前を失効させる。
+認証待ちの新しい cid が併存しても、選択した認証済み接続の期限が欠けない。
+
+#### 配布・更新・rollback
+
+これは上流 NATS に含まれる機能ではなく、固定ソースへの fork patch である。
+operator がビルド・配布・更新保守するか、上流への採用が必要である。
+新しい Kanade と producer を同じ v2 契約で配布する。v1 は未サポート扱いで、
+互換 shim で名前を回復しない。未改造・旧版・不明版・metadata 欠落・不整合は
+unknown/auth-unproven に留める。producer を未改造版に戻せば次のpollで
+名前が失効する。既存バイナリの置換には broker の再起動が必要で、すべての
+接続が再接続する。新 epoch は再認証まで未証明である。reload でも
+generation を更新し、古い認証結果を再利用しない。権限や認証方式を緩めて
+表示を緑にする運用はしない。
+
+検証は Python 3.11 以上（native package fixture の tomllib）、Go 1.27.2
+（.tool-versions と integration.yml）、Bun、Python TLS proxy、OpenSSL が必要。
+グローバル設定を変更せず、対応する Python を子プロセスにも選ぶこと
+（docs/local-verification.md を参照）。python3 tools/nats-identity/verify.py は
+固定ソースから producer をビルドし、Go race テスト、実 broker の
+WSS/TCP と producer 由来の Agents browser テストを実行する。
+2件のpositiveテストと必須browserテストの実行を検査し、空振りは成功にしない。
+本作業で本番の設定変更、再起動、配布、採用判断は行っていない。
+
+#### 初回測定（最適化前、保持した結果）
+
+初回は revision d0d12836 の結果を measurements-initial.json に内容を変えず
+保持した。Go 1.27.2、Darwin arm64、8 CPU の同一ホストで各負荷5サンプル。
+default は GOMAXPROCS=4/GOMEMLIMIT=off、constrained は
+GOMAXPROCS=1/GOMEMLIMIT=768MiB。中央値は以下のとおり。初回は
+variantごとに5回まとめて実行しており、後述の交互順序とは異なる。
+
+| profile | 負荷 | baseline ms/op | patched ms/op | 時間差 | B/op（baseline → patched） | allocs/op（baseline → patched） |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| default | TCP・平文password churn | 0.482 | 0.637 | +32.08% | 62888 → 64182 | 179 → 179 |
+| default | connz・128接続 | 0.505 | 0.787 | +55.74% | 132171 → 204187 | 395 → 525 |
+| default | 監視付き64B request/reply | 0.181 | 0.195 | +7.89% | 1318 → 1336 | 21 → 21 |
+| default | cold config・同一bcryptハッシュ×3 | 0.328 | 412.581 | +125816.99% | 129349 → 182872 | 445 → 856 |
+| constrained | TCP・平文password churn | 0.532 | 0.488 | -8.25% | 62946 → 64220 | 180 → 180 |
+| constrained | connz・128接続 | 0.542 | 0.836 | +54.30% | 131930 → 204016 | 394 → 523 |
+| constrained | 監視付き64B request/reply | 0.171 | 0.174 | +1.74% | 1318 → 1325 | 21 → 21 |
+| constrained | cold config・同一bcryptハッシュ×3 | 0.343 | 415.702 | +121045.97% | 129354 → 182816 | 445 → 854 |
+
+特にdefaultのTCP churnは **482047 → 636671 ns/op（+32.08%）**。
+5サンプルの範囲もbaseline 468165–538897、patched 580087–712285 ns/opで
+重ならない。これをnoiseとは扱わない。constrainedの中央値
+531838 → 487958 ns/op（−8.25%）とは別の結果である。
+defaultのconnz応答は46503 → 91203 byte、約96%増だった。
+3ユーザーのconfig構築は327661 → 412580854 ns/opであり、
+初回の大きな設定費用を省略しない。このfixtureは3人が**同一**の
+cost-8 bcryptハッシュを共有していた。WSS接続費用や独立ハッシュの費用は
+この初回測定からは分からない。client_bytesはResetTimerより前に報告したため
+初回出力には残っておらず、初回のchurn B/opを保持メモリと解釈してはいけない。
+
+#### 最適化後の比較
+
+measurements.json は各profile/variant/6負荷を5回ずつ記録し、生のGo出力、
+各sample、中央値、差分、固定ソース・patch・producer・benchmarkのSHA-256、
+初回結果のSHA-256を含む。両variantには同一benchmarkコードをコピーし、
+初回と同じNATS 2.14.1/Go 1.27.2、500ms、profile設定を使った。
+各roundは別のgo testプロセスでcount=1を実行し、第1/3/5回を
+baseline→patched、第2/4回をpatched→baselineにして順序を交互にした。
+元の4負荷を保持し、client_bytesをResetTimerの後に報告する修正を加え、
+独立ハッシュのcold configとWSS負荷を追加した。
+
+| profile | 負荷 | baseline ms/op | patched ms/op | 時間差 | B/op（baseline → patched） | allocs/op（baseline → patched） |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| default | TCP・平文password churn | 0.544 | 0.633 | +16.27% | 62944 → 64311 | 180 → 180 |
+| default | connz・128接続 | 0.538 | 0.667 | +23.88% | 132221 → 156984 | 395 → 397 |
+| default | 監視付き64B request/reply | 0.219 | 0.213 | -2.52% | 1332 → 1339 | 21 → 21 |
+| default | cold config・同一bcryptハッシュ×3 | 0.371 | 129.470 | +34777.44% | 129360 → 149536 | 445 → 751 |
+| default | cold config・独立salt/異なるpassword×3 | 0.363 | 371.106 | +102156.15% | 129345 → 181064 | 445 → 827 |
+| default | WSS・bcrypt cost 8 churn | 51.791 | 50.636 | -2.23% | 224336 → 214332 | 1143 → 1138 |
+| constrained | TCP・平文password churn | 0.489 | 0.508 | +3.96% | 62958 → 64280 | 180 → 180 |
+| constrained | connz・128接続 | 0.543 | 0.654 | +20.42% | 131949 → 156689 | 395 → 396 |
+| constrained | 監視付き64B request/reply | 0.178 | 0.178 | +0.32% | 1327 → 1332 | 21 → 21 |
+| constrained | cold config・同一bcryptハッシュ×3 | 0.351 | 125.686 | +35661.01% | 129354 → 149508 | 445 → 750 |
+| constrained | cold config・独立salt/異なるpassword×3 | 0.354 | 391.807 | +110590.34% | 129365 → 181064 | 445 → 826 |
+| constrained | WSS・bcrypt cost 8 churn | 50.973 | 42.394 | -16.83% | 213481 → 214514 | 1141 → 1138 |
+
+同一ハッシュのconfig構築は初回patched約413/416 msから約129/126 msへ
+短縮した。ただし、これは重複比較9回を3回に減らせたケースである。
+独立salt・異なるpasswordの3ハッシュでは3候補×3ハッシュの衝突検査が必要で、
+約371/392 msが残る。baselineの約0.36 msとは依然として大きな差がある。
+検査を省略したりbcrypt costを下げたりしない限り、このCPU費用は残る。
+credentialの生成はtimed regionの外だが、NewServerとpolicyの構築は
+**毎op冷状態**で行い、warm cache hitへ置き換えていない。
+64ユーザー超、cost 12超、distinct secret 256超、重み付き比較仕事量4096超では
+名前を出さない安全側の上限も維持している。
+
+defaultのpatched TCP churnは初回0.637 msから今回0.633 msとほぼ同じであり、
+この経路の回帰が解消したとはいえない。今回のbaselineも0.544 msに変わって
+おり、今回の差は+16.27%。constrainedは+3.96%。今回の範囲は重なるが、
+初回の非重複範囲と+32.08%を取り消す根拠にはしない。
+認証snapshotの保存や同期の費用は残っている。
+
+connzはdefaultでbaseline比時間+23.88%、B/op +18.73%、応答
+46508 → 65264 byte（約40.3%、1接続あたり約147 byte増）。
+constrainedでは時間+20.42%、応答46508 → 65229 byte。
+defaultのpatched同士では初回からB/op約23%減、allocs/opは525→397、
+応答は約28%減となった。ただし初回との時間比較には順序・ホスト状態の差もある。
+response_bytesは各sample末尾のserialized応答長を報告し、その5回の中央値である。
+v2のcoherentな共有フィールドと値コピーは冗長性を減らすが、追加の監視コストは残る。
+この比較はauth=1であり、auth=0でもConnInfoの値fieldのため構造体の拡大はある。
+auth=0の時間・allocationは今回測定していない。
+
+保持メモリは両profileでclient構造体6872 → 6952 byte、増分80 byte。
+identity_state_bytesも80 byteである。これはgeneration/sequenceと4つの
+string headerで、state/mechanism/sourceは固定文字列、publicUserは既存の
+immutableなcanonical名の参照を再利用する。新しい文字列のコピーや接続ごとの
+secret構造体は作らない。参照するpublic名の長さは最大64 byteで、設定内で
+共有される。client_bytesは構造体サイズの実測であり、allocatorのsize class、
+stack、socket、TLS、既存の設定の寿命やRSS全体を含まない。
+churnのB/opは一時割り当てを含み、80 byteの保持増分とは異なる。
+policyと一時的なsecret収集は設定単位であり、新たなidentity履歴は保存しない。
+producer・consumerとも名前は最大64 byteで検査する。定数文字列の本体は共有され、
+接続あたり新たに確保する動的なidentity文字列のバッファはない。ただし参照先の
+canonical名の寿命は接続まで延び得るため、構造体サイズだけでRSS増分は断定しない。
+監視用ConnInfoにはv2の値fieldが加わる（64-bit型定義からの計算では88 byte）。
+既存のclosed ringもこの空fieldを持つため、MaxClosedClientsの既定10000件なら
+field自体で880000 byte相当が増える。閉じた接続の新metadataは保存しないが、
+値field化によるこの容量のtradeoffは残る。allocator込みのRSSは未測定である。
+
+監視付きrequest/replyは10msごとにconnzを生成し、64 byteを1往復ずつ送る。
+今回の中央値からの逐次処理率はdefaultで約4572 → 4690 req/s、
+constrainedで約5632 → 5614 req/s。allocs/opはいずれも21のまま。
+これを並列PUB/SUBの最大throughputやtail latencyの保証にはしない。
+
+追加WSS負荷は、一時的なP-256証明書を検証する新しいTLS/WebSocket接続で、
+cost-8 bcryptユーザー1人のCONNECTとflushを毎op実行する。
+証明書・hashの生成は計時外、接続・TLS・bcrypt認証は計時内。
+TLSはbrokerで直接終端し、Caddyや遠隔ネットワークを再現していない。
+defaultは約51.8 → 50.6 ms、constrainedは約51.0 → 42.4 msだが、
+サンプル範囲が広く、producerで高速化できたという結論にはしない。
+この遅い合成負荷の小さい相対差で、元のTCP churnの回帰を相殺しない。
+実TLS proxyを経由するpositive/negative試験は別途verifyで維持している。
+
+これらは単一Darwinホスト上のmicrobenchmarkで、GOMEMLIMITはGoのsoft heap
+limitにすぎない。**1 GiB Linux VM・swapなしでの試験ではない**。
+TLS clientとbrokerは同じプロセス内で、長期RSS、接続storm、JetStream負荷、
+p95/p99、本番Caddyや本番のbcrypt costを評価したものではない。
+個々の範囲と全sampleを保存し、好都合な値だけを選んでいない。
+設定時の数百ms、監視・churnの残存増分は運用上のtradeoffであり、
+本番採用を許容したという意味ではない。採用・配布・本番での再起動は、
+この実装と測定結果を見た所有者の別判断が必要である。
 
 ## Telling a locked-out host from an offline one
 

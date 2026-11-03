@@ -44,9 +44,19 @@ class E2eTests(unittest.TestCase):
 
     def test_stage_filters_and_socket_opt_in(self):
         commands = list(e2e.commands())
-        self.assertIn("--ignored", commands[0])
+        if e2e.os.name == "posix":
+            self.assertEqual(commands[0], ["python3", "tools/nats-identity/verify.py"])
+        publication = next(cmd for cmd in commands if "api::agent_releases" in cmd)
+        self.assertIn("--ignored", publication)
         for module in ("package_manifest", "publisher_trust", "package_admission"):
             self.assertTrue(any(module + "::tests::" in cmd for cmd in commands))
+
+    def test_unsupported_python_fails_before_preparing_external_tools(self):
+        with patch.object(e2e.sys, "version_info", (3, 9)), \
+                patch.object(e2e, "prepare_nats") as prepare:
+            with self.assertRaisesRegex(ValueError, "Python 3.11"):
+                e2e.main()
+            prepare.assert_not_called()
 
     def test_nats_version_matches_actual_ci_pin(self):
         for version, valid in (("2.14.1", True), ("0.0.0", False)):

@@ -21,9 +21,10 @@ def verify():
     build.prepare()
     env = build.environment()
     src = build.OUT / 'patched' / f'nats-server-{build.VERSION}'
-    out = run(['go', 'test', '-race', './server', '-run', '^TestAuthIdentity', '-count=1'], src, env)
-    if not re.search(r'^ok\s', out, re.MULTILINE):
-        raise SystemExit('producer race tests did not pass')
+    out = run(['go', 'test', '-race', '-v', './server', '-run', '^TestAuthIdentity', '-count=1'], src, env)
+    if not re.search(r'^ok\s', out, re.MULTILINE) or len(re.findall(
+            r'^--- PASS: TestAuthIdentity', out, re.MULTILINE)) < 5:
+        raise SystemExit('required producer race tests did not execute successfully')
     web = build.ROOT / 'crates/kanade-backend/web'
     run(['bun', 'install', '--frozen-lockfile'], web, env)
     run(['bun', 'x', 'playwright', 'install', 'chromium'], web, env)

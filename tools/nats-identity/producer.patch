@@ -183,15 +183,31 @@
  	}
 --- a/server/monitor.go
 +++ b/server/monitor.go
-@@ -112,6 +112,7 @@
+@@ -46,6 +46,7 @@
+ 
+ // Connz represents detailed information on current client connections.
+ type Connz struct {
++    AuthIdentityServerStart time.Time `json:"auth_identity_server_start,omitzero"`
+ 	ID       string      `json:"server_id"`
+ 	Now      time.Time   `json:"now"`
+ 	NumConns int         `json:"num_connections"`
+@@ -112,6 +113,7 @@
  
  // ConnInfo has detailed information on a per connection basis.
  type ConnInfo struct {
-+	AuthIdentity   *AuthIdentity  `json:"auth_identity,omitempty"`
++	AuthIdentity   AuthIdentity  `json:"auth_identity,omitzero"`
  	Cid            uint64         `json:"cid"`
  	Kind           string         `json:"kind,omitempty"`
  	Type           string         `json:"type,omitempty"`
-@@ -575,6 +576,9 @@
+@@ -308,6 +310,7 @@
+ 
+ 	// copy the server id for monitoring
+ 	c.ID = s.info.ID
++    if auth { c.AuthIdentityServerStart = s.start }
+ 
+ 	// Number of total clients. The resulting ConnInfo array
+ 	// may be smaller if pagination is used.
+@@ -575,6 +578,9 @@
  	ci.MQTTClient = client.getMQTTClientID()
  	ci.Kind = client.kindString()
  	ci.Type = client.clientTypeString()
@@ -201,7 +217,7 @@
  	ci.Start = client.start
  	ci.LastActivity = client.last
  	ci.Uptime = myUptime(now.Sub(client.start))
-@@ -1222,82 +1226,84 @@
+@@ -1222,82 +1228,84 @@
  
  // Varz will output server information on the monitoring port at /varz.
  type Varz struct {
@@ -362,11 +378,11 @@
  }
  
  // JetStreamVarz contains basic runtime information about jetstream
-@@ -1862,6 +1868,8 @@
+@@ -1862,6 +1870,8 @@
  // is done.
  // Server lock is held on entry.
  func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64, rss int64) {
-+	v.AuthIdentityVersion = 1
++	v.AuthIdentityVersion = 2
 +	v.AuthIdentityGeneration = s.authIdentityPolicy.Load().generation
  	v.Now = time.Now().UTC()
  	v.Uptime = myUptime(time.Since(s.start))

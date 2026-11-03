@@ -6,25 +6,20 @@ import (
 	"reflect"
 	"strings"
 	"sync/atomic"
-	"time"
 	"unicode"
 )
 
-// AuthIdentity is additive monitoring v1. It never contains CONNECT options,
-// credential material, an internal User, an account, or an address.
+// AuthIdentity is additive monitoring v2. Broker/start binding is inherited
+// from the Connz envelope; cid/start/transport are the enclosing ConnInfo.
+// All fields of that connection are copied under the same existing c.mu.
 type AuthIdentity struct {
-	Version         int       `json:"version"`
-	ServerID        string    `json:"server_id"`
-	ServerStart     time.Time `json:"server_start"`
-	CID             uint64    `json:"cid"`
-	ConnectionStart time.Time `json:"connection_start"`
-	Transport       string    `json:"transport"`
-	Generation      uint64    `json:"generation"`
-	Sequence        uint64    `json:"sequence"`
-	State           string    `json:"state"`
-	Mechanism       string    `json:"mechanism"`
-	Source          string    `json:"source"`
-	PublicUser      string    `json:"public_user,omitempty"`
+	Version    int    `json:"version"`
+	Generation uint64 `json:"generation"`
+	Sequence   uint64 `json:"sequence"`
+	State      string `json:"state"`
+	Mechanism  string `json:"mechanism"`
+	Source     string `json:"source"`
+	PublicUser string `json:"public_user,omitempty"`
 }
 
 type authIdentityState struct {
@@ -49,7 +44,14 @@ func publicAuthNames(opts *Options) map[string]bool {
 	for _, u := range opts.Users {
 		candidates = append(candidates, u.Username)
 	}
-	secrets := []string{}
+	// Only this configuration call holds secret references. Deduplicate before
+	// bcrypt work; no secrets or hash results survive in the policy.
+	secrets := make(map[string]struct{})
+	addSecret := func(secret string) {
+		if secret != "" {
+			secrets[secret] = struct{}{}
+		}
+	}
 	visited := make(map[uintptr]bool)
 	var walk func(reflect.Value)
 	walk = func(v reflect.Value) {
@@ -69,7 +71,7 @@ func publicAuthNames(opts *Options) map[string]bool {
 			visited[v.Pointer()] = true
 			if u, ok := v.Interface().(*url.URL); ok && u.User != nil {
 				p, _ := u.User.Password()
-				secrets = append(secrets, p)
+				addSecret(p)
 				return
 			}
 			walk(v.Elem())
@@ -85,7 +87,7 @@ func publicAuthNames(opts *Options) map[string]bool {
 				x := v.Field(i)
 				n := strings.ToLower(f.Name)
 				if x.Kind() == reflect.String && (strings.Contains(n, "password") || strings.Contains(n, "token") || strings.Contains(n, "secret") || strings.Contains(n, "seed") || strings.Contains(n, "nkey") || (strings.HasPrefix(n, "jetstream") && strings.HasSuffix(n, "key")) || n == "authorization") {
-					secrets = append(secrets, x.String())
+					addSecret(x.String())
 				} else {
 					walk(x)
 				}
@@ -126,13 +128,26 @@ func publicAuthNames(opts *Options) map[string]bool {
 			unique[name] = true
 		}
 	}
+	// Check literal collisions first and parse each distinct hash once.
+	// A plaintext equality needs no expensive hash comparison.
+	for name := range unique {
+		if _, collides := secrets[name]; collides {
+			delete(unique, name)
+		}
+	}
+	hashes := [][]byte{}
 	work := 0
-	for _, secret := range secrets {
-		if cost, err := bcrypt.Cost([]byte(secret)); err == nil {
+	for secret := range secrets {
+		if !strings.HasPrefix(secret, "$") {
+			continue
+		}
+		hash := []byte(secret)
+		if cost, err := bcrypt.Cost(hash); err == nil {
 			if cost > 12 {
 				return names
 			}
 			work += (1 << cost) * len(unique)
+			hashes = append(hashes, hash)
 		}
 	}
 	if work > 4096 {
@@ -140,12 +155,9 @@ func publicAuthNames(opts *Options) map[string]bool {
 	}
 	for name := range unique {
 		safe := true
-		for _, secret := range secrets {
-			if secret == name {
-				safe = false
-				break
-			}
-			if _, err := bcrypt.Cost([]byte(secret)); err == nil && bcrypt.CompareHashAndPassword([]byte(secret), []byte(name)) == nil {
+		candidate := []byte(name)
+		for _, hash := range hashes {
+			if bcrypt.CompareHashAndPassword(hash, candidate) == nil {
 				safe = false
 				break
 			}
@@ -196,9 +208,9 @@ func (c *client) finishAuthIdentity(p *authIdentityPolicy, attempt uint64, accep
 }
 
 // c.mu is held by the existing authorized monitoring walk.
-func (c *client) authIdentityLocked() *AuthIdentity {
+func (c *client) authIdentityLocked() AuthIdentity {
 	if c.kind != CLIENT || c.srv == nil {
-		return nil
+		return AuthIdentity{}
 	}
 	a := c.authIdentity
 	if a.state == "" {
@@ -215,5 +227,5 @@ func (c *client) authIdentityLocked() *AuthIdentity {
 		a.state = "stale"
 		a.publicUser = ""
 	}
-	return &AuthIdentity{1, c.srv.info.ID, c.srv.start, c.cid, c.start, c.clientTypeString(), a.generation, a.sequence, a.state, a.mechanism, a.source, a.publicUser}
+	return AuthIdentity{2, a.generation, a.sequence, a.state, a.mechanism, a.source, a.publicUser}
 }

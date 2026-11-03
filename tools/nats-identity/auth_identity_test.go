@@ -21,9 +21,15 @@ func proofFor(t *testing.T, s *Server, id uint64) *AuthIdentity {
 	if err != nil {
 		t.Fatal("monitor failed")
 	}
+	if z.ID != s.info.ID || !z.AuthIdentityServerStart.Equal(s.start) {
+		t.Fatal("broker envelope binding missing")
+	}
 	for _, c := range z.Conns {
 		if c.Cid == id {
-			return c.AuthIdentity
+			if c.Start.Before(s.start) || c.Type != "nats" || c.AuthIdentity.Version != 2 {
+				t.Fatal("connection binding missing")
+			}
+			return &c.AuthIdentity
 		}
 	}
 	t.Fatal("connection missing")
@@ -63,7 +69,7 @@ func TestAuthIdentityCanonicalAndPending(t *testing.T) {
 	}
 	z, _ := s.Connz(&ConnzOptions{Username: false})
 	for _, c := range z.Conns {
-		if c.AuthIdentity != nil {
+		if c.AuthIdentity.Version != 0 {
 			t.Fatal("proof exposed without auth=1")
 		}
 	}
@@ -106,6 +112,25 @@ func TestAuthIdentitySecretCollisions(t *testing.T) {
 	opts.Users[0].Password = string(h)
 	if publicAuthNames(opts)["agent"] {
 		t.Fatal("proof work budget not enforced")
+	}
+}
+
+func TestAuthIdentityDistinctAndDuplicateHashes(t *testing.T) {
+	first, _ := bcrypt.GenerateFromPassword([]byte("agent"), 4)
+	second, _ := bcrypt.GenerateFromPassword([]byte("other-password"), 4)
+	for _, hashes := range [][]string{
+		{string(first), string(first), string(first)},
+		{string(first), string(second), string(second)},
+	} {
+		opts := &Options{Users: []*User{
+			{Username: "agent", Password: hashes[0]},
+			{Username: "backend", Password: hashes[1]},
+			{Username: "breakglass", Password: hashes[2]},
+		}}
+		names := publicAuthNames(opts)
+		if names["agent"] || !names["backend"] || !names["breakglass"] {
+			t.Fatal("deduplication changed collision decisions")
+		}
 	}
 }
 

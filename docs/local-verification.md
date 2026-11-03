@@ -3,8 +3,13 @@
 Rust gate は `magi.toml` の既存の 5 コマンドを維持する。e2e は
 `python3 scripts/ci/magi-e2e.py` で、既存の publication/store、manifest、
 trust/admission、CLI テストを実行する。stage 2a/2b は各
-`module::tests::` を個別指定する。Python 3、Rust、CI と同版の
+`module::tests::` を個別指定する。Python 3.11 以上（native package fixture が tomllib を使用）、Rust、CI と同版の
 `nats-server`、loopback の bind/connect 権限が必要。
+Go は .tool-versions と integration.yml に指定した 1.27.2 を使用する。
+Python は子プロセスにもサポート版が選ばれる環境で起動する。
+mise の場合は MISE_PYTHON_VERSION をその呼び出しに限定して設定できる。
+グローバルの既定値は変更しない。
+
 broker は既存 fixture が一時的に起動し、実 fleet には接続しない。
 `KANADE_APP_ARTIFACT_PUBLICATION=backend-exclusive` は子プロセスに設定する。
 
