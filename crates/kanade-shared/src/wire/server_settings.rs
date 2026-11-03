@@ -403,6 +403,28 @@ impl NatsAuthMode {
     }
 }
 
+#[derive(serde::Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct PasskeySettings {
+    pub enabled: bool,
+    /// Relying party ID — a bare host name (e.g. `kanade.example.com` or
+    /// `localhost`). No scheme, port, path or credentials. Must be
+    /// lowercase ASCII; use punycode for IDN. Must be a domain name, not
+    /// an IP address. Subdomains of this RP ID may be listed in
+    /// `rp_origins`.
+    #[serde(default)]
+    pub rp_id: String,
+    /// Allowed origin(s) for WebAuthn ceremonies. Each must be a bare
+    /// origin (`https://host[:port]`) whose host is either the RP ID or a
+    /// subdomain of it. `http` is only accepted for `localhost`. At least
+    /// one origin is required. No wildcards, paths, queries or fragments.
+    #[serde(default)]
+    pub rp_origins: Vec<String>,
+    /// Human-readable relying party name. Defaults to "Kanade".
+    #[serde(default)]
+    pub rp_name: Option<String>,
+}
+
 /// Value stored in the `server_settings` KV bucket under the single key
 /// [`crate::kv::KEY_SERVER_SETTINGS`]. Operator-editable, backend-side
 /// server configuration that isn't per-agent (so it doesn't belong in
@@ -427,6 +449,12 @@ impl NatsAuthMode {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct ServerSettings {
+    /// Passkeys are disabled until explicitly configured by an operator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passkeys: Option<PasskeySettings>,
+    /// Server-owned ceremony generation; never accepted from API clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passkey_generation: Option<String>,
     /// Days a dead agent (one whose heartbeat stopped arriving) may
     /// linger in the `agents` registry before the backend cleanup task
     /// prunes its row.
@@ -611,6 +639,8 @@ impl ServerSettings {
     /// every deployment that hasn't overridden the field.
     pub fn defaults() -> Self {
         Self {
+            passkeys: None,
+            passkey_generation: None,
             agent_prune_days: None,
             controller_group: None,
             mail: None,

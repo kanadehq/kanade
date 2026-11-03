@@ -200,6 +200,20 @@
       "token": "token (single shared token)",
       "users": "users (per-role NATS users)",
       "graceHint": "Changing this mode holds back new reports for 5 minutes so connections re-establishing under the new mode are not flagged while they converge."
+    },
+    "passkeys": {
+      "title": "Passkeys (WebAuthn)",
+      "description": "Changes apply immediately to every backend. Outstanding registration and sign-in challenges are invalidated. Use HTTPS origins (HTTP is allowed only for localhost). No restart is required.",
+      "invalid": "Effective state: invalid configuration",
+      "enabledLabel": "Enable passkeys",
+      "rpId": "RP ID (bare lowercase host name)",
+      "origins": "Allowed origins (one per line)",
+      "rpName": "RP display name",
+      "enabled": "Effective state: enabled",
+      "disabled": "Effective state: disabled",
+      "unavailable": "Effective state: unavailable — configuration could not be applied or read",
+      "loading": "Checking effective state…",
+      "save": "Save passkey settings"
     }
   }
 }

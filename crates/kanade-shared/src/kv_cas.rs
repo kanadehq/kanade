@@ -44,6 +44,15 @@ where
     T: Serialize + DeserializeOwned + Default,
     F: FnMut(&mut T) -> bool,
 {
+    try_read_modify_write(kv, key, |value| Ok(mutate(value))).await
+}
+
+/// Fallible mutation: validation runs on every CAS attempt before writing.
+pub async fn try_read_modify_write<T, F>(kv: &Store, key: &str, mut mutate: F) -> anyhow::Result<T>
+where
+    T: Serialize + DeserializeOwned + Default,
+    F: FnMut(&mut T) -> anyhow::Result<bool>,
+{
     let mut last_err = None;
     for attempt in 0..MAX_CAS_ATTEMPTS {
         if attempt > 0 {
@@ -73,7 +82,7 @@ where
             Some(e) => (T::default(), Some(e.revision)),
             None => (T::default(), None),
         };
-        if !mutate(&mut value) {
+        if !mutate(&mut value)? {
             return Ok(value);
         }
         let bytes = serde_json::to_vec(&value).with_context(|| format!("encode kv '{key}'"))?;

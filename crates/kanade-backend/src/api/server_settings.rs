@@ -50,6 +50,74 @@ use crate::api::AppState;
 use crate::audit;
 use crate::audit::Caller;
 
+#[derive(Debug)]
+struct PasskeyValidation(String);
+impl std::fmt::Display for PasskeyValidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for PasskeyValidation {}
+
+/// Nested PATCH semantics: omitted fields survive, null clears, arrays replace.
+/// Validate inside CAS so concurrent partial edits cannot save an invalid RP.
+fn merge_passkeys(
+    obj: &mut Map<String, Value>,
+    incoming: &Map<String, Value>,
+) -> anyhow::Result<bool> {
+    let Some(patch) = incoming.get("passkeys") else {
+        return Ok(false);
+    };
+    let before = obj.get("passkeys").cloned();
+    if patch.is_null() {
+        obj.remove("passkeys");
+    } else {
+        let patch = patch
+            .as_object()
+            .ok_or_else(|| PasskeyValidation("passkeys must be an object or null".into()))?;
+        let mut merged = before
+            .clone()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        for key in ["enabled", "rp_id", "rp_origins", "rp_name"] {
+            if let Some(value) = patch.get(key) {
+                if value.is_null() {
+                    merged.remove(key);
+                } else {
+                    merged.insert(key.into(), value.clone());
+                }
+            }
+        }
+        let config: kanade_shared::wire::PasskeySettings =
+            serde_json::from_value(Value::Object(merged.clone()))
+                .map_err(|e| PasskeyValidation(e.to_string()))?;
+        // Empty disabled settings are valid. Any supplied RP must be complete
+        // and satisfy the same constraints used to construct the live service.
+        if config.enabled || !config.rp_id.is_empty() || !config.rp_origins.is_empty() {
+            crate::passkey::PasskeyService::new(&config).map_err(PasskeyValidation)?;
+        }
+        obj.insert("passkeys".into(), Value::Object(merged));
+    }
+    let changed = before != obj.get("passkeys").cloned();
+    let effective_before: kanade_shared::wire::PasskeySettings = before
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let effective_after: kanade_shared::wire::PasskeySettings = obj
+        .get("passkeys")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    if effective_before != effective_after {
+        // A fresh generation also invalidates A -> B -> A ceremonies.
+        obj.insert(
+            "passkey_generation".into(),
+            Value::String(uuid::Uuid::new_v4().to_string()),
+        );
+    }
+    Ok(changed)
+}
+
 /// `GET /api/server-settings` — the current server settings, or all-default
 /// when the key is absent.
 pub async fn get(State(s): State<AppState>) -> Result<Json<ServerSettings>, (StatusCode, String)> {
@@ -148,8 +216,13 @@ pub async fn put(
     // build knows. Unknown keys are ignored here but preserved by the merge
     // below. `null`s decode to `None` (= unset), which the merge maps to
     // "remove the key".
+    // Passkey inner nulls are clears, resolved against the current document
+    // inside each CAS attempt rather than deserialized as a standalone config.
+    let mut validation_body = incoming.clone();
+    validation_body.remove("passkeys");
+    validation_body.remove("passkey_generation");
     let typed: ServerSettings =
-        serde_json::from_value(Value::Object(incoming.clone())).map_err(|e| {
+        serde_json::from_value(Value::Object(validation_body)).map_err(|e| {
             (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("invalid server_settings body: {e}"),
@@ -159,8 +232,8 @@ pub async fn put(
     validate_user_pair_update(&incoming)?;
     let typed = normalize(typed);
 
-    // Precompute the normalised JSON values once (outside the CAS closure,
-    // which may re-run on a revision conflict and can't be fallible).
+    // Precompute independent normalised values once. Passkey validation is
+    // deliberately repeated against the merged document inside CAS.
     let prune_value = typed.agent_prune_days.map(Value::from);
     let collect_value = typed.collect_retention_days.map(Value::from);
     let result_output_value = typed.result_output_retention_days.map(Value::from);
@@ -232,7 +305,7 @@ pub async fn put(
     // retrying the whole round on a revision conflict. `read_modify_write`
     // decodes a missing key to an empty map (first-ever write).
     let merged_map =
-        kv_cas::read_modify_write::<Map<String, Value>, _>(&kv, KEY_SERVER_SETTINGS, |obj| {
+        kv_cas::try_read_modify_write::<Map<String, Value>, _>(&kv, KEY_SERVER_SETTINGS, |obj| {
             let mut changed = false;
             changed |= merge_field(obj, &incoming, "agent_prune_days", prune_value.clone());
             collect_changed = merge_field(
@@ -270,10 +343,14 @@ pub async fn put(
             // a write-only secret, so it merges per-inner-key and an omitted
             // nats_token preserves the stored one (see merge_agent_install).
             changed |= merge_agent_install(obj, &incoming);
-            changed
+            changed |= merge_passkeys(obj, &incoming)?;
+            Ok(changed)
         })
         .await
         .map_err(|e| {
+            if let Some(e) = e.downcast_ref::<PasskeyValidation>() {
+                return (StatusCode::UNPROCESSABLE_ENTITY, e.0.clone());
+            }
             warn!(error = %format!("{e:#}"), "write server_settings");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1123,6 +1200,58 @@ mod tests {
         SupportCodeBody, hash_support_code, merge_agent_install, merge_field, merge_nats_auth_mode,
         normalize, redact_secrets, validate, validate_support_code, validate_user_pair_update,
     };
+
+    #[test]
+    fn passkey_patch_validates_merged_values_and_owns_generation() {
+        let mut stored = obj(json!({"future": true}));
+        assert!(
+            super::merge_passkeys(
+                &mut stored,
+                &obj(json!({"passkeys": {
+            "enabled": true, "rp_id": "example.com", "rp_origins": ["https://example.com"]
+        }, "passkey_generation": "client"}))
+            )
+            .unwrap()
+        );
+        stored["passkeys"]["future"] = json!("preserved");
+        let first = stored["passkey_generation"].clone();
+        assert_ne!(first, "client");
+        assert_eq!(stored["future"], true);
+        assert!(
+            !super::merge_passkeys(&mut stored, &obj(json!({"passkeys": {"enabled": true}})))
+                .unwrap()
+        );
+        assert_eq!(stored["passkey_generation"], first);
+        let mut candidate = stored.clone();
+        assert!(
+            super::merge_passkeys(
+                &mut candidate,
+                &obj(json!({"passkeys": {"rp_origins": ["http://example.com"]}}))
+            )
+            .is_err()
+        );
+        assert_eq!(stored["passkey_generation"], first);
+        assert!(
+            super::merge_passkeys(
+                &mut stored,
+                &obj(json!({"passkeys": {"enabled": false, "rp_name": "New"}}))
+            )
+            .unwrap()
+        );
+        assert_eq!(stored["passkeys"]["future"], "preserved");
+        assert_eq!(stored["passkeys"]["rp_id"], "example.com");
+        assert!(
+            super::merge_passkeys(
+                &mut stored,
+                &obj(json!({"passkeys": {"enabled": true, "rp_name": null}}))
+            )
+            .unwrap()
+        );
+        assert_ne!(stored["passkey_generation"], first);
+        assert!(stored["passkeys"].get("rp_name").is_none());
+        assert!(super::merge_passkeys(&mut stored, &obj(json!({"passkeys": null}))).unwrap());
+        assert!(stored.get("passkeys").is_none());
+    }
 
     fn obj(v: Value) -> Map<String, Value> {
         v.as_object().expect("object literal").clone()

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
+import { PasskeySettingsCard } from '@/components/PasskeySettingsCard';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useConfirm } from '@/components/ui/confirm-dialog';
@@ -775,6 +776,8 @@ function ServerTab() {
       {settings.isError && (
         <p className="text-red-500 text-sm">{formatError(settings.error)}</p>
       )}
+
+      <PasskeySettingsCard canOperate={canOperate} />
 
       {/* The four single-number knobs pair up two-across: each is a label and a
           narrow field, so a full-width row wasted most of it and pushed the

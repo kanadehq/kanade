@@ -37,10 +37,18 @@ use crate::passkey::{
     clean_name,
 };
 
-fn service(state: &AppState) -> Result<&PasskeyService, ApiError> {
+async fn service(state: &AppState) -> Result<std::sync::Arc<PasskeyService>, ApiError> {
     state
         .passkeys
-        .as_deref()
+        .service(&state.jetstream)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "passkey configuration unavailable");
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "passkey configuration unavailable",
+            )
+        })?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "passkeys are not enabled"))
 }
 
@@ -66,10 +74,33 @@ pub struct ConfigResp {
 
 /// `GET /api/auth/passkey/config` — public. Lets the SPA decide whether to
 /// show any passkey UI at all (the login screen has no session to ask with).
-pub async fn config(State(state): State<AppState>) -> Json<ConfigResp> {
-    Json(ConfigResp {
-        enabled: state.passkeys.is_some(),
-    })
+pub async fn config(State(state): State<AppState>) -> Result<Json<ConfigResp>, ApiError> {
+    let enabled = state
+        .passkeys
+        .service(&state.jetstream)
+        .await
+        .map_err(|_| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "passkey configuration unavailable",
+            )
+        })?
+        .is_some();
+    Ok(Json(ConfigResp { enabled }))
+}
+
+/// Authenticated diagnostics; the public probe exposes only enabled state.
+pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    match state.passkeys.service(&state.jetstream).await {
+        Ok(Some(_)) => Json(serde_json::json!({"state": "enabled"})),
+        Ok(None) => Json(serde_json::json!({"state": "disabled"})),
+        Err(crate::passkey::ConfigurationError::Invalid(reason)) => {
+            Json(serde_json::json!({"state": "invalid", "reason": reason}))
+        }
+        Err(crate::passkey::ConfigurationError::Unavailable(reason)) => {
+            Json(serde_json::json!({"state": "unavailable", "reason": reason}))
+        }
+    }
 }
 
 // ---- sign-in -----------------------------------------------------------
@@ -86,7 +117,7 @@ pub async fn login_start(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<LoginStartResp>, ApiError> {
-    let svc = service(&state)?;
+    let svc = service(&state).await?;
     let ip = client_ip(&headers);
     let (challenge_id, options) = svc.start_login(&ip).map_err(challenge_err)?;
     Ok(Json(LoginStartResp {
@@ -109,7 +140,7 @@ pub async fn login_finish(
     caller: Caller,
     Json(req): Json<LoginFinishReq>,
 ) -> Result<Json<LoginResp>, ApiError> {
-    let svc = service(&state)?;
+    let svc = service(&state).await?;
     let ip = client_ip(&headers);
     let outcome = svc
         .finish_login(
@@ -144,6 +175,18 @@ pub async fn login_finish(
         }
     };
     let ttl_hours = session_ttl_hours(&state).await;
+    if !svc.is_current().await {
+        audit::record(
+            &state.nats,
+            "admin",
+            "passkey.login_failed",
+            Some(&ok.username),
+            Some(&caller),
+            serde_json::json!({ "reason": "configuration_changed_or_unavailable", "ip": ip }),
+        )
+        .await;
+        return Err(err(StatusCode::BAD_REQUEST, BAD_CHALLENGE));
+    }
     let (token, exp) = mint_jwt(&ok.username, ok.role, ttl_hours)
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "token mint failed"))?;
     audit::record(
@@ -263,7 +306,7 @@ pub async fn register_start(
     claims: axum::Extension<Claims>,
     Json(req): Json<RegisterStartReq>,
 ) -> Result<Json<RegisterStartResp>, ApiError> {
-    let svc = service(&state)?;
+    let svc = service(&state).await?;
     let Some(name) = clean_name(&req.name) else {
         return Err(err(StatusCode::BAD_REQUEST, "name must be 1-64 characters"));
     };
@@ -298,7 +341,7 @@ pub async fn register_finish(
     caller: Caller,
     Json(req): Json<RegisterFinishReq>,
 ) -> Result<(StatusCode, Json<PasskeyInfo>), ApiError> {
-    let svc = service(&state)?;
+    let svc = service(&state).await?;
     let info = svc
         .finish_register(&state.pool, &claims.sub, &req.challenge_id, &req.credential)
         .await
@@ -341,7 +384,6 @@ pub async fn list(
     State(state): State<AppState>,
     claims: axum::Extension<Claims>,
 ) -> Result<Json<Vec<PasskeyInfo>>, ApiError> {
-    service(&state)?;
     Ok(Json(
         crate::passkey::list(&state.pool, &claims.sub)
             .await
@@ -360,7 +402,6 @@ pub async fn remove(
     Path(id): Path<i64>,
     Json(req): Json<Reauth>,
 ) -> Result<StatusCode, ApiError> {
-    service(&state)?;
     reauthenticate(&state, &headers, &claims, &req).await?;
     if !crate::passkey::remove(&state.pool, &claims.sub, id)
         .await
@@ -484,7 +525,13 @@ mod tests {
             public_url: None,
             nats_url: String::new(),
             login_throttle: Default::default(),
-            passkeys: passkeys_enabled.then(|| std::sync::Arc::new(crate::passkey::tests::svc())),
+            passkeys: std::sync::Arc::new(crate::passkey::PasskeyRuntime::for_test(
+                kanade_shared::wire::ServerSettings {
+                    passkeys: passkeys_enabled
+                        .then(|| crate::passkey::tests::section("kanade.example.com", &[ORIGIN])),
+                    ..Default::default()
+                },
+            )),
         };
         let router = crate::api::router(state.clone()).layer(axum::middleware::from_fn_with_state(
             pool.clone(),
@@ -613,14 +660,342 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn passkey_settings_changes_keep_start_rate_limits() {
+        let app = app(true).await;
+        let old = service(&app.state)
+            .await
+            .unwrap_or_else(|_| panic!("enabled"));
+        for _ in 0..20 {
+            old.start_login("rate-limit-test").unwrap();
+        }
+        {
+            let mut settings = app.state.passkeys.test_settings.write().unwrap();
+            let settings = settings.as_mut().unwrap();
+            settings.passkeys.as_mut().unwrap().rp_name = Some("Changed".into());
+            settings.passkey_generation = Some("new-generation".into());
+        }
+        let new = service(&app.state)
+            .await
+            .unwrap_or_else(|_| panic!("enabled"));
+        assert!(!std::sync::Arc::ptr_eq(&old, &new));
+        assert!(matches!(
+            new.start_login("rate-limit-test"),
+            Err(ChallengeError::RateLimited(_))
+        ));
+    }
+
+    // Same opt-in as the shared KV live tests; no external deployment needed.
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn passkey_settings_live_persistence_generations_and_ceremonies() {
+        use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
+        use serde_json::json;
+        let port = portpicker::pick_unused_port().unwrap();
+        let storage = tempfile::TempDir::new().unwrap();
+        let mut broker = tokio::process::Command::new("nats-server")
+            .args(["-js", "-a", "127.0.0.1", "-p", &port.to_string(), "-sd"])
+            .arg(storage.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("nats-server");
+        let mut connected = None;
+        for _ in 0..50 {
+            match async_nats::connect(format!("nats://127.0.0.1:{port}")).await {
+                Ok(client) => {
+                    connected = Some(client);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+        let nats = connected.expect("broker ready");
+        let js = async_nats::jetstream::new(nats.clone());
+        let kv = js
+            .create_key_value(async_nats::jetstream::kv::Config {
+                bucket: BUCKET_SERVER_SETTINGS.into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut app = app(false).await;
+        app.state.nats = nats;
+        app.state.jetstream = js.clone();
+        app.state.passkeys = Default::default();
+        app.router = crate::api::router(app.state.clone()).layer(
+            axum::middleware::from_fn_with_state(app.pool.clone(), crate::auth::verify),
+        );
+        let second = crate::passkey::PasskeyRuntime::default();
+        assert!(second.service(&js).await.unwrap().is_none());
+        let config = json!({"passkeys": {"enabled": true, "rp_id": "kanade.example.com", "rp_origins": [ORIGIN]}});
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/api/server-settings",
+            Some("bob"),
+            Some(config.clone()),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert!(kv.get(KEY_SERVER_SETTINGS).await.unwrap().is_none());
+        let (st, saved) = call(
+            &app,
+            "PUT",
+            "/api/server-settings",
+            Some("alice"),
+            Some(config),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{saved}");
+        let first_generation = saved["passkey_generation"].clone();
+        let (st, unchanged) = call(
+            &app,
+            "PUT",
+            "/api/server-settings",
+            Some("alice"),
+            Some(json!({
+                "passkeys": {"rp_name": null}, "passkey_generation": "client-controlled"
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(unchanged["passkey_generation"], first_generation);
+        assert!(second.service(&js).await.unwrap().is_some());
+        let before = kv.get(KEY_SERVER_SETTINGS).await.unwrap().unwrap();
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/api/server-settings",
+            Some("alice"),
+            Some(json!({"passkeys": {"rp_origins": ["http://kanade.example.com"]}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(kv.get(KEY_SERVER_SETTINGS).await.unwrap().unwrap(), before);
+        let mut authenticator = SoftPasskey::new(true);
+        let id = enroll(&app, &mut authenticator, "alice", None).await;
+        assert_eq!(
+            passkey_login(&app, &mut authenticator, "alice").await.0,
+            StatusCode::OK
+        );
+        let (_, pending_register) = start_register(&app, "alice", PW, None).await;
+        let (_, pending_login) =
+            call(&app, "POST", "/api/auth/passkey/login/start", None, None).await;
+        let old_service = service(&app.state)
+            .await
+            .unwrap_or_else(|_| panic!("enabled"));
+        for enabled in [false, true] {
+            let (st, _) = call(
+                &app,
+                "PUT",
+                "/api/server-settings",
+                Some("alice"),
+                Some(json!({"passkeys": {"enabled": enabled}})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            assert_eq!(second.service(&js).await.unwrap().is_some(), enabled);
+            assert!(!old_service.is_current().await);
+            if !enabled {
+                assert_eq!(
+                    call(&app, "POST", "/api/auth/passkey/login/start", None, None)
+                        .await
+                        .0,
+                    StatusCode::NOT_FOUND
+                );
+                assert_eq!(
+                    start_register(&app, "alice", PW, None).await.0,
+                    StatusCode::NOT_FOUND
+                );
+                assert_eq!(
+                    call(&app, "GET", "/api/auth/passkeys", Some("alice"), None)
+                        .await
+                        .0,
+                    StatusCode::OK
+                );
+            }
+        }
+        assert_eq!(
+            finish_started(&app, &pending_register).await,
+            StatusCode::BAD_REQUEST
+        );
+        let credential = create(
+            &mut SoftPasskey::new(true),
+            ORIGIN,
+            pending_register["options"].clone(),
+            |_| {},
+        );
+        assert!(matches!(
+            old_service
+                .finish_register(
+                    &app.pool,
+                    "alice",
+                    pending_register["challenge_id"].as_str().unwrap(),
+                    &credential
+                )
+                .await,
+            Err(RegisterError::Challenge(ChallengeError::Invalid))
+        ));
+        let h = handle_of(&app.pool, "alice").await;
+        let cred = sign(
+            &mut authenticator,
+            ORIGIN,
+            pending_login["options"].clone(),
+            &h,
+            |_| {},
+        );
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/api/auth/passkey/login/finish",
+            None,
+            Some(json!({"challenge_id": pending_login["challenge_id"], "credential": cred})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (_, saved) = call(&app, "GET", "/api/server-settings", Some("alice"), None).await;
+        assert_ne!(saved["passkey_generation"], first_generation);
+        assert_eq!(saved["passkeys"]["rp_id"], "kanade.example.com");
+        assert_eq!(
+            passkey_login(&app, &mut authenticator, "alice").await.0,
+            StatusCode::OK
+        );
+        enroll(&app, &mut SoftPasskey::new(true), "alice", None).await;
+        // Concurrent unrelated inner-field updates are both preserved by CAS.
+        let (a, b) = tokio::join!(
+            call(
+                &app,
+                "PUT",
+                "/api/server-settings",
+                Some("alice"),
+                Some(json!({"passkeys": {"rp_name": "Updated"}}))
+            ),
+            call(
+                &app,
+                "PUT",
+                "/api/server-settings",
+                Some("alice"),
+                Some(
+                    json!({"passkeys": {"rp_origins": [ORIGIN, "https://login.kanade.example.com"]}})
+                )
+            )
+        );
+        assert_eq!(a.0, StatusCode::OK);
+        assert_eq!(b.0, StatusCode::OK);
+        let (_, saved) = call(&app, "GET", "/api/server-settings", Some("alice"), None).await;
+        assert_eq!(saved["passkeys"]["rp_name"], "Updated");
+        assert_eq!(saved["passkeys"]["rp_origins"].as_array().unwrap().len(), 2);
+        // Fresh runtime after a process restart uses exactly the persisted KV.
+        let restarted = crate::passkey::PasskeyRuntime::default();
+        assert!(restarted.service(&js).await.unwrap().is_some());
+        call(
+            &app,
+            "PUT",
+            "/api/server-settings",
+            Some("alice"),
+            Some(json!({"passkeys": {"enabled": false}})),
+        )
+        .await;
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/api/auth/passkeys/{id}/remove"),
+            Some("alice"),
+            Some(json!({"password": PW})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                "/api/accounts/alice/passkeys",
+                Some("root"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            crate::passkey::list(&app.pool, "alice")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Changing the RP requires new credentials; no TOML or request-header
+        // value participates in registration or sign-in under the new RP.
+        let next_origin = "https://next.kanade.example.com";
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/api/server-settings",
+            Some("alice"),
+            Some(json!({"passkeys": {
+                "enabled": true, "rp_id": "next.kanade.example.com", "rp_origins": [next_origin]
+            }})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, started) = start_register(&app, "alice", PW, None).await;
+        let mut next_authenticator = SoftPasskey::new(true);
+        let credential = create(
+            &mut next_authenticator,
+            next_origin,
+            started["options"].clone(),
+            |_| {},
+        );
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/api/auth/passkeys/register/finish",
+            Some("alice"),
+            Some(json!({
+                "challenge_id": started["challenge_id"], "credential": credential
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+        let (_, started) = call(&app, "POST", "/api/auth/passkey/login/start", None, None).await;
+        let handle = handle_of(&app.pool, "alice").await;
+        let credential = sign(
+            &mut next_authenticator,
+            next_origin,
+            started["options"].clone(),
+            &handle,
+            |_| {},
+        );
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/api/auth/passkey/login/finish",
+            None,
+            Some(json!({
+                "challenge_id": started["challenge_id"], "credential": credential
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // Loss of the authority must fail closed even with a warm cache.
+        kv.put(KEY_SERVER_SETTINGS, "corrupt".into()).await.unwrap();
+        assert!(second.service(&js).await.is_err());
+        assert_eq!(
+            call(&app, "POST", "/api/auth/passkey/login/start", None, None)
+                .await
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        broker.kill().await.unwrap();
+        broker.wait().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn feature_is_invisible_when_not_configured() {
         let app = app(false).await;
         let (st, body) = call(&app, "GET", "/api/auth/passkey/config", None, None).await;
         assert_eq!((st, &body["enabled"]), (StatusCode::OK, &false.into()));
-        for (m, uri) in [
-            ("POST", "/api/auth/passkey/login/start"),
-            ("GET", "/api/auth/passkeys"),
-        ] {
+        for (m, uri) in [("POST", "/api/auth/passkey/login/start")] {
             let (st, _) = call(&app, m, uri, Some("alice"), None).await;
             assert_eq!(st, StatusCode::NOT_FOUND, "{uri}");
         }
@@ -1054,7 +1429,9 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(proof.enrollment_epoch, current);
-        let svc = service(&app.state).unwrap_or_else(|_| panic!("passkeys disabled"));
+        let svc = service(&app.state)
+            .await
+            .unwrap_or_else(|_| panic!("passkeys disabled"));
         // The reset precedes start, which was the gap in the previous fix:
         // re-reading here would silently bless the invalidated proof.
         let (id, options) = svc
@@ -1162,7 +1539,9 @@ mod tests {
     }
 
     async fn assert_old_proof_rejected(app: &App, proof: &ReauthProof) {
-        let svc = service(&app.state).unwrap_or_else(|_| panic!("passkeys disabled"));
+        let svc = service(&app.state)
+            .await
+            .unwrap_or_else(|_| panic!("passkeys disabled"));
         let (id, options) = svc
             .start_register(&app.pool, "alice", "old factor snapshot", proof)
             .await

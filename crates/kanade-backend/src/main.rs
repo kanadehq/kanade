@@ -1734,23 +1734,7 @@ async fn run_backend_inner(
         });
     }
 
-    let passkeys =
-        if cfg.server.webauthn.rp_id.is_empty() && cfg.server.webauthn.rp_origins.is_empty() {
-            None
-        } else {
-            let rp = passkey::validate_config(&cfg.server.webauthn).map_err(anyhow::Error::msg)?;
-            if cfg
-                .server
-                .public_url
-                .as_deref()
-                .is_some_and(|url| passkey::public_url_outside_origins(url, &rp))
-            {
-                tracing::warn!("public_url differs from configured WebAuthn origins");
-            }
-            Some(std::sync::Arc::new(
-                passkey::PasskeyService::new(&cfg.server.webauthn).map_err(anyhow::Error::msg)?,
-            ))
-        };
+    let passkeys = Default::default();
     let app_state = api::AppState {
         passkeys,
         pool: pool.clone(),

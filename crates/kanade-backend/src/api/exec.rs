@@ -813,7 +813,7 @@ mod typed_gate_e2e {
         .await
         .unwrap();
         let state = AppState {
-            passkeys: None,
+            passkeys: Default::default(),
             pool: pool.clone(),
             query_pool: pool.clone(),
             commands: std::sync::Arc::new(crate::command_publisher::CommandPublisher::new(

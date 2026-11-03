@@ -99,7 +99,7 @@ const SCRIPT_OBJECT_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub passkeys: Option<std::sync::Arc<crate::passkey::PasskeyService>>,
+    pub passkeys: std::sync::Arc<crate::passkey::PasskeyRuntime>,
     pub pool: SqlitePool,
     /// Dedicated **read-only** pool over the same SQLite file, opened with
     /// `SQLITE_OPEN_READONLY`. Only the admin ad-hoc `POST /api/query`
@@ -346,6 +346,10 @@ pub fn router(state: AppState) -> Router {
         // /api/config/defaults); different segment counts, so it can't
         // collide with the bare route.
         .route("/api/server-settings", get(server_settings::get))
+        .route(
+            "/api/server-settings/passkeys/status",
+            get(passkeys::status),
+        )
         .route(
             "/api/server-settings/defaults",
             get(server_settings::defaults),
@@ -909,6 +913,7 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // render the fields' placeholders, so left commons it 403'd every
         // restricted account that held Settings.
         "/api/server-settings"
+        | "/api/server-settings/passkeys/status"
         | "/api/server-settings/defaults"
         | "/api/server-settings/support-codes/{scope}"
         | "/api/server/restart" => Feature::Settings,
