@@ -69,6 +69,8 @@ serde_json = { workspace = true }
 # emailed URL carries the raw token (so a DB read can't mint a live link).
 sha2       = { workspace = true }
 sqlx       = { workspace = true }
+# Must match SQLx's semver-exempt raw SQLite handle ABI.
+libsqlite3-sys = "=0.37.0"
 tokio      = { workspace = true }
 totp-rs    = { workspace = true }
 # WebAuthn / passkey support
