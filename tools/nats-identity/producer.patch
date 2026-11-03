@@ -30,15 +30,17 @@
  }
 --- a/server/client.go
 +++ b/server/client.go
-@@ -256,6 +256,7 @@
+@@ -256,6 +256,9 @@
  }
  
  type client struct {
 +	authIdentity authIdentityState
++	// Sticky for this connection: injected credentials are never client proof.
++	authIdentityAssigned bool
  	// Here first because of use of atomics, and memory alignment.
  	stats
  	gwReplyMapping
-@@ -2215,6 +2216,7 @@
+@@ -2215,6 +2218,7 @@
  	// that other routines lookup the client, and access its options under
  	// the client's lock, so unmarshalling the options outside of the lock
  	// would cause data RACEs.
@@ -46,7 +48,7 @@
  	if err := json.Unmarshal(arg, &c.opts); err != nil {
  		c.mu.Unlock()
  		return err
-@@ -2233,6 +2235,9 @@
+@@ -2233,6 +2237,9 @@
  
  	// if websocket client, maybe some options through cookies
  	if ws := c.ws; ws != nil {
@@ -56,7 +58,7 @@
  		// if JWT not in the CONNECT, use the cookie JWT (possibly empty).
  		if c.opts.JWT == _EMPTY_ {
  			c.opts.JWT = ws.cookieJwt
-@@ -2315,6 +2320,9 @@
+@@ -2315,6 +2322,9 @@
  
  		// Initialize user info used in logs.
  		c.mu.Lock()
@@ -66,7 +68,7 @@
  		acc := c.acc
  		if c.getRawAuthUser() != _EMPTY_ {
  			c.ncsUser.Store(c.getAuthUserLabel())
-@@ -2423,6 +2431,10 @@
+@@ -2423,6 +2433,10 @@
  }
  
  func (c *client) authViolation() {
@@ -107,9 +109,9 @@
 +	}
 +	c.mu.Lock()
 +	attempt := c.authIdentity.sequence
++	assigned := c.authIdentityAssigned
 +	c.mu.Unlock()
 +	mechanism, canonical := "unavailable", ""
-+	assigned := false
 +	// Registered first so this runs after auth-callout's authorization defer.
 +	defer func() {
 +		if opts.AuthCallout != nil {
@@ -129,15 +131,16 @@
  		// TODO(dlc) - If they send us credentials should we fail?
  		s.mu.Unlock()
  		if c.kind == LEAF {
-@@ -936,6 +961,7 @@
+@@ -936,6 +961,8 @@
  			if (c.kind == CLIENT || c.kind == LEAF) && noAuthUser != _EMPTY_ &&
  				c.opts.Username == _EMPTY_ && c.opts.Password == _EMPTY_ && c.opts.Token == _EMPTY_ {
  				if u, exists := s.users[noAuthUser]; exists {
 +					assigned = true
  					c.mu.Lock()
++					c.authIdentityAssigned = true
  					c.opts.Username = u.Username
  					c.opts.Password = u.Password
-@@ -956,6 +982,7 @@
+@@ -956,6 +983,7 @@
  	// If we have a jwt and a userClaim, make sure we have the Account, etc associated.
  	// We need to look up the account. This will use an account resolver if one is present.
  	if juc != nil {
@@ -145,7 +148,7 @@
  		issuer := juc.Issuer
  		if juc.IssuerAccount != _EMPTY_ {
  			issuer = juc.IssuerAccount
-@@ -1124,6 +1151,7 @@
+@@ -1124,6 +1152,7 @@
  	}
  
  	if nkey != nil {
@@ -153,7 +156,7 @@
  		if proxyRequired = nkey.ProxyRequired; proxyRequired && !trustedProxy {
  			return setProxyAuthError(ErrAuthProxyRequired)
  		}
-@@ -1165,6 +1193,13 @@
+@@ -1165,6 +1194,13 @@
  		// If we are authorized, register the user which will properly setup any permissions
  		// for pub/sub authorizations.
  		if ok {
@@ -167,7 +170,7 @@
  			c.RegisterUser(user)
  		}
  		return ok
-@@ -1176,11 +1211,13 @@
+@@ -1176,11 +1212,13 @@
  			return setProxyAuthError(ErrAuthProxyRequired)
  		}
  		if token != _EMPTY_ {

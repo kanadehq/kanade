@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/nats-io/jwt/v2"
@@ -26,7 +27,7 @@ func proofFor(t *testing.T, s *Server, id uint64) *AuthIdentity {
 	}
 	for _, c := range z.Conns {
 		if c.Cid == id {
-			if c.Start.Before(s.start) || c.Type != "nats" || c.AuthIdentity.Version != 2 {
+			if c.Start.Before(s.start) || (c.Type != "nats" && c.Type != "websocket") || c.AuthIdentity.Version != 2 {
 				t.Fatal("connection binding missing")
 			}
 			return &c.AuthIdentity
@@ -225,4 +226,58 @@ func TestAuthIdentityReloadConcurrent(t *testing.T) {
 		}
 	}
 	wg.Wait()
+}
+
+func TestAuthIdentityNoAuthUserReload(t *testing.T) {
+	for _, override := range []bool{false, true} {
+		t.Run(fmt.Sprintf("websocket_override=%v", override), func(t *testing.T) {
+			opts := testWSOptions()
+			opts.Users = []*User{{Username: "guest", Password: "fixture-password"}}
+			if override {
+				opts.Websocket.NoAuthUser = "guest"
+			} else {
+				opts.NoAuthUser = "guest"
+			}
+			s := RunServer(opts)
+			defer s.Shutdown()
+
+			ids := make([]uint64, 0, 2)
+			for _, explicit := range []bool{false, true} {
+				conn, br, line := testWSCreateClientGetInfo(t, false, false, opts.Websocket.Host, opts.Websocket.Port)
+				defer conn.Close()
+				require_NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+				var info serverInfo
+				require_NoError(t, json.Unmarshal(line[5:], &info))
+				ids = append(ids, info.CID)
+				connect := `CONNECT {"verbose":false,"protocol":1}`
+				if explicit {
+					connect = `CONNECT {"verbose":false,"protocol":1,"user":"guest","pass":"fixture-password"}`
+				}
+				_, err := conn.Write(testWSCreateClientMsg(wsBinaryMessage, 1, true, false, []byte(connect+"\r\nPING\r\n")))
+				require_NoError(t, err)
+				require_True(t, bytes.HasPrefix(testWSReadFrame(t, br), []byte("PONG\r\n")))
+			}
+
+			var generation uint64
+			for round := 0; round < 3; round++ {
+				if round > 0 {
+					next := s.getOpts().Clone()
+					next.Users[0].Permissions = &Permissions{Publish: &SubjectPermission{Allow: []string{fmt.Sprintf("reload.%d", round)}}}
+					require_NoError(t, s.ReloadOptions(next))
+				}
+				anonymous := proofFor(t, s, ids[0])
+				explicit := proofFor(t, s, ids[1])
+				if anonymous.State != "accepted" || anonymous.Mechanism != "no_auth_user" || anonymous.PublicUser != "" {
+					t.Fatalf("round %d: assigned credentials acquired a named proof: %+v", round, anonymous)
+				}
+				if explicit.State != "accepted" || explicit.Mechanism != "user_password" || explicit.PublicUser != "guest" {
+					t.Fatalf("round %d: explicit credentials lost their named proof: %+v", round, explicit)
+				}
+				if anonymous.Generation <= generation || explicit.Generation != anonymous.Generation {
+					t.Fatal("reload did not revalidate both connections in a new generation")
+				}
+				generation = anonymous.Generation
+			}
+		})
+	}
 }
