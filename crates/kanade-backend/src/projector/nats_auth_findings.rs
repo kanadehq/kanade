@@ -38,7 +38,8 @@ use kanade_shared::nats_client::{NatsRole, parse_client_name};
 use kanade_shared::wire::NatsAuthMode;
 
 use super::nats_conns::{
-    LABEL_NO_AUTH, LABEL_PENDING, LABEL_SHARED_TOKEN, LABEL_UNKNOWN, LABEL_UNPROVEN,
+    LABEL_ACCEPTED_UNNAMED, LABEL_NO_AUTH, LABEL_PENDING, LABEL_REJECTED, LABEL_SHARED_TOKEN,
+    LABEL_UNKNOWN, LABEL_UNPROVEN,
 };
 
 /// How long findings are held back after the expected mode is changed.
@@ -130,8 +131,8 @@ impl Reported {
             LABEL_SHARED_TOKEN => Reported::SharedToken,
             LABEL_NO_AUTH => Reported::NoAuth,
             LABEL_PENDING => Reported::Pending,
-            LABEL_UNPROVEN => Reported::Unproven,
-            LABEL_UNKNOWN => Reported::Unknown,
+            LABEL_UNPROVEN | LABEL_REJECTED => Reported::Unproven,
+            LABEL_UNKNOWN | LABEL_ACCEPTED_UNNAMED => Reported::Unknown,
             user => Reported::User(user.to_string()),
         }
     }

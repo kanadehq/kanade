@@ -27,6 +27,9 @@ export default defineConfig({
   // Tailwind stylesheet prod ships — the layout the hit-testing asserts on.
   use: {
     ctViteConfig: {
+      server: process.env.KANADE_IDENTITY_API ? {
+        proxy: { '/api': { target: process.env.KANADE_IDENTITY_API } },
+      } : undefined,
       plugins: [react(), tailwindcss()],
       resolve: {
         alias: {

@@ -19,7 +19,7 @@ use sqlx::{Row, SqlitePool};
 use super::nats_auth_findings::{
     FindingKind, NOTICE_PREFIX, Observed, Severity, grace_until, group, in_grace,
 };
-use super::nats_conns::{EvidenceReason, LABEL_PENDING, LABEL_UNPROVEN};
+use super::nats_conns::{EvidenceReason, LABEL_PENDING, LABEL_REJECTED, LABEL_UNPROVEN};
 use super::notice_ledger::{self, Desired, Op, Policy, Stored};
 
 /// A recorded poll older than this is reported as `stale`: the projector
@@ -73,7 +73,7 @@ impl Poll<'_> {
                 .count(),
             self.observed
                 .iter()
-                .filter(|o| o.label == LABEL_UNPROVEN)
+                .filter(|o| matches!(o.label.as_str(), LABEL_UNPROVEN | LABEL_REJECTED))
                 .count(),
         )
     }
@@ -334,7 +334,7 @@ pub async fn health_block(
     let mut pending_connections = None;
     let mut unproven_connections = None;
     let mut uncertainty_reasons = None;
-    let (poll_status, polled_at) = match state {
+    let (mut poll_status, polled_at) = match state {
         None => ("pending".to_string(), None),
         Some(r) => {
             let at: Option<DateTime<Utc>> = r.try_get("polled_at").ok();
@@ -369,6 +369,14 @@ pub async fn health_block(
             }
         }
     };
+    let identity_expired: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agents WHERE nats_identity_expires_at IS NOT NULL AND julianday(nats_identity_expires_at) <= julianday(?))")
+        .bind(now).fetch_one(pool).await.unwrap_or(true);
+    if identity_expired {
+        poll_status = "stale".into();
+        pending_connections = None;
+        unproven_connections = None;
+        uncertainty_reasons = None;
+    }
     NatsAuthHealth {
         expected_mode: settings.map(|s| s.effective_nats_auth_mode().as_str()),
         grace_until: settings.and_then(|s| grace_until(now, s.nats_auth_mode_changed_at)),

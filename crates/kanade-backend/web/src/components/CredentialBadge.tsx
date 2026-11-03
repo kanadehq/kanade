@@ -32,6 +32,8 @@ const LOOK: Record<
   unproven: { variant: 'default', Icon: ShieldAlert },
   pending: { variant: 'default', Icon: HelpCircle },
   acceptanceUnproven: { variant: 'default', Icon: ShieldAlert },
+  rejected: { variant: 'amber', Icon: ShieldAlert },
+  acceptedUnproven: { variant: 'default', Icon: ShieldAlert },
   // Never correlated. NOT "on the old credential" — this host has said
   // nothing, and provisioning it would be answering a question nobody asked.
   unseen: { variant: 'default', Icon: HelpCircle },

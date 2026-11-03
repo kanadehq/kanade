@@ -1155,11 +1155,17 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
         // — which no classifier produces, but which a hand-edited row
         // could hold — is folded into it rather than shown as a credential
         // with no name.
-        nats_user: r
-            .try_get::<Option<String>, _>("nats_user")
+        nats_user: if r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("nats_identity_expires_at")
             .ok()
             .flatten()
-            .filter(|s| !s.is_empty()),
+            .is_some_and(|deadline| deadline <= chrono::Utc::now())
+        {
+            Some("unknown".to_owned())
+        } else {
+            r.try_get::<Option<String>, _>("nats_user").ok().flatten()
+        }
+        .filter(|s| !s.is_empty()),
         nats_user_since: r
             .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("nats_user_since")
             .ok()

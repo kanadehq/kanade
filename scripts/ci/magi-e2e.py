@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def commands():
+    if os.name == "posix":
+        yield ["python3", "tools/nats-identity/verify.py"]
     yield ["cargo", "test", "-p", "kanade-backend", "--",
            "api::agent_releases", "api::app_artifacts",
            "api::exec::typed_gate_e2e", "--ignored"]

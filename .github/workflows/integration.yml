@@ -137,6 +137,24 @@ jobs:
           KANADE_APP_ARTIFACT_PUBLICATION: backend-exclusive
         run: cargo test -p kanade-backend -- api::agent_releases api::app_artifacts api::exec::typed_gate_e2e --ignored
 
+      - uses: actions/setup-go@v6
+        if: runner.os != 'Windows'
+        with:
+          go-version: '1.27.2'
+      - uses: oven-sh/setup-bun@v2
+        if: runner.os != 'Windows'
+        with:
+          bun-version: '1.4.4'
+      - name: Install browser system dependencies for broker identity proof
+        if: runner.os == 'Linux'
+        working-directory: crates/kanade-backend/web
+        run: |
+          bun install --frozen-lockfile
+          bun x playwright install-deps chromium
+      - name: Build broker producer and verify WSS proof through the Agents UI
+        if: runner.os != 'Windows'
+        run: python3 tools/nats-identity/verify.py
+
       - name: Broker connection identity and WSS credential evidence
         if: runner.os != 'Windows'
         # The WSS fixture uses Python's standard-library TLS byte tunnel and

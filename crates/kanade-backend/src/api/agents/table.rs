@@ -94,7 +94,7 @@ const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         id: "credential",
-        raw: "NULLIF(nats_user,'')",
+        raw: "CASE WHEN nats_identity_expires_at IS NOT NULL AND julianday(nats_identity_expires_at) <= julianday('now') THEN 'unknown' ELSE NULLIF(nats_user,'') END",
         kind: Kind::Text,
         also: None,
         legacy: &["nats_user", "credential"],

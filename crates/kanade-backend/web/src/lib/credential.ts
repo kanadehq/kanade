@@ -44,6 +44,10 @@ export type CredentialState =
   | 'pending'
   /** The monitoring observation does not establish connection acceptance. */
   | 'acceptanceUnproven'
+  /** The broker rejected authentication; no credential identity is displayed. */
+  | 'rejected'
+  /** Broker acceptance is proven; a safe public name is unavailable. */
+  | 'acceptedUnproven'
   /** Authenticated as a named NATS user. The end state of the migration. */
   | 'named';
 
@@ -64,6 +68,8 @@ export function credentialState(a: AgentRow): CredentialState {
   if (u === UNPROVEN) return 'unproven';
   if (u === 'auth-pending') return 'pending';
   if (u === 'auth-unproven') return 'acceptanceUnproven';
+  if (u === 'auth-rejected') return 'rejected';
+  if (u === 'auth-accepted-unnameable') return 'acceptedUnproven';
   return 'named';
 }
 

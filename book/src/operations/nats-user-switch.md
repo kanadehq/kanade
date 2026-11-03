@@ -450,15 +450,67 @@ same proxy. Old broker identities and expired credential-health observations
 remain unusable as identity evidence. These cases run in the existing
 integration CI job alongside the other `live_connz_` tests.
 
-An authoritative naming path needs the broker's **validated identity and
-acceptance state**, independently of CONNECT option reporting, as well as a
-verified effective listener policy. It must bind observations to broker
-identity/start, reload epoch, transport, cid and connection start, expire
-missing/stale evidence and reject credential/name collisions before a name
-can leave memory. Neither a successful probe, a configured username allowlist,
-a connection name nor an expected-mode setting provides that metadata. This
-implementation deliberately keeps the conservative WebSocket fallback; a
-named WebSocket proof path remains pending an authoritative metadata source.
+### Broker-produced identity proof (v1)
+
+A named WebSocket badge needs the broker's own **validated authentication
+result**; CONNECT option reporting, a connection name, a username allowlist, an
+expected-mode setting and probe results are never substitutes. The reference
+producer is the patch in `tools/nats-identity/producer.patch`, applied to
+nats-server v2.14.1 (source tarball pinned by SHA-256 in
+`tools/nats-identity/build.py`). It records a small snapshot only when the
+broker authenticates or revalidates a connection, and exposes it additively on
+the authorized `/connz` (`auth_identity`) and `/varz`
+(`auth_identity_version`, `auth_identity_generation`) monitoring responses.
+The snapshot carries: version, server id and start, cid, connection start,
+transport, authentication generation (bumped on every config reload), a
+sequence, state (`pending`/`accepted`/`rejected`), mechanism (user_password,
+token, anonymous, no_auth_user, nkey, jwt, ...), source (connect or cookie)
+and a public user name only when it is a validated configured username that
+collides with no configured secret. Passwords, tokens, keys, JWTs, raw client
+claims and peer addresses are never part of it.
+
+Kanade accepts the proof only if every binding matches the same `/varz`
+epoch (server id, start, generation, version 1), the connection (cid, start,
+transport) and a poll that is no more than 60 s from the broker clock.
+Anything else (absent, old, newer, mismatched or malformed evidence) becomes
+`unknown`. Named projections also carry a 90 s expiry that the Agents API
+enforces on read, and a failed poll invalidates them immediately, so a lost
+or stale monitor can never leave a green name. Anonymous and `no_auth_user`
+show as no-auth, tokens as `shared-token`, NKey/JWT/delegated mechanisms as
+`auth-accepted-unnameable` and rejections as `auth-rejected`.
+
+Rollout and rollback. A new Kanade against an unmodified or older broker is
+safe: the version fields are absent, nothing is named and the badge stays
+`auth-unproven`/`unknown` without any startup error. Rolling the broker back
+to an unmodified build revokes names on the next poll. Replacing the broker
+binary is a restart: every client reconnects (agents already reconnect
+automatically), and the new epoch is unproven until clients re-authenticate.
+Because the producer is a patch rather than upstream code, a patched broker
+must be built and distributed by the operator (or the patch upstreamed);
+`python3 tools/nats-identity/verify.py` builds it from the pinned source,
+runs its Go race tests, and then the real-broker WSS/TCP tests plus the
+Agents browser test against it. It does not touch production services.
+
+Measured impact (`tools/nats-identity/measure.py`, committed results in
+`measurements.json`; Go 1.27.2, an 8-core arm64 laptop, 5 samples per
+workload, median shown, `GOMAXPROCS=4` unconstrained and `GOMAXPROCS=1` with
+`GOMEMLIMIT=768MiB` as a constrained approximation, not a 1 GiB VM):
+connection churn with a handshake and flush ranged from 0.48 to 0.64 ms/op
+against 0.48 to 0.53 ms/op for the reference (allocations unchanged, about
+2 % more bytes; the unconstrained difference was within sample noise in the
+other profile); a monitored request/reply workload showed 1.0 to 1.1x the
+reference latency with identical allocation counts; `/connz` for 128
+connections allocates about 55 % more per call and the response doubles from
+about 46 KB to 91 KB (roughly 350 bytes per connection) and takes about 1.5x as
+long to produce. The hot PUB/SUB path is not touched. The material cost is
+**configuration load and reload**: the producer verifies at load time that a
+public name does not equal any configured secret, including bcrypt hashes. For
+three bcrypt (cost 8) users this raised config load from about 0.3 ms to about
+0.4 s. The work is capped (more than 64 users, cost above 12 or excessive
+total work disables naming rather than blocking), but operators with large
+bcrypt user lists should treat this as an explicit tradeoff. These are
+single-machine micro-benchmarks; no sustained or 1 GiB-VM load test has been
+run, and none was run against production.
 
 ## Telling a locked-out host from an offline one
 

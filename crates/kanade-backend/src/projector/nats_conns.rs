@@ -145,6 +145,10 @@ pub const LABEL_UNKNOWN: &str = "unknown";
 pub const LABEL_PENDING: &str = "auth-pending";
 /// Authentication acceptance cannot be established from this observation.
 pub const LABEL_UNPROVEN: &str = "auth-unproven";
+/// Broker-produced v1 proof of authentication rejection. Never a username.
+pub const LABEL_REJECTED: &str = "auth-rejected";
+/// Acceptance is proven, but a safe public credential name is unavailable.
+pub const LABEL_ACCEPTED_UNNAMED: &str = "auth-accepted-unnameable";
 
 /// Fixed, secret-free classification vocabulary; never contains broker values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize)]
@@ -158,6 +162,7 @@ pub enum EvidenceReason {
     InvalidConnectionStart,
     AuthPolicyConflict,
     AcceptanceUnproven,
+    AuthenticationRejected,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -195,6 +200,12 @@ impl Acceptance {
 fn uncertainty_reasons(conns: &[ConnInfo]) -> BTreeMap<EvidenceReason, usize> {
     let mut counts = BTreeMap::new();
     for c in conns {
+        if c.identity_label.as_deref() == Some(LABEL_REJECTED) {
+            *counts
+                .entry(EvidenceReason::AuthenticationRejected)
+                .or_default() += 1;
+            continue;
+        }
         if Claimed::from_name(c.name.as_deref()).is_some()
             && c.authorized_user
                 .as_deref()
@@ -205,6 +216,101 @@ fn uncertainty_reasons(conns: &[ConnInfo]) -> BTreeMap<EvidenceReason, usize> {
         }
     }
     counts
+}
+
+/// Versioned broker result; never Debug-print any unvalidated broker value.
+#[derive(Deserialize)]
+struct AuthIdentity {
+    version: u32,
+    server_id: String,
+    server_start: DateTime<Utc>,
+    cid: u64,
+    connection_start: DateTime<Utc>,
+    transport: String,
+    generation: u64,
+    sequence: u64,
+    state: String,
+    mechanism: String,
+    source: String,
+    public_user: Option<String>,
+}
+
+impl std::fmt::Debug for AuthIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthIdentity(<unvalidated>)")
+    }
+}
+
+fn public_identity(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        && !matches!(
+            name,
+            LABEL_UNKNOWN
+                | LABEL_SHARED_TOKEN
+                | LABEL_NO_AUTH
+                | LABEL_PENDING
+                | LABEL_UNPROVEN
+                | LABEL_REJECTED
+                | LABEL_ACCEPTED_UNNAMED
+        )
+}
+
+/// The administrative monitoring endpoint is the authority. v1 is emitted
+/// only by the reviewed producer patch, after the broker checks credentials;
+/// CONNECT names, authorized_user and expected-mode settings never enter it.
+fn verified_identity(c: &ConnInfo, broker: &Varz, observed: DateTime<Utc>) -> Option<String> {
+    let a = match &c.auth_identity {
+        Some(a) => a,
+        None if broker.auth_identity_version.is_none() => return None,
+        None => return Some(LABEL_UNKNOWN.into()),
+    };
+    let valid = a.version == 1
+        && broker.auth_identity_version == Some(1)
+        && ((a.state == "pending" && a.generation == 0)
+            || (a.generation != 0
+                && Some(a.generation) == broker.auth_identity_generation
+                && a.sequence != 0))
+        && a.server_id == broker.server_id
+        && a.server_start == broker.start
+        && a.cid != 0
+        && a.cid == c.cid
+        && Some(a.connection_start) == c.start
+        && c.kind.as_deref() == Some("Client")
+        && c.transport.as_deref() == Some(a.transport.as_str())
+        && matches!(a.transport.as_str(), "nats" | "websocket")
+        && a.connection_start >= broker.start
+        && a.connection_start <= broker.now
+        && (observed - broker.now).num_seconds().abs() <= 60;
+    Some(if !valid {
+        LABEL_UNKNOWN.into()
+    } else {
+        match (a.state.as_str(), a.mechanism.as_str()) {
+            ("accepted", "user_password") if matches!(a.source.as_str(), "connect" | "cookie") => a
+                .public_user
+                .as_deref()
+                .filter(|n| public_identity(n))
+                .unwrap_or(if a.public_user.is_none() {
+                    LABEL_ACCEPTED_UNNAMED
+                } else {
+                    LABEL_UNKNOWN
+                })
+                .into(),
+            ("accepted", "token") => LABEL_SHARED_TOKEN.into(),
+            (
+                "accepted",
+                "nkey" | "jwt" | "tls_mapping" | "delegated" | "custom" | "unavailable",
+            ) => LABEL_ACCEPTED_UNNAMED.into(),
+            // An assigned no_auth_user is not proof of presenting credentials.
+            ("accepted", "anonymous" | "no_auth_user") => LABEL_NO_AUTH.into(),
+            ("pending" | "validated", _) => LABEL_PENDING.into(),
+            ("rejected", _) => LABEL_REJECTED.into(),
+            _ => LABEL_UNKNOWN.into(),
+        }
+    })
 }
 
 /// The subset of `/connz` this projector reads.
@@ -222,6 +328,10 @@ struct Connz {
 
 #[derive(Debug, Deserialize)]
 struct ConnInfo {
+    #[serde(default)]
+    auth_identity: Option<AuthIdentity>,
+    #[serde(skip)]
+    identity_label: Option<String>,
     #[serde(skip)]
     connection: Option<super::nats_auth_evidence::Connection>,
     /// Broker-issued id, scoped to its startup epoch. Also breaks ties
@@ -253,6 +363,8 @@ struct ConnInfo {
 /// Optional auth_required remains unknown when omitted (NATS uses omitempty).
 #[derive(Debug, Deserialize)]
 struct Varz {
+    auth_identity_version: Option<u32>,
+    auth_identity_generation: Option<u64>,
     server_id: String,
     start: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -269,6 +381,8 @@ impl Varz {
             && self.config_load_time == other.config_load_time
             && self.auth_required == other.auth_required
             && self.auth_timeout == other.auth_timeout
+            && self.auth_identity_version == other.auth_identity_version
+            && self.auth_identity_generation == other.auth_identity_generation
             && self.now <= other.now
     }
 
@@ -330,6 +444,9 @@ impl Varz {
 }
 
 fn classify_connection(c: &ConnInfo, probe: &CredentialProbe, ev: Evidence) -> String {
+    if let Some(label) = &c.identity_label {
+        return label.clone();
+    }
     if c.authorized_user
         .as_deref()
         .is_none_or(|u| u.trim().is_empty())
@@ -618,6 +735,50 @@ async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u6
     Ok(changed)
 }
 
+/// A lost poll must invalidate current proof, rather than preserve a green
+/// historical credential. The API also enforces the persisted 90 s deadline.
+async fn invalidate_identity_proofs(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("UPDATE agents SET nats_user = 'unknown', nats_user_since = CURRENT_TIMESTAMP, nats_identity_expires_at = NULL WHERE nats_identity_expires_at IS NOT NULL")
+        .execute(pool).await?;
+    Ok(())
+}
+
+async fn apply_identity_projection(
+    pool: &SqlitePool,
+    conns: &[ConnInfo],
+    probe: &CredentialProbe,
+    ev: Evidence,
+) -> Result<u64> {
+    let (labels, _) = correlate(conns, probe, ev);
+    let mut latest = HashMap::<String, &ConnInfo>::new();
+    for c in conns {
+        if let Some(parsed) = c.name.as_deref().and_then(parse_client_name)
+            && parsed.role == NatsRole::Agent.as_str()
+            && let Some(pc) = parsed.identity
+            && latest.get(pc).is_none_or(|old| old.cid < c.cid)
+        {
+            latest.insert(pc.to_owned(), c);
+        }
+    }
+    let hosts: Vec<String> = latest
+        .into_iter()
+        .filter_map(|(pc, c)| {
+            c.identity_label
+                .as_deref()
+                .filter(|n| public_identity(n))
+                .filter(|n| labels.get(&pc).is_some_and(|label| label == *n))
+                .map(|_| pc)
+        })
+        .collect();
+    let json = serde_json::to_string(&hosts)?;
+    sqlx::query("UPDATE agents SET nats_user = 'unknown', nats_user_since = CURRENT_TIMESTAMP, nats_identity_expires_at = NULL WHERE nats_identity_expires_at IS NOT NULL AND pc_id NOT IN (SELECT value FROM json_each(?))")
+        .bind(&json).execute(pool).await?;
+    let changed = apply(pool, &labels).await?;
+    sqlx::query("UPDATE agents SET nats_identity_expires_at = ? WHERE pc_id IN (SELECT value FROM json_each(?))")
+        .bind(Utc::now() + chrono::Duration::seconds(90)).bind(json).execute(pool).await?;
+    Ok(changed)
+}
+
 /// An HTTP client for the monitoring endpoint.
 ///
 /// Plain HTTP, deliberately: `http_port` speaks no TLS, and giving the
@@ -722,6 +883,7 @@ async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>
             }
             previous = c.cid;
             c.acceptance = before.acceptance(&c, at);
+            c.identity_label = verified_identity(&c, &before, observed_at);
             c.connection = Some(super::nats_auth_evidence::Connection {
                 observed_at: Some(observed_at),
                 cid: c.cid.to_string(),
@@ -871,7 +1033,7 @@ pub async fn run(
                     }
                     reported = anomalies;
                 }
-                match apply(&pool, &labels).await {
+                match apply_identity_projection(&pool, &conns, &probe, ev).await {
                     Ok(changed) => {
                         if healthy != Some(true) {
                             info!(
@@ -892,6 +1054,9 @@ pub async fn run(
                 }
             }
             Err(e) => {
+                if invalidate_identity_proofs(&pool).await.is_err() {
+                    warn!("NATS identity proof invalidation failed");
+                }
                 // The audit's own answer is now unknown, not "clean": say so
                 // in its recorded state and leave the ledger as it was.
                 if let Err(se) =
@@ -2033,6 +2198,237 @@ mod tests {
         let proxy_port: u16 = line.trim().parse().unwrap();
         let url = format!("wss://127.0.0.1:{proxy_port}");
         (proxy, cert, url)
+    }
+
+    #[test]
+    fn identity_contract_rejects_unsupported_stale_and_mismatched_bindings() {
+        let now = Utc::now();
+        let mut broker = snapshot_fixture();
+        broker.now = now;
+        broker.auth_identity_version = Some(1);
+        broker.auth_identity_generation = Some(7);
+        let mut c = connection_fixture();
+        let fixture = serde_json::json!({"version":1,"server_id":broker.server_id,
+            "server_start":broker.start,"cid":c.cid,"connection_start":c.start,
+            "transport":"nats","generation":7,"sequence":2,"state":"accepted",
+            "mechanism":"user_password","source":"connect","public_user":"agent"});
+        for field in [
+            "version",
+            "server_id",
+            "server_start",
+            "cid",
+            "connection_start",
+            "transport",
+            "generation",
+            "sequence",
+            "state",
+            "mechanism",
+            "public_user",
+        ] {
+            let mut broken = fixture.clone();
+            broken[field] = match field {
+                "version" | "cid" | "generation" | "sequence" => 0.into(),
+                "server_start" | "connection_start" => serde_json::to_value(now).unwrap(),
+                "public_user" => "credential canary".into(),
+                _ => "unsupported".into(),
+            };
+            c.auth_identity = Some(serde_json::from_value(broken).unwrap());
+            assert_eq!(
+                verified_identity(&c, &broker, now).as_deref(),
+                Some(LABEL_UNKNOWN)
+            );
+        }
+        c.auth_identity = Some(serde_json::from_value(fixture).unwrap());
+        assert_eq!(
+            verified_identity(&c, &broker, now).as_deref(),
+            Some("agent")
+        );
+        assert_eq!(
+            verified_identity(&c, &broker, now + chrono::Duration::minutes(2)).as_deref(),
+            Some(LABEL_UNKNOWN)
+        );
+        broker.auth_identity_version = Some(2);
+        assert_eq!(
+            verified_identity(&c, &broker, now).as_deref(),
+            Some(LABEL_UNKNOWN)
+        );
+        broker.auth_identity_version = None;
+        assert_eq!(
+            verified_identity(&c, &broker, now).as_deref(),
+            Some(LABEL_UNKNOWN)
+        );
+        c.auth_identity = None;
+        assert!(verified_identity(&c, &broker, now).is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the reproducibly built identity producer, Python and OpenSSL"]
+    async fn live_identity_producer_wss_named_spoof_cookie_and_anonymous() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            for case in ["user", "spoof", "cookie", "no_auth_user", "token", "anonymous"] {
+                let ws_port = portpicker::pick_unused_port().unwrap();
+                let users = if matches!(case, "token" | "anonymous") { "" } else {
+                    "authorization { users: [{user: agent, password: fixture-password}, {user: backend, password: other-password}] }"
+                };
+                let ws_auth = match case {
+                    "cookie" => "user_cookie: fixture_user, pass_cookie: fixture_pass",
+                    "no_auth_user" => "no_auth_user: agent",
+                    "token" => "authorization { token: fixture-token }",
+                    _ => "",
+                };
+                let config = format!("{users}\nwebsocket {{ port: {ws_port}, no_tls: true, {ws_auth} }}");
+                let (mut server, dir, port, base) = disposable_broker(&config).await;
+                let cookie = (case == "cookie").then_some("fixture_user=agent; fixture_pass=fixture-password");
+                let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), cookie).await;
+                let opts = match case {
+                    "user" => async_nats::ConnectOptions::new().user_and_password("agent".into(), "fixture-password".into()),
+                    "spoof" => async_nats::ConnectOptions::with_auth_callback(|_| async {
+                        let mut auth = async_nats::Auth::new();
+                        auth.username = Some("agent".into()); auth.password = Some("fixture-password".into());
+                        auth.nkey = Some("broker-claim-canary".into()); Ok(auth)
+                    }),
+                    "token" => async_nats::ConnectOptions::new().token("fixture-token".into()),
+                    _ => async_nats::ConnectOptions::new(),
+                };
+                let client = opts.name("kanade-agent/PC001").add_root_certificates(cert)
+                    .connect(&url).await.unwrap();
+                client.flush().await.unwrap();
+                let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+                let (conns, _, broker) = fetch_walk(&http, &base).await.unwrap();
+                assert_eq!(broker.auth_identity_version, Some(1), "a real producer is mandatory");
+                let c = conns.iter().find(|c| c.cid == client.server_info().client_id).unwrap();
+                let expected = match case { "token" => LABEL_SHARED_TOKEN,
+                    "no_auth_user" | "anonymous" => LABEL_NO_AUTH, _ => "agent" };
+                assert_eq!(classify_connection(c, &probe_holding(None), Evidence::Unproven), expected);
+                if case == "spoof" { assert_eq!(c.authorized_user.as_deref(), Some("broker-claim-canary")); }
+                let pool = pool_with(&["PC001"]).await;
+                apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
+                assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(expected));
+                if case == "user" {
+                    let tcp = async_nats::ConnectOptions::new().user_and_password("agent".into(), "fixture-password".into())
+                        .connect(format!("nats://127.0.0.1:{port}")).await.unwrap(); tcp.flush().await.unwrap();
+                    let conns = fetch_all(&http, &base).await.unwrap();
+                    let tcp_c = conns.iter().find(|c| c.cid == tcp.server_info().client_id).unwrap();
+                    assert_eq!(classify_connection(tcp_c, &probe_holding(None), Evidence::Unproven), "agent");
+                    drop(tcp);
+                }
+                drop(client); proxy.kill().await.unwrap();proxy.wait().await.unwrap();
+                server.kill().await.unwrap();server.wait().await.unwrap();
+            }
+        }).await.expect("real producer WSS deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the reproducibly built identity producer, Python and OpenSSL"]
+    async fn live_identity_producer_named_expiry_reload_restart_rollback_and_ui() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let ws_port = portpicker::pick_unused_port().unwrap();
+            let config = format!("authorization {{ users: [{{user: agent, password: fixture-password}}] }}\nwebsocket {{ port: {ws_port}, no_tls: true }}");
+            let (mut server, dir, _port, base) = disposable_broker(&config).await;
+            let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), None).await;
+            let opts = || async_nats::ConnectOptions::new().user_and_password("agent".into(), "fixture-password".into())
+                .name("kanade-agent/PC001").add_root_certificates(cert.clone());
+            let client = opts().connect(&url).await.unwrap();client.flush().await.unwrap();
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            let (mut conns, complete, before) = fetch_walk(&http, &base).await.unwrap();
+            assert_eq!(before.auth_identity_version, Some(1));
+            let pool = pool_with(&["PC001"]).await;
+            apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));
+            let settings = kanade_shared::wire::ServerSettings {
+                nats_auth_mode: Some(kanade_shared::wire::NatsAuthMode::Users), ..Default::default()
+            };
+            let observed = observe(&conns, &probe_holding(None), Evidence::Unproven);
+            nats_auth_audit::run_poll(&pool, Ok(settings.clone()), &nats_auth_audit::Poll {
+                observed: &observed, registered: &HashSet::from(["PC001".into()]), complete, uncertainty_reasons: None,
+            }, Utc::now()).await.unwrap();
+            // This HTTP server calls the production Agents API, against the
+            // actual producer-derived projection. The browser uses a real
+            // Vite HTTP proxy; no API rows or metadata are stubbed.
+            let api = axum::Router::new()
+                .route("/api/agents", axum::routing::get(crate::api::agents::list))
+                .route("/test/expire", axum::routing::post(|axum::extract::State(pool): axum::extract::State<SqlitePool>| async move {
+                    sqlx::query("UPDATE agents SET nats_identity_expires_at = '2000-01-01T00:00:00Z' WHERE nats_identity_expires_at IS NOT NULL").execute(&pool).await.unwrap();
+                    axum::http::StatusCode::NO_CONTENT
+                }))
+                .route("/test/health", axum::routing::get(|axum::extract::State(pool): axum::extract::State<SqlitePool>| async move {
+                    axum::Json(nats_auth_audit::health_block(&pool, None, Utc::now()).await)
+                })).with_state(pool.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let serving = tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
+            if std::env::var_os("KANADE_IDENTITY_BROWSER").is_some() {
+                let output = tokio::process::Command::new("bun")
+                    .args(["run", "test:ct", "src/pages/Agents.identity.ct.tsx"])
+                    .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/web"))
+                    .env("KANADE_IDENTITY_API", format!("http://{address}"))
+                    .output().await.unwrap();
+                assert!(output.status.success(), "producer-derived Agents browser test failed");
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "positive browser test did not execute");
+            }
+            // API expiry works independently of a ticking projector.
+            sqlx::query("UPDATE agents SET nats_identity_expires_at = '2000-01-01T00:00:00Z'").execute(&pool).await.unwrap();
+            let (_, axum::Json(rows)) = crate::api::agents::list(axum::extract::State(pool.clone()), axum::extract::Query(Default::default()), axum::extract::Query(Vec::new())).await.unwrap();
+            assert_eq!(rows[0].nats_user.as_deref(), Some(LABEL_UNKNOWN));
+            // Unsupported producer / rollback must revoke a previously named
+            // projection, even if the old raw monitoring value looks familiar.
+            let mut old: Vec<ConnInfo> = serde_json::from_value(serde_json::json!([{
+                "cid":client.server_info().client_id,"kind":"Client","type":"websocket",
+                "name":"kanade-agent/PC001","authorized_user":"agent"
+            }])).unwrap();
+            apply_identity_projection(&pool, &old, &probe_holding(None), Evidence::UsersMode).await.unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+            apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));
+            let path = dir.path().join("nats.conf");
+            let text = std::fs::read_to_string(&path).unwrap();
+            // A non-auth reload still invalidates the cached result. Existing
+            // sockets must reconnect or be revalidated before they regain it.
+            std::fs::write(&path, format!("{text}\nmax_payload: 1048577\n")).unwrap();
+            assert!(tokio::process::Command::new("nats-server").arg("--signal")
+                .arg(format!("reload={}",server.id().unwrap())).stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()).status().await.unwrap().success());
+            let mut after = None;
+            for _ in 0..100 {
+                let result = fetch_walk(&http,&base).await;
+                if let Ok((c,_,v)) = result && v.auth_identity_generation != before.auth_identity_generation {
+                    after=Some((c,v));break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let (reloaded, epoch) = after.expect("reload generation");
+            assert!(!before.same_epoch(&epoch));
+            // Old proof is unusable after a reload, even if the broker
+            // immediately revalidates the live connection into the new epoch.
+            for c in &mut conns { c.identity_label = verified_identity(c, &epoch, Utc::now()); }
+            apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
+            assert_eq!(read(&pool,"PC001").await.0.as_deref(),Some(LABEL_UNKNOWN));
+            assert!(reloaded.iter().all(|c| c.auth_identity.as_ref().is_none_or(|a| a.generation != before.auth_identity_generation.unwrap() || c.identity_label.as_deref() != Some("agent"))));
+            drop(client);
+            let new_client=opts().connect(&url).await.unwrap();new_client.flush().await.unwrap();
+            let fresh=fetch_all(&http,&base).await.unwrap();
+            apply_identity_projection(&pool,&fresh,&probe_holding(None),Evidence::Unproven).await.unwrap();
+            assert_eq!(read(&pool,"PC001").await.0.as_deref(),Some("agent"));
+            server.kill().await.unwrap();server.wait().await.unwrap();
+            invalidate_identity_proofs(&pool).await.unwrap();
+            assert_eq!(read(&pool,"PC001").await.0.as_deref(),Some(LABEL_UNKNOWN));
+            server=tokio::process::Command::new("nats-server").arg("-c").arg(&path)
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true).spawn().unwrap();
+            let mut restart=None;
+            for _ in 0..100 { if let Ok(v)=fetch_json::<Varz>(&http,&format!("{base}/varz")).await {restart=Some(v);break;}
+                tokio::time::sleep(Duration::from_millis(20)).await; }
+            let restart=restart.unwrap();assert_ne!(restart.server_id,before.server_id);
+            let previous=conns.iter().find(|c|c.auth_identity.is_some()).unwrap();
+            assert_eq!(verified_identity(previous,&restart,Utc::now()).as_deref(),Some(LABEL_UNKNOWN));
+            old.clear();
+            let health=nats_auth_audit::health_block(&pool,Some(&settings),Utc::now()).await;
+            let history=super::super::nats_auth_evidence::history(&pool,None).await.unwrap();
+            let safe=serde_json::to_string(&(health,history)).unwrap();
+            for value in ["fixture-password","127.0.0.1","broker-claim-canary"] {assert!(!safe.contains(value));}
+            serving.abort();let _=serving.await;
+            drop(new_client);proxy.kill().await.unwrap();proxy.wait().await.unwrap();
+            server.kill().await.unwrap();server.wait().await.unwrap();
+        }).await.expect("producer lifecycle and browser deadline");
     }
 
     #[tokio::test]
