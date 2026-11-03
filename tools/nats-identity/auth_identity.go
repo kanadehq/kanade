@@ -22,21 +22,108 @@ type AuthIdentity struct {
 	PublicUser string `json:"public_user,omitempty"`
 }
 
+type authIdentityStatus uint8
+
+const (
+	authIdentityPending authIdentityStatus = iota
+	authIdentityValidated
+	authIdentityAccepted
+	authIdentityRejected
+	authIdentityStale
+)
+
+func (s authIdentityStatus) label() string {
+	switch s {
+	case authIdentityValidated:
+		return "validated"
+	case authIdentityAccepted:
+		return "accepted"
+	case authIdentityRejected:
+		return "rejected"
+	case authIdentityStale:
+		return "stale"
+	default:
+		return "pending"
+	}
+}
+
+type authIdentityMethod uint8
+
+const (
+	authIdentityUnavailable authIdentityMethod = iota
+	authIdentityUserPassword
+	authIdentityToken
+	authIdentityAnonymous
+	authIdentityNoAuthUser
+	authIdentityNKey
+	authIdentityJWT
+	authIdentityCustom
+	authIdentityDelegated
+	authIdentityTLSMapping
+)
+
+func (m authIdentityMethod) label() string {
+	switch m {
+	case authIdentityUserPassword:
+		return "user_password"
+	case authIdentityToken:
+		return "token"
+	case authIdentityAnonymous:
+		return "anonymous"
+	case authIdentityNoAuthUser:
+		return "no_auth_user"
+	case authIdentityNKey:
+		return "nkey"
+	case authIdentityJWT:
+		return "jwt"
+	case authIdentityCustom:
+		return "custom"
+	case authIdentityDelegated:
+		return "delegated"
+	case authIdentityTLSMapping:
+		return "tls_mapping"
+	default:
+		return "unavailable"
+	}
+}
+
+type authIdentitySource uint8
+
+const (
+	authIdentityConnect authIdentitySource = iota
+	authIdentityCookie
+)
+
+func (s authIdentitySource) label() string {
+	if s == authIdentityCookie {
+		return "cookie"
+	}
+	return "connect"
+}
+
+// The zero state is pending/CONNECT with an unavailable mechanism. Fixed
+// labels are expanded only for monitoring. Safe immutable name cells belong
+// to configuration, not authentication attempts or secret-bearing User objects.
 type authIdentityState struct {
-	generation, sequence                 uint64
-	state, mechanism, source, publicUser string
+	generation, sequence uint64
+	publicUser           *string
+	state                authIdentityStatus
+	mechanism            authIdentityMethod
+	source               authIdentitySource
+	// Sticky across CONNECT and revalidation: injected credentials are not proof.
+	assigned bool
 }
 
 type authIdentityPolicy struct {
 	opts       *Options // identity comparison only; no copy of secret-bearing options
 	generation uint64
-	names      map[string]bool // immutable, safe public identities only
+	names      map[string]*string // immutable cells containing safe public names only
 }
 
 // Work is bounded at configuration time, never on the message/authentication
 // path. If collision safety is too expensive or unsupported, emit no names.
-func publicAuthNames(opts *Options) map[string]bool {
-	names := make(map[string]bool)
+func publicAuthNames(opts *Options) map[string]*string {
+	names := make(map[string]*string)
 	if opts.CustomClientAuthentication != nil || opts.AuthCallout != nil || len(opts.TrustedKeys) != 0 || len(opts.Users) > 64 {
 		return names
 	}
@@ -163,7 +250,8 @@ func publicAuthNames(opts *Options) map[string]bool {
 			}
 		}
 		if safe {
-			names[name] = true
+			publicName := name
+			names[name] = &publicName
 		}
 	}
 	return names
@@ -175,7 +263,7 @@ func (s *Server) newAuthIdentityPolicy(opts *Options) *authIdentityPolicy {
 
 // Called only on authentication/revalidation. c.mu also protects monitoring;
 // no message delivery path reads or writes these fields.
-func (c *client) finishAuthIdentity(p *authIdentityPolicy, attempt uint64, accepted bool, mechanism, canonical string) {
+func (c *client) finishAuthIdentity(p *authIdentityPolicy, attempt uint64, accepted bool, mechanism authIdentityMethod, canonical string) {
 	if c.kind != CLIENT {
 		return
 	}
@@ -185,26 +273,30 @@ func (c *client) finishAuthIdentity(p *authIdentityPolicy, attempt uint64, accep
 		return
 	}
 	seq := attempt + 1
-	source := c.authIdentity.source
-	if source == "" {
-		source = "connect"
-	}
-	state := "rejected"
+	state := authIdentityRejected
 	if accepted {
-		state = "accepted"
-		if c.authIdentity.state == "pending" {
-			state = "validated"
+		state = authIdentityAccepted
+		if c.authIdentity.state == authIdentityPending {
+			state = authIdentityValidated
 		}
 	}
-	name := ""
-	if accepted && mechanism == "user_password" && p != nil && c.srv.authIdentityPolicy.Load() == p && p.names[canonical] {
-		name = canonical
+	var name *string
+	if accepted && mechanism == authIdentityUserPassword && p != nil && c.srv.authIdentityPolicy.Load() == p {
+		name = p.names[canonical]
 	}
 	generation := uint64(0)
 	if p != nil {
 		generation = p.generation
 	}
-	c.authIdentity = authIdentityState{generation, seq, state, mechanism, source, name}
+	c.authIdentity = authIdentityState{
+		generation: generation,
+		sequence:   seq,
+		publicUser: name,
+		state:      state,
+		mechanism:  mechanism,
+		source:     c.authIdentity.source,
+		assigned:   c.authIdentity.assigned,
+	}
 }
 
 // c.mu is held by the existing authorized monitoring walk.
@@ -213,19 +305,14 @@ func (c *client) authIdentityLocked() AuthIdentity {
 		return AuthIdentity{}
 	}
 	a := c.authIdentity
-	if a.state == "" {
-		a.state = "pending"
-	}
-	if a.mechanism == "" {
-		a.mechanism = "unavailable"
-	}
-	if a.source == "" {
-		a.source = "connect"
-	}
 	p := c.srv.authIdentityPolicy.Load()
-	if a.state == "accepted" && (p == nil || a.generation != p.generation) {
-		a.state = "stale"
-		a.publicUser = ""
+	if a.state == authIdentityAccepted && (p == nil || a.generation != p.generation) {
+		a.state = authIdentityStale
+		a.publicUser = nil
 	}
-	return AuthIdentity{2, a.generation, a.sequence, a.state, a.mechanism, a.source, a.publicUser}
+	name := ""
+	if a.publicUser != nil {
+		name = *a.publicUser
+	}
+	return AuthIdentity{2, a.generation, a.sequence, a.state.label(), a.mechanism.label(), a.source.label(), name}
 }

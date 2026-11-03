@@ -7,6 +7,7 @@ import platform
 import re
 import statistics
 import subprocess
+import time
 
 import build
 
@@ -49,12 +50,19 @@ def parse_sample(output):
 
 
 def measure():
-    # Build first with build.py; refuse differing benchmark code.
+    # Rebuild from the current sources so provenance cannot describe an older fork.
+    build.prepare()
     bench = build.ROOT / 'tools/nats-identity/identity_bench_test.go'
     for variant in ['baseline', 'patched']:
         copied = build.OUT / variant / f'nats-server-{build.VERSION}/server/identity_bench_test.go'
         if sha256(copied) != sha256(bench):
             raise SystemExit('rebuild both variants with identical benchmark code first')
+    # Darwin's small ephemeral-port range can be exhausted by repeated churn
+    # samples. Let TIME_WAIT expire between processes, outside benchmark timing.
+    cooldown_seconds = 0
+    if platform.system() == 'Darwin':
+        msl_ms = int(subprocess.check_output(['sysctl', '-n', 'net.inet.tcp.msl'], text=True))
+        cooldown_seconds = 2 * msl_ms / 1000 + 1
     results = {
         'environment': {'os': platform.system(), 'arch': platform.machine(),
                         'cpu_count': os.cpu_count(),
@@ -73,6 +81,8 @@ def measure():
             'order': 'within each profile, baseline/patched on rounds 1/3/5; patched/baseline on rounds 2/4',
             'profiles': {name: {'GOMAXPROCS': procs, 'GOMEMLIMIT': limit}
                          for name, procs, limit in PROFILES},
+            'cooldown_seconds': cooldown_seconds,
+            'cooldown': 'before each process, outside timed regions; Darwin 2*TCP MSL+1s; no retries',
             'cold_config': 'new server/policy per op, hash/certificate generation outside timed regions',
             'wss': 'direct broker TLS with verified disposable P-256 certificate, one bcrypt cost-8 user; no proxy',
             'limits': 'single Darwin host; GOMEMLIMIT is Go soft heap limit, not VM/RSS cap; no production load',
@@ -83,12 +93,21 @@ def measure():
         for round_index in range(SAMPLES):
             order = ['baseline', 'patched'] if round_index % 2 == 0 else ['patched', 'baseline']
             for variant in order:
+                if cooldown_seconds:
+                    print(f'{profile}/{variant}: TCP cooldown {cooldown_seconds:g}s outside timing', flush=True)
+                    time.sleep(cooldown_seconds)
                 env = build.environment()
                 env.update(GOMAXPROCS=procs, GOMEMLIMIT=limit)
                 src = build.OUT / variant / f'nats-server-{build.VERSION}'
-                output = subprocess.check_output(
+                completed = subprocess.run(
                     ['go', 'test', './server', '-run', '^$', '-bench', '^BenchmarkIdentity',
-                     '-benchmem', '-benchtime=500ms', '-count=1'], cwd=src, env=env, text=True)
+                     '-benchmem', '-benchtime=500ms', '-count=1'], cwd=src, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                if completed.returncode:
+                    print(f'{profile}/{variant} round {round_index + 1}: benchmark failed', flush=True)
+                    print(completed.stdout, end='', flush=True)
+                    completed.check_returncode()
+                output = completed.stdout
                 rows = parse_sample(output)
                 key = profile + '/' + variant
                 samples = results['samples'].setdefault(key, {})

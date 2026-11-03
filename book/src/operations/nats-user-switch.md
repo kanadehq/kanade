@@ -483,6 +483,9 @@ pending/validated、rejected、stale を名前に変換しない。
 を重複除去し、各bcryptハッシュを一度解析し、平文衝突を先に除外する。
 ハッシュ比較の結果や secret をグローバルにキャッシュしない。
 認証時には小さな結果を保存し、監視時には既存の接続ロックで値をコピーする。
+固定のstate/mechanism/sourceは1 byteの型付き列挙値で保持し、監視時だけ
+従来どおりの文字列に展開する。no_auth_userのstickyな由来も同じ状態に保持し、
+CONNECTの再処理やreloadで消さない。公開するv2契約や認証判断は変更しない。
 v2 は ConnInfo に値を直接保持するため、監視時の接続ごとの別ヒープ
 割り当てを減らせる。PUB/SUB の通常配送経路には処理を追加しない。
 設定・認証・監視が無費用になるわけではない。
@@ -547,93 +550,96 @@ cost-8 bcryptハッシュを共有していた。WSS接続費用や独立ハッ�
 
 measurements.json は各profile/variant/6負荷を5回ずつ記録し、生のGo出力、
 各sample、中央値、差分、固定ソース・patch・producer・benchmarkのSHA-256、
-初回結果のSHA-256を含む。両variantには同一benchmarkコードをコピーし、
-初回と同じNATS 2.14.1/Go 1.27.2、500ms、profile設定を使った。
-各roundは別のgo testプロセスでcount=1を実行し、第1/3/5回を
-baseline→patched、第2/4回をpatched→baselineにして順序を交互にした。
-元の4負荷を保持し、client_bytesをResetTimerの後に報告する修正を加え、
-独立ハッシュのcold configとWSS負荷を追加した。
+初回結果のSHA-256を含む。measure.py は計測前に現在のソースから両variantを
+再構築する。同一benchmarkコード、NATS 2.14.1/Go 1.27.2、500ms、
+count=1を使い、第1/3/5回をbaseline→patched、第2/4回を逆順にした。
+元の4負荷、client_bytesの計時後報告、独立ハッシュのcold config、
+WSS負荷を含む全20プロセス・120 workload sampleが成功した。
+
+Darwinでは各プロセスの前に、sysctlで読み取ったTCP MSLの2倍+1秒
+（今回は31秒）を**計時外**で待つ。連続churnによる送信元ポート枯渇を
+未改造baselineでも再現したためで、49152–65535の範囲で16,247回目の接続が
+EADDRNOTAVAIL（errno 49）になった。待機なしの不完全な比較は採用していない。
+OS設定は変更せず、失敗したsampleの自動再試行や除外もしない。
+失敗時にはGoの出力を保存できる形で表示し、比較全体を失敗にする。
+初回とは実行順序・待機・ホスト状態が異なるため、異なる回の絶対時間差を
+すべてコードの高速化に帰属させない。
 
 | profile | 負荷 | baseline ms/op | patched ms/op | 時間差 | B/op（baseline → patched） | allocs/op（baseline → patched） |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| default | TCP・平文password churn | 0.544 | 0.633 | +16.27% | 62944 → 64311 | 180 → 180 |
-| default | connz・128接続 | 0.538 | 0.667 | +23.88% | 132221 → 156984 | 395 → 397 |
-| default | 監視付き64B request/reply | 0.219 | 0.213 | -2.52% | 1332 → 1339 | 21 → 21 |
-| default | cold config・同一bcryptハッシュ×3 | 0.371 | 129.470 | +34777.44% | 129360 → 149536 | 445 → 751 |
-| default | cold config・独立salt/異なるpassword×3 | 0.363 | 371.106 | +102156.15% | 129345 → 181064 | 445 → 827 |
-| default | WSS・bcrypt cost 8 churn | 51.791 | 50.636 | -2.23% | 224336 → 214332 | 1143 → 1138 |
-| constrained | TCP・平文password churn | 0.489 | 0.508 | +3.96% | 62958 → 64280 | 180 → 180 |
-| constrained | connz・128接続 | 0.543 | 0.654 | +20.42% | 131949 → 156689 | 395 → 396 |
-| constrained | 監視付き64B request/reply | 0.178 | 0.178 | +0.32% | 1327 → 1332 | 21 → 21 |
-| constrained | cold config・同一bcryptハッシュ×3 | 0.351 | 125.686 | +35661.01% | 129354 → 149508 | 445 → 750 |
-| constrained | cold config・独立salt/異なるpassword×3 | 0.354 | 391.807 | +110590.34% | 129365 → 181064 | 445 → 826 |
-| constrained | WSS・bcrypt cost 8 churn | 50.973 | 42.394 | -16.83% | 213481 → 214514 | 1141 → 1138 |
+| default | TCP・平文password churn | 0.177 | 0.175 | -1.31% | 62905 → 62974 | 180 → 180 |
+| default | connz・128接続 | 0.170 | 0.212 | +24.71% | 131843 → 156609 | 393 → 395 |
+| default | 監視付き64B request/reply | 0.060 | 0.060 | +0.22% | 1271 → 1276 | 21 → 21 |
+| default | cold config・同一bcryptハッシュ×3 | 0.112 | 49.139 | +43641.32% | 129334 → 149494 | 445 → 753 |
+| default | cold config・独立salt/異なるpassword×3 | 0.112 | 146.924 | +131642.14% | 129334 → 181348 | 445 → 830 |
+| default | WSS・bcrypt cost 8 churn | 17.511 | 17.461 | -0.28% | 216584 → 216469 | 1132 → 1132 |
+| constrained | TCP・平文password churn | 0.183 | 0.180 | -1.42% | 62920 → 62981 | 180 → 180 |
+| constrained | connz・128接続 | 0.180 | 0.222 | +23.46% | 131683 → 156369 | 393 → 394 |
+| constrained | 監視付き64B request/reply | 0.052 | 0.052 | +0.79% | 1267 → 1269 | 21 → 21 |
+| constrained | cold config・同一bcryptハッシュ×3 | 0.120 | 49.112 | +40781.31% | 129332 → 149452 | 445 → 753 |
+| constrained | cold config・独立salt/異なるpassword×3 | 0.121 | 147.226 | +121555.31% | 129331 → 181376 | 445 → 829 |
+| constrained | WSS・bcrypt cost 8 churn | 17.495 | 17.477 | -0.10% | 212124 → 212153 | 1131 → 1131 |
 
-同一ハッシュのconfig構築は初回patched約413/416 msから約129/126 msへ
-短縮した。ただし、これは重複比較9回を3回に減らせたケースである。
-独立salt・異なるpasswordの3ハッシュでは3候補×3ハッシュの衝突検査が必要で、
-約371/392 msが残る。baselineの約0.36 msとは依然として大きな差がある。
-検査を省略したりbcrypt costを下げたりしない限り、このCPU費用は残る。
-credentialの生成はtimed regionの外だが、NewServerとpolicyの構築は
-**毎op冷状態**で行い、warm cache hitへ置き換えていない。
+同一ハッシュのconfig構築は今回約49 msだが、重複比較9回を3回に減らせた
+ケースである。独立salt・異なるpasswordの3ハッシュでは3候補×3ハッシュの
+衝突検査が必要で、約147 msが残る。baselineの約0.11–0.12 msとは依然として
+大きな差がある。初回の約413/416 msとの時間差には手法・ホスト状態の差もある。
+検査の省略、bcrypt costの引き下げ、warm cache hitへの置換はしていない。
+credential生成は計時外だが、NewServerとpolicyは毎op冷状態で構築する。
 64ユーザー超、cost 12超、distinct secret 256超、重み付き比較仕事量4096超では
 名前を出さない安全側の上限も維持している。
 
-defaultのpatched TCP churnは初回0.637 msから今回0.633 msとほぼ同じであり、
-この経路の回帰が解消したとはいえない。今回のbaselineも0.544 msに変わって
-おり、今回の差は+16.27%。constrainedは+3.96%。今回の範囲は重なるが、
-初回の非重複範囲と+32.08%を取り消す根拠にはしない。
-認証snapshotの保存や同期の費用は残っている。
+今回のTCP churnはdefault -1.31%、constrained -1.42%でsample範囲は重なる。
+defaultはbaseline 0.173015–0.178042、patched 0.172427–0.175990 msだった。
+ただし初回の非重複範囲と+32.08%をnoiseとして取り消すものではない。
+型・保持メモリ・計測条件も変わっているため、今回の差だけで全環境での
+接続費用を保証しない。認証snapshotの保存や同期そのものは残る。
 
-connzはdefaultでbaseline比時間+23.88%、B/op +18.73%、応答
-46508 → 65264 byte（約40.3%、1接続あたり約147 byte増）。
-constrainedでは時間+20.42%、応答46508 → 65229 byte。
-defaultのpatched同士では初回からB/op約23%減、allocs/opは525→397、
-応答は約28%減となった。ただし初回との時間比較には順序・ホスト状態の差もある。
-response_bytesは各sample末尾のserialized応答長を報告し、その5回の中央値である。
-v2のcoherentな共有フィールドと値コピーは冗長性を減らすが、追加の監視コストは残る。
-この比較はauth=1であり、auth=0でもConnInfoの値fieldのため構造体の拡大はある。
+connz生成・JSON化はdefaultでbaseline比時間+24.71%、B/op +18.78%、
+応答46393 → 65144 byte（約40.4%、1接続あたり約147 byte増）。
+constrainedでは時間+23.46%、応答46394 → 65140 byteだった。
+初回patchedの応答約91 KBより小さく、defaultのallocs/opは525から395へ減ったが、
+これはbroker内の生成・JSON化の比較であり、HTTPや監視ネットワークは含まない。
+response_bytesは各sample末尾のserialized応答長の5回の中央値である。
+v2の共有フィールドと値コピーで冗長性は減るが、監視費用は残る。
+auth=1の比較であり、auth=0でもConnInfoの値fieldのため構造体は拡大する。
 auth=0の時間・allocationは今回測定していない。
 
-保持メモリは両profileでclient構造体6872 → 6952 byte、増分80 byte。
-identity_state_bytesも80 byteである。これはgeneration/sequenceと4つの
-string headerで、state/mechanism/sourceは固定文字列、publicUserは既存の
-immutableなcanonical名の参照を再利用する。新しい文字列のコピーや接続ごとの
-secret構造体は作らない。参照するpublic名の長さは最大64 byteで、設定内で
-共有される。client_bytesは構造体サイズの実測であり、allocatorのsize class、
-stack、socket、TLS、既存の設定の寿命やRSS全体を含まない。
-churnのB/opは一時割り当てを含み、80 byteの保持増分とは異なる。
-policyと一時的なsecret収集は設定単位であり、新たなidentity履歴は保存しない。
-producer・consumerとも名前は最大64 byteで検査する。定数文字列の本体は共有され、
-接続あたり新たに確保する動的なidentity文字列のバッファはない。ただし参照先の
-canonical名の寿命は接続まで延び得るため、構造体サイズだけでRSS増分は断定しない。
-監視用ConnInfoにはv2の値fieldが加わる（64-bit型定義からの計算では88 byte）。
-既存のclosed ringもこの空fieldを持つため、MaxClosedClientsの既定10000件なら
-field自体で880000 byte相当が増える。閉じた接続の新metadataは保存しないが、
-値field化によるこの容量のtradeoffは残る。allocator込みのRSSは未測定である。
+保持メモリは両profileでclient構造体6872 → 6904 byte、増分32 byte。
+identity_state_bytesも32 byteで、64-bitのgeneration/sequence、安全な名前セルへの
+ポインタ、3つの1-byte列挙値とstickyな由来を保持する。名前セルは設定内の
+安全な公開名ごとに1つ作り、既存のimmutableな文字列を参照する。
+接続ごと・認証ごとの文字列コピーや名前セルの確保、secret構造体のコピーはない。
+セルはprivateなUserオブジェクトの内部ポインタではない。
+churnのB/op差はdefault +69 byte、constrained +61 byteであり、
+構造体だけの増分とは区別する。client_bytesはstack、socket、TLS、
+allocatorやRSS全体の測定ではなく、32 byteからRSS増分を断定しない。
+名前はproducer・consumerとも最大64 byteで、接続が参照する公開名の寿命は
+延び得るが、新たなidentity履歴やsecret-bearingなグローバルキャッシュは作らない。
+監視用ConnInfoのv2値fieldは64-bit型定義からの計算では88 byte。
+既定10000件のclosed ringもこの空fieldを持つため、fieldだけで880000 byte相当が
+増える。閉じた接続の新metadataは保存しないが、この容量のtradeoffは残る。
 
 監視付きrequest/replyは10msごとにconnzを生成し、64 byteを1往復ずつ送る。
-今回の中央値からの逐次処理率はdefaultで約4572 → 4690 req/s、
-constrainedで約5632 → 5614 req/s。allocs/opはいずれも21のまま。
-これを並列PUB/SUBの最大throughputやtail latencyの保証にはしない。
+今回の中央値からの逐次処理率はdefault約16641 → 16606 req/s、
+constrained約19262 → 19111 req/s。allocs/opはすべて21のままである。
+PUB/SUBの通常配送経路には処理を追加していないが、この逐次負荷を
+並列PUB/SUBの最大throughputやtail latencyの保証にはしない。
 
 追加WSS負荷は、一時的なP-256証明書を検証する新しいTLS/WebSocket接続で、
 cost-8 bcryptユーザー1人のCONNECTとflushを毎op実行する。
-証明書・hashの生成は計時外、接続・TLS・bcrypt認証は計時内。
+証明書・hash生成は計時外、接続・TLS・bcrypt認証は計時内である。
 TLSはbrokerで直接終端し、Caddyや遠隔ネットワークを再現していない。
-defaultは約51.8 → 50.6 ms、constrainedは約51.0 → 42.4 msだが、
-サンプル範囲が広く、producerで高速化できたという結論にはしない。
-この遅い合成負荷の小さい相対差で、元のTCP churnの回帰を相殺しない。
+defaultは約17.51 → 17.46 ms、constrained約17.49 → 17.48 msで範囲は重なる。
+producerで高速化できたとの結論や、初回TCP churnの回帰の相殺には使わない。
 実TLS proxyを経由するpositive/negative試験は別途verifyで維持している。
 
-これらは単一Darwinホスト上のmicrobenchmarkで、GOMEMLIMITはGoのsoft heap
-limitにすぎない。**1 GiB Linux VM・swapなしでの試験ではない**。
-TLS clientとbrokerは同じプロセス内で、長期RSS、接続storm、JetStream負荷、
-p95/p99、本番Caddyや本番のbcrypt costを評価したものではない。
-個々の範囲と全sampleを保存し、好都合な値だけを選んでいない。
-設定時の数百ms、監視・churnの残存増分は運用上のtradeoffであり、
-本番採用を許容したという意味ではない。採用・配布・本番での再起動は、
-この実装と測定結果を見た所有者の別判断が必要である。
+単一Darwinホストのmicrobenchmarkであり、GOMEMLIMITはGoのsoft heap limitに
+すぎない。**1 GiB Linux VM・swapなしでの試験ではない**。長期RSS、
+接続storm、JetStream負荷、p95/p99、本番Caddyや本番のbcrypt costは未評価である。
+全sampleと初回結果を保持し、失敗を隠すための再試行やsampleの選別はしない。
+設定時の約147 msと監視の残存増分は運用上のtradeoffで、本番採用の許可ではない。
+採用・配布・本番での再起動は、所有者の別判断が必要である。
 
 ## Telling a locked-out host from an offline one
 

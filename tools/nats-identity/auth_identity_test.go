@@ -68,6 +68,15 @@ func TestAuthIdentityCanonicalAndPending(t *testing.T) {
 	if a.State != "accepted" || a.PublicUser != "agent" || a.Mechanism != "user_password" || a.Generation == 0 {
 		t.Fatal("canonical result missing")
 	}
+	other, err := nats.Connect(s.ClientURL(), nats.UserInfo("backend", "other-password"))
+	if err != nil {
+		t.Fatal("second principal handshake failed")
+	}
+	defer other.Close()
+	otherID, _ := other.GetClientID()
+	if proofFor(t, s, otherID).PublicUser != "backend" {
+		t.Fatal("authenticated principals shared the wrong public name")
+	}
 	z, _ := s.Connz(&ConnzOptions{Username: false})
 	for _, c := range z.Conns {
 		if c.AuthIdentity.Version != 0 {
@@ -98,20 +107,20 @@ func TestAuthIdentitySecretCollisions(t *testing.T) {
 	h, _ := bcrypt.GenerateFromPassword([]byte("agent"), 4)
 	for _, password := range []string{"agent", string(h)} {
 		opts := &Options{Users: []*User{{Username: "agent", Password: "fixture"}, {Username: "other", Password: password}}}
-		if publicAuthNames(opts)["agent"] {
+		if publicAuthNames(opts)["agent"] != nil {
 			t.Fatal("credential collision exposed")
 		}
 	}
 	opts := &Options{Users: []*User{{Username: "agent", Password: "fixture"}}}
 	opts.Websocket.Token = "agent"
-	if publicAuthNames(opts)["agent"] {
+	if publicAuthNames(opts)["agent"] != nil {
 		t.Fatal("listener token collision exposed")
 	}
 	h, _ = bcrypt.GenerateFromPassword([]byte("fixture"), 12)
 	opts.Websocket.Token = ""
 	opts.Username = "second-role"
 	opts.Users[0].Password = string(h)
-	if publicAuthNames(opts)["agent"] {
+	if publicAuthNames(opts)["agent"] != nil {
 		t.Fatal("proof work budget not enforced")
 	}
 }
@@ -129,7 +138,7 @@ func TestAuthIdentityDistinctAndDuplicateHashes(t *testing.T) {
 			{Username: "breakglass", Password: hashes[2]},
 		}}
 		names := publicAuthNames(opts)
-		if names["agent"] || !names["backend"] || !names["breakglass"] {
+		if names["agent"] != nil || names["backend"] == nil || names["breakglass"] == nil {
 			t.Fatal("deduplication changed collision decisions")
 		}
 	}

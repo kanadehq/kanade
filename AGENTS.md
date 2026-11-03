@@ -809,9 +809,7 @@ not that CI or review did not run.
   the host OS (`check`, `test`, `clippy`, `offline-boot` and the rest of
   `integration.yml`). Those are verified by CI only.
 
-ローカル E2E の Python はグローバル設定を変更せず選択する。このホストでは
-以下でサポート済みの Homebrew Python 3.14 を子プロセスにも適用できる。
-
-```sh
-env MISE_PYTHON_VERSION=path:/opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14 python3 scripts/ci/magi-e2e.py
-```
+ローカル E2E の Python も `.tool-versions` で対応版を固定する。
+`mise install` 後、常駐 magi worker の worktree でも `python3` がその版を選ぶこと。
+CLI 起動元だけの一時的な環境変数に依存せず、グローバルの既定値は変更しない。
+mise を使わない環境では、子プロセスまで Python 3.11 以上が選ばれる PATH を用意する。

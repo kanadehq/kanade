@@ -7,8 +7,10 @@ trust/admission、CLI テストを実行する。stage 2a/2b は各
 `nats-server`、loopback の bind/connect 権限が必要。
 Go は .tool-versions と integration.yml に指定した 1.27.2 を使用する。
 Python は子プロセスにもサポート版が選ばれる環境で起動する。
-mise の場合は MISE_PYTHON_VERSION をその呼び出しに限定して設定できる。
-グローバルの既定値は変更しない。
+mise 環境では `.tool-versions` が対応版の Python も固定するため、
+`mise install` で用意し、worktree 内の `python3` がその版を選ぶことを確認する。
+常駐 magi worker の検証でもこの worktree 単位の選択を使い、起動元だけに
+設定した一時的な `MISE_PYTHON_VERSION` に依存しない。グローバルの既定値は変更しない。
 
 broker は既存 fixture が一時的に起動し、実 fleet には接続しない。
 `KANADE_APP_ARTIFACT_PUBLICATION=backend-exclusive` は子プロセスに設定する。
