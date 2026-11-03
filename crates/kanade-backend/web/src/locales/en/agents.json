@@ -77,7 +77,7 @@
     "noAuth": "no auth",
     "noAuthTitle": "The broker required no credential at all. Expected on a dev broker with no `authorization` block; anywhere else it means the broker is open to anyone who can reach it.",
     "unproven": "unproven",
-    "unprovenTitle": "The credential name has no current broker-verified proof. Check support for identity metadata v1 and monitoring freshness. WebSocket listeners can have independent authentication policies; a backend TCP connection or successful probe cannot replace this proof. This does not establish authentication failure. Command signing is a separate check.",
+    "unprovenTitle": "The credential name has no current broker-verified proof. Check support for identity metadata v2 and monitoring freshness. WebSocket listeners can have independent authentication policies; a backend TCP connection or successful probe cannot replace this proof. This does not establish authentication failure. Command signing is a separate check.",
     "pending": "auth pending",
     "pendingTitle": "The connection was observed before authentication acceptance, within the broker’s authentication deadline. Wait for a new observation. This is not a named identity or an authentication failure. Command signing is a separate check.",
     "acceptanceUnproven": "acceptance unproven",
