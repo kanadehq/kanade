@@ -29,6 +29,64 @@ See the [operations guides](book/src/operations/overview.md) for current
 procedures. [docs/SPEC.md](docs/SPEC.md) also contains historical designs and
 explicitly deferred work; it is not a list of enabled features.
 
+## CPU requirements
+
+Official native binaries use the following CPU floors. These are independent of
+the build host's CPU and toolchain version; the operating system, WebView/GUI
+runtime, and separately installed third-party programs can impose stricter
+requirements.
+
+| Release target | Minimum CPU |
+| --- | --- |
+| Linux `x86_64-unknown-linux-musl` | Original x86-64 (x86-64-v1), including SSE2; AVX/AVX2 are **not** required |
+| Windows `x86_64-pc-windows-msvc` | Original x86-64/SSE2 for Kanade's native code; supported Windows and WebView2 requirements still apply |
+| Linux `aarch64-unknown-linux-musl` | 64-bit ARMv8-A, including floating point and Advanced SIMD |
+| macOS `aarch64-apple-darwin` | Apple Silicon M1 or newer; the desktop client additionally requires macOS 14+ |
+
+The Linux CPU contract covers `kanade-agent`, `kanade-backend`, and the `kanade`
+CLI. `kanade-client` is not a Linux GUI application: its Linux binary deliberately
+exits with an unsupported-platform message. Intel macOS is not a release target.
+
+`.cargo/config.toml` specifies both Rust CPU options and target-specific C/C++
+options for native dependencies. Local Linux GNU builds use the same CPU floor as
+the musl releases. CPU-dispatched library routines may use newer instructions
+**after** checking CPU/OS support; the baseline does not disable those fast paths.
+Prebuilt native libraries must also satisfy the floor: compiler options cannot
+rewrite code that was already compiled.
+
+Keep Rust stable, native compilers, dependencies, and build images current.
+Toolchain/image updates must pass the compatibility gate rather than implicitly
+raise the minimum CPU. Do not inject stronger ISA options through `RUSTFLAGS`,
+`CARGO_ENCODED_RUSTFLAGS`, native compiler flags, or compiler wrappers when
+producing official releases.
+
+### CPU compatibility verification
+
+The repo-owned `CPU baseline` workflow builds the release workspace on
+`ubuntu-latest`, then executes the packaged Linux x86-64 agent, backend, and CLI
+on QEMU's `qemu64,-sse3,-cx16,-lahf-lm` model (the original x86-64 floor).
+The release post-build hook runs the same gate on the final archives before
+upload. It requires each binary's `--version` to exit successfully and report
+the expected product/version; missing artifacts/tools, SIGILL, and timeouts fail
+the gate.
+
+To check trusted, locally built release archives:
+
+```sh
+python3 scripts/ci/verify-linux-cpu.py dist <version>
+# Install qemu-user/qemu-user-static, or set QEMU_X86_64 to its executable.
+```
+
+This startup gate catches pre-main native-library failures; it is not a sandbox
+or exhaustive execution of every feature. Windows and ARM builds retain their
+native CI coverage; the QEMU gate described here checks Linux x86-64 only.
+
+A future minimum-CPU increase is an explicit compatibility change: update this
+contract, `.cargo/config.toml`, the emulator model/CI checks, and release notes
+together, then check affected fleet CPUs before promoting the release. A newer
+build runner alone is never a reason to change the supported CPU floor.
+
+
 ## Why
 
 The off-the-shelf endpoint managers (Intune, Tanium, Workspace ONE, …)

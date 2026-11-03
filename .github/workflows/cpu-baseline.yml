@@ -1,0 +1,54 @@
+name: CPU baseline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x86-64:
+    name: Linux x86-64-v1 startup
+    runs-on: ubuntu-latest
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install native build and CPU emulation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools qemu-user
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: cpu-baseline-musl
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+      # Match the release build's workspace feature unification. The backend's
+      # build.rs seeds a web placeholder here; this job checks native startup,
+      # while release.yml builds the real SPA and checks its final archives.
+      - name: Build release binaries with the repository CPU baseline
+        run: cargo build --locked --release --workspace --bins --target "$TARGET"
+      - name: Package and execute on the minimum CPU
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "kanade-agent") | .version')
+          mkdir -p dist
+          # kanade-client is deliberately an unsupported-GUI shim on Linux.
+          for bin in kanade-agent kanade-backend kanade; do
+            stem="$bin-$TARGET"
+            cp "target/$TARGET/release/$bin" "$stem"
+            tar czf "dist/$stem.tar.gz" "$stem"
+          done
+          python3 scripts/ci/verify-linux-cpu.py dist "$version"

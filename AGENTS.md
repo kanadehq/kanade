@@ -820,3 +820,22 @@ not that CI or review did not run.
 `mise install` 後、常駐 magi worker の worktree でも `python3` がその版を選ぶこと。
 CLI 起動元だけの一時的な環境変数に依存せず、グローバルの既定値は変更しない。
 mise を使わない環境では、子プロセスまで Python 3.11 以上が選ばれる PATH を用意する。
+
+## CPU compatibility contract
+
+- `README.md`'s CPU requirements and `.cargo/config.toml` are one contract:
+  x86-64-v1/SSE2 on Linux/Windows, ARMv8-A on Linux ARM64, Apple M1 on macOS.
+  OS and GUI runtime requirements are separate. Keep native compilers and Rust
+  current rather than freezing an old toolchain to preserve the CPU floor.
+- Native C/C++ options matter as well as Rust codegen. Do not add stronger
+  unconditional ISA requirements through environment flags or prebuilt libraries;
+  runtime-detected fast paths are allowed. A CPU-floor increase needs an explicit
+  compatibility announcement and coordinated config/docs/verification changes.
+- `scripts/ci/verify-linux-cpu.py` executes final Linux x86-64 archives on QEMU's
+  `qemu64,-sse3,-cx16,-lahf-lm` model. Both `.github/workflows/cpu-baseline.yml` and
+  the repo-owned `release-post-build.sh verify-dist` path invoke it; never move this
+  policy into kata-managed `release.yml`. The three supported Linux binaries are
+  listed in both the verifier and CPU workflow packaging loop; update both when a
+  Linux binary is added. The Linux client is intentionally an unsupported GUI shim.
+- The QEMU gate proves startup/version on the minimum Linux CPU, not every runtime
+  feature or Windows/ARM compatibility. Keep native CI coverage for those targets.

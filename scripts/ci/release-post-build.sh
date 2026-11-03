@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Available release hook (not currently invoked by release.yml):
+# Repo-owned release hook invoked by release.yml:
 #   release-post-build.sh sign         # after the build, before packaging
 #   release-post-build.sh verify-dist  # after packaging, before upload
 # Kept in the repo (release.yml is kata-managed and overwritten on apply)
@@ -38,3 +38,21 @@ case "$mode" in
     fi ;;
 esac
 python3 "$here/verify-agent-dist.py" "$artifact" "$version" "$platform"
+
+# The ELF machine type and release metadata do not establish CPU compatibility.
+# Execute the final Linux archives on the documented x86-64-v1 CPU model before
+# release.yml uploads them. Keep this in the hook, not the kata-managed workflow.
+if [[ "$mode" == verify-dist && "${TARGET:-}" == x86_64-unknown-linux-musl ]]; then
+  if [[ -z "${QEMU_X86_64:-}" ]] \
+      && ! command -v qemu-x86_64 >/dev/null \
+      && ! command -v qemu-x86_64-static >/dev/null; then
+    if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+      sudo apt-get update
+      sudo apt-get install -y --no-install-recommends qemu-user
+    else
+      echo "release-post-build: install qemu-user or set QEMU_X86_64 to verify the CPU baseline" >&2
+      exit 1
+    fi
+  fi
+  python3 "$here/verify-linux-cpu.py" dist "$version"
+fi
