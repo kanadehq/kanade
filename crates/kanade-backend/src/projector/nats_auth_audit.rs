@@ -334,7 +334,7 @@ pub async fn health_block(
     let mut pending_connections = None;
     let mut unproven_connections = None;
     let mut uncertainty_reasons = None;
-    let (mut poll_status, polled_at) = match state {
+    let (poll_status, polled_at) = match state {
         None => ("pending".to_string(), None),
         Some(r) => {
             let at: Option<DateTime<Utc>> = r.try_get("polled_at").ok();
@@ -369,14 +369,6 @@ pub async fn health_block(
             }
         }
     };
-    let identity_expired: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agents WHERE nats_identity_expires_at IS NOT NULL AND julianday(nats_identity_expires_at) <= julianday(?))")
-        .bind(now).fetch_one(pool).await.unwrap_or(true);
-    if identity_expired {
-        poll_status = "stale".into();
-        pending_connections = None;
-        unproven_connections = None;
-        uncertainty_reasons = None;
-    }
     NatsAuthHealth {
         expected_mode: settings.map(|s| s.effective_nats_auth_mode().as_str()),
         grace_until: settings.and_then(|s| grace_until(now, s.nats_auth_mode_changed_at)),
@@ -594,6 +586,32 @@ mod tests {
         record_state(&pool, PollStatus::Ok, t0()).await.unwrap();
         let h = health_block(&pool, Some(&users()), t0() + Duration::minutes(10)).await;
         assert_eq!(h.poll_status, "stale");
+    }
+
+    #[tokio::test]
+    async fn expired_agent_projection_preserves_fresh_poll_health() {
+        let pool = pool().await;
+        let settings = users();
+        let registered = reg();
+        let observed = [agent("PC2", LABEL_PENDING)];
+        run_poll(
+            &pool,
+            Ok(settings.clone()),
+            &poll(&observed, &registered),
+            t0(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agents (pc_id, hostname, nats_user, nats_identity_expires_at) VALUES ('PC1', 'expired-host', 'agent', ?)")
+            .bind(t0() - Duration::seconds(1))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let health = health_block(&pool, Some(&settings), t0() + Duration::seconds(1)).await;
+        assert_eq!(health.poll_status, "authentication_uncertain");
+        assert_eq!(health.pending_connections, Some(1));
+        assert_eq!(health.unproven_connections, Some(0));
     }
 
     #[tokio::test]
