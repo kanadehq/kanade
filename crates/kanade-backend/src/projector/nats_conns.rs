@@ -756,27 +756,47 @@ async fn apply_identity_projection(
     ev: Evidence,
 ) -> Result<u64> {
     let (selected, _) = correlate_selected(conns, probe, ev);
-    let hosts: Vec<String> = selected
+    let mut deadlines: HashMap<String, Option<DateTime<Utc>>> = selected
         .iter()
         .filter_map(|(pc, (c, label))| {
             c.identity_label
                 .as_deref()
                 .filter(|n| public_identity(n))
                 .filter(|n| label == *n)
-                .map(|_| pc.clone())
+                .map(|_| {
+                    (
+                        pc.clone(),
+                        c.connection
+                            .as_ref()
+                            .and_then(|connection| connection.observed_at)
+                            .map(|at| at + chrono::Duration::seconds(90)),
+                    )
+                })
         })
         .collect();
-    let labels = selected
-        .into_iter()
-        .map(|(pc, (_, label))| (pc, label))
-        .collect();
+    let hosts: Vec<_> = deadlines.keys().collect();
     let json = serde_json::to_string(&hosts)?;
     let mut tx = pool.begin().await.context("begin identity projection tx")?;
     sqlx::query("UPDATE agents SET nats_user = 'unknown', nats_user_since = CURRENT_TIMESTAMP, nats_identity_expires_at = NULL WHERE nats_identity_expires_at IS NOT NULL AND pc_id NOT IN (SELECT value FROM json_each(?))")
         .bind(&json).execute(&mut *tx).await?;
+    // The write above acquires SQLite's writer lock. Check freshness after
+    // that wait as well as any audit delay, without renewing the observation.
+    let now = Utc::now();
+    let labels = selected
+        .into_iter()
+        .map(|(pc, (_, mut label))| {
+            if let Some(deadline) = deadlines.get_mut(&pc)
+                && deadline.is_none_or(|at| at <= now)
+            {
+                *deadline = None;
+                label = LABEL_UNKNOWN.to_string();
+            }
+            (pc, label)
+        })
+        .collect();
     let changed = apply_labels(&mut tx, &labels).await?;
-    sqlx::query("UPDATE agents SET nats_identity_expires_at = ? WHERE pc_id IN (SELECT value FROM json_each(?))")
-        .bind(Utc::now() + chrono::Duration::seconds(90)).bind(json).execute(&mut *tx).await?;
+    sqlx::query("UPDATE agents SET nats_identity_expires_at = proof.value FROM json_each(?) AS proof WHERE agents.pc_id = proof.key")
+        .bind(serde_json::to_string(&deadlines)?).execute(&mut *tx).await?;
     tx.commit().await.context("commit identity projection tx")?;
     Ok(changed)
 }
@@ -1758,10 +1778,24 @@ mod tests {
         .unwrap()
     }
 
+    fn identity_connection_fixture() -> ConnInfo {
+        let mut c = connection_fixture();
+        c.connection = Some(super::super::nats_auth_evidence::Connection {
+            observed_at: Some(Utc::now() - chrono::Duration::seconds(30)),
+            cid: c.cid.to_string(),
+            server_id: "test-broker".into(),
+            broker_start: c.start.unwrap(),
+            broker_now: None,
+            connection_start: c.start,
+            last_activity: None,
+        });
+        c
+    }
+
     #[tokio::test]
     async fn identity_projection_uses_selected_connection_for_expiry() {
         let pool = pool_with(&["PC001"]).await;
-        let mut accepted = connection_fixture();
+        let mut accepted = identity_connection_fixture();
         accepted.name = Some("kanade-agent/PC001".into());
         accepted.identity_label = Some("agent".into());
         let mut pending = connection_fixture();
@@ -1784,7 +1818,17 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-            assert!(expires.is_some());
+            assert_eq!(
+                expires.map(|at| at.parse::<DateTime<Utc>>().unwrap()),
+                conns
+                    .iter()
+                    .find(|c| c.identity_label.as_deref() == Some("agent"))
+                    .unwrap()
+                    .connection
+                    .as_ref()
+                    .and_then(|connection| connection.observed_at)
+                    .map(|at| at + chrono::Duration::seconds(90)),
+            );
             conns.reverse();
         }
         invalidate_identity_proofs(&pool).await.unwrap();
@@ -1792,9 +1836,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identity_projection_does_not_republish_expired_or_undated_proofs() {
+        let pool = pool_with(&["PC001"]).await;
+        let mut accepted = identity_connection_fixture();
+        accepted.name = Some("kanade-agent/PC001".into());
+        accepted.identity_label = Some("agent".into());
+        let probe = probe_holding(None);
+        for observed_at in [Some(Utc::now() - chrono::Duration::seconds(100)), None] {
+            // Start with a valid projection to also test revoking an existing name.
+            accepted.connection.as_mut().unwrap().observed_at = Some(Utc::now());
+            apply_identity_projection(
+                &pool,
+                std::slice::from_ref(&accepted),
+                &probe,
+                Evidence::Unproven,
+            )
+            .await
+            .unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));
+
+            accepted.connection.as_mut().unwrap().observed_at = observed_at;
+            apply_identity_projection(
+                &pool,
+                std::slice::from_ref(&accepted),
+                &probe,
+                Evidence::Unproven,
+            )
+            .await
+            .unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+            let expires: Option<String> = sqlx::query_scalar(
+                "SELECT nats_identity_expires_at FROM agents WHERE pc_id = 'PC001'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(expires.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn identity_projection_rolls_back_label_when_expiry_write_fails() {
         let pool = pool_with(&["PC001"]).await;
-        let mut accepted = connection_fixture();
+        let mut accepted = identity_connection_fixture();
         accepted.name = Some("kanade-agent/PC001".into());
         accepted.identity_label = Some("agent".into());
         sqlx::query(
