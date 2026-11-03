@@ -583,8 +583,23 @@ fn correlate(
     probe: &CredentialProbe,
     ev: Evidence,
 ) -> (HashMap<String, String>, Anomalies) {
-    // pc_id → (cid, label); the highest cid wins a tie.
-    let mut best: HashMap<String, (u64, String)> = HashMap::new();
+    let (selected, anomalies) = correlate_selected(conns, probe, ev);
+    let labels = selected
+        .into_iter()
+        .map(|(pc, (_, label))| (pc, label))
+        .collect();
+    (labels, anomalies)
+}
+
+/// Keep the selected connection alongside its label so proof expiry follows
+/// exactly the same selection rules as the projected identity.
+fn correlate_selected<'a>(
+    conns: &'a [ConnInfo],
+    probe: &CredentialProbe,
+    ev: Evidence,
+) -> (HashMap<String, (&'a ConnInfo, String)>, Anomalies) {
+    // pc_id → (connection, label); the highest cid wins a tie.
+    let mut best: HashMap<String, (&ConnInfo, String)> = HashMap::new();
     let mut anomalies = Anomalies::default();
     for c in conns {
         let Some(name) = c.name.as_deref() else {
@@ -611,7 +626,7 @@ fn correlate(
             continue;
         }
         match best.get(pc_id) {
-            Some((cid, existing)) if *cid >= c.cid => {
+            Some((selected, existing)) if selected.cid >= c.cid => {
                 if existing != &label {
                     anomalies
                         .conflicting
@@ -619,7 +634,7 @@ fn correlate(
                 }
             }
             _ => {
-                best.insert(pc_id.to_string(), (c.cid, label));
+                best.insert(pc_id.to_string(), (c, label));
             }
         }
     }
@@ -627,11 +642,7 @@ fn correlate(
     // the anomalies themselves, not of the order the broker listed them in.
     anomalies.non_agent.sort();
     anomalies.conflicting.sort();
-    let labels = best
-        .into_iter()
-        .map(|(pc, (_cid, label))| (pc, label))
-        .collect();
-    (labels, anomalies)
+    (best, anomalies)
 }
 
 /// Every kanade-named (or unnamed) connection with the label the broker's
@@ -663,17 +674,19 @@ fn observe(conns: &[ConnInfo], probe: &CredentialProbe, ev: Evidence) -> Vec<Obs
         .collect()
 }
 
+#[cfg(test)]
+async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+    let changed = apply_labels(&mut tx, labels).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
 /// Write the correlated labels, touching only rows whose label actually
 /// changed. Returns how many rows moved.
 ///
-/// Diff first, then write. The `WHERE` guard on the UPDATE already makes an
-/// unchanged poll a semantic no-op, but a no-op UPDATE still takes SQLite's
-/// single writer lock for the length of the transaction — on a 3,000-host
-/// fleet that is 3,000 statements a minute, forever, competing with the
-/// projectors that #488 already had to be batched for (review #1273,
-/// coderabbit). Reading first costs one indexed scan of a one-row-per-PC
-/// table and, in the steady state this projector is in almost always, opens
-/// no write transaction at all.
+/// Diff first, then write within the caller's transaction, which also
+/// persists the proof deadline.
 ///
 /// `nats_user_since` therefore means "since when has it been this", which is
 /// the question a migration actually asks. How recently the host was seen at
@@ -682,13 +695,16 @@ fn observe(conns: &[ConnInfo], probe: &CredentialProbe, ev: Evidence) -> Vec<Obs
 /// Rows for hosts with no live connection are left alone: the last observed
 /// credential is still the best answer about an offline machine, exactly as
 /// `command_keys` stays put when an agent goes quiet.
-async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u64> {
+async fn apply_labels(
+    conn: &mut sqlx::SqliteConnection,
+    labels: &HashMap<String, String>,
+) -> Result<u64> {
     if labels.is_empty() {
         return Ok(0);
     }
     let current: HashMap<String, Option<String>> =
         sqlx::query("SELECT pc_id, nats_user FROM agents")
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await
             .context("read current nats_user labels")?
             .into_iter()
@@ -712,10 +728,8 @@ async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u6
     if pending.is_empty() {
         return Ok(0);
     }
-    let mut tx = pool.begin().await.context("begin nats_user tx")?;
     let mut changed = 0;
-    // The `WHERE` guard stays: the row can move between the read above and
-    // the write below, and it is what keeps `nats_user_since` honest.
+    // Keep the update conditional so unchanged labels retain their timestamp.
     for (pc_id, label) in pending {
         let res = sqlx::query(
             "UPDATE agents
@@ -726,12 +740,11 @@ async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u6
         .bind(label)
         .bind(pc_id)
         .bind(label)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .with_context(|| format!("update nats_user for {pc_id}"))?;
         changed += res.rows_affected();
     }
-    tx.commit().await.context("commit nats_user tx")?;
     Ok(changed)
 }
 
@@ -749,33 +762,29 @@ async fn apply_identity_projection(
     probe: &CredentialProbe,
     ev: Evidence,
 ) -> Result<u64> {
-    let (labels, _) = correlate(conns, probe, ev);
-    let mut latest = HashMap::<String, &ConnInfo>::new();
-    for c in conns {
-        if let Some(parsed) = c.name.as_deref().and_then(parse_client_name)
-            && parsed.role == NatsRole::Agent.as_str()
-            && let Some(pc) = parsed.identity
-            && latest.get(pc).is_none_or(|old| old.cid < c.cid)
-        {
-            latest.insert(pc.to_owned(), c);
-        }
-    }
-    let hosts: Vec<String> = latest
-        .into_iter()
-        .filter_map(|(pc, c)| {
+    let (selected, _) = correlate_selected(conns, probe, ev);
+    let hosts: Vec<String> = selected
+        .iter()
+        .filter_map(|(pc, (c, label))| {
             c.identity_label
                 .as_deref()
                 .filter(|n| public_identity(n))
-                .filter(|n| labels.get(&pc).is_some_and(|label| label == *n))
-                .map(|_| pc)
+                .filter(|n| label == *n)
+                .map(|_| pc.clone())
         })
         .collect();
+    let labels = selected
+        .into_iter()
+        .map(|(pc, (_, label))| (pc, label))
+        .collect();
     let json = serde_json::to_string(&hosts)?;
+    let mut tx = pool.begin().await.context("begin identity projection tx")?;
     sqlx::query("UPDATE agents SET nats_user = 'unknown', nats_user_since = CURRENT_TIMESTAMP, nats_identity_expires_at = NULL WHERE nats_identity_expires_at IS NOT NULL AND pc_id NOT IN (SELECT value FROM json_each(?))")
-        .bind(&json).execute(pool).await?;
-    let changed = apply(pool, &labels).await?;
+        .bind(&json).execute(&mut *tx).await?;
+    let changed = apply_labels(&mut tx, &labels).await?;
     sqlx::query("UPDATE agents SET nats_identity_expires_at = ? WHERE pc_id IN (SELECT value FROM json_each(?))")
-        .bind(Utc::now() + chrono::Duration::seconds(90)).bind(json).execute(pool).await?;
+        .bind(Utc::now() + chrono::Duration::seconds(90)).bind(json).execute(&mut *tx).await?;
+    tx.commit().await.context("commit identity projection tx")?;
     Ok(changed)
 }
 
@@ -1749,6 +1758,71 @@ mod tests {
             "subscriptions":0}"#,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn identity_projection_uses_selected_connection_for_expiry() {
+        let pool = pool_with(&["PC001"]).await;
+        let mut accepted = connection_fixture();
+        accepted.name = Some("kanade-agent/PC001".into());
+        accepted.identity_label = Some("agent".into());
+        let mut pending = connection_fixture();
+        pending.cid = accepted.cid + 1;
+        pending.name = accepted.name.clone();
+        pending.identity_label = Some(LABEL_PENDING.into());
+        let probe = probe_holding(None);
+
+        // Both the first projection and refresh must retain a deadline,
+        // regardless of the broker's connection ordering.
+        let mut conns = vec![accepted, pending];
+        for _ in 0..2 {
+            apply_identity_projection(&pool, &conns, &probe, Evidence::Unproven)
+                .await
+                .unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));
+            let expires: Option<String> = sqlx::query_scalar(
+                "SELECT nats_identity_expires_at FROM agents WHERE pc_id = 'PC001'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(expires.is_some());
+            conns.reverse();
+        }
+        invalidate_identity_proofs(&pool).await.unwrap();
+        assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+    }
+
+    #[tokio::test]
+    async fn identity_projection_rolls_back_label_when_expiry_write_fails() {
+        let pool = pool_with(&["PC001"]).await;
+        let mut accepted = connection_fixture();
+        accepted.name = Some("kanade-agent/PC001".into());
+        accepted.identity_label = Some("agent".into());
+        sqlx::query(
+            "CREATE TRIGGER reject_identity_expiry
+             BEFORE UPDATE OF nats_identity_expires_at ON agents
+             WHEN NEW.nats_identity_expires_at IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'expiry write failed'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            apply_identity_projection(&pool, &[accepted], &probe_holding(None), Evidence::Unproven)
+                .await
+                .is_err()
+        );
+        // A failed deadline write must leave neither the new name nor its
+        // timestamp committed, including on the first projection.
+        assert_eq!(read(&pool, "PC001").await, (None, None));
+        let expires: Option<String> =
+            sqlx::query_scalar("SELECT nats_identity_expires_at FROM agents WHERE pc_id = 'PC001'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(expires.is_none());
     }
 
     fn snapshot_fixture() -> Varz {
