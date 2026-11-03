@@ -762,6 +762,14 @@ Widening either allow list is a licensing decision, not a build fix.
 
 ## Local magi verification (`magi.toml`)
 
+broker identity producer は Go 1.27.2 を使用する。ローカルの
+`.tool-versions` と `.github/workflows/integration.yml` の `setup-go`
+を同時に更新すること。mise を使う新しいホストでは、検証前に
+`mise install` を実行する。プロジェクトの指定で shim が Go を選択するため、
+グローバルの既定値は不要。`tools/nats-identity/build.py` は
+`GOTOOLCHAIN=local` を設定し、別の toolchain を自動取得せずに
+インストール済みのコンパイラを使用する。
+
 `magi.toml` is repo-owned and is read from the repo layer that magi
 extracts from the pinned base commit, so a change only takes effect for
 runs started from a base that already contains it. An empty `verify.gate`
