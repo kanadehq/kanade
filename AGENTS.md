@@ -762,6 +762,14 @@ Widening either allow list is a licensing decision, not a build fix.
 
 ## Local magi verification (`magi.toml`)
 
+broker identity producer は Go 1.27.2 を使用する。ローカルの
+`.tool-versions` と `.github/workflows/integration.yml` の `setup-go`
+を同時に更新すること。mise を使う新しいホストでは、検証前に
+`mise install` を実行する。プロジェクトの指定で shim が Go を選択するため、
+グローバルの既定値は不要。`tools/nats-identity/build.py` は
+`GOTOOLCHAIN=local` を設定し、別の toolchain を自動取得せずに
+インストール済みのコンパイラを使用する。
+
 `magi.toml` is repo-owned and is read from the repo layer that magi
 extracts from the pinned base commit, so a change only takes effect for
 runs started from a base that already contains it. An empty `verify.gate`
@@ -786,7 +794,7 @@ not that CI or review did not run.
   実行する。成功件数が 0、ignored が残る、または harness ごとの実行件数と
   成功件数が一致しなければ失敗する。stage 2a/2b のフィルタは
   `package_manifest::tests::`、`publisher_trust::tests::`、
-  `package_admission::tests::` を個別に指定する。Python 3 が必要。
+  `package_admission::tests::` を個別に指定する。native package fixture が tomllib を使うため Python 3.11 以上が必要。
 - **Prerequisites**: loopback の bind 権限と、`integration.yml` の
   `NATS_SERVER_VERSION` に一致する broker が必要。e2e runner は同版の
   PATH 上のバイナリをコピーするか、公式リリースから取得して
@@ -800,3 +808,8 @@ not that CI or review did not run.
   the local toolchain), and the Windows/Linux/macOS matrix legs other than
   the host OS (`check`, `test`, `clippy`, `offline-boot` and the rest of
   `integration.yml`). Those are verified by CI only.
+
+ローカル E2E の Python も `.tool-versions` で対応版を固定する。
+`mise install` 後、常駐 magi worker の worktree でも `python3` がその版を選ぶこと。
+CLI 起動元だけの一時的な環境変数に依存せず、グローバルの既定値は変更しない。
+mise を使わない環境では、子プロセスまで Python 3.11 以上が選ばれる PATH を用意する。

@@ -1091,6 +1091,11 @@ pub async fn delete(
 }
 
 fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
+    let expired_identity_at = r
+        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("nats_identity_expires_at")
+        .ok()
+        .flatten()
+        .filter(|deadline| *deadline <= chrono::Utc::now());
     AgentRow {
         pc_id: r.try_get("pc_id").unwrap_or_default(),
         hostname: r.try_get("hostname").ok(),
@@ -1155,15 +1160,17 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
         // — which no classifier produces, but which a hand-edited row
         // could hold — is folded into it rather than shown as a credential
         // with no name.
-        nats_user: r
-            .try_get::<Option<String>, _>("nats_user")
-            .ok()
-            .flatten()
-            .filter(|s| !s.is_empty()),
-        nats_user_since: r
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("nats_user_since")
-            .ok()
-            .flatten(),
+        nats_user: if expired_identity_at.is_some() {
+            Some("unknown".to_owned())
+        } else {
+            r.try_get::<Option<String>, _>("nats_user").ok().flatten()
+        }
+        .filter(|s| !s.is_empty()),
+        nats_user_since: expired_identity_at.or_else(|| {
+            r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("nats_user_since")
+                .ok()
+                .flatten()
+        }),
         last_logon_user: r
             .try_get::<Option<String>, _>("last_logon_user")
             .ok()
@@ -1357,6 +1364,31 @@ mod tests {
         params: ListParams,
     ) -> Result<(HeaderMap, Json<Vec<AgentRow>>), (StatusCode, String)> {
         list(State(pool), Query(params), Query(Vec::new())).await
+    }
+
+    #[tokio::test]
+    async fn expired_identity_since_tracks_the_expiry_boundary() {
+        let pool = seeded_pool().await;
+        let expired_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        let future_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let since = expired_at - chrono::Duration::days(1);
+        for (pc, deadline) in [("PC001", expired_at), ("PC002", future_at)] {
+            sqlx::query("UPDATE agents SET nats_user = 'agent', nats_user_since = ?, nats_identity_expires_at = ? WHERE pc_id = ?")
+                .bind(since)
+                .bind(deadline)
+                .bind(pc)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let (_, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
+        let expired = rows.iter().find(|row| row.pc_id == "PC001").unwrap();
+        assert_eq!(expired.nats_user.as_deref(), Some("unknown"));
+        assert_eq!(expired.nats_user_since, Some(expired_at));
+        let fresh = rows.iter().find(|row| row.pc_id == "PC002").unwrap();
+        assert_eq!(fresh.nats_user.as_deref(), Some("agent"));
+        assert_eq!(fresh.nats_user_since, Some(since));
     }
 
     /// As [`call`], but with raw `meta.<key>.<op>=<value>` query params for

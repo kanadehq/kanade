@@ -1,0 +1,588 @@
+{
+  "environment": {
+    "os": "Darwin",
+    "arch": "arm64",
+    "cpu_count": 8,
+    "go": "go version go1.27.2 darwin/arm64"
+  },
+  "samples": {
+    "default/baseline": {
+      "BenchmarkIdentityChurn": [
+        {
+          "ns/op": 538897.0,
+          "B/op": 62948.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 493216.0,
+          "B/op": 62886.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 482047.0,
+          "B/op": 62888.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 478509.0,
+          "B/op": 62895.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 468165.0,
+          "B/op": 62887.0,
+          "allocs/op": 179.0
+        }
+      ],
+      "BenchmarkIdentityConnz": [
+        {
+          "ns/op": 510234.0,
+          "response_bytes": 46515.0,
+          "B/op": 132190.0,
+          "allocs/op": 395.0
+        },
+        {
+          "ns/op": 505302.0,
+          "response_bytes": 46500.0,
+          "B/op": 132018.0,
+          "allocs/op": 395.0
+        },
+        {
+          "ns/op": 536775.0,
+          "response_bytes": 46488.0,
+          "B/op": 132212.0,
+          "allocs/op": 395.0
+        },
+        {
+          "ns/op": 502612.0,
+          "response_bytes": 46507.0,
+          "B/op": 132046.0,
+          "allocs/op": 395.0
+        },
+        {
+          "ns/op": 500839.0,
+          "response_bytes": 46503.0,
+          "B/op": 132171.0,
+          "allocs/op": 395.0
+        }
+      ],
+      "BenchmarkIdentityMessagingMonitored": [
+        {
+          "ns/op": 210475.0,
+          "MB/s": 0.3,
+          "B/op": 1326.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 179155.0,
+          "MB/s": 0.36,
+          "B/op": 1317.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 176775.0,
+          "MB/s": 0.36,
+          "B/op": 1318.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 180527.0,
+          "MB/s": 0.35,
+          "B/op": 1331.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 180591.0,
+          "MB/s": 0.35,
+          "B/op": 1310.0,
+          "allocs/op": 21.0
+        }
+      ],
+      "BenchmarkIdentityConfigBcrypt": [
+        {
+          "ns/op": 334737.0,
+          "B/op": 129349.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 325917.0,
+          "B/op": 129353.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 327661.0,
+          "B/op": 129280.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 331077.0,
+          "B/op": 129437.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 322354.0,
+          "B/op": 129280.0,
+          "allocs/op": 445.0
+        }
+      ]
+    },
+    "default/patched": {
+      "BenchmarkIdentityChurn": [
+        {
+          "ns/op": 636671.0,
+          "B/op": 64242.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 708373.0,
+          "B/op": 64192.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 635324.0,
+          "B/op": 64182.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 580087.0,
+          "B/op": 64181.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 712285.0,
+          "B/op": 64181.0,
+          "allocs/op": 179.0
+        }
+      ],
+      "BenchmarkIdentityConnz": [
+        {
+          "ns/op": 876871.0,
+          "response_bytes": 91195.0,
+          "B/op": 204024.0,
+          "allocs/op": 523.0
+        },
+        {
+          "ns/op": 786971.0,
+          "response_bytes": 91195.0,
+          "B/op": 204192.0,
+          "allocs/op": 525.0
+        },
+        {
+          "ns/op": 774298.0,
+          "response_bytes": 91209.0,
+          "B/op": 204246.0,
+          "allocs/op": 525.0
+        },
+        {
+          "ns/op": 779969.0,
+          "response_bytes": 91211.0,
+          "B/op": 204187.0,
+          "allocs/op": 525.0
+        },
+        {
+          "ns/op": 925223.0,
+          "response_bytes": 91203.0,
+          "B/op": 203948.0,
+          "allocs/op": 523.0
+        }
+      ],
+      "BenchmarkIdentityMessagingMonitored": [
+        {
+          "ns/op": 280413.0,
+          "MB/s": 0.23,
+          "B/op": 1371.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 197189.0,
+          "MB/s": 0.32,
+          "B/op": 1346.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 194775.0,
+          "MB/s": 0.33,
+          "B/op": 1336.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 178565.0,
+          "MB/s": 0.36,
+          "B/op": 1332.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 186901.0,
+          "MB/s": 0.34,
+          "B/op": 1327.0,
+          "allocs/op": 21.0
+        }
+      ],
+      "BenchmarkIdentityConfigBcrypt": [
+        {
+          "ns/op": 419020875.0,
+          "B/op": 182872.0,
+          "allocs/op": 856.0
+        },
+        {
+          "ns/op": 415412854.0,
+          "B/op": 182816.0,
+          "allocs/op": 854.0
+        },
+        {
+          "ns/op": 410045334.0,
+          "B/op": 182872.0,
+          "allocs/op": 856.0
+        },
+        {
+          "ns/op": 412580854.0,
+          "B/op": 184040.0,
+          "allocs/op": 857.0
+        },
+        {
+          "ns/op": 400216042.0,
+          "B/op": 182872.0,
+          "allocs/op": 856.0
+        }
+      ]
+    },
+    "constrained/baseline": {
+      "BenchmarkIdentityChurn": [
+        {
+          "ns/op": 534546.0,
+          "B/op": 62948.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 531838.0,
+          "B/op": 62940.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 509057.0,
+          "B/op": 62946.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 553072.0,
+          "B/op": 62950.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 507515.0,
+          "B/op": 62937.0,
+          "allocs/op": 180.0
+        }
+      ],
+      "BenchmarkIdentityConnz": [
+        {
+          "ns/op": 544114.0,
+          "response_bytes": 46514.0,
+          "B/op": 131930.0,
+          "allocs/op": 394.0
+        },
+        {
+          "ns/op": 592925.0,
+          "response_bytes": 46510.0,
+          "B/op": 131911.0,
+          "allocs/op": 394.0
+        },
+        {
+          "ns/op": 538273.0,
+          "response_bytes": 46507.0,
+          "B/op": 131953.0,
+          "allocs/op": 394.0
+        },
+        {
+          "ns/op": 539366.0,
+          "response_bytes": 46507.0,
+          "B/op": 131927.0,
+          "allocs/op": 394.0
+        },
+        {
+          "ns/op": 541618.0,
+          "response_bytes": 46513.0,
+          "B/op": 131934.0,
+          "allocs/op": 394.0
+        }
+      ],
+      "BenchmarkIdentityMessagingMonitored": [
+        {
+          "ns/op": 181924.0,
+          "MB/s": 0.35,
+          "B/op": 1316.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 171361.0,
+          "MB/s": 0.37,
+          "B/op": 1321.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 166380.0,
+          "MB/s": 0.38,
+          "B/op": 1311.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 163716.0,
+          "MB/s": 0.39,
+          "B/op": 1323.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 171409.0,
+          "MB/s": 0.37,
+          "B/op": 1318.0,
+          "allocs/op": 21.0
+        }
+      ],
+      "BenchmarkIdentityConfigBcrypt": [
+        {
+          "ns/op": 339881.0,
+          "B/op": 129354.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 347808.0,
+          "B/op": 129358.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 343141.0,
+          "B/op": 129280.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 350524.0,
+          "B/op": 129441.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 335642.0,
+          "B/op": 129280.0,
+          "allocs/op": 445.0
+        }
+      ]
+    },
+    "constrained/patched": {
+      "BenchmarkIdentityChurn": [
+        {
+          "ns/op": 478301.0,
+          "B/op": 64227.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 476307.0,
+          "B/op": 64220.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 600680.0,
+          "B/op": 64225.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 487958.0,
+          "B/op": 64220.0,
+          "allocs/op": 180.0
+        },
+        {
+          "ns/op": 494947.0,
+          "B/op": 64216.0,
+          "allocs/op": 180.0
+        }
+      ],
+      "BenchmarkIdentityConnz": [
+        {
+          "ns/op": 846780.0,
+          "response_bytes": 91193.0,
+          "B/op": 203954.0,
+          "allocs/op": 523.0
+        },
+        {
+          "ns/op": 848087.0,
+          "response_bytes": 91204.0,
+          "B/op": 204005.0,
+          "allocs/op": 523.0
+        },
+        {
+          "ns/op": 835707.0,
+          "response_bytes": 91199.0,
+          "B/op": 204030.0,
+          "allocs/op": 523.0
+        },
+        {
+          "ns/op": 832495.0,
+          "response_bytes": 91179.0,
+          "B/op": 204018.0,
+          "allocs/op": 523.0
+        },
+        {
+          "ns/op": 827679.0,
+          "response_bytes": 91200.0,
+          "B/op": 204016.0,
+          "allocs/op": 523.0
+        }
+      ],
+      "BenchmarkIdentityMessagingMonitored": [
+        {
+          "ns/op": 177526.0,
+          "MB/s": 0.36,
+          "B/op": 1325.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 174344.0,
+          "MB/s": 0.37,
+          "B/op": 1325.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 157905.0,
+          "MB/s": 0.41,
+          "B/op": 1316.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 183926.0,
+          "MB/s": 0.35,
+          "B/op": 1348.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 171350.0,
+          "MB/s": 0.37,
+          "B/op": 1321.0,
+          "allocs/op": 21.0
+        }
+      ],
+      "BenchmarkIdentityConfigBcrypt": [
+        {
+          "ns/op": 429202166.0,
+          "B/op": 182816.0,
+          "allocs/op": 854.0
+        },
+        {
+          "ns/op": 423525042.0,
+          "B/op": 182816.0,
+          "allocs/op": 854.0
+        },
+        {
+          "ns/op": 400004896.0,
+          "B/op": 182816.0,
+          "allocs/op": 854.0
+        },
+        {
+          "ns/op": 406270896.0,
+          "B/op": 182816.0,
+          "allocs/op": 854.0
+        },
+        {
+          "ns/op": 415701500.0,
+          "B/op": 182760.0,
+          "allocs/op": 854.0
+        }
+      ]
+    }
+  },
+  "medians": {
+    "default/baseline": {
+      "BenchmarkIdentityChurn": {
+        "ns/op": 482047.0,
+        "B/op": 62888.0,
+        "allocs/op": 179.0
+      },
+      "BenchmarkIdentityConnz": {
+        "ns/op": 505302.0,
+        "response_bytes": 46503.0,
+        "B/op": 132171.0,
+        "allocs/op": 395.0
+      },
+      "BenchmarkIdentityMessagingMonitored": {
+        "ns/op": 180527.0,
+        "MB/s": 0.35,
+        "B/op": 1318.0,
+        "allocs/op": 21.0
+      },
+      "BenchmarkIdentityConfigBcrypt": {
+        "ns/op": 327661.0,
+        "B/op": 129349.0,
+        "allocs/op": 445.0
+      }
+    },
+    "default/patched": {
+      "BenchmarkIdentityChurn": {
+        "ns/op": 636671.0,
+        "B/op": 64182.0,
+        "allocs/op": 179.0
+      },
+      "BenchmarkIdentityConnz": {
+        "ns/op": 786971.0,
+        "response_bytes": 91203.0,
+        "B/op": 204187.0,
+        "allocs/op": 525.0
+      },
+      "BenchmarkIdentityMessagingMonitored": {
+        "ns/op": 194775.0,
+        "MB/s": 0.33,
+        "B/op": 1336.0,
+        "allocs/op": 21.0
+      },
+      "BenchmarkIdentityConfigBcrypt": {
+        "ns/op": 412580854.0,
+        "B/op": 182872.0,
+        "allocs/op": 856.0
+      }
+    },
+    "constrained/baseline": {
+      "BenchmarkIdentityChurn": {
+        "ns/op": 531838.0,
+        "B/op": 62946.0,
+        "allocs/op": 180.0
+      },
+      "BenchmarkIdentityConnz": {
+        "ns/op": 541618.0,
+        "response_bytes": 46510.0,
+        "B/op": 131930.0,
+        "allocs/op": 394.0
+      },
+      "BenchmarkIdentityMessagingMonitored": {
+        "ns/op": 171361.0,
+        "MB/s": 0.37,
+        "B/op": 1318.0,
+        "allocs/op": 21.0
+      },
+      "BenchmarkIdentityConfigBcrypt": {
+        "ns/op": 343141.0,
+        "B/op": 129354.0,
+        "allocs/op": 445.0
+      }
+    },
+    "constrained/patched": {
+      "BenchmarkIdentityChurn": {
+        "ns/op": 487958.0,
+        "B/op": 64220.0,
+        "allocs/op": 180.0
+      },
+      "BenchmarkIdentityConnz": {
+        "ns/op": 835707.0,
+        "response_bytes": 91199.0,
+        "B/op": 204016.0,
+        "allocs/op": 523.0
+      },
+      "BenchmarkIdentityMessagingMonitored": {
+        "ns/op": 174344.0,
+        "MB/s": 0.37,
+        "B/op": 1325.0,
+        "allocs/op": 21.0
+      },
+      "BenchmarkIdentityConfigBcrypt": {
+        "ns/op": 415701500.0,
+        "B/op": 182816.0,
+        "allocs/op": 854.0
+      }
+    }
+  }
+}

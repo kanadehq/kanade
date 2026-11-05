@@ -19,7 +19,7 @@ use sqlx::{Row, SqlitePool};
 use super::nats_auth_findings::{
     FindingKind, NOTICE_PREFIX, Observed, Severity, grace_until, group, in_grace,
 };
-use super::nats_conns::{EvidenceReason, LABEL_PENDING, LABEL_UNPROVEN};
+use super::nats_conns::{EvidenceReason, LABEL_PENDING, LABEL_REJECTED, LABEL_UNPROVEN};
 use super::notice_ledger::{self, Desired, Op, Policy, Stored};
 
 /// A recorded poll older than this is reported as `stale`: the projector
@@ -73,7 +73,7 @@ impl Poll<'_> {
                 .count(),
             self.observed
                 .iter()
-                .filter(|o| o.label == LABEL_UNPROVEN)
+                .filter(|o| matches!(o.label.as_str(), LABEL_UNPROVEN | LABEL_REJECTED))
                 .count(),
         )
     }
@@ -586,6 +586,32 @@ mod tests {
         record_state(&pool, PollStatus::Ok, t0()).await.unwrap();
         let h = health_block(&pool, Some(&users()), t0() + Duration::minutes(10)).await;
         assert_eq!(h.poll_status, "stale");
+    }
+
+    #[tokio::test]
+    async fn expired_agent_projection_preserves_fresh_poll_health() {
+        let pool = pool().await;
+        let settings = users();
+        let registered = reg();
+        let observed = [agent("PC2", LABEL_PENDING)];
+        run_poll(
+            &pool,
+            Ok(settings.clone()),
+            &poll(&observed, &registered),
+            t0(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agents (pc_id, hostname, nats_user, nats_identity_expires_at) VALUES ('PC1', 'expired-host', 'agent', ?)")
+            .bind(t0() - Duration::seconds(1))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let health = health_block(&pool, Some(&settings), t0() + Duration::seconds(1)).await;
+        assert_eq!(health.poll_status, "authentication_uncertain");
+        assert_eq!(health.pending_connections, Some(1));
+        assert_eq!(health.unproven_connections, Some(0));
     }
 
     #[tokio::test]

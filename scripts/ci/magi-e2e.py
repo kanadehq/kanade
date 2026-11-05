@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def commands():
+    if os.name == "posix":
+        yield ["python3", "tools/nats-identity/verify.py"]
     yield ["cargo", "test", "-p", "kanade-backend", "--",
            "api::agent_releases", "api::app_artifacts",
            "api::exec::typed_gate_e2e", "--ignored"]
@@ -173,6 +175,8 @@ def prepare_nats(env):
 
 
 def main():
+    if sys.version_info < (3, 11):
+        raise ValueError("ローカル E2E には tomllib を備えた Python 3.11 以上が必要です。")
     env = prepare_nats(os.environ.copy())
     env["KANADE_APP_ARTIFACT_PUBLICATION"] = "backend-exclusive"
     env["CARGO_TERM_COLOR"] = "never"

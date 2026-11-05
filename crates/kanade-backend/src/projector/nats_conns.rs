@@ -145,6 +145,10 @@ pub const LABEL_UNKNOWN: &str = "unknown";
 pub const LABEL_PENDING: &str = "auth-pending";
 /// Authentication acceptance cannot be established from this observation.
 pub const LABEL_UNPROVEN: &str = "auth-unproven";
+/// Broker-produced v2 proof of authentication rejection. Never a username.
+pub const LABEL_REJECTED: &str = "auth-rejected";
+/// Acceptance is proven, but a safe public credential name is unavailable.
+pub const LABEL_ACCEPTED_UNNAMED: &str = "auth-accepted-unnameable";
 
 /// Fixed, secret-free classification vocabulary; never contains broker values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize)]
@@ -158,6 +162,7 @@ pub enum EvidenceReason {
     InvalidConnectionStart,
     AuthPolicyConflict,
     AcceptanceUnproven,
+    AuthenticationRejected,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -195,6 +200,12 @@ impl Acceptance {
 fn uncertainty_reasons(conns: &[ConnInfo]) -> BTreeMap<EvidenceReason, usize> {
     let mut counts = BTreeMap::new();
     for c in conns {
+        if c.identity_label.as_deref() == Some(LABEL_REJECTED) {
+            *counts
+                .entry(EvidenceReason::AuthenticationRejected)
+                .or_default() += 1;
+            continue;
+        }
         if Claimed::from_name(c.name.as_deref()).is_some()
             && c.authorized_user
                 .as_deref()
@@ -207,9 +218,97 @@ fn uncertainty_reasons(conns: &[ConnInfo]) -> BTreeMap<EvidenceReason, usize> {
     counts
 }
 
+/// Versioned broker result; never Debug-print any unvalidated broker value.
+#[derive(Deserialize)]
+struct AuthIdentity {
+    version: u32,
+    generation: u64,
+    sequence: u64,
+    state: String,
+    mechanism: String,
+    source: String,
+    public_user: Option<String>,
+}
+
+impl std::fmt::Debug for AuthIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthIdentity(<unvalidated>)")
+    }
+}
+
+fn public_identity(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        && !matches!(
+            name,
+            LABEL_UNKNOWN
+                | LABEL_SHARED_TOKEN
+                | LABEL_NO_AUTH
+                | LABEL_PENDING
+                | LABEL_UNPROVEN
+                | LABEL_REJECTED
+                | LABEL_ACCEPTED_UNNAMED
+        )
+}
+
+/// The administrative monitoring endpoint is the authority. v2 is emitted
+/// only by the reviewed producer patch, after the broker checks credentials;
+/// CONNECT names, authorized_user and expected-mode settings never enter it.
+fn verified_identity(c: &ConnInfo, broker: &Varz, observed: DateTime<Utc>) -> Option<String> {
+    let a = match &c.auth_identity {
+        Some(a) => a,
+        None if broker.auth_identity_version.is_none() => return None,
+        None => return Some(LABEL_UNKNOWN.into()),
+    };
+    // v2 inherits broker/start from the checked Connz envelope, and
+    // cid/start/transport from the containing connection copied under c.mu.
+    let valid = a.version == 2
+        && broker.auth_identity_version == Some(2)
+        && ((a.state == "pending" && a.generation == 0)
+            || (a.generation != 0
+                && Some(a.generation) == broker.auth_identity_generation
+                && a.sequence != 0))
+        && c.cid != 0
+        && c.kind.as_deref() == Some("Client")
+        && matches!(c.transport.as_deref(), Some("nats" | "websocket"))
+        && c.start
+            .is_some_and(|start| start >= broker.start && start <= broker.now)
+        && (observed - broker.now).num_seconds().abs() <= 60;
+    Some(if !valid {
+        LABEL_UNKNOWN.into()
+    } else {
+        match (a.state.as_str(), a.mechanism.as_str()) {
+            ("accepted", "user_password") if matches!(a.source.as_str(), "connect" | "cookie") => a
+                .public_user
+                .as_deref()
+                .filter(|n| public_identity(n))
+                .unwrap_or(if a.public_user.is_none() {
+                    LABEL_ACCEPTED_UNNAMED
+                } else {
+                    LABEL_UNKNOWN
+                })
+                .into(),
+            ("accepted", "token") => LABEL_SHARED_TOKEN.into(),
+            (
+                "accepted",
+                "nkey" | "jwt" | "tls_mapping" | "delegated" | "custom" | "unavailable",
+            ) => LABEL_ACCEPTED_UNNAMED.into(),
+            // An assigned no_auth_user is not proof of presenting credentials.
+            ("accepted", "anonymous" | "no_auth_user") => LABEL_NO_AUTH.into(),
+            ("pending" | "validated", _) => LABEL_PENDING.into(),
+            ("rejected", _) => LABEL_REJECTED.into(),
+            _ => LABEL_UNKNOWN.into(),
+        }
+    })
+}
+
 /// The subset of `/connz` this projector reads.
 #[derive(Debug, Deserialize)]
 struct Connz {
+    auth_identity_server_start: Option<DateTime<Utc>>,
     /// Connections matching the query across ALL pages — the paging bound.
     total: usize,
     connections: Vec<ConnInfo>,
@@ -222,6 +321,10 @@ struct Connz {
 
 #[derive(Debug, Deserialize)]
 struct ConnInfo {
+    #[serde(default)]
+    auth_identity: Option<AuthIdentity>,
+    #[serde(skip)]
+    identity_label: Option<String>,
     #[serde(skip)]
     connection: Option<super::nats_auth_evidence::Connection>,
     /// Broker-issued id, scoped to its startup epoch. Also breaks ties
@@ -253,6 +356,8 @@ struct ConnInfo {
 /// Optional auth_required remains unknown when omitted (NATS uses omitempty).
 #[derive(Debug, Deserialize)]
 struct Varz {
+    auth_identity_version: Option<u32>,
+    auth_identity_generation: Option<u64>,
     server_id: String,
     start: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -269,6 +374,8 @@ impl Varz {
             && self.config_load_time == other.config_load_time
             && self.auth_required == other.auth_required
             && self.auth_timeout == other.auth_timeout
+            && self.auth_identity_version == other.auth_identity_version
+            && self.auth_identity_generation == other.auth_identity_generation
             && self.now <= other.now
     }
 
@@ -330,6 +437,9 @@ impl Varz {
 }
 
 fn classify_connection(c: &ConnInfo, probe: &CredentialProbe, ev: Evidence) -> String {
+    if let Some(label) = &c.identity_label {
+        return label.clone();
+    }
     if c.authorized_user
         .as_deref()
         .is_none_or(|u| u.trim().is_empty())
@@ -338,6 +448,10 @@ fn classify_connection(c: &ConnInfo, probe: &CredentialProbe, ev: Evidence) -> S
     }
     // A WS listener may use a different token even while TCP uses users.
     // Never extend TCP's proof that a value is a username to another listener.
+    // Nor does a WS users-mode config/username allowlist establish the
+    // authenticated user: getRawAuthUser prefers the client-supplied nkey
+    // option even when the broker validated a different username/password.
+    // The live WSS test exercises that with successful authentication.
     let ev = if c.transport.as_deref() != Some("nats") {
         Evidence::Unproven
     } else {
@@ -462,8 +576,23 @@ fn correlate(
     probe: &CredentialProbe,
     ev: Evidence,
 ) -> (HashMap<String, String>, Anomalies) {
-    // pc_id → (cid, label); the highest cid wins a tie.
-    let mut best: HashMap<String, (u64, String)> = HashMap::new();
+    let (selected, anomalies) = correlate_selected(conns, probe, ev);
+    let labels = selected
+        .into_iter()
+        .map(|(pc, (_, label))| (pc, label))
+        .collect();
+    (labels, anomalies)
+}
+
+/// Keep the selected connection alongside its label so proof expiry follows
+/// exactly the same selection rules as the projected identity.
+fn correlate_selected<'a>(
+    conns: &'a [ConnInfo],
+    probe: &CredentialProbe,
+    ev: Evidence,
+) -> (HashMap<String, (&'a ConnInfo, String)>, Anomalies) {
+    // pc_id → (connection, label); the highest cid wins a tie.
+    let mut best: HashMap<String, (&ConnInfo, String)> = HashMap::new();
     let mut anomalies = Anomalies::default();
     for c in conns {
         let Some(name) = c.name.as_deref() else {
@@ -490,7 +619,7 @@ fn correlate(
             continue;
         }
         match best.get(pc_id) {
-            Some((cid, existing)) if *cid >= c.cid => {
+            Some((selected, existing)) if selected.cid >= c.cid => {
                 if existing != &label {
                     anomalies
                         .conflicting
@@ -498,7 +627,7 @@ fn correlate(
                 }
             }
             _ => {
-                best.insert(pc_id.to_string(), (c.cid, label));
+                best.insert(pc_id.to_string(), (c, label));
             }
         }
     }
@@ -506,11 +635,7 @@ fn correlate(
     // the anomalies themselves, not of the order the broker listed them in.
     anomalies.non_agent.sort();
     anomalies.conflicting.sort();
-    let labels = best
-        .into_iter()
-        .map(|(pc, (_cid, label))| (pc, label))
-        .collect();
-    (labels, anomalies)
+    (best, anomalies)
 }
 
 /// Every kanade-named (or unnamed) connection with the label the broker's
@@ -542,17 +667,19 @@ fn observe(conns: &[ConnInfo], probe: &CredentialProbe, ev: Evidence) -> Vec<Obs
         .collect()
 }
 
+#[cfg(test)]
+async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+    let changed = apply_labels(&mut tx, labels).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
 /// Write the correlated labels, touching only rows whose label actually
 /// changed. Returns how many rows moved.
 ///
-/// Diff first, then write. The `WHERE` guard on the UPDATE already makes an
-/// unchanged poll a semantic no-op, but a no-op UPDATE still takes SQLite's
-/// single writer lock for the length of the transaction — on a 3,000-host
-/// fleet that is 3,000 statements a minute, forever, competing with the
-/// projectors that #488 already had to be batched for (review #1273,
-/// coderabbit). Reading first costs one indexed scan of a one-row-per-PC
-/// table and, in the steady state this projector is in almost always, opens
-/// no write transaction at all.
+/// Diff first, then write within the caller's transaction, which also
+/// persists the proof deadline.
 ///
 /// `nats_user_since` therefore means "since when has it been this", which is
 /// the question a migration actually asks. How recently the host was seen at
@@ -561,13 +688,16 @@ fn observe(conns: &[ConnInfo], probe: &CredentialProbe, ev: Evidence) -> Vec<Obs
 /// Rows for hosts with no live connection are left alone: the last observed
 /// credential is still the best answer about an offline machine, exactly as
 /// `command_keys` stays put when an agent goes quiet.
-async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u64> {
+async fn apply_labels(
+    conn: &mut sqlx::SqliteConnection,
+    labels: &HashMap<String, String>,
+) -> Result<u64> {
     if labels.is_empty() {
         return Ok(0);
     }
     let current: HashMap<String, Option<String>> =
         sqlx::query("SELECT pc_id, nats_user FROM agents")
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await
             .context("read current nats_user labels")?
             .into_iter()
@@ -591,10 +721,8 @@ async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u6
     if pending.is_empty() {
         return Ok(0);
     }
-    let mut tx = pool.begin().await.context("begin nats_user tx")?;
     let mut changed = 0;
-    // The `WHERE` guard stays: the row can move between the read above and
-    // the write below, and it is what keeps `nats_user_since` honest.
+    // Keep the update conditional so unchanged labels retain their timestamp.
     for (pc_id, label) in pending {
         let res = sqlx::query(
             "UPDATE agents
@@ -605,12 +733,71 @@ async fn apply(pool: &SqlitePool, labels: &HashMap<String, String>) -> Result<u6
         .bind(label)
         .bind(pc_id)
         .bind(label)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .with_context(|| format!("update nats_user for {pc_id}"))?;
         changed += res.rows_affected();
     }
-    tx.commit().await.context("commit nats_user tx")?;
+    Ok(changed)
+}
+
+/// A lost poll must invalidate current proof, rather than preserve a green
+/// historical credential. The API also enforces the persisted 90 s deadline.
+async fn invalidate_identity_proofs(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("UPDATE agents SET nats_user = 'unknown', nats_user_since = CURRENT_TIMESTAMP, nats_identity_expires_at = NULL WHERE nats_identity_expires_at IS NOT NULL")
+        .execute(pool).await?;
+    Ok(())
+}
+
+async fn apply_identity_projection(
+    pool: &SqlitePool,
+    conns: &[ConnInfo],
+    probe: &CredentialProbe,
+    ev: Evidence,
+) -> Result<u64> {
+    let (selected, _) = correlate_selected(conns, probe, ev);
+    let mut deadlines: HashMap<String, Option<DateTime<Utc>>> = selected
+        .iter()
+        .filter_map(|(pc, (c, label))| {
+            c.identity_label
+                .as_deref()
+                .filter(|n| public_identity(n))
+                .filter(|n| label == *n)
+                .map(|_| {
+                    (
+                        pc.clone(),
+                        c.connection
+                            .as_ref()
+                            .and_then(|connection| connection.observed_at)
+                            .map(|at| at + chrono::Duration::seconds(90)),
+                    )
+                })
+        })
+        .collect();
+    let hosts: Vec<_> = deadlines.keys().collect();
+    let json = serde_json::to_string(&hosts)?;
+    let mut tx = pool.begin().await.context("begin identity projection tx")?;
+    sqlx::query("UPDATE agents SET nats_user = 'unknown', nats_user_since = CURRENT_TIMESTAMP, nats_identity_expires_at = NULL WHERE nats_identity_expires_at IS NOT NULL AND pc_id NOT IN (SELECT value FROM json_each(?))")
+        .bind(&json).execute(&mut *tx).await?;
+    // The write above acquires SQLite's writer lock. Check freshness after
+    // that wait as well as any audit delay, without renewing the observation.
+    let now = Utc::now();
+    let labels = selected
+        .into_iter()
+        .map(|(pc, (_, mut label))| {
+            if let Some(deadline) = deadlines.get_mut(&pc)
+                && deadline.is_none_or(|at| at <= now)
+            {
+                *deadline = None;
+                label = LABEL_UNKNOWN.to_string();
+            }
+            (pc, label)
+        })
+        .collect();
+    let changed = apply_labels(&mut tx, &labels).await?;
+    sqlx::query("UPDATE agents SET nats_identity_expires_at = proof.value FROM json_each(?) AS proof WHERE agents.pc_id = proof.key")
+        .bind(serde_json::to_string(&deadlines)?).execute(&mut *tx).await?;
+    tx.commit().await.context("commit identity projection tx")?;
     Ok(changed)
 }
 
@@ -695,6 +882,11 @@ async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>
         if z.server_id != before.server_id || at < last_now || at < before.start {
             bail!("broker identity or time changed during connz walk");
         }
+        if before.auth_identity_version == Some(2)
+            && z.auth_identity_server_start != Some(before.start)
+        {
+            bail!("identity envelope start missing or mismatched");
+        }
         last_now = at;
         if z.offset != Some(offset) || z.num_connections != Some(z.connections.len()) {
             bail!("connz page metadata missing or inconsistent");
@@ -718,6 +910,7 @@ async fn fetch_walk(client: &MonitorClient, base: &str) -> Result<(Vec<ConnInfo>
             }
             previous = c.cid;
             c.acceptance = before.acceptance(&c, at);
+            c.identity_label = verified_identity(&c, &before, observed_at);
             c.connection = Some(super::nats_auth_evidence::Connection {
                 observed_at: Some(observed_at),
                 cid: c.cid.to_string(),
@@ -867,7 +1060,7 @@ pub async fn run(
                     }
                     reported = anomalies;
                 }
-                match apply(&pool, &labels).await {
+                match apply_identity_projection(&pool, &conns, &probe, ev).await {
                     Ok(changed) => {
                         if healthy != Some(true) {
                             info!(
@@ -888,6 +1081,9 @@ pub async fn run(
                 }
             }
             Err(e) => {
+                if invalidate_identity_proofs(&pool).await.is_err() {
+                    warn!("NATS identity proof invalidation failed");
+                }
                 // The audit's own answer is now unknown, not "clean": say so
                 // in its recorded state and leave the ledger as it was.
                 if let Err(se) =
@@ -1582,6 +1778,135 @@ mod tests {
         .unwrap()
     }
 
+    fn identity_connection_fixture() -> ConnInfo {
+        let mut c = connection_fixture();
+        c.connection = Some(super::super::nats_auth_evidence::Connection {
+            observed_at: Some(Utc::now() - chrono::Duration::seconds(30)),
+            cid: c.cid.to_string(),
+            server_id: "test-broker".into(),
+            broker_start: c.start.unwrap(),
+            broker_now: None,
+            connection_start: c.start,
+            last_activity: None,
+        });
+        c
+    }
+
+    #[tokio::test]
+    async fn identity_projection_uses_selected_connection_for_expiry() {
+        let pool = pool_with(&["PC001"]).await;
+        let mut accepted = identity_connection_fixture();
+        accepted.name = Some("kanade-agent/PC001".into());
+        accepted.identity_label = Some("agent".into());
+        let mut pending = connection_fixture();
+        pending.cid = accepted.cid + 1;
+        pending.name = accepted.name.clone();
+        pending.identity_label = Some(LABEL_PENDING.into());
+        let probe = probe_holding(None);
+
+        // Both the first projection and refresh must retain a deadline,
+        // regardless of the broker's connection ordering.
+        let mut conns = vec![accepted, pending];
+        for _ in 0..2 {
+            apply_identity_projection(&pool, &conns, &probe, Evidence::Unproven)
+                .await
+                .unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));
+            let expires: Option<String> = sqlx::query_scalar(
+                "SELECT nats_identity_expires_at FROM agents WHERE pc_id = 'PC001'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                expires.map(|at| at.parse::<DateTime<Utc>>().unwrap()),
+                conns
+                    .iter()
+                    .find(|c| c.identity_label.as_deref() == Some("agent"))
+                    .unwrap()
+                    .connection
+                    .as_ref()
+                    .and_then(|connection| connection.observed_at)
+                    .map(|at| at + chrono::Duration::seconds(90)),
+            );
+            conns.reverse();
+        }
+        invalidate_identity_proofs(&pool).await.unwrap();
+        assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+    }
+
+    #[tokio::test]
+    async fn identity_projection_does_not_republish_expired_or_undated_proofs() {
+        let pool = pool_with(&["PC001"]).await;
+        let mut accepted = identity_connection_fixture();
+        accepted.name = Some("kanade-agent/PC001".into());
+        accepted.identity_label = Some("agent".into());
+        let probe = probe_holding(None);
+        for observed_at in [Some(Utc::now() - chrono::Duration::seconds(100)), None] {
+            // Start with a valid projection to also test revoking an existing name.
+            accepted.connection.as_mut().unwrap().observed_at = Some(Utc::now());
+            apply_identity_projection(
+                &pool,
+                std::slice::from_ref(&accepted),
+                &probe,
+                Evidence::Unproven,
+            )
+            .await
+            .unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));
+
+            accepted.connection.as_mut().unwrap().observed_at = observed_at;
+            apply_identity_projection(
+                &pool,
+                std::slice::from_ref(&accepted),
+                &probe,
+                Evidence::Unproven,
+            )
+            .await
+            .unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+            let expires: Option<String> = sqlx::query_scalar(
+                "SELECT nats_identity_expires_at FROM agents WHERE pc_id = 'PC001'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(expires.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_projection_rolls_back_label_when_expiry_write_fails() {
+        let pool = pool_with(&["PC001"]).await;
+        let mut accepted = identity_connection_fixture();
+        accepted.name = Some("kanade-agent/PC001".into());
+        accepted.identity_label = Some("agent".into());
+        sqlx::query(
+            "CREATE TRIGGER reject_identity_expiry
+             BEFORE UPDATE OF nats_identity_expires_at ON agents
+             WHEN NEW.nats_identity_expires_at IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'expiry write failed'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            apply_identity_projection(&pool, &[accepted], &probe_holding(None), Evidence::Unproven)
+                .await
+                .is_err()
+        );
+        // A failed deadline write must leave neither the new name nor its
+        // timestamp committed, including on the first projection.
+        assert_eq!(read(&pool, "PC001").await, (None, None));
+        let expires: Option<String> =
+            sqlx::query_scalar("SELECT nats_identity_expires_at FROM agents WHERE pc_id = 'PC001'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(expires.is_none());
+    }
+
     fn snapshot_fixture() -> Varz {
         serde_json::from_str(&varz_fixture()).unwrap()
     }
@@ -1749,20 +2074,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identity_v2_requires_the_broker_envelope_and_connection_binding() {
+        let mut broker: serde_json::Value = serde_json::from_str(&varz_fixture()).unwrap();
+        broker["now"] = serde_json::to_value(Utc::now()).unwrap();
+        broker["auth_identity_version"] = 2.into();
+        broker["auth_identity_generation"] = 7.into();
+        let page = serde_json::json!({
+            "server_id":broker["server_id"], "auth_identity_server_start":broker["start"],
+            "now":broker["now"], "offset":0,"num_connections":1,"total":1,
+            "connections":[{
+                "cid":1,"start":"2026-10-18T02:24:57Z","kind":"Client","type":"websocket",
+                "auth_identity":{"version":2,"generation":7,"sequence":2,
+                    "state":"accepted","mechanism":"user_password","source":"connect","public_user":"agent"}
+            }]
+        });
+        let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+        let (base, _) = canned_http(vec![
+            broker.to_string(),
+            page.to_string(),
+            broker.to_string(),
+        ])
+        .await;
+        let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+        assert!(complete);
+        assert_eq!(conns[0].identity_label.as_deref(), Some("agent"));
+        // Every broker binding lives in the checked enclosing response in v2.
+        for (field, value) in [
+            ("server_id", serde_json::json!("other")),
+            ("auth_identity_server_start", serde_json::Value::Null),
+            (
+                "auth_identity_server_start",
+                serde_json::json!("2026-10-18T01:00:00Z"),
+            ),
+        ] {
+            let mut broken = page.clone();
+            broken[field] = value;
+            let (base, _) = canned_http(vec![
+                broker.to_string(),
+                broken.to_string(),
+                broker.to_string(),
+            ])
+            .await;
+            assert!(fetch_walk(&http, &base).await.is_err());
+        }
+        for (field, value) in [
+            ("cid", serde_json::json!(0)),
+            ("start", serde_json::json!("2026-10-18T01:00:00Z")),
+            ("start", serde_json::Value::Null),
+            ("type", serde_json::json!("unsupported")),
+            ("kind", serde_json::json!("Leaf")),
+        ] {
+            let mut broken = page.clone();
+            broken["connections"][0][field] = value;
+            let (base, _) = canned_http(vec![
+                broker.to_string(),
+                broken.to_string(),
+                broker.to_string(),
+            ])
+            .await;
+            if let Ok((conns, _, _)) = fetch_walk(&http, &base).await {
+                assert!(
+                    conns
+                        .iter()
+                        .all(|c| c.identity_label.as_deref() != Some("agent"))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn inconsistent_monitoring_never_proves_a_clean_poll() {
         let page = serde_json::json!({
             "server_id":"TESTSERVER","now":"2026-10-18T02:24:58Z",
             "offset":0,"num_connections":0,"total":0,"connections":[]
         });
         let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
-        for field in [
-            "server_id",
-            "offset",
-            "num_connections",
-            "now",
-            "connections",
-            "total",
-        ] {
+        for field in ["offset", "num_connections", "now", "connections", "total"] {
             let mut broken = page.clone();
             broken.as_object_mut().unwrap().remove(field);
             let (base, _) =
@@ -1976,6 +2363,602 @@ mod tests {
             server.wait().await.unwrap();
         }).await.expect("live websocket test deadline");
     }
+    async fn wss_proxy(
+        ws_port: u16,
+        dir: &std::path::Path,
+        cookie: Option<&str>,
+    ) -> (tokio::process::Child, std::path::PathBuf, String) {
+        use tokio::io::AsyncBufReadExt;
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        let cert_config = dir.join("cert.cnf");
+        std::fs::write(&cert_config,
+            "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n"
+        ).unwrap();
+        assert!(
+            tokio::process::Command::new("openssl")
+                .args([
+                    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config"
+                ])
+                .arg(&cert_config)
+                .arg("-keyout")
+                .arg(&key)
+                .arg("-out")
+                .arg(&cert)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+        let mut command = tokio::process::Command::new("python3");
+        command.env_remove("KANADE_TEST_WS_COOKIE");
+        if let Some(cookie) = cookie {
+            command.env("KANADE_TEST_WS_COOKIE", cookie);
+        }
+        let mut proxy = command
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/ci/nats-wss-proxy.py"
+            ))
+            .arg(ws_port.to_string())
+            .arg(&cert)
+            .arg(&key)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut output = tokio::io::BufReader::new(proxy.stdout.take().unwrap());
+        let mut line = String::new();
+        output.read_line(&mut line).await.unwrap();
+        let proxy_port: u16 = line.trim().parse().unwrap();
+        let url = format!("wss://127.0.0.1:{proxy_port}");
+        (proxy, cert, url)
+    }
+
+    #[test]
+    fn identity_contract_rejects_unsupported_stale_and_mismatched_bindings() {
+        let now = Utc::now();
+        let mut broker = snapshot_fixture();
+        broker.now = now;
+        broker.auth_identity_version = Some(2);
+        broker.auth_identity_generation = Some(7);
+        let mut c = connection_fixture();
+        let fixture = serde_json::json!({"version":2,"generation":7,"sequence":2,"state":"accepted",
+            "mechanism":"user_password","source":"connect","public_user":"agent"});
+        for field in [
+            "version",
+            "generation",
+            "sequence",
+            "state",
+            "mechanism",
+            "public_user",
+        ] {
+            let mut broken = fixture.clone();
+            broken[field] = match field {
+                "version" | "generation" | "sequence" => 0.into(),
+                "public_user" => "credential canary".into(),
+                _ => "unsupported".into(),
+            };
+            c.auth_identity = Some(serde_json::from_value(broken).unwrap());
+            assert_eq!(
+                verified_identity(&c, &broker, now).as_deref(),
+                Some(LABEL_UNKNOWN)
+            );
+        }
+        c.auth_identity = Some(serde_json::from_value(fixture).unwrap());
+        assert_eq!(
+            verified_identity(&c, &broker, now).as_deref(),
+            Some("agent")
+        );
+        assert_eq!(
+            verified_identity(&c, &broker, now + chrono::Duration::minutes(2)).as_deref(),
+            Some(LABEL_UNKNOWN)
+        );
+        broker.auth_identity_version = Some(1);
+        assert_eq!(
+            verified_identity(&c, &broker, now).as_deref(),
+            Some(LABEL_UNKNOWN)
+        );
+        broker.auth_identity_version = None;
+        assert_eq!(
+            verified_identity(&c, &broker, now).as_deref(),
+            Some(LABEL_UNKNOWN)
+        );
+        c.auth_identity = None;
+        assert!(verified_identity(&c, &broker, now).is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the reproducibly built identity producer, Python and OpenSSL"]
+    async fn live_identity_producer_wss_named_spoof_cookie_and_anonymous() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            for case in ["user", "spoof", "cookie", "no_auth_user", "token", "anonymous"] {
+                let ws_port = portpicker::pick_unused_port().unwrap();
+                let users = if matches!(case, "token" | "anonymous") { "" } else {
+                    "authorization { users: [{user: agent, password: fixture-password}, {user: backend, password: other-password}] }"
+                };
+                let ws_auth = match case {
+                    "cookie" => "user_cookie: fixture_user, pass_cookie: fixture_pass",
+                    "no_auth_user" => "no_auth_user: agent",
+                    "token" => "authorization { token: fixture-token }",
+                    _ => "",
+                };
+                let config = format!("{users}\nwebsocket {{ port: {ws_port}, no_tls: true, {ws_auth} }}");
+                let (mut server, dir, port, base) = disposable_broker(&config).await;
+                let cookie = (case == "cookie").then_some("fixture_user=agent; fixture_pass=fixture-password");
+                let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), cookie).await;
+                let opts = match case {
+                    "user" => async_nats::ConnectOptions::new().user_and_password("agent".into(), "fixture-password".into()),
+                    "spoof" => async_nats::ConnectOptions::with_auth_callback(|_| async {
+                        let mut auth = async_nats::Auth::new();
+                        auth.username = Some("agent".into()); auth.password = Some("fixture-password".into());
+                        auth.nkey = Some("broker-claim-canary".into()); Ok(auth)
+                    }),
+                    "token" => async_nats::ConnectOptions::new().token("fixture-token".into()),
+                    _ => async_nats::ConnectOptions::new(),
+                };
+                let client = opts.name("kanade-agent/PC001").add_root_certificates(cert)
+                    .connect(&url).await.unwrap();
+                client.flush().await.unwrap();
+                let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+                let (conns, _, broker) = fetch_walk(&http, &base).await.unwrap();
+                assert_eq!(broker.auth_identity_version, Some(2), "a real producer is mandatory");
+                let c = conns.iter().find(|c| c.cid == client.server_info().client_id).unwrap();
+                let expected = match case { "token" => LABEL_SHARED_TOKEN,
+                    "no_auth_user" | "anonymous" => LABEL_NO_AUTH, _ => "agent" };
+                assert_eq!(classify_connection(c, &probe_holding(None), Evidence::Unproven), expected);
+                if case == "spoof" { assert_eq!(c.authorized_user.as_deref(), Some("broker-claim-canary")); }
+                let pool = pool_with(&["PC001"]).await;
+                apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
+                assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(expected));
+                if case == "user" {
+                    let tcp = async_nats::ConnectOptions::new().user_and_password("agent".into(), "fixture-password".into())
+                        .connect(format!("nats://127.0.0.1:{port}")).await.unwrap(); tcp.flush().await.unwrap();
+                    let conns = fetch_all(&http, &base).await.unwrap();
+                    let tcp_c = conns.iter().find(|c| c.cid == tcp.server_info().client_id).unwrap();
+                    assert_eq!(classify_connection(tcp_c, &probe_holding(None), Evidence::Unproven), "agent");
+                    drop(tcp);
+                }
+                drop(client); proxy.kill().await.unwrap();proxy.wait().await.unwrap();
+                server.kill().await.unwrap();server.wait().await.unwrap();
+            }
+        }).await.expect("real producer WSS deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the reproducibly built identity producer, Python and OpenSSL"]
+    async fn live_identity_producer_named_expiry_reload_restart_rollback_and_ui() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let ws_port = portpicker::pick_unused_port().unwrap();
+            let config = format!("authorization {{ users: [{{user: agent, password: fixture-password}}] }}\nwebsocket {{ port: {ws_port}, no_tls: true }}");
+            let (mut server, dir, _port, base) = disposable_broker(&config).await;
+            let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), None).await;
+            let opts = || async_nats::ConnectOptions::new().user_and_password("agent".into(), "fixture-password".into())
+                .name("kanade-agent/PC001").add_root_certificates(cert.clone());
+            let client = opts().connect(&url).await.unwrap();client.flush().await.unwrap();
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            let (mut conns, complete, before) = fetch_walk(&http, &base).await.unwrap();
+            assert_eq!(before.auth_identity_version, Some(2));
+            let pool = pool_with(&["PC001"]).await;
+            apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));
+            let settings = kanade_shared::wire::ServerSettings {
+                nats_auth_mode: Some(kanade_shared::wire::NatsAuthMode::Users), ..Default::default()
+            };
+            let observed = observe(&conns, &probe_holding(None), Evidence::Unproven);
+            nats_auth_audit::run_poll(&pool, Ok(settings.clone()), &nats_auth_audit::Poll {
+                observed: &observed, registered: &HashSet::from(["PC001".into()]), complete, uncertainty_reasons: None,
+            }, Utc::now()).await.unwrap();
+            // This HTTP server calls the production Agents API, against the
+            // actual producer-derived projection. The browser uses a real
+            // Vite HTTP proxy; no API rows or metadata are stubbed.
+            let api = axum::Router::new()
+                .route("/api/agents", axum::routing::get(crate::api::agents::list))
+                .route("/test/expire", axum::routing::post(|axum::extract::State(pool): axum::extract::State<SqlitePool>| async move {
+                    sqlx::query("UPDATE agents SET nats_identity_expires_at = '2000-01-01T00:00:00Z' WHERE nats_identity_expires_at IS NOT NULL").execute(&pool).await.unwrap();
+                    axum::http::StatusCode::NO_CONTENT
+                }))
+                .route("/test/health", axum::routing::get(|axum::extract::State(pool): axum::extract::State<SqlitePool>| async move {
+                    axum::Json(nats_auth_audit::health_block(&pool, None, Utc::now()).await)
+                })).with_state(pool.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let serving = tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
+            if std::env::var_os("KANADE_IDENTITY_BROWSER").is_some() {
+                let output = tokio::process::Command::new("bun")
+                    .args(["run", "test:ct", "src/pages/Agents.identity.ct.tsx"])
+                    .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/web"))
+                    .env("KANADE_IDENTITY_API", format!("http://{address}"))
+                    .output().await.unwrap();
+                assert!(output.status.success(), "producer-derived Agents browser test failed");
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "positive browser test did not execute");
+            }
+            // API expiry works independently of a ticking projector.
+            sqlx::query("UPDATE agents SET nats_identity_expires_at = '2000-01-01T00:00:00Z'").execute(&pool).await.unwrap();
+            let (_, axum::Json(rows)) = crate::api::agents::list(axum::extract::State(pool.clone()), axum::extract::Query(Default::default()), axum::extract::Query(Vec::new())).await.unwrap();
+            assert_eq!(rows[0].nats_user.as_deref(), Some(LABEL_UNKNOWN));
+            // Unsupported producer / rollback must revoke a previously named
+            // projection, even if the old raw monitoring value looks familiar.
+            let mut old: Vec<ConnInfo> = serde_json::from_value(serde_json::json!([{
+                "cid":client.server_info().client_id,"kind":"Client","type":"websocket",
+                "name":"kanade-agent/PC001","authorized_user":"agent"
+            }])).unwrap();
+            apply_identity_projection(&pool, &old, &probe_holding(None), Evidence::UsersMode).await.unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+            apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some("agent"));
+            let path = dir.path().join("nats.conf");
+            let text = std::fs::read_to_string(&path).unwrap();
+            // A non-auth reload still invalidates the cached result. Existing
+            // sockets must reconnect or be revalidated before they regain it.
+            std::fs::write(&path, format!("{text}\nmax_payload: 1048577\n")).unwrap();
+            assert!(tokio::process::Command::new("nats-server").arg("--signal")
+                .arg(format!("reload={}",server.id().unwrap())).stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()).status().await.unwrap().success());
+            let mut after = None;
+            for _ in 0..100 {
+                let result = fetch_walk(&http,&base).await;
+                if let Ok((c,_,v)) = result && v.auth_identity_generation != before.auth_identity_generation {
+                    after=Some((c,v));break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let (reloaded, epoch) = after.expect("reload generation");
+            assert!(!before.same_epoch(&epoch));
+            // Old proof is unusable after a reload, even if the broker
+            // immediately revalidates the live connection into the new epoch.
+            for c in &mut conns { c.identity_label = verified_identity(c, &epoch, Utc::now()); }
+            apply_identity_projection(&pool, &conns, &probe_holding(None), Evidence::Unproven).await.unwrap();
+            assert_eq!(read(&pool,"PC001").await.0.as_deref(),Some(LABEL_UNKNOWN));
+            assert!(reloaded.iter().all(|c| c.auth_identity.as_ref().is_none_or(|a| a.generation != before.auth_identity_generation.unwrap() || c.identity_label.as_deref() != Some("agent"))));
+            drop(client);
+            let new_client=opts().connect(&url).await.unwrap();new_client.flush().await.unwrap();
+            let fresh=fetch_all(&http,&base).await.unwrap();
+            apply_identity_projection(&pool,&fresh,&probe_holding(None),Evidence::Unproven).await.unwrap();
+            assert_eq!(read(&pool,"PC001").await.0.as_deref(),Some("agent"));
+            server.kill().await.unwrap();server.wait().await.unwrap();
+            invalidate_identity_proofs(&pool).await.unwrap();
+            assert_eq!(read(&pool,"PC001").await.0.as_deref(),Some(LABEL_UNKNOWN));
+            server=tokio::process::Command::new("nats-server").arg("-c").arg(&path)
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true).spawn().unwrap();
+            let mut restart=None;
+            for _ in 0..100 { if let Ok(v)=fetch_json::<Varz>(&http,&format!("{base}/varz")).await {restart=Some(v);break;}
+                tokio::time::sleep(Duration::from_millis(20)).await; }
+            let restart=restart.unwrap();assert_ne!(restart.server_id,before.server_id);
+            let previous=conns.iter().find(|c|c.auth_identity.is_some()).unwrap();
+            assert_eq!(verified_identity(previous,&restart,Utc::now()).as_deref(),Some(LABEL_UNKNOWN));
+            old.clear();
+            let health=nats_auth_audit::health_block(&pool,Some(&settings),Utc::now()).await;
+            let history=super::super::nats_auth_evidence::history(&pool,None).await.unwrap();
+            let safe=serde_json::to_string(&(health,history)).unwrap();
+            for value in ["fixture-password","127.0.0.1","broker-claim-canary"] {assert!(!safe.contains(value));}
+            serving.abort();let _=serving.await;
+            drop(new_client);proxy.kill().await.unwrap();proxy.wait().await.unwrap();
+            server.kill().await.unwrap();server.wait().await.unwrap();
+        }).await.expect("producer lifecycle and browser deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server, Python, OpenSSL and loopback sockets"]
+    async fn live_connz_wss_users_acceptance_does_not_prove_reported_identity() {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            let ws_port = portpicker::pick_unused_port().unwrap();
+            let config = format!(
+                "authorization {{ users: [{{user: agent, password: test-password}}, {{user: backend, password: other-password}}] }}\nwebsocket {{ port: {ws_port}, no_tls: true }}"
+            );
+            let (mut server, dir, port, base) = disposable_broker(&config).await;
+            let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), None).await;
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            // The disposable certificate must not work without explicit trust.
+            assert!(async_nats::ConnectOptions::new()
+                .user_and_password("agent".into(), "test-password".into())
+                .connect(&url).await.is_err());
+            // These are actual broker authentication errors through the TLS
+            // proxy, not HTTP errors or success inferred from TCP policy.
+            for opts in [
+                async_nats::ConnectOptions::new(),
+                async_nats::ConnectOptions::new().user_and_password("agent".into(), "wrong-password".into()),
+                async_nats::ConnectOptions::new().token("test-token".into()),
+            ] {
+                let err = opts.add_root_certificates(cert.clone()).connect(&url).await.unwrap_err();
+                assert_eq!(err.kind(), async_nats::ConnectErrorKind::AuthorizationViolation);
+            }
+            let tcp = async_nats::ConnectOptions::new()
+                .user_and_password("agent".into(), "test-password".into())
+                .connect(format!("nats://127.0.0.1:{port}")).await.unwrap();
+            tcp.flush().await.unwrap();
+            let pool = pool_with(&["PC001"]).await;
+            // Even a configured username allowlist would accept "backend".
+            // Yet this client authenticates with the agent password: the
+            // ignored nkey CONNECT field controls getRawAuthUser/connz.
+            for reported in [None, Some("backend"), Some("credential-canary-not-a-username")] {
+                let injected = reported.map(str::to_string);
+                let ws = async_nats::ConnectOptions::with_auth_callback(move |_| {
+                    let injected = injected.clone();
+                    async move {
+                        let mut auth = async_nats::Auth::new();
+                        auth.username = Some("agent".into());
+                        auth.password = Some("test-password".into());
+                        auth.nkey = injected;
+                        Ok(auth)
+                    }
+                })
+                .name("kanade-agent/PC001").add_root_certificates(cert.clone())
+                .connect(&url).await.unwrap();
+                ws.flush().await.unwrap();
+                let cid = ws.server_info().client_id;
+                let conns = fetch_all(&http, &base).await.unwrap();
+                let c = conns.iter().find(|c| c.cid == cid).unwrap();
+                assert_eq!(c.transport.as_deref(), Some("websocket"));
+                assert_eq!(c.authorized_user.as_deref(), Some(reported.unwrap_or("agent")));
+                assert_eq!(classify_connection(c, &probe_holding(None), Evidence::UsersMode), LABEL_UNKNOWN);
+                let tcp_conn = conns.iter().find(|c| c.cid == tcp.server_info().client_id).unwrap();
+                assert_eq!(classify_connection(tcp_conn, &probe_holding(None), Evidence::UsersMode), "agent");
+                let (labels, _) = correlate(&conns, &probe_holding(None), Evidence::UsersMode);
+                apply(&pool, &labels).await.unwrap();
+                assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+                let settings = kanade_shared::wire::ServerSettings {
+                    nats_auth_mode: Some(kanade_shared::wire::NatsAuthMode::Users),
+                    ..Default::default()
+                };
+                let observed = observe(&conns, &probe_holding(None), Evidence::UsersMode);
+                nats_auth_audit::run_poll(&pool, Ok(settings.clone()), &nats_auth_audit::Poll {
+                    observed: &observed, registered: &HashSet::from(["PC001".into()]),
+                    complete: true, uncertainty_reasons: None,
+                }, Utc::now()).await.unwrap();
+                let health = nats_auth_audit::health_block(&pool, Some(&settings), Utc::now()).await;
+                assert!(health.findings.iter().any(|f| f.kind == "credential_unnameable"));
+                let history = super::super::nats_auth_evidence::history(&pool, None).await.unwrap();
+                let safe = serde_json::to_string(&(health, history)).unwrap();
+                for secret in ["credential-canary-not-a-username", "test-password", "other-password", "127.0.0.1"] {
+                    assert!(!safe.contains(secret));
+                }
+                drop(ws);
+            }
+            drop(tcp);
+            proxy.kill().await.unwrap();
+            proxy.wait().await.unwrap();
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+        }).await.expect("live WSS identity test deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server, Python, OpenSSL and loopback sockets"]
+    async fn live_connz_wss_anonymous_and_cookie_overrides_do_not_prove_a_name() {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            let users = "authorization { users: [{user: guest, password: cookie-password}] }";
+            for (auth, ws_auth, cookie, expected) in [
+                (users, "no_auth_user: guest", None, LABEL_UNKNOWN),
+                (
+                    users,
+                    "user_cookie: fixture_user, pass_cookie: fixture_pass",
+                    Some("fixture_user=guest; fixture_pass=cookie-password"),
+                    LABEL_UNKNOWN,
+                ),
+                (
+                    "",
+                    "authorization { token: cookie-token }, token_cookie: fixture_token",
+                    Some("fixture_token=cookie-token"),
+                    LABEL_SHARED_TOKEN,
+                ),
+            ] {
+                let ws_port = portpicker::pick_unused_port().unwrap();
+                let config =
+                    format!("{auth}\nwebsocket {{ port: {ws_port}, no_tls: true, {ws_auth} }}");
+                let (mut server, dir, _port, base) = disposable_broker(&config).await;
+                if cookie.is_some() {
+                    // Without the cookie, the same TLS/WebSocket listener
+                    // must reject CONNECT with a broker authorization error.
+                    let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), None).await;
+                    let err = async_nats::ConnectOptions::new()
+                        .add_root_certificates(cert)
+                        .connect(&url)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        err.kind(),
+                        async_nats::ConnectErrorKind::AuthorizationViolation
+                    );
+                    proxy.kill().await.unwrap();
+                    proxy.wait().await.unwrap();
+                }
+                let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), cookie).await;
+                let client = async_nats::ConnectOptions::new()
+                    .name("kanade-agent/PC001")
+                    .add_root_certificates(cert)
+                    .connect(&url)
+                    .await
+                    .unwrap();
+                let sub = client.subscribe("audit.test").await.unwrap();
+                client.flush().await.unwrap();
+                let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+                let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+                let c = conns
+                    .iter()
+                    .find(|c| c.cid == client.server_info().client_id)
+                    .unwrap();
+                assert_eq!(c.transport.as_deref(), Some("websocket"));
+                assert!(c.subscriptions.is_some_and(|n| n > 0));
+                assert_eq!(
+                    classify_connection(c, &probe_holding(None), Evidence::UsersMode),
+                    expected
+                );
+                let pool = pool_with(&["PC001"]).await;
+                let (labels, _) = correlate(&conns, &probe_holding(None), Evidence::UsersMode);
+                apply(&pool, &labels).await.unwrap();
+                assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(expected));
+                let settings = kanade_shared::wire::ServerSettings {
+                    nats_auth_mode: Some(kanade_shared::wire::NatsAuthMode::Users),
+                    ..Default::default()
+                };
+                let observed = observe(&conns, &probe_holding(None), Evidence::UsersMode);
+                nats_auth_audit::run_poll(
+                    &pool,
+                    Ok(settings.clone()),
+                    &nats_auth_audit::Poll {
+                        observed: &observed,
+                        registered: &HashSet::from(["PC001".into()]),
+                        complete,
+                        uncertainty_reasons: None,
+                    },
+                    Utc::now(),
+                )
+                .await
+                .unwrap();
+                let health =
+                    nats_auth_audit::health_block(&pool, Some(&settings), Utc::now()).await;
+                let history = super::super::nats_auth_evidence::history(&pool, None)
+                    .await
+                    .unwrap();
+                let safe = serde_json::to_string(&(health, history)).unwrap();
+                for forbidden in [
+                    "cookie-password",
+                    "cookie-token",
+                    "fixture_user",
+                    "fixture_pass",
+                    "fixture_token",
+                    "127.0.0.1",
+                ] {
+                    assert!(!safe.contains(forbidden));
+                }
+                drop(sub);
+                drop(client);
+                proxy.kill().await.unwrap();
+                proxy.wait().await.unwrap();
+                if let Some(cookie) = cookie {
+                    let invalid = cookie
+                        .replace("cookie-password", "wrong-password")
+                        .replace("cookie-token", "wrong-token");
+                    let (mut bad_proxy, cert, url) =
+                        wss_proxy(ws_port, dir.path(), Some(&invalid)).await;
+                    let err = async_nats::ConnectOptions::new()
+                        .add_root_certificates(cert)
+                        .connect(&url)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        err.kind(),
+                        async_nats::ConnectErrorKind::AuthorizationViolation
+                    );
+                    bad_proxy.kill().await.unwrap();
+                    bad_proxy.wait().await.unwrap();
+                }
+                server.kill().await.unwrap();
+                server.wait().await.unwrap();
+            }
+        })
+        .await
+        .expect("live WSS override deadline");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable nats-server, Python, OpenSSL and loopback sockets"]
+    async fn live_connz_wss_reload_restart_and_expiry_do_not_reuse_identity_evidence() {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            let ws_port = portpicker::pick_unused_port().unwrap();
+            let config = format!("authorization {{ users: [{{user: agent, password: first-password}}] }}\nwebsocket {{ port: {ws_port}, no_tls: true }}");
+            let (mut server, dir, _port, base) = disposable_broker(&config).await;
+            let (mut proxy, cert, url) = wss_proxy(ws_port, dir.path(), None).await;
+            let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
+            let opts = |password: &str| async_nats::ConnectOptions::new()
+                .user_and_password("agent".into(), password.into())
+                .name("kanade-agent/PC001").max_reconnects(1)
+                .add_root_certificates(cert.clone());
+            let first = opts("first-password").connect(&url).await.unwrap();
+            first.flush().await.unwrap();
+            let first_cid = first.server_info().client_id;
+            let (_, _, before) = fetch_walk(&http, &base).await.unwrap();
+            let config_path = dir.path().join("nats.conf");
+            let text = std::fs::read_to_string(&config_path).unwrap();
+            std::fs::write(&config_path, text.replace("first-password", "second-password")).unwrap();
+            assert!(tokio::process::Command::new("nats-server")
+                .arg("--signal").arg(format!("reload={}", server.id().unwrap()))
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .status().await.unwrap().success());
+            let mut reloaded = None;
+            for _ in 0..100 {
+                let after: Varz = fetch_json(&http, &format!("{base}/varz")).await.unwrap();
+                if after.config_load_time > before.config_load_time {
+                    reloaded = Some(after);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let after = reloaded.expect("broker reload observed");
+            assert!(!before.same_epoch(&after));
+            assert_eq!(before.server_id, after.server_id);
+            let err = opts("first-password").connect(&url).await.unwrap_err();
+            assert_eq!(err.kind(), async_nats::ConnectErrorKind::AuthorizationViolation);
+            let second = opts("second-password").connect(&url).await.unwrap();
+            second.flush().await.unwrap();
+            let second_cid = second.server_info().client_id;
+            assert_ne!(first_cid, second_cid);
+            let (conns, complete, _) = fetch_walk(&http, &base).await.unwrap();
+            assert!(!conns.iter().any(|c| c.cid == first_cid));
+            let current = conns.iter().find(|c| c.cid == second_cid).unwrap();
+            assert_eq!(classify_connection(current, &probe_holding(None), Evidence::UsersMode), LABEL_UNKNOWN);
+            let pool = pool_with(&["PC001"]).await;
+            let settings = kanade_shared::wire::ServerSettings {
+                nats_auth_mode: Some(kanade_shared::wire::NatsAuthMode::Users),
+                ..Default::default()
+            };
+            let observed = observe(&conns, &probe_holding(None), Evidence::UsersMode);
+            let now = Utc::now();
+            nats_auth_audit::run_poll(&pool, Ok(settings.clone()), &nats_auth_audit::Poll {
+                observed: &observed, registered: &HashSet::from(["PC001".into()]),
+                complete, uncertainty_reasons: None,
+            }, now).await.unwrap();
+            let stale = nats_auth_audit::health_block(&pool, Some(&settings), now + chrono::Duration::minutes(4)).await;
+            assert_eq!(stale.poll_status, "stale");
+            assert!(stale.uncertainty_reasons.is_none());
+            drop(first);
+            drop(second);
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+            server = tokio::process::Command::new("nats-server").arg("-c").arg(&config_path)
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .kill_on_drop(true).spawn().unwrap();
+            let mut restarted = None;
+            for _ in 0..100 {
+                if let Ok(v) = fetch_json::<Varz>(&http, &format!("{base}/varz")).await {
+                    restarted = Some(v);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let restart = restarted.expect("restarted broker ready");
+            assert_ne!(after.server_id, restart.server_id);
+            assert_ne!(after.start, restart.start);
+            assert!(!after.same_epoch(&restart));
+            let third = opts("second-password").connect(&url).await.unwrap();
+            third.flush().await.unwrap();
+            let conns = fetch_all(&http, &base).await.unwrap();
+            let current = conns.iter().find(|c| c.cid == third.server_info().client_id).unwrap();
+            // A CID may be reused after restart. A stale server id cannot
+            // establish evidence even if the numeric id happens to match.
+            assert_eq!(monitor_evidence(&CredentialProbe::from_user("agent"), true,
+                &after.server_id, current.cid, &restart, &conns), Evidence::Unproven);
+            assert_eq!(classify_connection(current, &probe_holding(None), Evidence::UsersMode), LABEL_UNKNOWN);
+            let (labels, _) = correlate(&conns, &probe_holding(None), Evidence::UsersMode);
+            apply(&pool, &labels).await.unwrap();
+            assert_eq!(read(&pool, "PC001").await.0.as_deref(), Some(LABEL_UNKNOWN));
+            let history = super::super::nats_auth_evidence::history(&pool, None).await.unwrap();
+            let safe = serde_json::to_string(&(stale, history)).unwrap();
+            for forbidden in ["first-password", "second-password", "127.0.0.1"] {
+                assert!(!safe.contains(forbidden));
+            }
+            drop(third);
+            proxy.kill().await.unwrap();
+            proxy.wait().await.unwrap();
+            server.kill().await.unwrap();
+            server.wait().await.unwrap();
+        }).await.expect("live WSS lifecycle deadline");
+    }
+
     #[tokio::test]
     #[ignore = "requires disposable nats-server and loopback sockets"]
     async fn live_connz_websocket_no_auth_user_has_a_broker_assigned_identity() {

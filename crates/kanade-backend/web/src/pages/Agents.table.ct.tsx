@@ -213,3 +213,37 @@ test.describe('mobile card layout', () => {
     await expect.poll(async () => (await c.locator('tbody tr').first().innerText()).includes('pc-118')).toBe(true);
   });
 });
+
+test('credential acceptance sentinels stay neutral in the actual Agents table', async ({ mount, page }) => {
+  const rows = [
+    { ...FLEET[0], pc_id: 'pending-fixture', nats_user: 'auth-pending' },
+    { ...FLEET[1], pc_id: 'unaccepted-fixture', nats_user: 'auth-unproven' },
+    { ...FLEET[2], pc_id: 'opaque-fixture', nats_user: 'unknown' },
+    { ...FLEET[3], pc_id: 'tcp-fixture', nats_user: 'agent' },
+  ];
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    await route.fulfill({
+      json: path === '/api/agents' ? rows : [],
+      headers: { 'X-Total-Count': String(rows.length), 'X-Online-Count': '0', 'X-Offline-Count': String(rows.length) },
+    });
+  });
+  const c = await mount(<AgentsTableHarness />);
+  await expect(c.locator('tbody tr')).toHaveCount(4);
+  for (const [id, label] of [
+    ['pending-fixture', 'auth pending'],
+    ['unaccepted-fixture', 'acceptance unproven'],
+    ['opaque-fixture', 'unproven'],
+  ]) {
+    const row = c.locator('tbody tr').filter({ hasText: id });
+    const badge = row.getByText(label, { exact: true });
+    await expect(badge).toBeVisible();
+    await expect(badge).not.toHaveClass(/bg-success/);
+    await expect(badge).toHaveAttribute('title', /Command signing is a separate check/);
+    await expect(row.getByText(/auth-pending|auth-unproven/)).toHaveCount(0);
+  }
+  const named = c.locator('tbody tr').filter({ hasText: 'tcp-fixture' }).getByText('agent', { exact: true });
+  await expect(named).toHaveClass(/bg-success/);
+  await expect(c.locator('tbody tr').filter({ hasText: 'opaque-fixture' }).getByText('unproven', { exact: true }))
+    .toHaveAttribute('title', /WebSocket listeners can have independent/);
+});
