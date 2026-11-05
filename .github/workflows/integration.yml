@@ -31,7 +31,7 @@ env:
   # Pinned so a `nats-server` release with a behaviour change can't
   # silently break the offline_boot suite. Bump when intentionally
   # upgrading.
-  NATS_SERVER_VERSION: "2.14.1"
+  NATS_SERVER_VERSION: "2.14.3"
 
 jobs:
   offline-boot:

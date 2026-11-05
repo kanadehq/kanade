@@ -434,8 +434,8 @@ identities. On the tested broker, a users-authenticated WebSocket client can
 also supply an ignored `nkey` CONNECT field. `/connz` reports that field in
 preference to the username actually checked, including another configured
 username (see the upstream
-[`getRawAuthUser`](https://github.com/nats-io/nats-server/blob/v2.14.1/server/client.go)
-and [user/password validation](https://github.com/nats-io/nats-server/blob/v2.14.1/server/auth.go)). The real-broker WSS regression test authenticates as one user while
+[`getRawAuthUser`](https://github.com/nats-io/nats-server/blob/v2.14.3/server/client.go)
+and [user/password validation](https://github.com/nats-io/nats-server/blob/v2.14.3/server/auth.go)). The real-broker WSS regression test authenticates as one user while
 reporting another, then checks that SQLite, credential health and evidence
 history retain only the safe `unknown` classification. Negative handshakes
 are checked for broker authorization errors through the same TLS proxy; TLS
@@ -456,7 +456,12 @@ WSS 接続の名前には broker が**認証に成功した結果**を使う。C
 nkey/name、旧 authorized_user、期待する認証モード、名前の allowlist、
 probe の成否を認証結果の代用にはしない。producer は
 tools/nats-identity/producer.patch と auth_identity.go にあり、
-build.py の SHA-256 で固定した nats-server 2.14.1 のソースに適用する。
+build.py の SHA-256 で固定した公式 nats-server 2.14.3 のソースに適用する。
+公式 signed tag v2.14.3 の commit は
+`9b17a586be69c9ff36e4c84a421ca47da410b561`、tag archive の SHA-256 は
+`dba5286035ce9017b897ea24a783551dc28b07ad50c78da5471ead2bcfab3e86`。
+tag と commit の archive 内の全ファイル内容が一致することも確認した。
+2.14.1 用 patch は fuzz・offset なしで適用でき、producer 本体や契約は変更しない。
 クライアントの wire protocol、認証判断、権限、JetStream、Caddy は変更しない。
 
 v2 は認証結果と一緒に取得する情報の重複を除いた契約である。v1 の
@@ -521,7 +526,7 @@ WSS/TCP と producer 由来の Agents browser テストを実行する。
 2件のpositiveテストと必須browserテストの実行を検査し、空振りは成功にしない。
 本作業で本番の設定変更、再起動、配布、採用判断は行っていない。
 
-#### 初回測定（最適化前、保持した結果）
+#### 過去の NATS 2.14.1 初回測定（最適化前、保持した結果）
 
 初回は revision d0d12836 の結果を measurements-initial.json に内容を変えず
 保持した。Go 1.27.2、Darwin arm64、8 CPU の同一ホストで各負荷5サンプル。
@@ -551,9 +556,10 @@ cost-8 bcryptハッシュを共有していた。WSS接続費用や独立ハッ�
 この初回測定からは分からない。client_bytesはResetTimerより前に報告したため
 初回出力には残っておらず、初回のchurn B/opを保持メモリと解釈してはいけない。
 
-#### 最適化後の比較
+#### 過去の NATS 2.14.1 最適化後の比較
 
-measurements.json は各profile/variant/6負荷を5回ずつ記録し、生のGo出力、
+measurements-2.14.1.json は当時の measurements.json を変更せず保持したもので、
+以下はすべて **2.14.1 の過去測定**である。同ファイルは各profile/variant/6負荷を5回ずつ記録し、生のGo出力、
 各sample、中央値、差分、固定ソース・patch・producer・benchmarkのSHA-256、
 初回結果のSHA-256を含む。measure.py は計測前に現在のソースから両variantを
 再構築する。同一benchmarkコード、NATS 2.14.1/Go 1.27.2、500ms、
@@ -645,6 +651,87 @@ producerで高速化できたとの結論や、初回TCP churnの回帰の相殺
 全sampleと初回結果を保持し、失敗を隠すための再試行やsampleの選別はしない。
 設定時の約147 msと監視の残存増分は運用上のtradeoffで、本番採用の許可ではない。
 採用・配布・本番での再起動は、所有者の別判断が必要である。
+
+#### NATS 2.14.3 互換性と最終ソースの再測定
+
+本番より古い 2.14.1 に戻さないため、CI の broker pin と source build を
+公式 2.14.3 に揃えた。producer.patch、auth_identity.go、Go テスト、
+benchmark は変更していない。v2、認証判断、privacy guard、sticky
+no_auth_user、compact snapshot、reload/restart/rollback/expiry の契約を維持する。
+archive は版別にキャッシュし、build 時に固定 SHA-256 を照合する。
+
+この worktree で以下を実行した（`mise exec` は子プロセスにも指定版を渡す）。
+
+```sh
+mise exec -- python3 tools/nats-identity/verify.py
+mise exec -- python3 -m unittest discover -s tools/nats-identity -p test_measure.py
+mise exec -- python3 -m unittest discover -s scripts/ci -p test_magi_e2e.py
+mise exec -- python3 tools/nats-identity/measure.py
+```
+
+verify は実 broker の `go test -race -v ./server -run '^TestAuthIdentity' -count=1`
+で top-level 6件と sticky no_auth_user の2 subtest を成功させた。
+続く `cargo test --locked -p kanade-backend --bin kanade-backend
+live_identity_producer_ -- --ignored` は 2 passed、0 failed、0 ignored。
+`KANADE_IDENTITY_BROWSER=1` を必須にし、実 producer から SQLite と本物の
+Agents API に到達する browser テストの `1 passed` も内部で検査した。
+測定の欠落・重複・空iteration・必須metricとPASSの欠落を拒否する3テスト、
+CI pin/tool準備と空振りcount検査の15テストも成功した。
+count検査のnegative fixtureが表示する ERROR は期待された出力である。
+
+measurements.json は **2.14.3 の最終ソース**から baseline/patched を再構築した
+比較で、生のGo出力、全120 workload sample（20プロセス）、中央値、差分、
+source commit/URL/archive・patch・producer・benchmark・build/measure driver・
+producer test・両binaryのSHA-256、および過去2.14.1結果のSHA-256を含む。
+Darwin arm64/8 CPU、Go 1.27.2、各profile/variant/6負荷を5回、
+500ms/count=1、順序は第1/3/5回 baseline→patched、第2/4回は逆。
+default は GOMAXPROCS=4/GOMEMLIMIT=off、constrained は 1/768MiB。
+TCP MSLから算出した31秒を各プロセス前に計時外で待ち、失敗・再試行・
+sample除外なしで全件成功した。元の診断出力と実行件数の検査は維持している。
+
+| profile | 負荷 | baseline ms/op | patched ms/op | 時間差 | B/op（baseline → patched） | allocs/op（baseline → patched） |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| default | TCP・平文password churn | 0.209 | 0.240 | +15.01% | 62905 → 62965 | 180 → 179 |
+| default | connz・128接続 | 0.213 | 0.332 | +55.84% | 131901 → 156643 | 393 → 395 |
+| default | 監視付き64B request/reply | 0.077 | 0.093 | +21.83% | 1278 → 1290 | 21 → 21 |
+| default | cold config・同一bcryptハッシュ×3 | 0.153 | 70.356 | +45993.27% | 129345 → 149492 | 445 → 753 |
+| default | cold config・独立salt/異なるpassword×3 | 0.151 | 187.382 | +124252.58% | 129339 → 181128 | 445 → 830 |
+| default | WSS・bcrypt cost 8 churn | 20.863 | 21.593 | +3.50% | 216717 → 217917 | 1134 → 1135 |
+| constrained | TCP・平文password churn | 0.195 | 0.185 | -4.92% | 62920 → 62989 | 180 → 180 |
+| constrained | connz・128接続 | 0.191 | 0.258 | +34.98% | 131692 → 156389 | 393 → 394 |
+| constrained | 監視付き64B request/reply | 0.060 | 0.059 | -1.23% | 1270 → 1274 | 21 → 21 |
+| constrained | cold config・同一bcryptハッシュ×3 | 0.142 | 51.782 | +36269.90% | 129341 → 149469 | 445 → 753 |
+| constrained | cold config・独立salt/異なるpassword×3 | 0.131 | 147.297 | +112546.04% | 129335 → 181348 | 445 → 829 |
+| constrained | WSS・bcrypt cost 8 churn | 18.027 | 17.625 | -2.23% | 212117 → 212173 | 1131 → 1131 |
+
+**default のTCP +15.01%と監視付きrequest/reply +21.83%、connzの
+default +55.84%/constrained +34.98%は、今回観測した回帰として報告する。**
+過去2.14.1の小さい中央値差を根拠に「影響なし」とはしない。
+TCP は208658 → 239972 ns/op、範囲はbaseline 182608–347971、
+patched 176228–315932。request/reply は76600 → 93322 ns/op、
+範囲60375–143714/60084–106958で、どちらも範囲は重なる。
+connz のdefault範囲も173597–414810/215387–430153 ns/opと広い。
+単一ホストのこの比較だけから、上流2.14.3の変更が原因だとも、
+重なる範囲を理由に回帰が存在しないとも断定しない。再測定による選別はしていない。
+逐次request/replyの中央値からの処理率はdefault約13055 → 10716 req/s、
+constrained約16748 → 16956 req/sで、p95/p99や最大throughputではない。
+
+connzの応答長はdefault 46391 → 65143 byte（+40.42%）、
+constrained 46391 → 65138 byte（+40.41%）。B/opは両profileとも約18.75%増。
+client_bytesは両profileで6872 → 6904、identity_state_bytesは32である。
+Go 1.27.2 の `internal/runtime/gc/sizeclasses.go` の6784/6912 byte境界と、
+pointer-bearing objectの8 byte headerを使う `runtime/msize.go` の丸めでは、
+6880/6912 byteの両方が6912 byte classに入り、**clientのallocation classは跨がない**。
+これは型サイズとallocatorソースからの判定で、RSSの実測や全構造体の
+allocation class検証ではない。ConnInfo値fieldの88 byte、既定closed ringの
+field相当880000 byte、auth=0でも構造体が拡大するtradeoffも残る。
+
+cold bcrypt configは約52–70 ms（同一hash）/147–187 ms（独立hash）であり、
+検査省略、bcrypt cost低下、warm cacheへの置換では隠していない。
+1 GiB Linux/swapなし、長期RSS、storm、JetStream混在負荷、p95/p99、
+本番Caddyと本番bcrypt costは未評価である。機能互換性の成功は、
+これらの性能・運用リスクの解消や配布・再起動の承認を意味しない。
+本作業で本番変更・配布・publishは行っていない。
 
 ## Telling a locked-out host from an offline one
 

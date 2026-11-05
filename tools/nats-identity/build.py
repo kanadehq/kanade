@@ -10,8 +10,10 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / 'target/nats-identity'
-VERSION = '2.14.1'
-SHA256 = '5543bd3757c596994d116986a99965b3b2d61a416f24dd98cefde91c094c102e'
+VERSION = '2.14.3'
+# Official signed v2.14.3 tag; tag and commit archives have identical file contents.
+SOURCE_COMMIT = '9b17a586be69c9ff36e4c84a421ca47da410b561'
+SHA256 = 'dba5286035ce9017b897ea24a783551dc28b07ad50c78da5471ead2bcfab3e86'
 URL = f'https://github.com/nats-io/nats-server/archive/refs/tags/v{VERSION}.tar.gz'
 
 
@@ -23,7 +25,7 @@ def environment():
 
 def prepare():
     OUT.mkdir(parents=True, exist_ok=True)
-    archive = OUT / 'source.tar.gz'
+    archive = OUT / f'source-{VERSION}.tar.gz'
     if not archive.exists():
         urllib.request.urlretrieve(URL, archive)
     if hashlib.sha256(archive.read_bytes()).hexdigest() != SHA256:

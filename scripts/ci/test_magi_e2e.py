@@ -59,7 +59,7 @@ class E2eTests(unittest.TestCase):
             prepare.assert_not_called()
 
     def test_nats_version_matches_actual_ci_pin(self):
-        for version, valid in (("2.14.1", True), ("0.0.0", False)):
+        for version, valid in (("2.14.3", True), ("0.0.0", False)):
             with self.subTest(version=version), patch.object(
                 e2e.subprocess, "run", return_value=subprocess.CompletedProcess(
                     [], 0, f"nats-server: v{version}\n")):
@@ -75,17 +75,17 @@ class NatsSetupTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.cache = self.root / "target/magi-tools/nats/2.14.1/linux-amd64/bin/nats-server"
+        self.cache = self.root / "target/magi-tools/nats/2.14.3/linux-amd64/bin/nats-server"
         patcher = patch.object(e2e, "ROOT", self.root)
         patcher.start()
         self.addCleanup(patcher.stop)
-        for target, value in (("nats_version", "2.14.1"), ("nats_platform", "linux-amd64")):
+        for target, value in (("nats_version", "2.14.3"), ("nats_platform", "linux-amd64")):
             patcher = patch.object(e2e, target, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def download(self, version, host, destination):
-        self.assertEqual((version, host), ("2.14.1", "linux-amd64"))
+        self.assertEqual((version, host), ("2.14.3", "linux-amd64"))
         destination.write_bytes(b"pinned broker")
 
     def test_wrong_global_version_downloads_and_prepends_only_child_path(self):
@@ -127,7 +127,7 @@ class NatsSetupTests(unittest.TestCase):
         with patch.object(e2e, "check_nats") as check, \
                 patch.object(e2e, "download_nats") as download:
             e2e.prepare_nats({"PATH": "", "KANADE_TEST_NATS_SERVER": str(source)})
-        check.assert_any_call(source.resolve(), "2.14.1", {"PATH": "", "KANADE_TEST_NATS_SERVER": str(source)})
+        check.assert_any_call(source.resolve(), "2.14.3", {"PATH": "", "KANADE_TEST_NATS_SERVER": str(source)})
         download.assert_not_called()
         self.assertEqual(self.cache.read_bytes(), b"offline")
 
@@ -158,30 +158,30 @@ class NatsSetupTests(unittest.TestCase):
         import tarfile
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode="w:gz") as package:
-            for name in ("../../unwanted", "nats-server-v2.14.1-linux-amd64/nats-server"):
+            for name in ("../../unwanted", "nats-server-v2.14.3-linux-amd64/nats-server"):
                 entry = tarfile.TarInfo(name)
                 entry.size = 6
                 package.addfile(entry, io.BytesIO(b"binary"))
         payload.seek(0)
         destination = self.root / "nats-server"
         with patch.object(e2e.urllib.request, "urlopen", return_value=payload) as download:
-            e2e.download_nats("2.14.1", "linux-amd64", destination)
+            e2e.download_nats("2.14.3", "linux-amd64", destination)
         self.assertEqual(destination.read_bytes(), b"binary")
         self.assertEqual(set(self.root.iterdir()), {self.root / "nats.tar.gz", destination})
         self.assertEqual(download.call_args.args[0],
-                         "https://github.com/nats-io/nats-server/releases/download/v2.14.1/"
-                         "nats-server-v2.14.1-linux-amd64.tar.gz")
+                         "https://github.com/nats-io/nats-server/releases/download/v2.14.3/"
+                         "nats-server-v2.14.3-linux-amd64.tar.gz")
 
     def test_windows_download_uses_zip_and_expected_executable(self):
         import io
         import zipfile
         payload = io.BytesIO()
         with zipfile.ZipFile(payload, "w") as package:
-            package.writestr("nats-server-v2.14.1-windows-amd64/nats-server.exe", b"binary")
+            package.writestr("nats-server-v2.14.3-windows-amd64/nats-server.exe", b"binary")
         payload.seek(0)
         destination = self.root / "nats-server.exe"
         with patch.object(e2e.urllib.request, "urlopen", return_value=payload):
-            e2e.download_nats("2.14.1", "windows-amd64", destination)
+            e2e.download_nats("2.14.3", "windows-amd64", destination)
         self.assertEqual(destination.read_bytes(), b"binary")
 
 

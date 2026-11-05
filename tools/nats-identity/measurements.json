@@ -6,14 +6,25 @@
     "go": "go version go1.27.2 darwin/arm64"
   },
   "provenance": {
-    "nats_version": "2.14.1",
-    "source_sha256": "5543bd3757c596994d116986a99965b3b2d61a416f24dd98cefde91c094c102e",
+    "nats_version": "2.14.3",
+    "source_commit": "9b17a586be69c9ff36e4c84a421ca47da410b561",
+    "source_url": "https://github.com/nats-io/nats-server/archive/refs/tags/v2.14.3.tar.gz",
+    "source_sha256": "dba5286035ce9017b897ea24a783551dc28b07ad50c78da5471ead2bcfab3e86",
     "patch_sha256": "3e574d1a7526854da6e5df9a6d4c07e81bcb93af5f895629868e0b76efc3eb33",
     "producer_sha256": "a96b5835606250352b74a5af94e106c72d5f136bb161b9647ee2b7002414dbb5",
     "benchmark_sha256": "e8818bca3cf17792e287273cc3c53afae93811b7c5bd563b903284694d98b9d5",
+    "build_driver_sha256": "63fe7faef8b731e36733abad48dde1f1583fca128f5459609981570cd130ed8f",
+    "measurement_driver_sha256": "87b7af8eb2ca38f8d7e83b672bbf65ebb6dac13032eb8450abf04f376180b043",
+    "producer_tests_sha256": "51f582bb92fbba6fdd0dab41a14bfc57cd9e746c14cb1f07170fcb9b5c84f662",
+    "binary_sha256": {
+      "baseline": "e8878459c3de094ddf7f036291649ef4743a6d471f16b001eba5637b7f0dde17",
+      "patched": "a675cb123bc658228a48957dd446b330babdda5124a4a1e52bc37686eb489227"
+    },
     "initial_results": "measurements-initial.json",
     "initial_results_sha256": "193d1efe08ef752630dd7a10767a6f71ebed0d4a3d5e7196fa4bca9a34461cad",
-    "initial_revision": "d0d12836d4b70facc59691f21346b5a0f920348f"
+    "initial_revision": "d0d12836d4b70facc59691f21346b5a0f920348f",
+    "historical_results": "measurements-2.14.1.json",
+    "historical_results_sha256": "d09a504335f0b93ff01d3dfcf1d6c8999149dc462dead74fa8d88c6d0d601f48"
   },
   "methodology": {
     "samples_per_variant": 5,
@@ -41,672 +52,672 @@
       "profile": "default",
       "variant": "baseline",
       "round": 1,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3324\t    178035 ns/op\t   62909 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    3271\t    169839 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46400 response_bytes\t  131787 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9414\t     60539 ns/op\t   1.06 MB/s\t    1266 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    5404\t    113848 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    5316\t    112412 ns/op\t  129336 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      31\t  19203262 ns/op\t  216612 B/op\t    1133 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.436s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    1468\t    347971 ns/op\t   62893 B/op\t     179 allocs/op\nBenchmarkIdentityConnz-4                  \t    1611\t    414810 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46404 response_bytes\t  132161 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    3945\t    143714 ns/op\t   0.45 MB/s\t    1317 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    2204\t    264366 ns/op\t  129345 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    2490\t    230800 ns/op\t  129339 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      15\t  34512742 ns/op\t  216717 B/op\t    1139 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.523s\n"
     },
     {
       "profile": "default",
       "variant": "patched",
       "round": 1,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3420\t    175864 ns/op\t   62974 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    2822\t    211814 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65144 response_bytes\t  156604 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    8830\t     64533 ns/op\t   0.99 MB/s\t    1277 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t      12\t  49122490 ns/op\t  149494 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       4\t 146615500 ns/op\t  181376 B/op\t     830 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      32\t  17460781 ns/op\t  216570 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.986s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    1959\t    315932 ns/op\t   62961 B/op\t     179 allocs/op\nBenchmarkIdentityConnz-4                  \t    1502\t    430153 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65148 response_bytes\t  156910 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    5233\t    106958 ns/op\t   0.60 MB/s\t    1302 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t       6\t  87979465 ns/op\t  149421 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       2\t 263649354 ns/op\t  181704 B/op\t     831 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      18\t  31139537 ns/op\t  220341 B/op\t    1137 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t7.275s\n"
     },
     {
       "profile": "default",
       "variant": "patched",
       "round": 2,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3330\t    174913 ns/op\t   62968 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    2721\t    219921 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65144 response_bytes\t  156934 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9056\t     62269 ns/op\t   1.03 MB/s\t    1276 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t      12\t  48896927 ns/op\t  149485 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       4\t 146170062 ns/op\t  181428 B/op\t     830 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      32\t  17408285 ns/op\t  216469 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.820s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    2527\t    239972 ns/op\t   62965 B/op\t     179 allocs/op\nBenchmarkIdentityConnz-4                  \t    1995\t    323976 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65142 response_bytes\t  156636 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    6402\t     95860 ns/op\t   0.67 MB/s\t    1292 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t       6\t  86388528 ns/op\t  149522 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       3\t 222962694 ns/op\t  181128 B/op\t     830 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      22\t  26507216 ns/op\t  218784 B/op\t    1136 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.599s\n"
     },
     {
       "profile": "default",
       "variant": "baseline",
       "round": 2,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3409\t    177242 ns/op\t   62906 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    3319\t    189938 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46390 response_bytes\t  131843 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9664\t     60091 ns/op\t   1.07 MB/s\t    1266 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    5343\t    112284 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    5499\t    111241 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      31\t  17478449 ns/op\t  216644 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.232s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    2914\t    182608 ns/op\t   62905 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    3427\t    173974 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46382 response_bytes\t  131834 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9424\t     60614 ns/op\t   1.06 MB/s\t    1266 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    5494\t    112562 ns/op\t  129333 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    5329\t    111319 ns/op\t  129335 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      31\t  17637859 ns/op\t  216405 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.229s\n"
     },
     {
       "profile": "default",
       "variant": "baseline",
       "round": 3,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3444\t    178042 ns/op\t   62904 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    3368\t    174046 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46392 response_bytes\t  131778 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9747\t     61472 ns/op\t   1.04 MB/s\t    1271 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    5418\t    112339 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    5510\t    111401 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      32\t  17510672 ns/op\t  216584 B/op\t    1133 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.169s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3180\t    188695 ns/op\t   62911 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    3417\t    173597 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46388 response_bytes\t  131772 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9348\t     60375 ns/op\t   1.06 MB/s\t    1272 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    5410\t    116316 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    5115\t    113336 ns/op\t  129338 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      33\t  17997144 ns/op\t  216470 B/op\t    1133 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.078s\n"
     },
     {
       "profile": "default",
       "variant": "patched",
       "round": 3,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3466\t    172427 ns/op\t   62974 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    2779\t    205591 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65145 response_bytes\t  156504 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9694\t     60221 ns/op\t   1.06 MB/s\t    1279 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t      12\t  49905392 ns/op\t  149509 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       4\t 152023417 ns/op\t  181108 B/op\t     830 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      31\t  18126710 ns/op\t  216637 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.361s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    2268\t    271286 ns/op\t   62963 B/op\t     179 allocs/op\nBenchmarkIdentityConnz-4                  \t    1717\t    335085 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65143 response_bytes\t  156871 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    6750\t     93322 ns/op\t   0.69 MB/s\t    1290 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t       8\t  70356302 ns/op\t  149492 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       3\t 177535305 ns/op\t  181090 B/op\t     830 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      26\t  20902226 ns/op\t  217917 B/op\t    1135 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.884s\n"
     },
     {
       "profile": "default",
       "variant": "patched",
       "round": 4,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3422\t    173952 ns/op\t   62971 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    2782\t    211947 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65137 response_bytes\t  156609 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9721\t     59991 ns/op\t   1.07 MB/s\t    1273 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t      12\t  50583073 ns/op\t  149509 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       4\t 147542000 ns/op\t  181080 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      33\t  17452611 ns/op\t  216248 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.326s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3414\t    176228 ns/op\t   62976 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    2774\t    215387 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65128 response_bytes\t  156615 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9128\t     60084 ns/op\t   1.07 MB/s\t    1275 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t      10\t  53232658 ns/op\t  149484 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       4\t 147553792 ns/op\t  181376 B/op\t     830 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      32\t  17664210 ns/op\t  216441 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.769s\n"
     },
     {
       "profile": "default",
       "variant": "baseline",
       "round": 4,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    2942\t    173015 ns/op\t   62905 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    3426\t    168870 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46393 response_bytes\t  131897 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9765\t     59767 ns/op\t   1.07 MB/s\t    1271 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    5464\t    111983 ns/op\t  129333 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    5451\t    111524 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      32\t  17480052 ns/op\t  216373 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.182s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3421\t    208658 ns/op\t   62978 B/op\t     181 allocs/op\nBenchmarkIdentityConnz-4                  \t    2655\t    213285 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46392 response_bytes\t  131910 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    7942\t     76600 ns/op\t   0.84 MB/s\t    1278 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    4332\t    152639 ns/op\t  129347 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    4744\t    150686 ns/op\t  129342 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      24\t  21756132 ns/op\t  217898 B/op\t    1134 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.850s\n"
     },
     {
       "profile": "default",
       "variant": "baseline",
       "round": 5,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3332\t    175382 ns/op\t   62905 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    3488\t    168482 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46394 response_bytes\t  131887 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9648\t     59520 ns/op\t   1.08 MB/s\t    1271 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    5293\t    120903 ns/op\t  129335 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    5433\t    111793 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      32\t  17580536 ns/op\t  216299 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.383s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    2274\t    234446 ns/op\t   62899 B/op\t     179 allocs/op\nBenchmarkIdentityConnz-4                  \t    2611\t    237699 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46391 response_bytes\t  131901 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    7276\t     78954 ns/op\t   0.81 MB/s\t    1282 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t    4201\t    155651 ns/op\t  129349 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t    3838\t    163413 ns/op\t  129357 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      25\t  20863410 ns/op\t  217936 B/op\t    1134 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.612s\n"
     },
     {
       "profile": "default",
       "variant": "patched",
       "round": 5,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    3352\t    175990 ns/op\t   62978 B/op\t     180 allocs/op\nBenchmarkIdentityConnz-4                  \t    2815\t    209604 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65149 response_bytes\t  156704 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    9492\t     59016 ns/op\t   1.08 MB/s\t    1274 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t      12\t  49138566 ns/op\t  149470 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       4\t 146924104 ns/op\t  181348 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      32\t  18965393 ns/op\t  216420 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.941s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn-4                  \t    2677\t    233084 ns/op\t   62965 B/op\t     179 allocs/op\nBenchmarkIdentityConnz-4                  \t    2008\t    332389 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65143 response_bytes\t  156643 B/op\t     395 allocs/op\nBenchmarkIdentityMessagingMonitored-4     \t    6999\t     76245 ns/op\t   0.84 MB/s\t    1286 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt-4           \t       8\t  63666823 ns/op\t  149492 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct-4   \t       3\t 187381931 ns/op\t  181090 B/op\t     830 allocs/op\nBenchmarkIdentityWSSBcryptChurn-4         \t      27\t  21593338 ns/op\t  217495 B/op\t    1133 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.137s\n"
     },
     {
       "profile": "constrained",
       "variant": "baseline",
       "round": 1,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3452\t    183091 ns/op\t   62912 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    3327\t    181028 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46376 response_bytes\t  131684 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10692\t     51736 ns/op\t   1.24 MB/s\t    1268 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    5533\t    120214 ns/op\t  129332 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5714\t    124006 ns/op\t  129331 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      30\t  17485979 ns/op\t  212156 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.617s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3202\t    213841 ns/op\t   62915 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2766\t    227975 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46382 response_bytes\t  131707 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t    8943\t     65746 ns/op\t   0.97 MB/s\t    1274 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    3912\t    142377 ns/op\t  129327 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5067\t    138849 ns/op\t  129331 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      27\t  19108741 ns/op\t  212241 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.433s\n"
     },
     {
       "profile": "constrained",
       "variant": "patched",
       "round": 1,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3382\t    181072 ns/op\t   62980 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2736\t    221921 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65140 response_bytes\t  156370 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10892\t     51364 ns/op\t   1.25 MB/s\t    1269 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t      12\t  49130875 ns/op\t  149456 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 147226042 ns/op\t  181348 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      32\t  17518405 ns/op\t  212159 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.070s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3410\t    215169 ns/op\t   62973 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2468\t    268930 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65141 response_bytes\t  156396 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t    9411\t     59849 ns/op\t   1.07 MB/s\t    1274 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t       9\t  55930995 ns/op\t  149469 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 155084479 ns/op\t  181348 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      30\t  20010201 ns/op\t  212287 B/op\t    1133 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.938s\n"
     },
     {
       "profile": "constrained",
       "variant": "patched",
       "round": 2,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3255\t    170412 ns/op\t   62980 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2760\t    222228 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65154 response_bytes\t  156369 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10704\t     52325 ns/op\t   1.22 MB/s\t    1265 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t      12\t  48995090 ns/op\t  149452 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 146912448 ns/op\t  181376 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      32\t  17567948 ns/op\t  212151 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.080s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3327\t    185346 ns/op\t   63134 B/op\t     184 allocs/op\nBenchmarkIdentityConnz                \t    2460\t    258231 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65133 response_bytes\t  156389 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t    9529\t     59279 ns/op\t   1.08 MB/s\t    1274 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t      12\t  49291215 ns/op\t  149401 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 147256281 ns/op\t  181080 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      33\t  17469010 ns/op\t  212122 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t7.441s\n"
     },
     {
       "profile": "constrained",
       "variant": "baseline",
       "round": 2,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3468\t    175843 ns/op\t   62920 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    3367\t    180427 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46394 response_bytes\t  131683 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   11326\t     51235 ns/op\t   1.25 MB/s\t    1266 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    5635\t    118930 ns/op\t  129331 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5629\t    120309 ns/op\t  129332 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      31\t  17515681 ns/op\t  212139 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.680s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3362\t    194927 ns/op\t   62920 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2666\t    222123 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46391 response_bytes\t  131718 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t    9374\t     59709 ns/op\t   1.07 MB/s\t    1272 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    4358\t    148666 ns/op\t  129346 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5080\t    138150 ns/op\t  129338 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      27\t  19056009 ns/op\t  212242 B/op\t    1132 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.953s\n"
     },
     {
       "profile": "constrained",
       "variant": "baseline",
       "round": 3,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3403\t    175659 ns/op\t   62924 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    3436\t    177632 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46397 response_bytes\t  131681 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10908\t     51915 ns/op\t   1.23 MB/s\t    1267 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    5665\t    118106 ns/op\t  129331 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5748\t    122316 ns/op\t  129331 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      31\t  17501032 ns/op\t  212124 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.633s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3384\t    183588 ns/op\t   62922 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    3325\t    189559 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46391 response_bytes\t  131692 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t    9796\t     56010 ns/op\t   1.14 MB/s\t    1270 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    4768\t    146601 ns/op\t  129341 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5328\t    130761 ns/op\t  129335 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      32\t  17637962 ns/op\t  212086 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.344s\n"
     },
     {
       "profile": "constrained",
       "variant": "patched",
       "round": 3,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3603\t    174020 ns/op\t   63001 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2742\t    217520 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65138 response_bytes\t  156368 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10737\t     54810 ns/op\t   1.17 MB/s\t    1270 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t      12\t  49853781 ns/op\t  149452 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 147429448 ns/op\t  181376 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      32\t  17477292 ns/op\t  212157 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.201s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3308\t    184663 ns/op\t   62989 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2703\t    233001 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65135 response_bytes\t  156373 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10414\t     57454 ns/op\t   1.11 MB/s\t    1271 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t       9\t  57488088 ns/op\t  149469 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 146948146 ns/op\t  181348 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      33\t  17624529 ns/op\t  212129 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.683s\n"
     },
     {
       "profile": "constrained",
       "variant": "patched",
       "round": 4,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3511\t    183239 ns/op\t   62981 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2614\t    224370 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65137 response_bytes\t  156385 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   11169\t     52417 ns/op\t   1.22 MB/s\t    1264 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t      12\t  49112358 ns/op\t  149509 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 147930864 ns/op\t  181052 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      32\t  17289668 ns/op\t  212153 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.739s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    2974\t    230314 ns/op\t   62971 B/op\t     179 allocs/op\nBenchmarkIdentityConnz                \t    2148\t    271020 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65138 response_bytes\t  156423 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t    9604\t     58975 ns/op\t   1.09 MB/s\t    1274 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t      10\t  51782371 ns/op\t  149531 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 156249375 ns/op\t  181052 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      30\t  21485271 ns/op\t  212206 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.892s\n"
     },
     {
       "profile": "constrained",
       "variant": "baseline",
       "round": 4,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3494\t    194746 ns/op\t   62916 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    3363\t    176197 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46390 response_bytes\t  131683 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   11036\t     52244 ns/op\t   1.23 MB/s\t    1267 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    5102\t    121894 ns/op\t  129336 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5620\t    121019 ns/op\t  129332 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      31\t  17494957 ns/op\t  212121 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.421s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3414\t    196650 ns/op\t   62912 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    3208\t    191309 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46386 response_bytes\t  131689 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10566\t     54607 ns/op\t   1.17 MB/s\t    1268 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    4772\t    130685 ns/op\t  129341 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5378\t    127068 ns/op\t  129335 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      31\t  18027071 ns/op\t  212117 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.990s\n"
     },
     {
       "profile": "constrained",
       "variant": "baseline",
       "round": 5,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3374\t    187446 ns/op\t   62924 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    3160\t    179747 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46395 response_bytes\t  131690 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10809\t     52306 ns/op\t   1.22 MB/s\t    1268 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    5493\t    120134 ns/op\t  129333 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5706\t    120198 ns/op\t  129331 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      31\t  17346750 ns/op\t  212121 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.773s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3477\t    174195 ns/op\t   62929 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    3369\t    185066 ns/op\t      6872 client_bytes\t         0 identity_state_bytes\t     46398 response_bytes\t  131690 B/op\t     393 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10204\t     60667 ns/op\t   1.05 MB/s\t    1270 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t    5352\t    129828 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t    5394\t    129521 ns/op\t  129334 B/op\t     445 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      31\t  17699016 ns/op\t  212115 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t5.854s\n"
     },
     {
       "profile": "constrained",
       "variant": "patched",
       "round": 5,
-      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3596\t    180499 ns/op\t   62987 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2797\t    221119 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65144 response_bytes\t  156367 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   11130\t     51395 ns/op\t   1.25 MB/s\t    1274 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t      12\t  48858601 ns/op\t  149452 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 146024188 ns/op\t  181376 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      32\t  17403632 ns/op\t  212147 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.401s\n"
+      "raw_output": "goos: darwin\ngoarch: arm64\npkg: github.com/nats-io/nats-server/v2/server\ncpu: Apple M1\nBenchmarkIdentityChurn                \t    3139\t    167033 ns/op\t   63002 B/op\t     180 allocs/op\nBenchmarkIdentityConnz                \t    2702\t    221539 ns/op\t      6904 client_bytes\t        32.00 identity_state_bytes\t     65146 response_bytes\t  156373 B/op\t     394 allocs/op\nBenchmarkIdentityMessagingMonitored   \t   10638\t     54458 ns/op\t   1.18 MB/s\t    1271 B/op\t      21 allocs/op\nBenchmarkIdentityConfigBcrypt         \t      12\t  48911531 ns/op\t  149452 B/op\t     753 allocs/op\nBenchmarkIdentityConfigBcryptDistinct \t       4\t 147297094 ns/op\t  181348 B/op\t     829 allocs/op\nBenchmarkIdentityWSSBcryptChurn       \t      31\t  17444198 ns/op\t  212173 B/op\t    1131 allocs/op\nPASS\nok  \tgithub.com/nats-io/nats-server/v2/server\t6.223s\n"
     }
   ],
   "samples": {
     "default/baseline": {
       "BenchmarkIdentityChurn": [
         {
-          "ns/op": 178035.0,
-          "B/op": 62909.0,
-          "allocs/op": 180.0
+          "ns/op": 347971.0,
+          "B/op": 62893.0,
+          "allocs/op": 179.0
         },
         {
-          "ns/op": 177242.0,
-          "B/op": 62906.0,
-          "allocs/op": 180.0
-        },
-        {
-          "ns/op": 178042.0,
-          "B/op": 62904.0,
-          "allocs/op": 180.0
-        },
-        {
-          "ns/op": 173015.0,
+          "ns/op": 182608.0,
           "B/op": 62905.0,
           "allocs/op": 180.0
         },
         {
-          "ns/op": 175382.0,
-          "B/op": 62905.0,
+          "ns/op": 188695.0,
+          "B/op": 62911.0,
           "allocs/op": 180.0
+        },
+        {
+          "ns/op": 208658.0,
+          "B/op": 62978.0,
+          "allocs/op": 181.0
+        },
+        {
+          "ns/op": 234446.0,
+          "B/op": 62899.0,
+          "allocs/op": 179.0
         }
       ],
       "BenchmarkIdentityConnz": [
         {
-          "ns/op": 169839.0,
+          "ns/op": 414810.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
-          "response_bytes": 46400.0,
-          "B/op": 131787.0,
+          "response_bytes": 46404.0,
+          "B/op": 132161.0,
+          "allocs/op": 395.0
+        },
+        {
+          "ns/op": 173974.0,
+          "client_bytes": 6872.0,
+          "identity_state_bytes": 0.0,
+          "response_bytes": 46382.0,
+          "B/op": 131834.0,
           "allocs/op": 393.0
         },
         {
-          "ns/op": 189938.0,
+          "ns/op": 173597.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
-          "response_bytes": 46390.0,
-          "B/op": 131843.0,
+          "response_bytes": 46388.0,
+          "B/op": 131772.0,
           "allocs/op": 393.0
         },
         {
-          "ns/op": 174046.0,
+          "ns/op": 213285.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
           "response_bytes": 46392.0,
-          "B/op": 131778.0,
-          "allocs/op": 393.0
+          "B/op": 131910.0,
+          "allocs/op": 394.0
         },
         {
-          "ns/op": 168870.0,
+          "ns/op": 237699.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
-          "response_bytes": 46393.0,
-          "B/op": 131897.0,
-          "allocs/op": 393.0
-        },
-        {
-          "ns/op": 168482.0,
-          "client_bytes": 6872.0,
-          "identity_state_bytes": 0.0,
-          "response_bytes": 46394.0,
-          "B/op": 131887.0,
+          "response_bytes": 46391.0,
+          "B/op": 131901.0,
           "allocs/op": 393.0
         }
       ],
       "BenchmarkIdentityMessagingMonitored": [
         {
-          "ns/op": 60539.0,
+          "ns/op": 143714.0,
+          "MB/s": 0.45,
+          "B/op": 1317.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 60614.0,
           "MB/s": 1.06,
           "B/op": 1266.0,
           "allocs/op": 21.0
         },
         {
-          "ns/op": 60091.0,
-          "MB/s": 1.07,
-          "B/op": 1266.0,
+          "ns/op": 60375.0,
+          "MB/s": 1.06,
+          "B/op": 1272.0,
           "allocs/op": 21.0
         },
         {
-          "ns/op": 61472.0,
-          "MB/s": 1.04,
-          "B/op": 1271.0,
+          "ns/op": 76600.0,
+          "MB/s": 0.84,
+          "B/op": 1278.0,
           "allocs/op": 21.0
         },
         {
-          "ns/op": 59767.0,
-          "MB/s": 1.07,
-          "B/op": 1271.0,
-          "allocs/op": 21.0
-        },
-        {
-          "ns/op": 59520.0,
-          "MB/s": 1.08,
-          "B/op": 1271.0,
+          "ns/op": 78954.0,
+          "MB/s": 0.81,
+          "B/op": 1282.0,
           "allocs/op": 21.0
         }
       ],
       "BenchmarkIdentityConfigBcrypt": [
         {
-          "ns/op": 113848.0,
-          "B/op": 129334.0,
+          "ns/op": 264366.0,
+          "B/op": 129345.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 112284.0,
-          "B/op": 129334.0,
-          "allocs/op": 445.0
-        },
-        {
-          "ns/op": 112339.0,
-          "B/op": 129334.0,
-          "allocs/op": 445.0
-        },
-        {
-          "ns/op": 111983.0,
+          "ns/op": 112562.0,
           "B/op": 129333.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 120903.0,
-          "B/op": 129335.0,
+          "ns/op": 116316.0,
+          "B/op": 129334.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 152639.0,
+          "B/op": 129347.0,
+          "allocs/op": 445.0
+        },
+        {
+          "ns/op": 155651.0,
+          "B/op": 129349.0,
           "allocs/op": 445.0
         }
       ],
       "BenchmarkIdentityConfigBcryptDistinct": [
         {
-          "ns/op": 112412.0,
-          "B/op": 129336.0,
+          "ns/op": 230800.0,
+          "B/op": 129339.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 111241.0,
-          "B/op": 129334.0,
+          "ns/op": 111319.0,
+          "B/op": 129335.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 111401.0,
-          "B/op": 129334.0,
+          "ns/op": 113336.0,
+          "B/op": 129338.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 111524.0,
-          "B/op": 129334.0,
+          "ns/op": 150686.0,
+          "B/op": 129342.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 111793.0,
-          "B/op": 129334.0,
+          "ns/op": 163413.0,
+          "B/op": 129357.0,
           "allocs/op": 445.0
         }
       ],
       "BenchmarkIdentityWSSBcryptChurn": [
         {
-          "ns/op": 19203262.0,
-          "B/op": 216612.0,
-          "allocs/op": 1133.0
+          "ns/op": 34512742.0,
+          "B/op": 216717.0,
+          "allocs/op": 1139.0
         },
         {
-          "ns/op": 17478449.0,
-          "B/op": 216644.0,
+          "ns/op": 17637859.0,
+          "B/op": 216405.0,
           "allocs/op": 1132.0
         },
         {
-          "ns/op": 17510672.0,
-          "B/op": 216584.0,
+          "ns/op": 17997144.0,
+          "B/op": 216470.0,
           "allocs/op": 1133.0
         },
         {
-          "ns/op": 17480052.0,
-          "B/op": 216373.0,
-          "allocs/op": 1131.0
+          "ns/op": 21756132.0,
+          "B/op": 217898.0,
+          "allocs/op": 1134.0
         },
         {
-          "ns/op": 17580536.0,
-          "B/op": 216299.0,
-          "allocs/op": 1131.0
+          "ns/op": 20863410.0,
+          "B/op": 217936.0,
+          "allocs/op": 1134.0
         }
       ]
     },
     "default/patched": {
       "BenchmarkIdentityChurn": [
         {
-          "ns/op": 175864.0,
-          "B/op": 62974.0,
+          "ns/op": 315932.0,
+          "B/op": 62961.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 239972.0,
+          "B/op": 62965.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 271286.0,
+          "B/op": 62963.0,
+          "allocs/op": 179.0
+        },
+        {
+          "ns/op": 176228.0,
+          "B/op": 62976.0,
           "allocs/op": 180.0
         },
         {
-          "ns/op": 174913.0,
-          "B/op": 62968.0,
-          "allocs/op": 180.0
-        },
-        {
-          "ns/op": 172427.0,
-          "B/op": 62974.0,
-          "allocs/op": 180.0
-        },
-        {
-          "ns/op": 173952.0,
-          "B/op": 62971.0,
-          "allocs/op": 180.0
-        },
-        {
-          "ns/op": 175990.0,
-          "B/op": 62978.0,
-          "allocs/op": 180.0
+          "ns/op": 233084.0,
+          "B/op": 62965.0,
+          "allocs/op": 179.0
         }
       ],
       "BenchmarkIdentityConnz": [
         {
-          "ns/op": 211814.0,
+          "ns/op": 430153.0,
           "client_bytes": 6904.0,
           "identity_state_bytes": 32.0,
-          "response_bytes": 65144.0,
-          "B/op": 156604.0,
+          "response_bytes": 65148.0,
+          "B/op": 156910.0,
           "allocs/op": 395.0
         },
         {
-          "ns/op": 219921.0,
+          "ns/op": 323976.0,
           "client_bytes": 6904.0,
           "identity_state_bytes": 32.0,
-          "response_bytes": 65144.0,
-          "B/op": 156934.0,
+          "response_bytes": 65142.0,
+          "B/op": 156636.0,
           "allocs/op": 395.0
         },
         {
-          "ns/op": 205591.0,
+          "ns/op": 335085.0,
           "client_bytes": 6904.0,
           "identity_state_bytes": 32.0,
-          "response_bytes": 65145.0,
-          "B/op": 156504.0,
-          "allocs/op": 394.0
-        },
-        {
-          "ns/op": 211947.0,
-          "client_bytes": 6904.0,
-          "identity_state_bytes": 32.0,
-          "response_bytes": 65137.0,
-          "B/op": 156609.0,
+          "response_bytes": 65143.0,
+          "B/op": 156871.0,
           "allocs/op": 395.0
         },
         {
-          "ns/op": 209604.0,
+          "ns/op": 215387.0,
           "client_bytes": 6904.0,
           "identity_state_bytes": 32.0,
-          "response_bytes": 65149.0,
-          "B/op": 156704.0,
+          "response_bytes": 65128.0,
+          "B/op": 156615.0,
+          "allocs/op": 395.0
+        },
+        {
+          "ns/op": 332389.0,
+          "client_bytes": 6904.0,
+          "identity_state_bytes": 32.0,
+          "response_bytes": 65143.0,
+          "B/op": 156643.0,
           "allocs/op": 395.0
         }
       ],
       "BenchmarkIdentityMessagingMonitored": [
         {
-          "ns/op": 64533.0,
-          "MB/s": 0.99,
-          "B/op": 1277.0,
+          "ns/op": 106958.0,
+          "MB/s": 0.6,
+          "B/op": 1302.0,
           "allocs/op": 21.0
         },
         {
-          "ns/op": 62269.0,
-          "MB/s": 1.03,
-          "B/op": 1276.0,
+          "ns/op": 95860.0,
+          "MB/s": 0.67,
+          "B/op": 1292.0,
           "allocs/op": 21.0
         },
         {
-          "ns/op": 60221.0,
-          "MB/s": 1.06,
-          "B/op": 1279.0,
+          "ns/op": 93322.0,
+          "MB/s": 0.69,
+          "B/op": 1290.0,
           "allocs/op": 21.0
         },
         {
-          "ns/op": 59991.0,
+          "ns/op": 60084.0,
           "MB/s": 1.07,
-          "B/op": 1273.0,
+          "B/op": 1275.0,
           "allocs/op": 21.0
         },
         {
-          "ns/op": 59016.0,
-          "MB/s": 1.08,
-          "B/op": 1274.0,
+          "ns/op": 76245.0,
+          "MB/s": 0.84,
+          "B/op": 1286.0,
           "allocs/op": 21.0
         }
       ],
       "BenchmarkIdentityConfigBcrypt": [
         {
-          "ns/op": 49122490.0,
-          "B/op": 149494.0,
+          "ns/op": 87979465.0,
+          "B/op": 149421.0,
           "allocs/op": 753.0
         },
         {
-          "ns/op": 48896927.0,
-          "B/op": 149485.0,
+          "ns/op": 86388528.0,
+          "B/op": 149522.0,
           "allocs/op": 753.0
         },
         {
-          "ns/op": 49905392.0,
-          "B/op": 149509.0,
+          "ns/op": 70356302.0,
+          "B/op": 149492.0,
           "allocs/op": 753.0
         },
         {
-          "ns/op": 50583073.0,
-          "B/op": 149509.0,
+          "ns/op": 53232658.0,
+          "B/op": 149484.0,
           "allocs/op": 753.0
         },
         {
-          "ns/op": 49138566.0,
-          "B/op": 149470.0,
+          "ns/op": 63666823.0,
+          "B/op": 149492.0,
           "allocs/op": 753.0
         }
       ],
       "BenchmarkIdentityConfigBcryptDistinct": [
         {
-          "ns/op": 146615500.0,
+          "ns/op": 263649354.0,
+          "B/op": 181704.0,
+          "allocs/op": 831.0
+        },
+        {
+          "ns/op": 222962694.0,
+          "B/op": 181128.0,
+          "allocs/op": 830.0
+        },
+        {
+          "ns/op": 177535305.0,
+          "B/op": 181090.0,
+          "allocs/op": 830.0
+        },
+        {
+          "ns/op": 147553792.0,
           "B/op": 181376.0,
           "allocs/op": 830.0
         },
         {
-          "ns/op": 146170062.0,
-          "B/op": 181428.0,
+          "ns/op": 187381931.0,
+          "B/op": 181090.0,
           "allocs/op": 830.0
-        },
-        {
-          "ns/op": 152023417.0,
-          "B/op": 181108.0,
-          "allocs/op": 830.0
-        },
-        {
-          "ns/op": 147542000.0,
-          "B/op": 181080.0,
-          "allocs/op": 829.0
-        },
-        {
-          "ns/op": 146924104.0,
-          "B/op": 181348.0,
-          "allocs/op": 829.0
         }
       ],
       "BenchmarkIdentityWSSBcryptChurn": [
         {
-          "ns/op": 17460781.0,
-          "B/op": 216570.0,
+          "ns/op": 31139537.0,
+          "B/op": 220341.0,
+          "allocs/op": 1137.0
+        },
+        {
+          "ns/op": 26507216.0,
+          "B/op": 218784.0,
+          "allocs/op": 1136.0
+        },
+        {
+          "ns/op": 20902226.0,
+          "B/op": 217917.0,
+          "allocs/op": 1135.0
+        },
+        {
+          "ns/op": 17664210.0,
+          "B/op": 216441.0,
           "allocs/op": 1132.0
         },
         {
-          "ns/op": 17408285.0,
-          "B/op": 216469.0,
-          "allocs/op": 1132.0
-        },
-        {
-          "ns/op": 18126710.0,
-          "B/op": 216637.0,
-          "allocs/op": 1132.0
-        },
-        {
-          "ns/op": 17452611.0,
-          "B/op": 216248.0,
-          "allocs/op": 1132.0
-        },
-        {
-          "ns/op": 18965393.0,
-          "B/op": 216420.0,
-          "allocs/op": 1132.0
+          "ns/op": 21593338.0,
+          "B/op": 217495.0,
+          "allocs/op": 1133.0
         }
       ]
     },
     "constrained/baseline": {
       "BenchmarkIdentityChurn": [
         {
-          "ns/op": 183091.0,
-          "B/op": 62912.0,
+          "ns/op": 213841.0,
+          "B/op": 62915.0,
           "allocs/op": 180.0
         },
         {
-          "ns/op": 175843.0,
+          "ns/op": 194927.0,
           "B/op": 62920.0,
           "allocs/op": 180.0
         },
         {
-          "ns/op": 175659.0,
-          "B/op": 62924.0,
+          "ns/op": 183588.0,
+          "B/op": 62922.0,
           "allocs/op": 180.0
         },
         {
-          "ns/op": 194746.0,
-          "B/op": 62916.0,
+          "ns/op": 196650.0,
+          "B/op": 62912.0,
           "allocs/op": 180.0
         },
         {
-          "ns/op": 187446.0,
-          "B/op": 62924.0,
+          "ns/op": 174195.0,
+          "B/op": 62929.0,
           "allocs/op": 180.0
         }
       ],
       "BenchmarkIdentityConnz": [
         {
-          "ns/op": 181028.0,
+          "ns/op": 227975.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
-          "response_bytes": 46376.0,
-          "B/op": 131684.0,
+          "response_bytes": 46382.0,
+          "B/op": 131707.0,
           "allocs/op": 393.0
         },
         {
-          "ns/op": 180427.0,
+          "ns/op": 222123.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
-          "response_bytes": 46394.0,
-          "B/op": 131683.0,
+          "response_bytes": 46391.0,
+          "B/op": 131718.0,
           "allocs/op": 393.0
         },
         {
-          "ns/op": 177632.0,
+          "ns/op": 189559.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
-          "response_bytes": 46397.0,
-          "B/op": 131681.0,
+          "response_bytes": 46391.0,
+          "B/op": 131692.0,
           "allocs/op": 393.0
         },
         {
-          "ns/op": 176197.0,
+          "ns/op": 191309.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
-          "response_bytes": 46390.0,
-          "B/op": 131683.0,
+          "response_bytes": 46386.0,
+          "B/op": 131689.0,
           "allocs/op": 393.0
         },
         {
-          "ns/op": 179747.0,
+          "ns/op": 185066.0,
           "client_bytes": 6872.0,
           "identity_state_bytes": 0.0,
-          "response_bytes": 46395.0,
+          "response_bytes": 46398.0,
           "B/op": 131690.0,
           "allocs/op": 393.0
         }
       ],
       "BenchmarkIdentityMessagingMonitored": [
         {
-          "ns/op": 51736.0,
-          "MB/s": 1.24,
+          "ns/op": 65746.0,
+          "MB/s": 0.97,
+          "B/op": 1274.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 59709.0,
+          "MB/s": 1.07,
+          "B/op": 1272.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 56010.0,
+          "MB/s": 1.14,
+          "B/op": 1270.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 54607.0,
+          "MB/s": 1.17,
           "B/op": 1268.0,
           "allocs/op": 21.0
         },
         {
-          "ns/op": 51235.0,
-          "MB/s": 1.25,
-          "B/op": 1266.0,
-          "allocs/op": 21.0
-        },
-        {
-          "ns/op": 51915.0,
-          "MB/s": 1.23,
-          "B/op": 1267.0,
-          "allocs/op": 21.0
-        },
-        {
-          "ns/op": 52244.0,
-          "MB/s": 1.23,
-          "B/op": 1267.0,
-          "allocs/op": 21.0
-        },
-        {
-          "ns/op": 52306.0,
-          "MB/s": 1.22,
-          "B/op": 1268.0,
+          "ns/op": 60667.0,
+          "MB/s": 1.05,
+          "B/op": 1270.0,
           "allocs/op": 21.0
         }
       ],
       "BenchmarkIdentityConfigBcrypt": [
         {
-          "ns/op": 120214.0,
-          "B/op": 129332.0,
+          "ns/op": 142377.0,
+          "B/op": 129327.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 118930.0,
-          "B/op": 129331.0,
+          "ns/op": 148666.0,
+          "B/op": 129346.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 118106.0,
-          "B/op": 129331.0,
+          "ns/op": 146601.0,
+          "B/op": 129341.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 121894.0,
-          "B/op": 129336.0,
+          "ns/op": 130685.0,
+          "B/op": 129341.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 120134.0,
-          "B/op": 129333.0,
+          "ns/op": 129828.0,
+          "B/op": 129334.0,
           "allocs/op": 445.0
         }
       ],
       "BenchmarkIdentityConfigBcryptDistinct": [
         {
-          "ns/op": 124006.0,
+          "ns/op": 138849.0,
           "B/op": 129331.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 120309.0,
-          "B/op": 129332.0,
+          "ns/op": 138150.0,
+          "B/op": 129338.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 122316.0,
-          "B/op": 129331.0,
+          "ns/op": 130761.0,
+          "B/op": 129335.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 121019.0,
-          "B/op": 129332.0,
+          "ns/op": 127068.0,
+          "B/op": 129335.0,
           "allocs/op": 445.0
         },
         {
-          "ns/op": 120198.0,
-          "B/op": 129331.0,
+          "ns/op": 129521.0,
+          "B/op": 129334.0,
           "allocs/op": 445.0
         }
       ],
       "BenchmarkIdentityWSSBcryptChurn": [
         {
-          "ns/op": 17485979.0,
-          "B/op": 212156.0,
+          "ns/op": 19108741.0,
+          "B/op": 212241.0,
+          "allocs/op": 1132.0
+        },
+        {
+          "ns/op": 19056009.0,
+          "B/op": 212242.0,
+          "allocs/op": 1132.0
+        },
+        {
+          "ns/op": 17637962.0,
+          "B/op": 212086.0,
           "allocs/op": 1131.0
         },
         {
-          "ns/op": 17515681.0,
-          "B/op": 212139.0,
+          "ns/op": 18027071.0,
+          "B/op": 212117.0,
           "allocs/op": 1131.0
         },
         {
-          "ns/op": 17501032.0,
-          "B/op": 212124.0,
-          "allocs/op": 1131.0
-        },
-        {
-          "ns/op": 17494957.0,
-          "B/op": 212121.0,
-          "allocs/op": 1131.0
-        },
-        {
-          "ns/op": 17346750.0,
-          "B/op": 212121.0,
+          "ns/op": 17699016.0,
+          "B/op": 212115.0,
           "allocs/op": 1131.0
         }
       ]
@@ -714,183 +725,183 @@
     "constrained/patched": {
       "BenchmarkIdentityChurn": [
         {
-          "ns/op": 181072.0,
-          "B/op": 62980.0,
+          "ns/op": 215169.0,
+          "B/op": 62973.0,
           "allocs/op": 180.0
         },
         {
-          "ns/op": 170412.0,
-          "B/op": 62980.0,
+          "ns/op": 185346.0,
+          "B/op": 63134.0,
+          "allocs/op": 184.0
+        },
+        {
+          "ns/op": 184663.0,
+          "B/op": 62989.0,
           "allocs/op": 180.0
         },
         {
-          "ns/op": 174020.0,
-          "B/op": 63001.0,
-          "allocs/op": 180.0
+          "ns/op": 230314.0,
+          "B/op": 62971.0,
+          "allocs/op": 179.0
         },
         {
-          "ns/op": 183239.0,
-          "B/op": 62981.0,
-          "allocs/op": 180.0
-        },
-        {
-          "ns/op": 180499.0,
-          "B/op": 62987.0,
+          "ns/op": 167033.0,
+          "B/op": 63002.0,
           "allocs/op": 180.0
         }
       ],
       "BenchmarkIdentityConnz": [
         {
-          "ns/op": 221921.0,
+          "ns/op": 268930.0,
           "client_bytes": 6904.0,
           "identity_state_bytes": 32.0,
-          "response_bytes": 65140.0,
-          "B/op": 156370.0,
+          "response_bytes": 65141.0,
+          "B/op": 156396.0,
           "allocs/op": 394.0
         },
         {
-          "ns/op": 222228.0,
+          "ns/op": 258231.0,
           "client_bytes": 6904.0,
           "identity_state_bytes": 32.0,
-          "response_bytes": 65154.0,
-          "B/op": 156369.0,
+          "response_bytes": 65133.0,
+          "B/op": 156389.0,
           "allocs/op": 394.0
         },
         {
-          "ns/op": 217520.0,
+          "ns/op": 233001.0,
+          "client_bytes": 6904.0,
+          "identity_state_bytes": 32.0,
+          "response_bytes": 65135.0,
+          "B/op": 156373.0,
+          "allocs/op": 394.0
+        },
+        {
+          "ns/op": 271020.0,
           "client_bytes": 6904.0,
           "identity_state_bytes": 32.0,
           "response_bytes": 65138.0,
-          "B/op": 156368.0,
+          "B/op": 156423.0,
           "allocs/op": 394.0
         },
         {
-          "ns/op": 224370.0,
+          "ns/op": 221539.0,
           "client_bytes": 6904.0,
           "identity_state_bytes": 32.0,
-          "response_bytes": 65137.0,
-          "B/op": 156385.0,
-          "allocs/op": 394.0
-        },
-        {
-          "ns/op": 221119.0,
-          "client_bytes": 6904.0,
-          "identity_state_bytes": 32.0,
-          "response_bytes": 65144.0,
-          "B/op": 156367.0,
+          "response_bytes": 65146.0,
+          "B/op": 156373.0,
           "allocs/op": 394.0
         }
       ],
       "BenchmarkIdentityMessagingMonitored": [
         {
-          "ns/op": 51364.0,
-          "MB/s": 1.25,
-          "B/op": 1269.0,
-          "allocs/op": 21.0
-        },
-        {
-          "ns/op": 52325.0,
-          "MB/s": 1.22,
-          "B/op": 1265.0,
-          "allocs/op": 21.0
-        },
-        {
-          "ns/op": 54810.0,
-          "MB/s": 1.17,
-          "B/op": 1270.0,
-          "allocs/op": 21.0
-        },
-        {
-          "ns/op": 52417.0,
-          "MB/s": 1.22,
-          "B/op": 1264.0,
-          "allocs/op": 21.0
-        },
-        {
-          "ns/op": 51395.0,
-          "MB/s": 1.25,
+          "ns/op": 59849.0,
+          "MB/s": 1.07,
           "B/op": 1274.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 59279.0,
+          "MB/s": 1.08,
+          "B/op": 1274.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 57454.0,
+          "MB/s": 1.11,
+          "B/op": 1271.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 58975.0,
+          "MB/s": 1.09,
+          "B/op": 1274.0,
+          "allocs/op": 21.0
+        },
+        {
+          "ns/op": 54458.0,
+          "MB/s": 1.18,
+          "B/op": 1271.0,
           "allocs/op": 21.0
         }
       ],
       "BenchmarkIdentityConfigBcrypt": [
         {
-          "ns/op": 49130875.0,
-          "B/op": 149456.0,
+          "ns/op": 55930995.0,
+          "B/op": 149469.0,
           "allocs/op": 753.0
         },
         {
-          "ns/op": 48995090.0,
-          "B/op": 149452.0,
+          "ns/op": 49291215.0,
+          "B/op": 149401.0,
           "allocs/op": 753.0
         },
         {
-          "ns/op": 49853781.0,
-          "B/op": 149452.0,
+          "ns/op": 57488088.0,
+          "B/op": 149469.0,
           "allocs/op": 753.0
         },
         {
-          "ns/op": 49112358.0,
-          "B/op": 149509.0,
+          "ns/op": 51782371.0,
+          "B/op": 149531.0,
           "allocs/op": 753.0
         },
         {
-          "ns/op": 48858601.0,
+          "ns/op": 48911531.0,
           "B/op": 149452.0,
           "allocs/op": 753.0
         }
       ],
       "BenchmarkIdentityConfigBcryptDistinct": [
         {
-          "ns/op": 147226042.0,
+          "ns/op": 155084479.0,
           "B/op": 181348.0,
           "allocs/op": 829.0
         },
         {
-          "ns/op": 146912448.0,
-          "B/op": 181376.0,
+          "ns/op": 147256281.0,
+          "B/op": 181080.0,
           "allocs/op": 829.0
         },
         {
-          "ns/op": 147429448.0,
-          "B/op": 181376.0,
+          "ns/op": 146948146.0,
+          "B/op": 181348.0,
           "allocs/op": 829.0
         },
         {
-          "ns/op": 147930864.0,
+          "ns/op": 156249375.0,
           "B/op": 181052.0,
           "allocs/op": 829.0
         },
         {
-          "ns/op": 146024188.0,
-          "B/op": 181376.0,
+          "ns/op": 147297094.0,
+          "B/op": 181348.0,
           "allocs/op": 829.0
         }
       ],
       "BenchmarkIdentityWSSBcryptChurn": [
         {
-          "ns/op": 17518405.0,
-          "B/op": 212159.0,
+          "ns/op": 20010201.0,
+          "B/op": 212287.0,
+          "allocs/op": 1133.0
+        },
+        {
+          "ns/op": 17469010.0,
+          "B/op": 212122.0,
           "allocs/op": 1131.0
         },
         {
-          "ns/op": 17567948.0,
-          "B/op": 212151.0,
+          "ns/op": 17624529.0,
+          "B/op": 212129.0,
           "allocs/op": 1131.0
         },
         {
-          "ns/op": 17477292.0,
-          "B/op": 212157.0,
+          "ns/op": 21485271.0,
+          "B/op": 212206.0,
           "allocs/op": 1131.0
         },
         {
-          "ns/op": 17289668.0,
-          "B/op": 212153.0,
-          "allocs/op": 1131.0
-        },
-        {
-          "ns/op": 17403632.0,
-          "B/op": 212147.0,
+          "ns/op": 17444198.0,
+          "B/op": 212173.0,
           "allocs/op": 1131.0
         }
       ]
@@ -899,145 +910,145 @@
   "medians": {
     "default/baseline": {
       "BenchmarkIdentityChurn": {
-        "ns/op": 177242.0,
+        "ns/op": 208658.0,
         "B/op": 62905.0,
         "allocs/op": 180.0
       },
       "BenchmarkIdentityConnz": {
-        "ns/op": 169839.0,
+        "ns/op": 213285.0,
         "client_bytes": 6872.0,
         "identity_state_bytes": 0.0,
-        "response_bytes": 46393.0,
-        "B/op": 131843.0,
+        "response_bytes": 46391.0,
+        "B/op": 131901.0,
         "allocs/op": 393.0
       },
       "BenchmarkIdentityMessagingMonitored": {
-        "ns/op": 60091.0,
-        "MB/s": 1.07,
-        "B/op": 1271.0,
+        "ns/op": 76600.0,
+        "MB/s": 0.84,
+        "B/op": 1278.0,
         "allocs/op": 21.0
       },
       "BenchmarkIdentityConfigBcrypt": {
-        "ns/op": 112339.0,
-        "B/op": 129334.0,
+        "ns/op": 152639.0,
+        "B/op": 129345.0,
         "allocs/op": 445.0
       },
       "BenchmarkIdentityConfigBcryptDistinct": {
-        "ns/op": 111524.0,
-        "B/op": 129334.0,
+        "ns/op": 150686.0,
+        "B/op": 129339.0,
         "allocs/op": 445.0
       },
       "BenchmarkIdentityWSSBcryptChurn": {
-        "ns/op": 17510672.0,
-        "B/op": 216584.0,
-        "allocs/op": 1132.0
+        "ns/op": 20863410.0,
+        "B/op": 216717.0,
+        "allocs/op": 1134.0
       }
     },
     "default/patched": {
       "BenchmarkIdentityChurn": {
-        "ns/op": 174913.0,
-        "B/op": 62974.0,
-        "allocs/op": 180.0
+        "ns/op": 239972.0,
+        "B/op": 62965.0,
+        "allocs/op": 179.0
       },
       "BenchmarkIdentityConnz": {
-        "ns/op": 211814.0,
+        "ns/op": 332389.0,
         "client_bytes": 6904.0,
         "identity_state_bytes": 32.0,
-        "response_bytes": 65144.0,
-        "B/op": 156609.0,
+        "response_bytes": 65143.0,
+        "B/op": 156643.0,
         "allocs/op": 395.0
       },
       "BenchmarkIdentityMessagingMonitored": {
-        "ns/op": 60221.0,
-        "MB/s": 1.06,
-        "B/op": 1276.0,
+        "ns/op": 93322.0,
+        "MB/s": 0.69,
+        "B/op": 1290.0,
         "allocs/op": 21.0
       },
       "BenchmarkIdentityConfigBcrypt": {
-        "ns/op": 49138566.0,
-        "B/op": 149494.0,
+        "ns/op": 70356302.0,
+        "B/op": 149492.0,
         "allocs/op": 753.0
       },
       "BenchmarkIdentityConfigBcryptDistinct": {
-        "ns/op": 146924104.0,
-        "B/op": 181348.0,
+        "ns/op": 187381931.0,
+        "B/op": 181128.0,
         "allocs/op": 830.0
       },
       "BenchmarkIdentityWSSBcryptChurn": {
-        "ns/op": 17460781.0,
-        "B/op": 216469.0,
-        "allocs/op": 1132.0
+        "ns/op": 21593338.0,
+        "B/op": 217917.0,
+        "allocs/op": 1135.0
       }
     },
     "constrained/baseline": {
       "BenchmarkIdentityChurn": {
-        "ns/op": 183091.0,
+        "ns/op": 194927.0,
         "B/op": 62920.0,
         "allocs/op": 180.0
       },
       "BenchmarkIdentityConnz": {
-        "ns/op": 179747.0,
+        "ns/op": 191309.0,
         "client_bytes": 6872.0,
         "identity_state_bytes": 0.0,
-        "response_bytes": 46394.0,
-        "B/op": 131683.0,
+        "response_bytes": 46391.0,
+        "B/op": 131692.0,
         "allocs/op": 393.0
       },
       "BenchmarkIdentityMessagingMonitored": {
-        "ns/op": 51915.0,
-        "MB/s": 1.23,
-        "B/op": 1267.0,
+        "ns/op": 59709.0,
+        "MB/s": 1.07,
+        "B/op": 1270.0,
         "allocs/op": 21.0
       },
       "BenchmarkIdentityConfigBcrypt": {
-        "ns/op": 120134.0,
-        "B/op": 129332.0,
+        "ns/op": 142377.0,
+        "B/op": 129341.0,
         "allocs/op": 445.0
       },
       "BenchmarkIdentityConfigBcryptDistinct": {
-        "ns/op": 121019.0,
-        "B/op": 129331.0,
+        "ns/op": 130761.0,
+        "B/op": 129335.0,
         "allocs/op": 445.0
       },
       "BenchmarkIdentityWSSBcryptChurn": {
-        "ns/op": 17494957.0,
-        "B/op": 212124.0,
+        "ns/op": 18027071.0,
+        "B/op": 212117.0,
         "allocs/op": 1131.0
       }
     },
     "constrained/patched": {
       "BenchmarkIdentityChurn": {
-        "ns/op": 180499.0,
-        "B/op": 62981.0,
+        "ns/op": 185346.0,
+        "B/op": 62989.0,
         "allocs/op": 180.0
       },
       "BenchmarkIdentityConnz": {
-        "ns/op": 221921.0,
+        "ns/op": 258231.0,
         "client_bytes": 6904.0,
         "identity_state_bytes": 32.0,
-        "response_bytes": 65140.0,
-        "B/op": 156369.0,
+        "response_bytes": 65138.0,
+        "B/op": 156389.0,
         "allocs/op": 394.0
       },
       "BenchmarkIdentityMessagingMonitored": {
-        "ns/op": 52325.0,
-        "MB/s": 1.22,
-        "B/op": 1269.0,
+        "ns/op": 58975.0,
+        "MB/s": 1.09,
+        "B/op": 1274.0,
         "allocs/op": 21.0
       },
       "BenchmarkIdentityConfigBcrypt": {
-        "ns/op": 49112358.0,
-        "B/op": 149452.0,
+        "ns/op": 51782371.0,
+        "B/op": 149469.0,
         "allocs/op": 753.0
       },
       "BenchmarkIdentityConfigBcryptDistinct": {
-        "ns/op": 147226042.0,
-        "B/op": 181376.0,
+        "ns/op": 147297094.0,
+        "B/op": 181348.0,
         "allocs/op": 829.0
       },
       "BenchmarkIdentityWSSBcryptChurn": {
-        "ns/op": 17477292.0,
-        "B/op": 212153.0,
+        "ns/op": 17624529.0,
+        "B/op": 212173.0,
         "allocs/op": 1131.0
       }
     }
@@ -1045,71 +1056,71 @@
   "delta_percent": {
     "default": {
       "BenchmarkIdentityChurn": {
-        "ns/op": -1.3140226357183926,
-        "B/op": 0.1096892138939598,
-        "allocs/op": 0.0
+        "ns/op": 15.007332572918376,
+        "B/op": 0.09538192512519306,
+        "allocs/op": -0.5555555555555536
       },
       "BenchmarkIdentityConnz": {
-        "ns/op": 24.714582634141745,
+        "ns/op": 55.84265185080994,
         "client_bytes": 0.465657741559955,
-        "response_bytes": 40.417735434225,
-        "B/op": 18.784463338971346,
+        "response_bytes": 40.4216335064991,
+        "B/op": 18.758007899864282,
         "allocs/op": 0.5089058524172962
       },
       "BenchmarkIdentityMessagingMonitored": {
-        "ns/op": 0.21633855319431738,
-        "MB/s": -0.9345794392523366,
-        "B/op": 0.3933910306844979,
+        "ns/op": 21.83028720626632,
+        "MB/s": -17.85714285714286,
+        "B/op": 0.9389671361502261,
         "allocs/op": 0.0
       },
       "BenchmarkIdentityConfigBcrypt": {
-        "ns/op": 43641.32402816475,
-        "B/op": 15.587548517791138,
+        "ns/op": 45993.267120460696,
+        "B/op": 15.576172252503007,
         "allocs/op": 69.21348314606742
       },
       "BenchmarkIdentityConfigBcryptDistinct": {
-        "ns/op": 131642.13980847172,
-        "B/op": 40.216803006170075,
+        "ns/op": 124252.58152714916,
+        "B/op": 40.041286850833856,
         "allocs/op": 86.51685393258425
       },
       "BenchmarkIdentityWSSBcryptChurn": {
-        "ns/op": -0.28491767763110243,
-        "B/op": -0.05309718169393962,
-        "allocs/op": 0.0
+        "ns/op": 3.4986035360470735,
+        "B/op": 0.553717521006658,
+        "allocs/op": 0.08818342151675207
       }
     },
     "constrained": {
       "BenchmarkIdentityChurn": {
-        "ns/op": -1.41568946589401,
-        "B/op": 0.09694850603940708,
+        "ns/op": -4.915173372595893,
+        "B/op": 0.10966306420852057,
         "allocs/op": 0.0
       },
       "BenchmarkIdentityConnz": {
-        "ns/op": 23.46297851980841,
+        "ns/op": 34.98110386861046,
         "client_bytes": 0.465657741559955,
-        "response_bytes": 40.40608699400785,
-        "B/op": 18.74653523993226,
+        "response_bytes": 40.410855553878974,
+        "B/op": 18.753606900950693,
         "allocs/op": 0.2544529262086481
       },
       "BenchmarkIdentityMessagingMonitored": {
-        "ns/op": 0.7897524800154043,
-        "MB/s": -0.8130081300813052,
-        "B/op": 0.15785319652723562,
+        "ns/op": -1.229295416101428,
+        "MB/s": 1.869158878504673,
+        "B/op": 0.31496062992126816,
         "allocs/op": 0.0
       },
       "BenchmarkIdentityConfigBcrypt": {
-        "ns/op": 40781.31419914429,
-        "B/op": 15.55686141094239,
+        "ns/op": 36269.89893030476,
+        "B/op": 15.561964110374893,
         "allocs/op": 69.21348314606742
       },
       "BenchmarkIdentityConfigBcryptDistinct": {
-        "ns/op": 121555.31197580544,
-        "B/op": 40.241705391592106,
+        "ns/op": 112546.04430984773,
+        "B/op": 40.2157188696022,
         "allocs/op": 86.29213483146067
       },
       "BenchmarkIdentityWSSBcryptChurn": {
-        "ns/op": -0.10097195437519524,
-        "B/op": 0.013671248892155319,
+        "ns/op": -2.2329861573186283,
+        "B/op": 0.026400524238989753,
         "allocs/op": 0.0
       }
     }
