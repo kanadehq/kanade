@@ -874,15 +874,24 @@ function resultListRow(x: DemoResult) {
 
 get(/^\/api\/results$/, (_req, url) => {
   const limit = Number(url.searchParams.get('limit') ?? '50');
-  const offset = Number(url.searchParams.get('offset') ?? '0');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+    return new Response('limit must be between 1 and 1000', { status: 400 });
+  }
   const status = url.searchParams.get('status');
+  if (
+    status &&
+    status !== 'running' &&
+    status !== 'success' &&
+    status !== 'failure' &&
+    status !== 'skipped'
+  ) {
+    return new Response(`unknown status filter: ${status}`, { status: 400 });
+  }
 
   // Every one of these is a REGEX in the real backend (results.rs
   // ListParams: pc_id, job_id, exec_id, stdout, stderr), not a substring
   // match — plain text without metacharacters just happens to behave like
-  // one. `exec_id`, `stdout`, `stderr` and `since` had no implementation
-  // here at all, so the Activity page's output-content filters silently
-  // returned the unfiltered list.
+  // one.
   const res: Array<[string, RegExp | null | 'invalid']> = [
     ['pc_id', compileParam(url.searchParams.get('pc_id'))],
     ['job_id', compileParam(url.searchParams.get('job_id'))],
@@ -895,36 +904,116 @@ get(/^\/api\/results$/, (_req, url) => {
   }
   const [pcRe, jobRe, execRe, outRe, errRe] = res.map(([, re]) => re as RegExp | null);
 
-  // #399: the lower bound is on `started_at` — the column the table
-  // shows — not on when the backend recorded the row.
-  const sinceMs = Date.parse(url.searchParams.get('since') ?? '') || 0;
+  // #399 / #1666: bounds and keyset cursor operate on `(started_at, result_id)`.
+  const sinceRaw = url.searchParams.get('since') ?? '';
+  const untilRaw = url.searchParams.get('until') ?? '';
+  if (sinceRaw && untilRaw && sinceRaw > untilRaw) {
+    return new Response("'since' must not be later than 'until'", { status: 400 });
+  }
+  const filterSig = JSON.stringify([
+    url.searchParams.get('pc_id') ?? '',
+    url.searchParams.get('job_id') ?? '',
+    url.searchParams.get('exec_id') ?? '',
+    url.searchParams.get('stdout') ?? '',
+    url.searchParams.get('stderr') ?? '',
+    status ?? '',
+    sinceRaw,
+    untilRaw,
+  ]);
 
-  let rows = RESULTS;
-  if (status === 'failure') rows = rows.filter((x) => exitTone(x.exit_code, x.skipped) === 'danger');
-  if (status === 'skipped') rows = rows.filter((x) => x.skipped);
-  if (status === 'success') rows = rows.filter((x) => x.exit_code === 0);
-  rows = rows.filter((x) => {
-    // `started_at` / `exec_id` are DERIVED in resultListRow, so the filter
-    // reads them from there rather than re-deriving — a row that matched a
-    // filter but displayed a different exec_id would be worse than either.
-    const row = resultListRow(x);
-    if (sinceMs && Date.parse(row.started_at) < sinceMs) return false;
-    if (pcRe && !pcRe.test(row.pc_id)) return false;
-    // NULL job_id/exec_id are matched as the empty string server-side, so
-    // a `^foo` filter excludes them while an unset filter keeps them.
-    if (jobRe && !jobRe.test(row.job_id ?? '')) return false;
-    if (execRe && !execRe.test(row.exec_id ?? '')) return false;
-    // Against the WHOLE buffer, not resultListRow's 200-char preview:
-    // the backend matches the stored output and only clips for display,
-    // so filtering the preview would miss hits past the cut.
-    if (outRe && !outRe.test(x.stdout)) return false;
-    if (errRe && !errRe.test(x.stderr)) return false;
+  let cursorTuple: { started_at: string; result_id: string } | null = null;
+  const cursorRaw = url.searchParams.get('cursor') ?? '';
+  if (cursorRaw) {
+    try {
+      const parsed = JSON.parse(Buffer.from(cursorRaw, 'base64url').toString('utf8')) as {
+        v?: number;
+        started_at?: string;
+        result_id?: string;
+        filter_hash?: string;
+      };
+      if (parsed.v !== 1 || !parsed.started_at || !parsed.result_id) {
+        return new Response('invalid cursor', { status: 400 });
+      }
+      if (parsed.filter_hash !== filterSig) {
+        return new Response('cursor does not match active search filters', { status: 400 });
+      }
+      cursorTuple = { started_at: parsed.started_at, result_id: parsed.result_id };
+    } catch {
+      return new Response('invalid cursor encoding', { status: 400 });
+    }
+  }
+
+  let candidates = RESULTS.map((x) => ({ raw: x, row: resultListRow(x) }));
+  if (status === 'failure') {
+    candidates = candidates.filter(({ raw }) => exitTone(raw.exit_code, raw.skipped) === 'danger');
+  } else if (status === 'skipped') {
+    candidates = candidates.filter(({ raw }) => raw.skipped);
+  } else if (status === 'success') {
+    candidates = candidates.filter(({ raw }) => raw.exit_code === 0 && !raw.skipped);
+  } else if (status === 'running') {
+    candidates = [];
+  }
+
+  candidates = candidates.filter(({ row }) => {
+    if (sinceRaw && row.started_at < sinceRaw) return false;
+    if (untilRaw && row.started_at > untilRaw) return false;
+    if (
+      cursorTuple &&
+      (row.started_at > cursorTuple.started_at ||
+        (row.started_at === cursorTuple.started_at && row.result_id >= cursorTuple.result_id))
+    ) {
+      return false;
+    }
     return true;
   });
 
-  return json(rows.slice(offset, offset + limit).map(resultListRow), {
-    headers: { 'X-Total-Count': String(rows.length) },
-  });
+  candidates.sort((a, b) =>
+    b.row.started_at.localeCompare(a.row.started_at) ||
+    b.row.result_id.localeCompare(a.row.result_id),
+  );
+
+  const scanCap = outRe || errRe ? 1_000 : 10_000;
+  const matched: Array<ReturnType<typeof resultListRow>> = [];
+  let scanned = 0;
+  let lastInspected: { started_at: string; result_id: string } | null = null;
+
+  for (const { raw, row } of candidates) {
+    if (scanned >= scanCap || matched.length >= limit) break;
+    scanned += 1;
+    lastInspected = { started_at: row.started_at, result_id: row.result_id };
+    if (pcRe && !pcRe.test(row.pc_id)) continue;
+    if (jobRe && !jobRe.test(row.job_id ?? '')) continue;
+    if (execRe && !execRe.test(row.exec_id ?? '')) continue;
+    if (outRe && !outRe.test(raw.stdout)) continue;
+    if (errRe && !errRe.test(raw.stderr)) continue;
+    matched.push(row);
+  }
+
+  const hasMoreInRange = scanned < candidates.length;
+  const stopReason =
+    matched.length >= limit && hasMoreInRange
+      ? 'limit_reached'
+      : scanned >= scanCap && hasMoreInRange
+        ? 'scan_limit_reached'
+        : 'end_of_range';
+
+  const headers: Record<string, string> = {
+    'X-Results-Scanned': String(scanned),
+    'X-Results-Stop-Reason': stopReason,
+  };
+  if (stopReason !== 'end_of_range' && lastInspected) {
+    headers['X-Results-Next-Cursor'] = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        started_at: lastInspected.started_at,
+        result_id: lastInspected.result_id,
+        filter_hash: filterSig,
+      }),
+      'utf8',
+    ).toString('base64url');
+  }
+
+  return json(matched, { headers });
 });
 
 get(/^\/api\/results\/([^/]+)$/, (_req, _url, m) => {

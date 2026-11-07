@@ -144,3 +144,179 @@ test('Activity preserves navigation, back/forward and debounced edits without st
   await c.locator('#res-exec').fill('');
   await expect(c.getByTestId('location')).not.toContainText('exec_id=');
 });
+
+test('Activity continues across scan-budget windows with pinned since and resets cursor on filter change', async ({ mount, page }) => {
+  const requests: URLSearchParams[] = [];
+  await page.route('**/api/results?*', async (route) => {
+    const sp = new URL(route.request().url()).searchParams;
+    requests.push(sp);
+    const cursor = sp.get('cursor');
+    const stdout = sp.get('stdout');
+
+    if (stdout === 'fresh-filter') {
+      await route.fulfill({
+        json: [
+          {
+            result_id: 'res-fresh-1',
+            request_id: 'req-fresh-1',
+            exec_id: 'exec-fresh-1',
+            pc_id: 'PC-FRESH',
+            exit_code: 0,
+            skipped: false,
+            stdout: 'fresh-filter output',
+            stderr: '',
+            started_at: '2026-04-02T00:00:00Z',
+            finished_at: '2026-04-02T00:00:01Z',
+            job_id: 'job-fresh',
+            version: '1',
+          },
+        ],
+        headers: {
+          'X-Results-Scanned': '12',
+          'X-Results-Stop-Reason': 'end_of_range',
+        },
+      });
+      return;
+    }
+
+    if (!cursor) {
+      await route.fulfill({
+        json: [],
+        headers: {
+          'X-Results-Scanned': '10000',
+          'X-Results-Stop-Reason': 'scan_limit_reached',
+          'X-Results-Next-Cursor': 'cursor-window-2',
+        },
+      });
+      return;
+    }
+
+    if (cursor === 'cursor-window-2') {
+      await route.fulfill({
+        json: [
+          {
+            result_id: 'res-old-match',
+            request_id: 'req-old-match',
+            exec_id: 'exec-old-match',
+            pc_id: 'PC-OLD-99',
+            exit_code: 0,
+            skipped: false,
+            stdout: 'older matching run',
+            stderr: '',
+            started_at: '2026-03-20T12:00:00Z',
+            finished_at: '2026-03-20T12:00:05Z',
+            job_id: 'job-old',
+            version: '1',
+          },
+        ],
+        headers: {
+          'X-Results-Scanned': '2500',
+          'X-Results-Stop-Reason': 'end_of_range',
+        },
+      });
+      return;
+    }
+
+    await route.fulfill({ json: [] });
+  });
+
+  const c = await mount(<ExecutionActivityHost initial="/activity?job_id=job-old" />);
+
+  // First window hit the 10k scan cap with 0 matches: must show incomplete-scan
+  // state with a continuation button rather than definitive "No activity matches".
+  await expect(c.getByText('No matches in the scanned window', { exact: true })).toBeVisible();
+  await expect(c.getByTestId('activity-scan-status')).toContainText('10000');
+
+  const searchOlderBtn = c.getByRole('button', { name: 'Search older history', exact: true });
+  await expect(searchOlderBtn).toBeVisible();
+  await searchOlderBtn.click();
+
+  // Second window finds the older matching row and reports end_of_range.
+  await expect(c.getByText('PC-OLD-99', { exact: true })).toBeVisible();
+  await expect(c.getByTestId('activity-scan-status')).toContainText('End of time range (2500 runs inspected)');
+  expect(requests.length).toBeGreaterThanOrEqual(2);
+  expect(requests[1]?.get('cursor')).toBe('cursor-window-2');
+  // `since` must stay pinned across cursor steps in the same search series.
+  expect(requests[1]?.get('since')).toBe(requests[0]?.get('since'));
+
+  // Stepping back returns to the previous window; changing a filter resets cursor.
+  await c.getByRole('button', { name: 'Previous window', exact: true }).click();
+  await expect(c.getByText('No matches in the scanned window', { exact: true })).toBeVisible();
+  await c.getByRole('button', { name: 'Search older history', exact: true }).click();
+  await expect(c.getByText('PC-OLD-99', { exact: true })).toBeVisible();
+
+  await c.locator('#res-stdout').fill('fresh-filter');
+  await expect(c.getByText('PC-FRESH', { exact: true })).toBeVisible();
+  expect(requests.at(-1)?.get('stdout')).toBe('fresh-filter');
+  expect(requests.at(-1)?.has('cursor')).toBe(false);
+});
+
+for (const ignoreAbort of [false, true]) {
+  test(`Activity の検索更新は過去ページを${ignoreAbort ? '遅延応答後も破棄する' : 'キャンセルする'}`, async ({ mount, page }) => {
+    // キャンセル通知を観測し、遅延応答のケースでは通信側だけ通知を無視させる。
+    await page.evaluate((ignore) => {
+      const state = window as typeof window & { olderAborted: boolean; olderCompleted: boolean };
+      state.olderAborted = false;
+      state.olderCompleted = false;
+      const original = window.fetch.bind(window);
+      window.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), location.href);
+        if (url.pathname === '/api/results' && url.searchParams.has('cursor')) {
+          init?.signal?.addEventListener('abort', () => { state.olderAborted = true; });
+          const response = await original(input, ignore ? { ...init, signal: undefined } : init);
+          state.olderCompleted = true;
+          return response;
+        }
+        return original(input, init);
+      }, original);
+    }, ignoreAbort);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    let requestedOlder = false;
+    let newestRequests = 0;
+    let fulfilledOlder = false;
+    await page.route('**/api/results?*', async (route) => {
+      if (new URL(route.request().url()).searchParams.has('cursor')) {
+        requestedOlder = true;
+        await pending;
+        await route.fulfill({
+          json: [{
+            result_id: 'stale-result', request_id: 'stale-request', pc_id: 'STALE-PC',
+            exit_code: 0, skipped: false, stdout: '', stderr: '',
+            started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:00:01Z',
+          }],
+          headers: { 'X-Results-Stop-Reason': 'end_of_range', 'X-Results-Scanned': '1' },
+        });
+        fulfilledOlder = true;
+      } else {
+        newestRequests++;
+        await route.fulfill({ json: [], headers: {
+          'X-Results-Stop-Reason': 'scan_limit_reached',
+          'X-Results-Next-Cursor': 'older-page', 'X-Results-Scanned': '10000',
+        } });
+      }
+    });
+    const c = await mount(<ExecutionActivityHost initial="/activity" />);
+    const older = c.getByRole('button', { name: 'Search older history', exact: true });
+    await expect(older).toBeEnabled();
+    await older.click();
+    try {
+      await expect.poll(() => requestedOlder).toBe(true);
+      await c.getByRole('button', { name: 'Back to newest', exact: true }).first().click();
+      await expect.poll(() => newestRequests).toBe(2);
+      await expect.poll(() => page.evaluate(() =>
+        (window as typeof window & { olderAborted: boolean }).olderAborted)).toBe(true);
+      await expect(older).toBeEnabled();
+    } finally {
+      release();
+    }
+    await expect.poll(() => fulfilledOlder).toBe(true);
+    if (ignoreAbort) {
+      await expect.poll(() => page.evaluate(() =>
+        (window as typeof window & { olderCompleted: boolean }).olderCompleted)).toBe(true);
+    }
+    await expect(c.getByText('STALE-PC', { exact: true })).toHaveCount(0);
+    await expect(c.getByText('No matches in the scanned window', { exact: true })).toBeVisible();
+    await expect(older).toBeEnabled();
+  });
+}
