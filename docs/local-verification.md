@@ -175,11 +175,13 @@ doctor はコマンドの発見・合成の検証であり、gate/e2e の成功�
 - editorconfig、coverage、ライセンス・notice・SBOM、docs の専用ジョブは
   引き続き CI 側の確認が必要。既存 workflow の必須検査は変更しない。
 
-## 今回の移植の検証
+## 過去の移植時の検証（当時の CI ピン: 2.14.1）
 
 runner の unittest は 6 件成功（終了 0）。`git diff --check` も終了 0。
 設定された e2e コマンドは起動したが、`/opt/homebrew/bin/nats-server` が
 2.15.0、CI ピンが 2.14.1 のため版照合で終了 1 になった。Rust の
 publication/store・manifest・trust/admission テストには到達していない。
-launcher 環境に CI ピンと同版の NATS を用意する必要がある。
-親 run が全体検証と最終 gate を所有するため、この移植から別 run は起動しない。
+当時は launcher 環境に CI ピンと同版の NATS を用意する必要があった。
+上記は過去の失敗記録であり、現在は `integration.yml` と
+`tools/nats-identity/build.py` に固定された 2.14.3 を使用する。
+当時の親 run が全体検証と最終 gate を所有し、この移植から別 run は起動しなかった。

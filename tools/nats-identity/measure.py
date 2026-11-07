@@ -68,13 +68,21 @@ def measure():
                         'cpu_count': os.cpu_count(),
                         'go': subprocess.check_output(['go', 'version'], text=True).strip()},
         'provenance': {
-            'nats_version': build.VERSION, 'source_sha256': build.SHA256,
+            'nats_version': build.VERSION, 'source_commit': build.SOURCE_COMMIT,
+            'source_url': build.URL, 'source_sha256': build.SHA256,
             'patch_sha256': sha256(build.ROOT / 'tools/nats-identity/producer.patch'),
             'producer_sha256': sha256(build.ROOT / 'tools/nats-identity/auth_identity.go'),
             'benchmark_sha256': sha256(bench),
+            'build_driver_sha256': sha256(build.ROOT / 'tools/nats-identity/build.py'),
+            'measurement_driver_sha256': sha256(build.ROOT / 'tools/nats-identity/measure.py'),
+            'producer_tests_sha256': sha256(build.ROOT / 'tools/nats-identity/auth_identity_test.go'),
+            'binary_sha256': {variant: sha256(build.OUT / 'bin' / variant / 'nats-server')
+                              for variant in ['baseline', 'patched']},
             'initial_results': 'measurements-initial.json',
             'initial_results_sha256': sha256(build.ROOT / 'tools/nats-identity/measurements-initial.json'),
             'initial_revision': 'd0d12836d4b70facc59691f21346b5a0f920348f',
+            'historical_results': 'measurements-2.14.1.json',
+            'historical_results_sha256': sha256(build.ROOT / 'tools/nats-identity/measurements-2.14.1.json'),
         },
         'methodology': {
             'samples_per_variant': SAMPLES, 'benchtime': '500ms', 'count_per_process': 1,

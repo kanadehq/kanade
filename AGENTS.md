@@ -770,6 +770,13 @@ broker identity producer は Go 1.27.2 を使用する。ローカルの
 `GOTOOLCHAIN=local` を設定し、別の toolchain を自動取得せずに
 インストール済みのコンパイラを使用する。
 
+NATS は `integration.yml` の `NATS_SERVER_VERSION` と
+`tools/nats-identity/build.py` の 2.14.3 を同時に維持する。producer は
+公式 v2.14.3 の commit `9b17a586be69c9ff36e4c84a421ca47da410b561` と
+archive SHA-256 を固定している。版更新時は `scripts/ci/test_magi_e2e.py`、
+運用ドキュメント、実 producer/consumer/browser/race 検証と full measurement
+を同時に更新し、過去版の測定結果を新しい版の結果として扱わない。
+
 `magi.toml` is repo-owned and is read from the repo layer that magi
 extracts from the pinned base commit, so a change only takes effect for
 runs started from a base that already contains it. An empty `verify.gate`
