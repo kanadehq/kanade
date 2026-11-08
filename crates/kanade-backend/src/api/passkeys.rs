@@ -991,6 +991,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_status_reports_effective_state_and_requires_authorization() {
+        let app = app(true).await;
+        let path = "/api/server-settings/passkeys/status";
+        assert_eq!(
+            call(&app, "GET", path, None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        for (enabled, rp_id, expected) in [
+            (true, "kanade.example.com", "enabled"),
+            (true, "https://invalid.example.com", "invalid"),
+            (false, "kanade.example.com", "disabled"),
+            (true, "kanade.example.com", "enabled"),
+        ] {
+            {
+                let mut settings = app.state.passkeys.test_settings.write().unwrap();
+                let config = settings.as_mut().unwrap().passkeys.as_mut().unwrap();
+                config.enabled = enabled;
+                config.rp_id = rp_id.into();
+            }
+            let (status, body) = call(&app, "GET", path, Some("alice"), None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["state"], expected);
+            if expected == "invalid" {
+                assert!(body["reason"].as_str().unwrap().contains("bare host name"));
+                assert_eq!(
+                    call(&app, "GET", "/api/auth/passkey/config", None, None)
+                        .await
+                        .0,
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_generation_change_invalidates_ceremonies_and_allows_fresh_authentication() {
+        let app = app(true).await;
+        let mut authenticator = SoftPasskey::new(true);
+        enroll(&app, &mut authenticator, "alice", None).await;
+        let (status, registration) = start_register(&app, "alice", PW, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, login) = call(&app, "POST", "/api/auth/passkey/login/start", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Even restoring the same RP must not restore its outstanding challenges.
+        for enabled in [false, true] {
+            {
+                let mut settings = app.state.passkeys.test_settings.write().unwrap();
+                let settings = settings.as_mut().unwrap();
+                settings.passkeys.as_mut().unwrap().enabled = enabled;
+                settings.passkey_generation = Some(format!("generation-{enabled}"));
+            }
+            let (status, config) = call(&app, "GET", "/api/auth/passkey/config", None, None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(config["enabled"], enabled);
+            if !enabled {
+                assert_eq!(
+                    start_register(&app, "alice", PW, None).await.0,
+                    StatusCode::NOT_FOUND
+                );
+                assert_eq!(
+                    call(&app, "POST", "/api/auth/passkey/login/start", None, None)
+                        .await
+                        .0,
+                    StatusCode::NOT_FOUND
+                );
+            }
+        }
+        let credential = create(
+            &mut SoftPasskey::new(true),
+            ORIGIN,
+            registration["options"].clone(),
+            |_| {},
+        );
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/auth/passkeys/register/finish",
+            Some("alice"),
+            Some(serde_json::json!({
+                "challenge_id": registration["challenge_id"], "credential": credential
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let credential = sign(
+            &mut authenticator,
+            ORIGIN,
+            login["options"].clone(),
+            &handle_of(&app.pool, "alice").await,
+            |_| {},
+        );
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/auth/passkey/login/finish",
+            None,
+            Some(serde_json::json!({
+                "challenge_id": login["challenge_id"], "credential": credential
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            passkey_login(&app, &mut authenticator, "alice").await.0,
+            StatusCode::OK
+        );
+        enroll(&app, &mut SoftPasskey::new(true), "alice", None).await;
+    }
+
+    #[tokio::test]
     async fn feature_is_invisible_when_not_configured() {
         let app = app(false).await;
         let (st, body) = call(&app, "GET", "/api/auth/passkey/config", None, None).await;
