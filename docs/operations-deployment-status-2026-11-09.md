@@ -1,10 +1,13 @@
 # v0.104.0 backend deployment status — 2026-11-09
 
-Deployment remains blocked. The configured backend reports **0.102.1**;
+Deployment remains blocked pending established host access and the supported
+backend-only backup, update and rollback procedure. Release binaries are now
+published, and the parent graph has retired the competing candidate. The
+configured backend still reports **0.102.1**;
 v0.104.0 has not been installed by this attempt. No service, binary,
 database, credential, configuration, passkey setting, or rollout was changed.
-The observations below were collected around 15:00–15:04 UTC and are a
-snapshot, not a statement about subsequent release or deployment activity.
+The initial observations below were collected around 15:00–15:04 UTC;
+the review follow-up records the changed conditions at 15:08 UTC.
 
 ## Source and release evidence
 
@@ -96,9 +99,8 @@ Rollback compatibility therefore remains unverified. Do not wipe the DB.
 
 ## Required continuation
 
-Establish the single execution owner through the parent control plane,
-confirm the existing host access and supported update/backup procedure,
-and wait for the exact release backend asset to become available. Before
+Confirm the existing host access and supported update/backup procedure.
+Release assets and competing-seat status were rechecked below. Before
 mutation, recheck the running version and shared execution result; if the
 requested version is already deployed, verify it without redeploying.
 Preserve the old binary, settings, credentials, SQLite database and WAL
@@ -111,3 +113,37 @@ Use existing operator authentication to verify JSON from
 to confirm the Passkeys card. No enablement, settings save, RP ID, or
 origin change is authorized by this deployment request. Agent, client,
 CLI, NATS and proxy updates are outside this attempt's scope.
+
+## Review follow-up — 15:08 UTC
+
+Finding `R1-1-1` correctly identifies that deployment has not happened;
+it remains unresolved. The initial missing-asset and competing-candidate
+conditions have changed and must not be used as current blockers:
+
+- `gh release view v0.104.0 --repo kanadehq/kanade --json assets` now
+  lists the backend tarballs for Linux x86_64/aarch64 and macOS aarch64,
+  plus the Windows x86_64 zip. The Release workflow's `github release`
+  job and all four build jobs succeeded; crates.io publishing was still
+  in progress. Release asset availability no longer blocks deployment.
+- The reported Linux aarch64 asset digest is
+  `sha256:9a7edcb426323c2257babca91048474427510ecd54711cc496ca01c65837edd2`;
+  Linux x86_64 is
+  `sha256:3e473d334064d5554bbe100d2f98fabeeddc02467c88e6fcfca7fe957829f1ba`.
+  These are API metadata, not downloaded-byte verification. Target
+  architecture still needs confirmation before selecting an asset.
+- `magi show bba8 --json` records the other candidate folded at
+  `15:06:25.119859Z`, the surviving branch selected, and only its fix seat
+  active. The previous competing implementation condition has ended.
+- Repeated TLS-verified requests returned `/api/version` HTTP 200 JSON
+  with `0.102.1`, `/health` HTTP 200 with `ok`, and the passkey status
+  path HTTP 200 HTML. This is still the older deployment; feature
+  acceptance remains unverified.
+
+The unresolved decision is the established SSH access and backend-only
+update/backup/rollback path requested through the task chat. The private
+application environment file contains backend and NATS connection/auth
+settings, not an SSH destination, login or identity. Targeted inspection
+of the local shell histories found no Kanade SSH, SCP, fleet deployment,
+service or backup command. Repository examples do not establish those
+operator-specific values. No alternate deployment mechanism was invented
+to make the review finding appear resolved. No production mutation occurred.
