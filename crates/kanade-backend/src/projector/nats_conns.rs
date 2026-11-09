@@ -1663,53 +1663,23 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
     async fn live_connz_reports_the_token_as_the_user_and_echoes_our_name() {
-        use std::io::Write as _;
-
         const TOKEN: &str = "live-test-fleet-token";
-        let client_port = portpicker::pick_unused_port().expect("pick client port");
-        let http_port = portpicker::pick_unused_port().expect("pick monitor port");
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let conf = dir.path().join("nats.conf");
-        let mut f = std::fs::File::create(&conf).expect("write conf");
         // Token auth + monitoring: the shape configs/nats-server.conf ships.
-        write!(
-            f,
-            "port: {client_port}\nhttp_port: {http_port}\nauthorization {{ token: \"{TOKEN}\" }}\n"
-        )
-        .expect("write conf");
-        drop(f);
-        let _server = tokio::process::Command::new("nats-server")
-            .arg("-c")
-            .arg(&conf)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn nats-server (is it in PATH?)");
+        let (_server, _dir, client_port, base) =
+            disposable_broker(&format!("authorization {{ token: \"{TOKEN}\" }}")).await;
 
         // Announce ourselves exactly as an agent does. Built through the
         // shared helper so a change to the name format breaks here too.
         let name = kanade_shared::nats_client::client_name(NatsRole::Agent, Some("PC-LIVE"));
         let url = format!("nats://127.0.0.1:{client_port}");
-        let mut conn = None;
-        for _ in 0..50 {
-            match async_nats::ConnectOptions::new()
-                .token(TOKEN.to_string())
-                .name(name.clone())
-                .connect(&url)
-                .await
-            {
-                Ok(c) => {
-                    conn = Some(c);
-                    break;
-                }
-                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-            }
-        }
-        let _conn = conn.expect("nats-server did not come up in 5s");
+        let _conn = async_nats::ConnectOptions::new()
+            .token(TOKEN.to_string())
+            .name(name.clone())
+            .connect(&url)
+            .await
+            .expect("connect to disposable broker");
 
         let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
-        let base = format!("http://127.0.0.1:{http_port}");
         let (conns, complete, _) = fetch_walk(&http, &base)
             .await
             .expect("read live broker snapshot");
@@ -2174,42 +2144,117 @@ mod tests {
         assert!(fetch_walk(&http, &base).await.is_err());
     }
 
+    fn disposable_broker_ports(dir: &std::path::Path, pid: u32) -> Option<(u16, u16)> {
+        #[derive(Deserialize)]
+        struct Ports {
+            nats: Vec<String>,
+            monitoring: Vec<String>,
+        }
+
+        // The executable basename can include .exe; bind discovery to this
+        // child instead of assuming a platform-specific filename.
+        let suffix = format!("_{pid}.ports");
+        std::fs::read_dir(dir).ok()?.find_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_name().to_str()?.ends_with(&suffix) {
+                return None;
+            }
+            // The file can be observed before its JSON has finished writing.
+            let ports: Ports = serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
+            let port = ports.nats.first()?.parse::<hyper::Uri>().ok()?.port_u16()?;
+            let monitor = ports
+                .monitoring
+                .first()?
+                .parse::<hyper::Uri>()
+                .ok()?
+                .port_u16()?;
+            Some((port, monitor))
+        })
+    }
+
+    #[test]
+    fn disposable_broker_ports_require_the_child_pid_and_complete_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let ports =
+            br#"{"nats":["nats://127.0.0.1:41351"],"monitoring":["http://127.0.0.1:35849"]}"#;
+        std::fs::write(dir.path().join("nats-server_142.ports"), ports).unwrap();
+        assert_eq!(disposable_broker_ports(dir.path(), 42), None);
+        let path = dir.path().join("nats-server.exe_42.ports");
+        std::fs::write(&path, br#"{"nats":["nats://127.0.0.1:41351"]"#).unwrap();
+        assert_eq!(disposable_broker_ports(dir.path(), 42), None);
+        std::fs::write(&path, ports).unwrap();
+        assert_eq!(
+            disposable_broker_ports(dir.path(), 42),
+            Some((41351, 35849))
+        );
+    }
+
     async fn disposable_broker(
         extra: &str,
     ) -> (tokio::process::Child, tempfile::TempDir, u16, String) {
-        let port = portpicker::pick_unused_port().unwrap();
-        let monitor = portpicker::pick_unused_port().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nats.conf");
-        std::fs::write(
-            &path,
-            format!("host: 127.0.0.1\nport: {port}\nhttp_port: {monitor}\n{extra}\n"),
-        )
-        .unwrap();
+        let ports_dir = serde_json::to_string(&dir.path().to_string_lossy()).unwrap();
+        let config = |port: i32, monitor: i32| {
+            format!(
+                "host: 127.0.0.1\nport: {port}\nhttp_port: {monitor}\nports_file_dir: {ports_dir}\n{extra}\n"
+            )
+        };
+        // Let the broker bind both sockets; picking and releasing ports before
+        // spawn races with the other live tests running in parallel.
+        std::fs::write(&path, config(-1, -1)).unwrap();
+        let log_path = dir.path().join("nats.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        // Keep the first process's -1 options on reload, even after persisting
+        // concrete ports for its replacement. NATS rejects HTTPPort -1 -> N.
         let mut server = tokio::process::Command::new("nats-server")
             .arg("-c")
             .arg(&path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .args(["-p", "-1", "-m", "-1"])
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
             .kill_on_drop(true)
             .spawn()
             .expect("nats-server in PATH");
-        let base = format!("http://127.0.0.1:{monitor}");
+        let pid = server.id().expect("disposable broker PID");
+        let broker_log = || std::fs::read_to_string(&log_path).unwrap_or_default();
         let http: MonitorClient = Client::builder(TokioExecutor::new()).build_http();
-        for _ in 0..50 {
-            if fetch_json::<Varz>(&http, &format!("{base}/varz"))
-                .await
-                .is_ok()
-            {
-                return (server, dir, port, base);
+        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(status) = server.try_wait().unwrap() {
+                    panic!(
+                        "disposable broker exited before ready ({status}):\n{}",
+                        broker_log()
+                    );
+                }
+                if let Some((port, monitor)) = disposable_broker_ports(dir.path(), pid) {
+                    let url = format!("http://127.0.0.1:{monitor}/varz");
+                    if tokio::time::timeout(
+                        Duration::from_millis(100),
+                        fetch_json::<Varz>(&http, &url),
+                    )
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+                    {
+                        return (port, monitor);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            assert!(
-                server.try_wait().unwrap().is_none(),
-                "disposable broker exited before ready"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        panic!("disposable broker did not start");
+        })
+        .await;
+        let (port, monitor) = match ready {
+            Ok(ports) => ports,
+            Err(_) => {
+                let _ = server.kill().await;
+                let _ = server.wait().await;
+                panic!("disposable broker did not start in 5s:\n{}", broker_log());
+            }
+        };
+        // Reloads and restarts must keep the addresses this fixture exposes.
+        std::fs::write(&path, config(i32::from(port), i32::from(monitor))).unwrap();
+        let base = format!("http://127.0.0.1:{monitor}");
+        (server, dir, port, base)
     }
 
     async fn raw_info(port: u16) -> (tokio::io::BufReader<tokio::net::TcpStream>, u64) {

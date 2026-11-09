@@ -839,3 +839,16 @@ mise を使わない環境では、子プロセスまで Python 3.11 以上が�
   Linux binary is added. The Linux client is intentionally an unsupported GUI shim.
 - The QEMU gate proves startup/version on the minimum Linux CPU, not every runtime
   feature or Windows/ARM compatibility. Keep native CI coverage for those targets.
+
+## Concurrent NATS test brokers
+
+- The disposable TCP/monitor fixtures in
+  `crates/kanade-backend/src/projector/nats_conns.rs` and
+  `crates/kanade-agent/tests/nats_role_conformance.rs` let NATS bind random ports
+  (`-1`) and discover them from the spawned PID's `.ports` file. Picking an unused
+  port and releasing it before spawn is not a reservation under parallel tests.
+- Initial `-p -1 -m -1` command-line overrides are intentional: the fixtures write
+  concrete ports into the config for later restarts, but NATS 2.14.3 rejects an
+  active config reload that changes its HTTPPort option from `-1` to that number.
+  The initial process retains its random options on reload; replacement processes
+  use the saved concrete ports. Keep both reload and restart scenarios covered.

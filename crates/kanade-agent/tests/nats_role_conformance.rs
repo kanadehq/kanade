@@ -745,8 +745,6 @@ struct Violation {
 impl Broker {
     async fn start(auth: Auth) -> Self {
         let dir = TempDir::new().expect("broker tempdir");
-        let port = portpicker::pick_unused_port().expect("port");
-        let http_port = portpicker::pick_unused_port().expect("http port");
         // The checked-in file is copied byte for byte: `include` resolves
         // relative to the main config, so the test exercises exactly the
         // bytes an operator would deploy.
@@ -755,11 +753,13 @@ impl Broker {
         let mut b = Self {
             sentinel,
             dir,
-            port,
-            http_port,
+            port: 0,
+            http_port: 0,
         };
         b.write_conf(auth);
         b.spawn().await;
+        // Keep reconnect targets stable across restarts and auth reloads.
+        b.write_conf(auth);
         b
     }
 
@@ -782,13 +782,47 @@ impl Broker {
         // the bootstrap's streams reserve more than a small disk offers, which
         // fails the bootstrap for a reason unrelated to what is under test.
         let conf = format!(
-            "host: 127.0.0.1\nport: {}\nhttp: 127.0.0.1:{}\njetstream {{ store_dir: \"{}\", max_file_store: 1TB }}\n{}\n",
-            self.port,
-            self.http_port,
+            "host: 127.0.0.1\nport: {}\nhttp_port: {}\nports_file_dir: \"{}\"\njetstream {{ store_dir: \"{}\", max_file_store: 1TB }}\n{}\n",
+            if self.port == 0 {
+                -1
+            } else {
+                i32::from(self.port)
+            },
+            if self.http_port == 0 {
+                -1
+            } else {
+                i32::from(self.http_port)
+            },
+            self.dir.path().to_string_lossy().replace('\\', "/"),
             store.to_string_lossy().replace('\\', "/"),
             auth_block,
         );
         std::fs::write(self.dir.path().join("nats.conf"), conf).expect("nats.conf");
+    }
+
+    fn allocated_ports(&self, pid: u32) -> Result<(u16, u16), String> {
+        // NATS includes its executable basename, which may end in `.exe`.
+        let suffix = format!("_{pid}.ports");
+        let entries = std::fs::read_dir(self.dir.path()).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !entry.file_name().to_string_lossy().ends_with(&suffix) {
+                continue;
+            }
+            let bytes = std::fs::read(entry.path()).map_err(|e| e.to_string())?;
+            let ports: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|e| format!("broker ports file: {e}"))?;
+            let port = |kind: &str| {
+                ports[kind][0]
+                    .as_str()
+                    .and_then(|url| url.rsplit_once(':'))
+                    .and_then(|(_, port)| port.parse::<u16>().ok())
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| format!("broker ports file has no usable {kind} port: {ports}"))
+            };
+            return Ok((port("nats")?, port("monitoring")?));
+        }
+        Err(format!("broker has not written its {suffix} ports file"))
     }
 
     async fn spawn(&mut self) {
@@ -806,6 +840,11 @@ impl Broker {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log2))
             .kill_on_drop(true);
+        if self.port == 0 {
+            // Preserve -1 in this process's reload options while the config
+            // records concrete ports for a restart. NATS rejects HTTPPort -1 -> N.
+            cmd.args(["-p", "-1", "-m", "-1"]);
+        }
         for role in Role::ALL {
             // The form `setup.sh` writes into the broker's env file: the hash
             // inside double quotes, because the server parses an environment
@@ -813,26 +852,41 @@ impl Broker {
             cmd.env(role.env_name(), format!("\"{}\"", role.password_hash()));
         }
         let spawned = Instant::now();
-        self.sentinel.set(cmd.spawn().expect("spawn nats-server"));
+        let child = cmd.spawn().expect("spawn nats-server");
+        let pid = child.id().expect("broker pid");
+        self.sentinel.set(child);
+        let mut ready = Waiter::new(
+            &BROKER_READY,
+            "monitoring port answers",
+            vec![self.sentinel.clone()],
+        )
+        .since(spawned);
+        // Only the first start requests random ports. NATS owns both sockets
+        // before publishing them, so concurrent fixtures cannot steal them.
+        let (port, http_port) = if self.port == 0 {
+            loop {
+                ready.check();
+                match self.allocated_ports(pid) {
+                    Ok(ports) => break ports,
+                    Err(seen) => ready.observed(seen),
+                }
+                ready.tick().await;
+            }
+        } else {
+            (self.port, self.http_port)
+        };
         // The monitoring port has to answer a request, not just accept a
         // connection: that is what the later oracles read.
-        let port = self.http_port;
-        wait_until(
-            Waiter::new(
-                &BROKER_READY,
-                "monitoring port answers",
-                vec![self.sentinel.clone()],
-            )
-            .since(spawned),
-            || async move {
-                match http_request(port, "GET", "/varz", None, "").await.0 {
-                    200 => Ok(()),
-                    0 => Err("nothing answered on the monitoring port".to_string()),
-                    st => Err(format!("monitoring port answered HTTP {st}")),
-                }
-            },
-        )
+        wait_until(ready, || async move {
+            match http_request(http_port, "GET", "/varz", None, "").await.0 {
+                200 => Ok(()),
+                0 => Err("nothing answered on the monitoring port".to_string()),
+                st => Err(format!("monitoring port answered HTTP {st}")),
+            }
+        })
         .await;
+        self.port = port;
+        self.http_port = http_port;
     }
 
     async fn stop(&mut self) {
