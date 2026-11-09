@@ -10,11 +10,11 @@
 //!     `AuthenticationResult::user_verified` explicitly. A credential used
 //!     without PIN/biometric is rejected.
 //!   * **RP ID and origin are configuration, never request data.** See
-//!     [`validate_config`]; an unsafe combination stops the backend booting.
+//!     [`validate_config`]; unsafe combinations are rejected before saving.
 //!   * **Challenges are server-side, single-use and short-lived**
 //!     ([`CHALLENGE_TTL`]). `take` removes the entry before anything else is
 //!     checked, so a challenge can be spent exactly once even if the attempt
-//!     then fails. They live in memory (this backend is a single process), so
+//!     then fails. They live in each backend process, so
 //!     a restart just invalidates in-flight ceremonies; the webauthn-rs state
 //!     types are therefore never serialised.
 //!   * **Replay protection** is the single-use challenge plus the signature
@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use kanade_shared::config::WebauthnSection;
+use kanade_shared::wire::PasskeySettings;
 use rand::Rng as _;
 use sqlx::SqlitePool;
 use webauthn_rs::prelude::{
@@ -89,9 +89,8 @@ fn valid_host_label(l: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// Validate `[server.webauthn]`. Fail-closed: any doubt is an error, and the
-/// caller aborts startup. Never consults request data.
-pub fn validate_config(cfg: &WebauthnSection) -> Result<RelyingParty, String> {
+/// Validate persisted passkey settings. Never consults request data.
+pub fn validate_config(cfg: &PasskeySettings) -> Result<RelyingParty, String> {
     let rp_id = cfg.rp_id.as_str();
     if rp_id.is_empty() || rp_id != rp_id.trim() {
         return Err("rp_id must be a non-empty host name without surrounding whitespace".into());
@@ -182,16 +181,6 @@ pub fn validate_config(cfg: &WebauthnSection) -> Result<RelyingParty, String> {
     })
 }
 
-/// True when `public_url` (used for emailed links) is not one of the
-/// passkey origins — almost always a typo in one of the two settings. Only a
-/// warning: the two serve different purposes and may legitimately differ.
-pub fn public_url_outside_origins(public_url: &str, rp: &RelyingParty) -> bool {
-    match Url::parse(public_url) {
-        Ok(u) => !rp.origins.iter().any(|o| o.origin() == u.origin()),
-        Err(_) => true,
-    }
-}
-
 // ---- challenge store ------------------------------------------------
 
 enum Pending {
@@ -224,10 +213,122 @@ pub enum ChallengeError {
     RateLimited(u64),
 }
 
+#[derive(Debug)]
+pub enum ConfigurationError {
+    Unavailable(String),
+    Invalid(String),
+}
+impl std::fmt::Display for ConfigurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(e) | Self::Invalid(e) => f.write_str(e),
+        }
+    }
+}
+
+type StartLimits = std::sync::Arc<Mutex<HashMap<String, (u32, Instant)>>>;
+
+struct CachedService {
+    generation: Option<String>,
+    config: PasskeySettings,
+    service: std::sync::Arc<PasskeyService>,
+}
+
+/// Reads shared settings for every operation. The lock spans the broker read,
+/// so an older read cannot replace a newer cached service. Challenge storage
+/// is per process; configuration and ceremony generations are shared.
+#[derive(Default)]
+pub struct PasskeyRuntime {
+    cached: tokio::sync::Mutex<Option<CachedService>>,
+    starts: StartLimits,
+    #[cfg(test)]
+    pub test_settings: std::sync::RwLock<Option<kanade_shared::wire::ServerSettings>>,
+}
+
+async fn read_passkey_settings(
+    kv: &async_nats::jetstream::kv::Store,
+) -> Result<(Option<String>, PasskeySettings), String> {
+    use kanade_shared::{kv::KEY_SERVER_SETTINGS, wire::ServerSettings};
+    let settings: ServerSettings = match kv
+        .get(KEY_SERVER_SETTINGS)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+        None => ServerSettings::default(),
+    };
+    Ok((
+        settings.passkey_generation,
+        settings.passkeys.unwrap_or_default(),
+    ))
+}
+
+impl PasskeyRuntime {
+    #[cfg(test)]
+    pub fn for_test(settings: kanade_shared::wire::ServerSettings) -> Self {
+        Self {
+            test_settings: std::sync::RwLock::new(Some(settings)),
+            ..Default::default()
+        }
+    }
+
+    pub async fn service(
+        &self,
+        js: &async_nats::jetstream::Context,
+    ) -> Result<Option<std::sync::Arc<PasskeyService>>, ConfigurationError> {
+        let mut cached = self.cached.lock().await;
+        #[cfg(test)]
+        let test_settings = self.test_settings.read().unwrap().clone();
+        #[cfg(not(test))]
+        let test_settings: Option<kanade_shared::wire::ServerSettings> = None;
+        let (kv, generation, config) = if let Some(settings) = test_settings {
+            (
+                None,
+                settings.passkey_generation,
+                settings.passkeys.unwrap_or_default(),
+            )
+        } else {
+            let kv = js
+                .get_key_value(kanade_shared::kv::BUCKET_SERVER_SETTINGS)
+                .await
+                .map_err(|e| ConfigurationError::Unavailable(e.to_string()))?;
+            let (generation, config) = read_passkey_settings(&kv)
+                .await
+                .map_err(ConfigurationError::Unavailable)?;
+            (Some(kv), generation, config)
+        };
+        if !config.enabled {
+            *cached = None;
+            return Ok(None);
+        }
+        if let Some(old) = cached.as_ref()
+            && old.generation == generation
+            && old.config == config
+        {
+            return Ok(Some(old.service.clone()));
+        }
+        let mut service = PasskeyService::new(&config).map_err(ConfigurationError::Invalid)?;
+        service.starts = self.starts.clone();
+        service.authority = kv.map(|kv| (kv, generation.clone(), config.clone()));
+        let service = std::sync::Arc::new(service);
+        *cached = Some(CachedService {
+            generation,
+            config,
+            service: service.clone(),
+        });
+        Ok(Some(service))
+    }
+}
+
 pub struct PasskeyService {
     webauthn: Webauthn,
     store: Mutex<HashMap<String, Entry>>,
-    starts: Mutex<HashMap<String, (u32, Instant)>>,
+    starts: StartLimits,
+    authority: Option<(
+        async_nats::jetstream::kv::Store,
+        Option<String>,
+        PasskeySettings,
+    )>,
 }
 
 fn new_challenge_id() -> String {
@@ -237,7 +338,7 @@ fn new_challenge_id() -> String {
 }
 
 impl PasskeyService {
-    pub fn new(cfg: &WebauthnSection) -> Result<Self, String> {
+    pub fn new(cfg: &PasskeySettings) -> Result<Self, String> {
         let rp = validate_config(cfg)?;
         let first = rp.origins[0].clone();
         let mut builder = WebauthnBuilder::new(&rp.rp_id, &first)
@@ -253,8 +354,19 @@ impl PasskeyService {
         Ok(Self {
             webauthn,
             store: Mutex::new(HashMap::new()),
-            starts: Mutex::new(HashMap::new()),
+            starts: Default::default(),
+            authority: None,
         })
+    }
+
+    pub async fn is_current(&self) -> bool {
+        let Some((kv, generation, config)) = &self.authority else {
+            return true;
+        };
+        match read_passkey_settings(kv).await {
+            Ok((current, value)) => current == *generation && value == *config && value.enabled,
+            Err(_) => false,
+        }
     }
 
     fn insert(&self, pending: Pending, now: Instant) -> Result<String, ChallengeError> {
@@ -583,6 +695,11 @@ impl PasskeyService {
                 .bind(r.last_insert_rowid())
                 .fetch_one(&mut *tx)
                 .await?;
+                // The final authoritative read is the ceremony commit boundary.
+                // A later settings write applies to subsequent ceremonies.
+                if !self.is_current().await {
+                    return Err(RegisterError::Challenge(ChallengeError::Invalid));
+                }
                 tx.commit().await?;
                 Ok(info)
             }

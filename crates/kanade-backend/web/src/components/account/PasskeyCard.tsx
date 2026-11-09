@@ -29,7 +29,7 @@ function serverMessage(err: unknown): string {
 
 /**
  * Self-service passkey (WebAuthn) management: list, add, remove. Renders
- * nothing unless the backend has `[server.webauthn]` configured.
+ * existing credentials remain removable while sign-in is disabled.
  *
  * Adding or removing a credential re-authenticates with the current password
  * (and a TOTP code when MFA is on) — the backend enforces this; the fields
@@ -60,10 +60,10 @@ export function PasskeyCard() {
   }, []);
 
   useEffect(() => {
-    if (enabled) void load();
+    void load();
   }, [enabled, load]);
 
-  if (!enabled) return null;
+  if (!enabled && rows.length === 0) return null;
 
   function reset() {
     setAdding(false);
@@ -81,7 +81,7 @@ export function PasskeyCard() {
 
   async function register(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || !reauthReady || busy) return;
+    if (!enabled || !name.trim() || !reauthReady || busy) return;
     setBusy(true);
     try {
       const started = await apiFetch<StartResp>('/api/auth/passkeys/register/start', {
@@ -249,7 +249,7 @@ export function PasskeyCard() {
             <div className="flex gap-2">
               <Button
                 type="submit"
-                disabled={busy || !supported || !name.trim() || !reauthReady}
+                disabled={!enabled || busy || !supported || !name.trim() || !reauthReady}
                 className="flex-1"
               >
                 {busy ? t('registering') : t('register')}
@@ -265,7 +265,7 @@ export function PasskeyCard() {
               <Button
                 type="button"
                 onClick={() => setAdding(true)}
-                disabled={!supported || mustChangePw || busy}
+                disabled={!enabled || !supported || mustChangePw || busy}
                 className="w-full max-w-md"
               >
                 <Fingerprint className="size-4 mr-2" />

@@ -48,3 +48,14 @@ Component-specific guides:
   the agent self-update path (different from the other three; it
   uses a dedicated rollout bucket, not the generic
   OBJECT_APP_PACKAGES + script pair)
+
+## Enabling passkey sign-in
+
+Use **Operator Settings → Server Settings → Passkeys** to configure and enable
+WebAuthn. This is the only supported configuration path; passkeys are disabled
+by default. Enter the externally trusted RP ID and HTTPS origins explicitly,
+save, and check the effective state. Updates apply without a restart and
+invalidate pending ceremonies across backend instances. See [configuration
+reference](../reference/config.md#passkeys-webauthn) for validation rules,
+credential management and multi-instance routing requirements. Existing
+password/TOTP login and recovery continue to work.

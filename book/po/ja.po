@@ -5070,18 +5070,6 @@ msgstr "任意の文字列"
 msgid "Public SPA base URL for account emails; set it behind a proxy and to avoid deriving links from request headers."
 msgstr "アカウントメール用の公開 SPA ベース URL。プロキシ経由の場合やリクエストヘッダー由来のリンク生成を避ける場合に設定してください。"
 
-#: src/reference/config.md:143
-msgid "`server.webauthn`"
-msgstr "`server.webauthn`"
-
-#: src/reference/config.md:143
-msgid "Table"
-msgstr "テーブル"
-
-#: src/reference/config.md:143
-msgid "Passkey RP ID/origins/name; omitted or empty disables passkeys. See `configs/backend.toml`."
-msgstr "パスキーの RP ID / origins / name。省略または空ならパスキーは無効です。`configs/backend.toml` を参照してください。"
-
 #: src/reference/config.md:144
 msgid "`nats.url`"
 msgstr "`nats.url`"

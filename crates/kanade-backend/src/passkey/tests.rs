@@ -14,8 +14,9 @@ pub(crate) const ORIGIN: &str = "https://kanade.example.com";
 const EVIL: &str = "https://evil.kanade.example.com";
 const IP: &str = "198.51.100.7";
 
-pub(crate) fn section(rp_id: &str, origins: &[&str]) -> WebauthnSection {
-    WebauthnSection {
+pub(crate) fn section(rp_id: &str, origins: &[&str]) -> PasskeySettings {
+    PasskeySettings {
+        enabled: true,
         rp_id: rp_id.to_string(),
         rp_origins: origins.iter().map(|s| s.to_string()).collect(),
         rp_name: None,
@@ -269,20 +270,6 @@ fn rejects_unsafe_configurations() {
         assert!(PasskeyService::new(&section(id, origins)).is_err(), "{why}");
     }
 }
-
-#[test]
-fn public_url_mismatch_is_detected() {
-    let rp = validate_config(&section("example.com", &[ORIGIN])).unwrap();
-    assert!(!public_url_outside_origins(
-        "https://kanade.example.com/",
-        &rp
-    ));
-    assert!(public_url_outside_origins("https://other.example.com", &rp));
-    assert!(public_url_outside_origins("http://kanade.example.com", &rp));
-    assert!(public_url_outside_origins("garbage", &rp));
-}
-
-// ---- enrolment ------------------------------------------------------------
 
 #[tokio::test]
 async fn enrolled_passkey_is_listed_and_removable_only_by_its_owner() {

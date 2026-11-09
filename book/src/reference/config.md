@@ -140,7 +140,6 @@ level = 'info'
 |---|---|---|
 | `server.bind` | String | HTTP/WebSocket bind address. |
 | `server.public_url` | Optional String | Public SPA base URL for account emails; set it behind a proxy and to avoid deriving links from request headers. |
-| `server.webauthn` | Table | Passkey RP ID/origins/name; omitted or empty disables passkeys. See `configs/backend.toml`. |
 | `nats.url` | String | Broker address. |
 | `nats.monitor_url` | Optional String | Monitoring base URL; defaults to HTTP on the broker host, port 8222. |
 | `db.sqlite_path` | Path | SQLite file path. |
@@ -169,3 +168,34 @@ not encrypted storage; non-Windows hosts use the corresponding environment varia
 - **Backend Settings**: `HKLM:\SOFTWARE\Kanade\backend`
 
 These registry paths are protected with local ACL configurations, allowing read permissions strictly to `SYSTEM` and Administrators in the deployment scripts.
+
+### Passkeys (WebAuthn)
+
+Passkeys are configured **only** in **Operator Settings → Server Settings →
+Passkeys** (the persisted `server_settings` KV document). There is no TOML
+setting. New installations default to disabled. An operator sets the RP ID,
+allowed origins (one per line), optional display name (default: Kanade), and
+explicitly enables passkeys. The update API uses nested per-field PATCH
+semantics: omission preserves a field, null clears it, and an origins array
+replaces the whole array. Invalid configurations are rejected before saving.
+
+The RP ID must be a lowercase ASCII domain name without scheme, port or path.
+Origins must be HTTPS bare origins matching that domain or a subdomain; HTTP
+is accepted only for localhost. Values are never derived from request headers.
+Saving valid settings takes effect immediately, without restarting, on all
+backend instances. The settings card reports the effective enabled/disabled
+state and configuration/read failures. Each change invalidates outstanding
+registration and sign-in challenges, including a change back to an earlier RP.
+A ceremony's final authoritative settings read is its commit boundary: a settings
+write after that read applies to subsequent ceremonies.
+
+Credential listing, removal and administrator reset remain available when
+passkey sign-in is disabled. Enrollment/removal still require the current
+password and, when enabled, TOTP. Password/TOTP sign-in and account recovery
+remain available. RP changes can make credentials registered under another RP
+unusable; register new credentials for the configured RP.
+
+Configuration is shared across backends, but in-flight challenges remain in
+process memory. Route both steps of each ceremony to the same backend (sticky
+sessions); restarting that backend discards its outstanding challenges. Keep
+the backend behind a trusted proxy that appends the real client IP for throttling.
