@@ -3,6 +3,9 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# Generated Python bytecode
+__pycache__/
+
 # Local SQLite (backend projector dev DB, created on `cargo run -p kanade-backend`).
 # Production deploys store this under /var/lib/kanade or C:\ProgramData\Kanade.
 *.db

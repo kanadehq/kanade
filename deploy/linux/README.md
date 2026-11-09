@@ -44,6 +44,10 @@ prove acceptance on a particular distribution or host.
 
 GitHub Releases build backend and agent artifacts for both
 `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
+The supported CPU floors and release verification procedure are defined in
+[CPU requirements](../../README.md#cpu-requirements). Build from the repository
+root so Cargo applies `.cargo/config.toml` to Rust and native dependencies.
+
 Use `build-release.sh` / `build-release.ps1` below to collect them, or build
 locally on an ARM64 build host:
 
