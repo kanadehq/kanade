@@ -403,14 +403,19 @@ fn validate_temp_dir(path: &Path, uid: u32) -> Result<()> {
         let leaf = component_path == path;
         if !metadata.is_dir()
             || (leaf && metadata.uid() != uid)
-            || (!leaf && metadata.uid() != 0 && metadata.uid() != uid)
-            || metadata.mode() & 0o022 != 0
+            || (!leaf && !safe_temp_ancestor(metadata.uid(), metadata.mode(), uid))
             || (leaf && metadata.mode() & 0o077 != 0)
         {
             bail!("unsafe session temporary directory ownership, type or permissions");
         }
     }
     Ok(())
+}
+
+fn safe_temp_ancestor(owner: u32, mode: u32, uid: u32) -> bool {
+    // A root-owned sticky directory protects entries even when writable by others.
+    let sticky_root = owner == 0 && mode & 0o1000 != 0;
+    (owner == 0 || owner == uid) && (mode & 0o022 == 0 || sticky_root)
 }
 
 /// A short, bounded child with no inherited secrets and no diagnostic output
@@ -688,13 +693,35 @@ mod tests {
     }
 
     #[test]
+    fn temp_ancestors_allow_writable_modes_only_with_root_owned_sticky_bit() {
+        for (owner, mode, allowed) in [
+            (0, 0o755, true),
+            (501, 0o700, true),
+            (0, 0o1777, true),
+            (0, 0o1770, true),
+            (0, 0o777, false),
+            (0, 0o770, false),
+            (501, 0o1777, false),
+            (501, 0o1770, false),
+            (502, 0o1755, false),
+            (502, 0o1777, false),
+        ] {
+            assert_eq!(
+                safe_temp_ancestor(owner, mode, 501),
+                allowed,
+                "owner={owner}, mode={mode:o}"
+            );
+        }
+    }
+
+    #[test]
     fn temp_directory_rejects_wrong_owner_open_modes_and_links() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().canonicalize().unwrap();
         set_mode(&path, 0o700).unwrap();
         validate_temp_dir(&path, current_euid()).unwrap();
         assert!(validate_temp_dir(&path, current_euid() + 1).is_err());
-        for mode in [0o755, 0o770, 0o777] {
+        for mode in [0o755, 0o770, 0o777, 0o1777] {
             set_mode(&path, mode).unwrap();
             assert!(validate_temp_dir(&path, current_euid()).is_err());
         }
