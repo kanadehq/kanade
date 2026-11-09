@@ -373,7 +373,8 @@ async fn start(
             exe.to_str().context("agent executable path is not UTF-8")?,
             &args,
             None,
-        )?
+        )
+        .await?
     } else {
         require_console_user()?;
         let mut c = tokio::process::Command::new(&exe);

@@ -210,7 +210,8 @@ async fn attempt(session: Session) -> Result<bool> {
         exe.to_str().context("non UTF-8 executable")?,
         &["--screen-permission-check", &uid],
         None,
-    );
+    )
+    .await;
     let mut command = match command {
         Ok(command) => command,
         Err(e) => {
