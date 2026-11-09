@@ -6,7 +6,7 @@
 //! the job's host is wrapped as
 //!
 //! ```text
-//! run_as: user        /bin/launchctl asuser <uid> /usr/bin/sudo -n -u <name> -H -- \
+//! run_as: user        /bin/launchctl asuser <uid> /usr/bin/sudo -n -u #<target-uid> -H -- \
 //!                         /usr/bin/env -i <user env> <program> <args...>
 //! run_as: system_gui  /bin/launchctl asuser <uid> /usr/bin/env -i <root env> <program> <args...>
 //! ```
@@ -28,10 +28,13 @@
 
 use std::ffi::{CStr, c_char};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use kanade_shared::wire::RunAs;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 use tracing::{info, warn};
 
@@ -59,6 +62,7 @@ const STAGING_CATEGORY: &str = "/Library/Application Support/Kanade/agent-script
 /// A resolved passwd entry.
 #[derive(Debug)]
 struct Account {
+    uid: u32,
     name: String,
     home: String,
     shell: String,
@@ -70,7 +74,7 @@ struct Account {
 /// No console user (login window, or `/dev/console` unreadable) is an
 /// error, exactly like the Windows path's "no active console session":
 /// the job is not run and the error surfaces from `run_command_with_kill`.
-pub(crate) fn session_command(
+pub(crate) async fn session_command(
     run_as: RunAs,
     program: &str,
     args: &[&str],
@@ -84,11 +88,11 @@ pub(crate) fn session_command(
              run_as: user / system_gui needs a logged-in user"
         );
     };
-    session_command_for_uid(run_as, console_uid, program, args, cwd)
+    session_command_for_uid(run_as, console_uid, program, args, cwd).await
 }
 
 /// Pin the target discovered by the caller; never retarget to a newly switched user.
-pub(crate) fn session_command_for_uid(
+pub(crate) async fn session_command_for_uid(
     run_as: RunAs,
     console_uid: u32,
     program: &str,
@@ -110,11 +114,16 @@ pub(crate) fn session_command_for_uid(
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| FALLBACK_LANG.to_string());
-    let env = job_env(&target, &lang, &path);
+    let env = job_env(&target, &lang, &path, None);
+    let temp = resolve_temp_dir(run_as, console_uid, &target, &env).await?;
+    let env = job_env(&target, &lang, &path, Some(&temp));
+    if crate::screen_permission_macos::console_uid() != Some(console_uid) {
+        bail!("console user changed while resolving session temporary directory");
+    }
     let argv = launch_argv(run_as, console_uid, &target, &env, program, args);
 
     let mut builder = ProcessCommand::new(LAUNCHCTL);
-    builder.args(&argv);
+    builder.env_clear().args(&argv);
     if let Some(dir) = launch_cwd(run_as, cwd, &target.home) {
         builder.current_dir(dir);
     }
@@ -231,6 +240,7 @@ fn lookup_account(uid: u32) -> Result<Account> {
         let shell = passwd_field(pwd.pw_shell, uid, "pw_shell")?;
         // login(1) semantics for blank fields.
         return Ok(Account {
+            uid,
             name,
             home: if home.is_empty() { "/".into() } else { home },
             shell: if shell.is_empty() {
@@ -293,15 +303,174 @@ fn build_path(etc_paths: &str, paths_d: &[String]) -> String {
 }
 
 /// The complete environment a session job starts with (`env -i`).
-fn job_env(account: &Account, lang: &str, path: &str) -> Vec<String> {
-    vec![
+fn job_env(account: &Account, lang: &str, path: &str, temp: Option<&Path>) -> Vec<String> {
+    let mut env = vec![
         format!("HOME={}", account.home),
         format!("USER={}", account.name),
         format!("LOGNAME={}", account.name),
         format!("SHELL={}", account.shell),
         format!("LANG={lang}"),
         format!("PATH={path}"),
-    ]
+    ];
+    if let Some(temp) = temp {
+        env.push(format!("TMPDIR={}", temp.display()));
+    }
+    env
+}
+
+const TEMP_RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
+const TEMP_OUTPUT_LIMIT: u64 = 4096;
+
+/// Resolve under the same bootstrap and credentials as the host, before
+/// PowerShell/.NET initializes its process-wide temporary-directory cache.
+async fn resolve_temp_dir(
+    run_as: RunAs,
+    console_uid: u32,
+    target: &Account,
+    env: &[String],
+) -> Result<PathBuf> {
+    let output = session_probe(
+        run_as,
+        console_uid,
+        target,
+        env,
+        "/usr/bin/getconf",
+        &["DARWIN_USER_TEMP_DIR"],
+    )
+    .await
+    .context("resolve session temporary directory")?;
+    let path = parse_temp_dir(&output)?;
+    // lstat each component, including the leaf, before canonicalization:
+    // canonicalize alone would silently accept a redirected leaf symlink.
+    validate_temp_dir(&path, target.uid)?;
+    let canonical =
+        std::fs::canonicalize(&path).context("canonicalize session temporary directory")?;
+    validate_temp_dir(&canonical, target.uid)?;
+    let path_arg = canonical
+        .to_str()
+        .context("temporary directory is not UTF-8")?;
+    session_probe(
+        run_as,
+        console_uid,
+        target,
+        env,
+        "/bin/sh",
+        &[
+            "-c",
+            "umask 077; p=$(/usr/bin/mktemp \"$1/.kanade-temp-probe.XXXXXXXX\") || exit 1; /bin/rm -f -- \"$p\"",
+            "kanade-temp-probe",
+            path_arg,
+        ],
+    )
+    .await
+    .context("create/remove temporary file as session identity")?;
+    validate_temp_dir(&canonical, target.uid)?;
+    Ok(canonical)
+}
+
+fn parse_temp_dir(output: &[u8]) -> Result<PathBuf> {
+    if output.len() as u64 > TEMP_OUTPUT_LIMIT {
+        bail!("temporary directory response exceeds limit");
+    }
+    let value = std::str::from_utf8(output).context("temporary directory is not UTF-8")?;
+    let value = value.strip_suffix('\n').unwrap_or(value);
+    if value.is_empty() || value.chars().any(char::is_control) {
+        bail!("invalid temporary directory response");
+    }
+    let path = Path::new(value);
+    if !path.is_absolute()
+        || value.split('/').any(|part| matches!(part, "." | ".."))
+        || path == Path::new("/")
+    {
+        bail!("temporary directory must be an absolute non-root path without dot components");
+    }
+    // /var is a system alias on macOS. No other symlink is accepted.
+    Ok(match path.strip_prefix("/var") {
+        Ok(rest) => Path::new("/private/var").join(rest),
+        Err(_) => path.to_path_buf(),
+    })
+}
+
+fn validate_temp_dir(path: &Path, uid: u32) -> Result<()> {
+    let mut component_path = PathBuf::new();
+    for component in path.components() {
+        if !matches!(component, Component::RootDir | Component::Normal(_)) {
+            bail!("invalid temporary directory component");
+        }
+        component_path.push(component);
+        let metadata = std::fs::symlink_metadata(&component_path)
+            .context("inspect session temporary directory component")?;
+        let leaf = component_path == path;
+        if !metadata.is_dir()
+            || (leaf && metadata.uid() != uid)
+            || (!leaf && metadata.uid() != 0 && metadata.uid() != uid)
+            || metadata.mode() & 0o022 != 0
+            || (leaf && metadata.mode() & 0o077 != 0)
+        {
+            bail!("unsafe session temporary directory ownership, type or permissions");
+        }
+    }
+    Ok(())
+}
+
+/// A short, bounded child with no inherited secrets and no diagnostic output
+/// mixed into the host's streams. The group guard also covers future cancellation.
+async fn session_probe(
+    run_as: RunAs,
+    console_uid: u32,
+    target: &Account,
+    env: &[String],
+    program: &str,
+    args: &[&str],
+) -> Result<Vec<u8>> {
+    let mut command = ProcessCommand::new(LAUNCHCTL);
+    command.args(launch_argv(run_as, console_uid, target, env, program, args));
+    command.env_clear().current_dir("/");
+    bounded_probe(command, TEMP_RESOLVE_TIMEOUT).await
+}
+
+struct ProbeGroup(u32);
+
+impl Drop for ProbeGroup {
+    fn drop(&mut self) {
+        // SAFETY: the child owns this new process group; never signal our group.
+        unsafe { libc::kill(-(self.0 as i32), libc::SIGKILL) };
+    }
+}
+
+async fn bounded_probe(mut command: ProcessCommand, timeout: Duration) -> Result<Vec<u8>> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut child = command
+        .spawn()
+        .context("spawn session temporary directory probe")?;
+    let group = ProbeGroup(child.id().context("probe has no pid")?);
+    let stdout = child.stdout.take().context("probe has no stdout")?;
+    let mut output = Vec::new();
+    let result = tokio::time::timeout(timeout, async {
+        stdout
+            .take(TEMP_OUTPUT_LIMIT + 1)
+            .read_to_end(&mut output)
+            .await?;
+        if output.len() as u64 > TEMP_OUTPUT_LIMIT {
+            bail!("session temporary directory probe output exceeds limit");
+        }
+        let status = child.wait().await?;
+        if !status.success() {
+            bail!("session temporary directory probe failed: {status}");
+        }
+        Ok(())
+    })
+    .await;
+    // Kill descendants even if they have closed stdout and the leader exited.
+    drop(group);
+    let _ = child.wait().await;
+    result.context("session temporary directory probe timed out")??;
+    Ok(output)
 }
 
 /// Arguments to `/bin/launchctl` (argv\[1..\]). `target` is whose identity
@@ -317,8 +486,9 @@ fn launch_argv(
 ) -> Vec<String> {
     let mut argv = vec!["asuser".to_string(), console_uid.to_string()];
     if run_as == RunAs::User {
+        let numeric_uid = format!("#{}", target.uid);
         argv.extend(
-            [SUDO, "-n", "-u", &target.name, "-H", "--"]
+            [SUDO, "-n", "-u", &numeric_uid, "-H", "--"]
                 .into_iter()
                 .map(String::from),
         );
@@ -369,6 +539,7 @@ mod tests {
 
     fn user() -> Account {
         Account {
+            uid: 501,
             name: "alice".into(),
             home: "/Users/alice".into(),
             shell: "/bin/zsh".into(),
@@ -407,7 +578,12 @@ mod tests {
 
     #[test]
     fn user_argv_drops_to_the_user_then_replaces_the_environment() {
-        let env = job_env(&user(), "ja_JP.UTF-8", "/usr/bin:/bin");
+        let env = job_env(
+            &user(),
+            "ja_JP.UTF-8",
+            "/usr/bin:/bin",
+            Some(Path::new("/private/var/folders/user/T")),
+        );
         let argv = launch_argv(
             RunAs::User,
             501,
@@ -424,7 +600,7 @@ mod tests {
                 "/usr/bin/sudo",
                 "-n",
                 "-u",
-                "alice",
+                "#501",
                 "-H",
                 "--",
                 "/usr/bin/env",
@@ -435,6 +611,7 @@ mod tests {
                 "SHELL=/bin/zsh",
                 "LANG=ja_JP.UTF-8",
                 "PATH=/usr/bin:/bin",
+                "TMPDIR=/private/var/folders/user/T",
                 "pwsh",
                 "-NoProfile",
                 "-File",
@@ -446,11 +623,17 @@ mod tests {
     #[test]
     fn system_gui_argv_joins_the_user_session_but_stays_root() {
         let root = Account {
+            uid: 0,
             name: "root".into(),
             home: "/var/root".into(),
             shell: "/bin/sh".into(),
         };
-        let env = job_env(&root, "en_US.UTF-8", "/usr/bin");
+        let env = job_env(
+            &root,
+            "en_US.UTF-8",
+            "/usr/bin",
+            Some(Path::new("/private/var/folders/root/T")),
+        );
         let argv = launch_argv(RunAs::SystemGui, 501, &root, &env, "sh", &["-c", "id"]);
         assert_eq!(
             argv,
@@ -465,6 +648,7 @@ mod tests {
                 "SHELL=/bin/sh",
                 "LANG=en_US.UTF-8",
                 "PATH=/usr/bin",
+                "TMPDIR=/private/var/folders/root/T",
                 "sh",
                 "-c",
                 "id",
@@ -476,15 +660,157 @@ mod tests {
     #[test]
     fn values_are_single_argv_elements_never_reparsed() {
         let odd = Account {
+            uid: 502,
             name: "bob".into(),
             home: "/Users/bob smith/$(id)".into(),
             shell: "/bin/zsh".into(),
         };
         let script = "echo \"$HOME\"; rm -rf ~ `id` $(whoami)";
-        let env = job_env(&odd, "en_US.UTF-8", "/usr/bin");
+        let env = job_env(&odd, "en_US.UTF-8", "/usr/bin", None);
         let argv = launch_argv(RunAs::User, 502, &odd, &env, "sh", &["-c", script]);
         assert!(argv.contains(&"HOME=/Users/bob smith/$(id)".to_string()));
         assert_eq!(argv[argv.len() - 3..], ["sh", "-c", script]);
+    }
+
+    #[test]
+    fn temp_response_only_accepts_one_absolute_path_and_normalizes_var() {
+        assert_eq!(
+            parse_temp_dir(b"/var/folders/test/T/\n").unwrap(),
+            Path::new("/private/var/folders/test/T")
+        );
+        for invalid in [
+            "", "\n", "/", "relative", "/a/../b", "/a/./b", "/a\n\n", "/a\r\n", "/a\0b",
+        ] {
+            assert!(parse_temp_dir(invalid.as_bytes()).is_err(), "{invalid:?}");
+        }
+        assert!(parse_temp_dir(&[b'/'; 4097]).is_err());
+        assert!(parse_temp_dir(b"/\xff").is_err());
+    }
+
+    #[test]
+    fn temp_directory_rejects_wrong_owner_open_modes_and_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap();
+        set_mode(&path, 0o700).unwrap();
+        validate_temp_dir(&path, current_euid()).unwrap();
+        assert!(validate_temp_dir(&path, current_euid() + 1).is_err());
+        for mode in [0o755, 0o770, 0o777] {
+            set_mode(&path, mode).unwrap();
+            assert!(validate_temp_dir(&path, current_euid()).is_err());
+        }
+        set_mode(&path, 0o700).unwrap();
+        let leaf = path.join("leaf");
+        std::os::unix::fs::symlink(&path, &leaf).unwrap();
+        assert!(validate_temp_dir(&leaf, current_euid()).is_err());
+        assert!(validate_temp_dir(&leaf.join("child"), current_euid()).is_err());
+        std::fs::remove_file(&leaf).unwrap();
+        std::fs::write(&leaf, b"file").unwrap();
+        assert!(validate_temp_dir(&leaf, current_euid()).is_err());
+    }
+
+    #[test]
+    fn resolved_temp_is_the_only_addition_to_the_environment_allowlist() {
+        let env = job_env(
+            &user(),
+            "en_US.UTF-8",
+            "/usr/bin",
+            Some(Path::new("/private/var/folders/example/T")),
+        );
+        assert_eq!(
+            env.iter()
+                .map(|v| v.split('=').next().unwrap())
+                .collect::<Vec<_>>(),
+            ["HOME", "USER", "LOGNAME", "SHELL", "LANG", "PATH", "TMPDIR"]
+        );
+        let argv = launch_argv(RunAs::User, 501, &user(), &env, "pwsh", &["a b", "$(id)"]);
+        assert!(argv.contains(&"#501".into()));
+        assert_eq!(argv[argv.len() - 3..], ["pwsh", "a b", "$(id)"]);
+    }
+
+    #[tokio::test]
+    async fn probe_bounds_output_and_preserves_failure_status() {
+        for script in ["exit 7", "while :; do printf 'xxxxxxxxxxxxxxxx'; done"] {
+            let mut command = ProcessCommand::new("/bin/sh");
+            command.args(["-c", script]);
+            assert!(
+                bounded_probe(command, Duration::from_secs(1))
+                    .await
+                    .is_err()
+            );
+        }
+        let mut command = ProcessCommand::new("/bin/sh");
+        command.args(["-c", "printf /private/var/folders/test/T"]);
+        assert_eq!(
+            bounded_probe(command, Duration::from_secs(1))
+                .await
+                .unwrap(),
+            b"/private/var/folders/test/T"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_timeout_kills_and_reaps_the_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let mut command = ProcessCommand::new("/bin/sh");
+        command.args(["-c", "echo $$ > \"$1\"; exec /bin/sleep 30", "probe"]);
+        command.arg(&pid_file);
+        assert!(
+            bounded_probe(command, Duration::from_millis(300))
+                .await
+                .is_err()
+        );
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal 0 only tests existence. wait() must already have reaped it.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_probe_kills_the_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let mut command = ProcessCommand::new("/bin/sh");
+        command.args(["-c", "echo $$ > \"$1\"; exec /bin/sleep 30", "probe"]);
+        command.arg(&pid_file);
+        let task = tokio::spawn(bounded_probe(command, Duration::from_secs(10)));
+        let pid: i32 = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = contents.trim().parse()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        // Tokio reaps kill_on_drop children asynchronously on cancellation.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                // SAFETY: signal 0 only tests process existence.
+                if unsafe { libc::kill(pid, 0) } == -1 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::ESRCH)
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

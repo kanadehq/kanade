@@ -1,0 +1,47 @@
+# Review-only diagnostic. Do not register or execute without explicit owner approval.
+# Uses the supported agent pwsh UTF-8 launcher; no schedule or production action.
+id: probe-macos-tempdir
+version: 0.1.0
+description: Diagnose macOS session temporary directory and named Mutex initialization
+tags: [diagnostic, macos]
+execute:
+  shell: pwsh
+  run_as: user
+  timeout: 20s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    $result = [ordered]@{
+      run_as = 'user'
+      effective_uid = (& /usr/bin/id -u)
+      pwsh_version = $PSVersionTable.PSVersion.ToString()
+      dotnet_version = [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
+      tmpdir = $env:TMPDIR
+      temp_path = $null
+      mutex_created = $false
+      mutex_acquired = $false
+      mutex_released = $false
+      error_type = $null
+    }
+    $mutex = $null
+    $held = $false
+    $failed = $false
+    try {
+      $result.temp_path = [System.IO.Path]::GetTempPath()
+      $created = $false
+      $mutex = [System.Threading.Mutex]::new($false, ('kanade-temp-probe-' + [guid]::NewGuid().ToString('N')), [ref]$created)
+      $result.mutex_created = $created
+      $held = $mutex.WaitOne(0)
+      $result.mutex_acquired = $held
+      if (-not $created -or -not $held) { throw [System.InvalidOperationException]::new() }
+      $mutex.ReleaseMutex()
+      $held = $false
+      $result.mutex_released = $true
+    } catch {
+      $failed = $true
+      $result.error_type = $_.Exception.GetType().FullName
+    } finally {
+      if ($held) { $mutex.ReleaseMutex() }
+      if ($null -ne $mutex) { $mutex.Dispose() }
+    }
+    $result | ConvertTo-Json -Compress
+    if ($failed) { exit 1 }

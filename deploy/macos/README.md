@@ -119,7 +119,7 @@ install keeps working however old its plist is.
 `user` and `system_gui` launch the job's host as
 
 ```text
-user:        /bin/launchctl asuser <uid> /usr/bin/sudo -n -u <name> -H -- /usr/bin/env -i <env> <host> <args…>
+user:        /bin/launchctl asuser <uid> /usr/bin/sudo -n -u #<target-uid> -H -- /usr/bin/env -i <env> <host> <args…>
 system_gui:  /bin/launchctl asuser <uid> /usr/bin/env -i <env> <host> <args…>
 ```
 
@@ -130,9 +130,16 @@ system_gui:  /bin/launchctl asuser <uid> /usr/bin/env -i <env> <host> <args…>
   agent with no active console session.
 - **Environment** is exactly `HOME`, `USER`, `LOGNAME`, `SHELL` (from the
   passwd entry of the user, or of root for `system_gui`), `LANG` (the
-  daemon's, else `en_US.UTF-8`) and `PATH`. Nothing else crosses over — in
+  daemon's, else `en_US.UTF-8`), `PATH` and `TMPDIR`. Nothing else crosses over — in
   particular not the daemon's `KANADE_*` variables or the NATS token.
-  There is no `TMPDIR`; tools fall back to `/tmp`.
+  `TMPDIR` comes from `getconf DARWIN_USER_TEMP_DIR` under the target UID
+  through the same bootstrap/credential chain (root for `system_gui`). It
+  is never inherited from the daemon. Resolution is bounded; invalid paths,
+  symlinks other than the standard `/var` alias, incorrect ownership and
+  unsafe directory modes fail the launch. A private directory must already
+  exist: the agent does not create or repair it. A target-identity exclusive
+  file creation/removal checks usability before the host starts. See
+  [the diagnostic procedure](../../docs/macos-tempdir-diagnostic.md).
 - **PATH** — for every `run_as`, `system` too — is
   `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin`, then `/etc/paths`,
   then each file in `/etc/paths.d` in name order (what `path_helper` gives a

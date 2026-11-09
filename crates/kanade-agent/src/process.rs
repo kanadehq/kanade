@@ -453,7 +453,16 @@ pub async fn run_command_with_start_deadline(
             ("pwsh", args)
         }
     };
-    let mut builder = host_command(cmd, program, &args)?;
+    let mut builder = tokio::select! {
+        biased;
+        _ = kill.killed() => {
+            return Ok(ExecOutcome::Killed {
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+        result = host_command(cmd, program, &args) => result?,
+    };
     builder
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -580,7 +589,7 @@ pub async fn run_command_with_start_deadline(
 /// identity — or, on macOS for `run_as: user` / `system_gui`, wrapped by
 /// [`crate::process_as_user_macos::session_command`] to run in the console
 /// user's GUI session.
-fn host_command(cmd: &Command, program: &str, args: &[&str]) -> Result<ProcessCommand> {
+async fn host_command(cmd: &Command, program: &str, args: &[&str]) -> Result<ProcessCommand> {
     #[cfg(target_os = "macos")]
     if !matches!(cmd.run_as, RunAs::System) {
         return crate::process_as_user_macos::session_command(
@@ -588,7 +597,8 @@ fn host_command(cmd: &Command, program: &str, args: &[&str]) -> Result<ProcessCo
             program,
             args,
             cmd.cwd.as_deref(),
-        );
+        )
+        .await;
     }
     let mut builder = ProcessCommand::new(program);
     builder.args(args);
