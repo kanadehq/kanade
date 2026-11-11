@@ -1376,3 +1376,15 @@ button.nav-item.active:hover {
   width: 16px;
   height: 16px;
 }
+
+/* Offline / cached-data notice (agent has no broker connection). */
+.cache-banner {
+  padding: 8px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border, #8884);
+  background: rgba(230, 160, 0, 0.15);
+}
+.job-blocked {
+  font-size: 12px;
+  margin-left: 8px;
+}

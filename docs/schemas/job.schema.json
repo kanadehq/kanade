@@ -669,6 +669,17 @@
           "description": "End-user-facing title for the job row. The operator-internal\n`Manifest::id` slug is rarely what an end user should read, so\nthis is required (and validated non-empty by\n[`Manifest::validate`]). Maps to `UserInvokableJob::display_name`.",
           "type": "string"
         },
+        "offline": {
+          "description": "Optional **offline execution opt-in** for the end-user Client App.\n\n`None` (every existing manifest) ⇒ the job may be *browsed* from the\nagent's durable cache while the broker is unreachable, but it is\n**never executed offline** (default deny). Viewing cached data and\nauthorizing an execution are separate decisions: only\n`offline: { allow: true, max_age: \"1h\" }` lets the agent start the job\nwithout broker connectivity, and only while the last successful\nauthoritative synchronization (full catalog / membership / revocation\nscan) is younger than `max_age` **and** every definition and script body\nthe run needs is locally present and digest-checked. Absent or\nuncertain freshness evidence (clock skew, agent restart since the last\nsync, partial sync) fails closed. A stricter `staleness: strict` on the\nmanifest still applies (the shorter bound wins). Jobs that need the\nbroker to complete (`collect:`, `finalize:`, `check:`, `emit:`,\n`script_object`) are refused offline even when allowed.\n\nAffects the Client App path only; agent-scheduled and operator\nexecutions are unchanged. New field ⇒ #492 wire rule.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OfflineHint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "show_when": {
           "description": "Optional **dynamic display gate** keyed on a health check's result.\n\n`None` ⇒ always listed (current behavior). When set, the agent\nlists the job in `jobs.list` ONLY while the named [`check:`] slug's\nlatest result is one of [`ShowWhen::is`]. The canonical use is an\nupdate action that hides itself once the machine is already current:\npair the update job with a `check:` that reports `ok` when up to\ndate and gate on `is: [fail]`.\n\nEvaluated agent-side at `jobs.list` time against the live\n`StateSnapshot.checks`, which is **keyed by check name** — so the\ndetector `check:` and this job may live in *different* manifests and\nstill share one slug. Distinct from [`visible_to`](ClientHint::visible_to):\nthat gates BOTH listing and `jobs.execute` (an authorization\nboundary); `show_when` gates listing ONLY (a UX hint), so it can't\ncause a list/execute race. New field ⇒ #492 wire rule.\n\n[`check:`]: crate::manifest::CheckHint",
           "anyOf": [
@@ -1189,6 +1200,27 @@
           "type": "string",
           "const": "unknown"
         }
+      ]
+    },
+    "OfflineHint": {
+      "description": "Offline execution policy for a [`ClientHint`] — see\n[`ClientHint::offline`].",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Explicit opt-in. `false` (or omitting the whole block) denies offline\nexecution.",
+          "type": "boolean"
+        },
+        "max_age": {
+          "description": "Humantime validity period (`1s` ..= `24h`) counted from the START of\nthe last successful authoritative synchronization. Required when\n`allow: true`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allow"
       ]
     },
     "Placement": {

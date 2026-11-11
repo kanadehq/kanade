@@ -176,6 +176,19 @@ type UserInvokableJob = {
   // support grant revealed. A badge hint: the agent already applied the gate
   // when it built this list, and a listed row stays runnable.
   unlock?: string | null;
+  // Why this row cannot run while the agent is offline / serving cached
+  // data. Absent ⇒ no offline restriction. Viewing never implies running.
+  exec_unavailable?: ExecUnavailable | null;
+};
+
+type ExecUnavailable = { code: string; message: string };
+
+// Where a list came from. `cache` ⇒ the agent could not reach the broker and
+// served its last synchronized snapshot.
+type CacheStatus = {
+  source: "live" | "cache" | "unknown";
+  last_sync_at?: string | null;
+  exec_unavailable?: ExecUnavailable | null;
 };
 
 type JobConfirm = {
@@ -183,7 +196,7 @@ type JobConfirm = {
   message?: string | null;
 };
 
-type JobsListResult = { items: UserInvokableJob[] };
+type JobsListResult = { items: UserInvokableJob[]; cache?: CacheStatus | null };
 
 // The raw `RpcNotification` the backend re-emits as a `klp-notification`
 // Tauri event; we switch on `method`.
@@ -753,6 +766,7 @@ async function loadJobs(force = false): Promise<void> {
   try {
     // `category: null` → every tab's jobs in one round-trip; group locally.
     const res = await invoke<JobsListResult>("jobs_list", { category: null });
+    updateCacheBanner("jobs", res.cache);
     jobsByCategory.clear();
     for (const job of res.items) {
       const list = jobsByCategory.get(job.category) ?? [];
@@ -836,14 +850,56 @@ function renderJobRow(j: UserInvokableJob): string {
   const gated = j.unlock
     ? `<span class="job-unlock-badge" title="サポート担当者の解錠中のみ表示されます">サポート専用</span>`
     : "";
+  // Offline / cached rows: the button is disabled and the reason is shown
+  // next to it (the agent re-checks on press, so this is only a display).
+  const blocked = j.exec_unavailable;
+  const runBtn = blocked
+    ? `<button class="job-run-btn" disabled title="${escapeHtml(blocked.message)}" data-job-id="${escapeHtml(j.id)}" data-label="${escapeHtml(j.display_name)}">実行不可</button>
+      <span class="job-blocked muted" data-code="${escapeHtml(blocked.code)}">${escapeHtml(blocked.message)}</span>`
+    : `<button class="job-run-btn" data-job-id="${escapeHtml(j.id)}" data-label="${escapeHtml(j.display_name)}">実行</button>`;
   return `
     <div class="job-row${j.unlock ? " job-row-unlocked" : ""}">
       ${iconHtml(j.icon, fallback)}
       <span class="job-name">${escapeHtml(j.display_name)}</span>
       ${gated}
-      <button class="job-run-btn" data-job-id="${escapeHtml(j.id)}" data-label="${escapeHtml(j.display_name)}">実行</button>
+      ${runBtn}
       ${desc}
     </div>`;
+}
+
+// ---- Offline / cached-data banner --------------------------------------
+//
+// The pipe to the agent can be healthy while the agent has no broker
+// connection; the lists then come from its durable cache. Show that state,
+// the last synchronization time, and why running is unavailable. The two
+// sources (jobs, notifications) are tracked separately; the banner shows
+// while either is cache-served.
+const cacheStatusBySource: Record<string, CacheStatus | null | undefined> = {};
+
+function updateCacheBanner(
+  source: "jobs" | "notifications",
+  cache: CacheStatus | null | undefined,
+): void {
+  cacheStatusBySource[source] = cache;
+  const el = document.getElementById("cache-banner");
+  if (!el) return;
+  const cached = Object.values(cacheStatusBySource).filter(
+    (c): c is CacheStatus => c?.source === "cache",
+  );
+  if (cached.length === 0) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const withTime = cached.find((c) => c.last_sync_at);
+  const when = withTime?.last_sync_at
+    ? new Date(withTime.last_sync_at).toLocaleString()
+    : "不明";
+  const reason = cached.find((c) => c.exec_unavailable)?.exec_unavailable;
+  el.hidden = false;
+  el.textContent =
+    `オフライン: 最後に同期した内容を表示しています（最終同期: ${when}）。` +
+    (reason ? ` 実行できません: ${reason.message}` : " 実行可否はジョブごとに表示されます。");
 }
 
 // ---- Support mode: the 裏コマンド unlock ------------------------------
@@ -1102,6 +1158,7 @@ type AppNotification = {
 type NotificationsListResult = {
   items: AppNotification[];
   next_cursor?: string | null;
+  cache?: CacheStatus | null;
 };
 
 type NotificationsAckResult = { acked_at: string };
@@ -1164,6 +1221,7 @@ async function loadNotifications(): Promise<void> {
       filter: "all",
       cursor: null,
     });
+    updateCacheBanner("notifications", res.cache);
     for (const n of res.items) notifications.set(n.id, n);
     // Reconcile recalls missed while offline: an id deleted from the stream
     // no longer comes back in `notifications.list`, so any locally-held id
@@ -1497,6 +1555,7 @@ async function surfaceForwardedToast(id: string): Promise<void> {
       filter: "all",
       cursor: null,
     });
+    updateCacheBanner("notifications", res.cache);
     for (const n of res.items) notifications.set(n.id, n);
     renderNotifications();
   } catch (err) {
@@ -1522,6 +1581,7 @@ async function resurfaceAllToasts(): Promise<void> {
       filter: "all",
       cursor: null,
     });
+    updateCacheBanner("notifications", res.cache);
     for (const n of res.items) notifications.set(n.id, n);
     // Reconcile recalls (same guard as `loadNotifications`): a notification
     // recalled while the screen was locked is gone from the stream but still

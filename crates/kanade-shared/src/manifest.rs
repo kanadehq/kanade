@@ -914,6 +914,63 @@ pub struct ClientHint {
     /// New field ⇒ #492 wire rule (`serde(default)` + `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unlock: Option<String>,
+    /// Optional **offline execution opt-in** for the end-user Client App.
+    ///
+    /// `None` (every existing manifest) ⇒ the job may be *browsed* from the
+    /// agent's durable cache while the broker is unreachable, but it is
+    /// **never executed offline** (default deny). Viewing cached data and
+    /// authorizing an execution are separate decisions: only
+    /// `offline: { allow: true, max_age: "1h" }` lets the agent start the job
+    /// without broker connectivity, and only while the last successful
+    /// authoritative synchronization (full catalog / membership / revocation
+    /// scan) is younger than `max_age` **and** every definition and script body
+    /// the run needs is locally present and digest-checked. Absent or
+    /// uncertain freshness evidence (clock skew, agent restart since the last
+    /// sync, partial sync) fails closed. A stricter `staleness: strict` on the
+    /// manifest still applies (the shorter bound wins). Jobs that need the
+    /// broker to complete (`collect:`, `finalize:`, `check:`, `emit:`,
+    /// `script_object`) are refused offline even when allowed.
+    ///
+    /// Affects the Client App path only; agent-scheduled and operator
+    /// executions are unchanged. New field ⇒ #492 wire rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline: Option<OfflineHint>,
+}
+
+/// Lower bound of [`OfflineHint::max_age`].
+pub const OFFLINE_MAX_AGE_MIN_SECS: u64 = 1;
+/// Upper bound of [`OfflineHint::max_age`] (24 h): revocations only reach a
+/// disconnected agent after it reconnects, so the window is bounded.
+pub const OFFLINE_MAX_AGE_MAX_SECS: u64 = 24 * 60 * 60;
+
+/// Offline execution policy for a [`ClientHint`] — see
+/// [`ClientHint::offline`].
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OfflineHint {
+    /// Explicit opt-in. `false` (or omitting the whole block) denies offline
+    /// execution.
+    pub allow: bool,
+    /// Humantime validity period (`1s` ..= `24h`) counted from the START of
+    /// the last successful authoritative synchronization. Required when
+    /// `allow: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<String>,
+}
+
+impl OfflineHint {
+    /// Validity period as a duration; `None` when offline execution is not
+    /// allowed or the value is unparseable / out of bounds (fail closed).
+    pub fn validity(&self) -> Option<std::time::Duration> {
+        if !self.allow {
+            return None;
+        }
+        let d = humantime::parse_duration(self.max_age.as_deref()?.trim()).ok()?;
+        let secs = d.as_secs();
+        ((OFFLINE_MAX_AGE_MIN_SECS..=OFFLINE_MAX_AGE_MAX_SECS).contains(&secs)
+            && d.subsec_nanos() == 0)
+            .then_some(d)
+    }
 }
 
 /// Confirmation-dialog config for a [`ClientHint`] — see
@@ -2993,6 +3050,27 @@ impl Manifest {
                     );
                 }
             }
+            if let Some(off) = &client.offline {
+                match (off.allow, off.max_age.as_deref()) {
+                    (true, None) => {
+                        return Err(
+                            "client.offline.max_age is required when allow is true".to_string()
+                        );
+                    }
+                    (true, Some(_)) if off.validity().is_none() => {
+                        return Err(format!(
+                            "client.offline.max_age must be a whole-second duration between \
+                             {OFFLINE_MAX_AGE_MIN_SECS}s and 24h (got {:?})",
+                            off.max_age.as_deref().unwrap_or_default()
+                        ));
+                    }
+                    (false, Some(_)) => {
+                        return Err("client.offline.max_age must be omitted when allow is false"
+                            .to_string());
+                    }
+                    _ => {}
+                }
+            }
         }
         // #219: a `collect:` job's `name` heads the bundle on the SPA
         // Collect page (and the Client App row when paired with
@@ -4217,6 +4295,71 @@ client:
             ..Default::default()
         };
         assert!(all.matches("anyPC", &[]));
+    }
+
+    fn offline_manifest(extra: &str) -> Manifest {
+        let yaml = format!(
+            "id: j\nversion: 1.0.0\nexecute:\n  shell: powershell\n  script: \"echo x\"\n  timeout: 30s\nclient:\n  name: A\n  category: troubleshoot\n{extra}"
+        );
+        serde_yaml::from_str(&yaml).expect("parse")
+    }
+
+    #[test]
+    fn manifest_client_offline_defaults_to_absent_and_denied() {
+        let m = offline_manifest("");
+        m.validate().expect("valid");
+        assert!(m.client.as_ref().unwrap().offline.is_none());
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(v["client"].get("offline").is_none(), "wire: {v:?}");
+    }
+
+    #[test]
+    fn manifest_client_offline_opt_in_round_trips_and_bounds() {
+        let m = offline_manifest("  offline:\n    allow: true\n    max_age: 1h\n");
+        m.validate().expect("valid opt-in");
+        let off = m.client.as_ref().unwrap().offline.clone().unwrap();
+        assert_eq!(off.validity(), Some(std::time::Duration::from_secs(3600)));
+        for ok in ["1s", "24h"] {
+            offline_manifest(&format!("  offline:\n    allow: true\n    max_age: {ok}\n"))
+                .validate()
+                .expect(ok);
+        }
+        for bad in ["0s", "500ms", "25h", "1d 1s", "soon", "1.5s"] {
+            let err = offline_manifest(&format!(
+                "  offline:\n    allow: true\n    max_age: \"{bad}\"\n"
+            ))
+            .validate()
+            .expect_err(bad);
+            assert!(err.contains("client.offline.max_age"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn manifest_client_offline_requires_max_age_and_rejects_noise() {
+        let err = offline_manifest("  offline:\n    allow: true\n")
+            .validate()
+            .expect_err("missing max_age");
+        assert!(err.contains("client.offline.max_age"), "{err}");
+        let err = offline_manifest("  offline:\n    allow: false\n    max_age: 1h\n")
+            .validate()
+            .expect_err("max_age with deny");
+        assert!(err.contains("client.offline.max_age"), "{err}");
+        offline_manifest("  offline:\n    allow: false\n")
+            .validate()
+            .expect("explicit deny is fine");
+        let bad = "id: j\nversion: 1.0.0\nexecute:\n  shell: powershell\n  script: x\n  timeout: 30s\nclient:\n  name: A\n  category: c\n  offline:\n    allow: true\n    max_age: 1h\n    typo: 1\n";
+        assert!(serde_yaml::from_str::<Manifest>(bad).is_err());
+        // Unparseable / disabled hints never yield a validity window.
+        let h = OfflineHint {
+            allow: true,
+            max_age: Some("nope".into()),
+        };
+        assert!(h.validity().is_none());
+        let h = OfflineHint {
+            allow: false,
+            max_age: None,
+        };
+        assert!(h.validity().is_none());
     }
 
     #[test]

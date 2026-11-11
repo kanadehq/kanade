@@ -168,6 +168,10 @@ pub struct NotificationsListResult {
     /// next page; `None` ⇒ caller has the tail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// `Some` with `source: cache` when this history is the last synchronized
+    /// snapshot served without broker connectivity. #492 wire rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::ipc::jobs::CacheStatus>,
 }
 
 // ---------- notifications.subscribe ----------

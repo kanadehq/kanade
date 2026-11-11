@@ -1,4 +1,5 @@
 mod check_cache;
+mod client_cache;
 mod collect;
 mod commands;
 mod concurrency;
@@ -904,6 +905,22 @@ pub(crate) async fn run_agent() -> Result<()> {
         kanade_shared::ipc::notifications::NotificationAmend,
     >(klp::notify_bus::BROADCAST_CAPACITY)
     .0;
+    // Durable Client App cache + offline gate. Scoped to broker + PC so a
+    // cache is never reused across them. A failure to prepare the directory
+    // disables offline browsing/execution (fail closed), nothing else.
+    match client_cache::init(
+        default_paths::data_dir().join("client_cache"),
+        format!("{}|{}", cfg.agent.nats_url, pc_id),
+    ) {
+        Ok(store) => {
+            tokio::spawn(client_cache::run_sync_loop(
+                store,
+                client.clone(),
+                pc_id.clone(),
+            ));
+        }
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "client cache disabled"),
+    }
     // Held for the life of the agent: dropping it stops the listener and
     // removes the socket file.
     #[cfg(unix)]

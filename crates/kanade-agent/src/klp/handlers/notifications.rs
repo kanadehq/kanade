@@ -374,7 +374,28 @@ pub async fn handle_notifications_list(
             "notifications.list: caller SID could not be resolved",
         ));
     }
+    let limit = (params.limit as usize).clamp(1, MAX_LIMIT);
+    let offset = decode_cursor(params.cursor.as_deref());
+    // Broker unreachable: serve this user's last complete history snapshot.
+    if !crate::klp::state::client_online(client) {
+        let snap = crate::client_cache::store()
+            .and_then(|s| s.load_notifications(user_sid))
+            .ok_or_else(|| {
+                RpcError::new(
+                    ErrorKind::AgentDisconnected,
+                    "サーバーに接続できず、保存済みの通知履歴もありません",
+                )
+            })?;
+        return Ok(offline_notifications_list(
+            snap,
+            params.filter,
+            Utc::now(),
+            limit,
+            offset,
+        ));
+    }
     let js = async_nats::jetstream::new(client.clone());
+    let started_wall = Utc::now();
 
     let my_groups = read_my_groups(&js, &conn.pc_id).await?;
     let subjects = filter_subjects(&conn.pc_id, &my_groups);
@@ -388,16 +409,44 @@ pub async fn handle_notifications_list(
     // notification not addressed to this PC is never surfaced.
     let acks = read_user_acks(&js, &conn.pc_id, user_sid).await?;
 
-    let limit = (params.limit as usize).clamp(1, MAX_LIMIT);
-    let offset = decode_cursor(params.cursor.as_deref());
-    Ok(build_notifications_list(
+    // The replay and the ack scan both completed, so this is the full
+    // history: persist it (replacing the previous snapshot, which is how a
+    // deleted / recalled notification disappears from the offline view).
+    if let Some(store) = crate::client_cache::store()
+        && let Err(e) =
+            store.commit_notifications(user_sid, started_wall, notifications.clone(), acks.clone())
+    {
+        warn!(error = %format!("{e:#}"), "notifications.list: cache write failed");
+    }
+    let mut result = build_notifications_list(
         notifications,
         &acks,
         params.filter,
         Utc::now(),
         limit,
         offset,
-    ))
+    );
+    result.cache = Some(crate::client_cache::live_status());
+    Ok(result)
+}
+
+/// Offline `notifications.list` from a persisted snapshot (same filtering,
+/// expiry and ack-reset rules as the live path).
+pub fn offline_notifications_list(
+    snap: crate::client_cache::NotificationSnapshot,
+    filter: NotificationsFilter,
+    now: DateTime<Utc>,
+    limit: usize,
+    offset: usize,
+) -> NotificationsListResult {
+    let synced_at = snap.synced_at;
+    let mut result = build_notifications_list(snap.items, &snap.acks, filter, now, limit, offset);
+    result.cache = Some(kanade_shared::ipc::jobs::CacheStatus {
+        source: kanade_shared::ipc::jobs::CacheSource::Cache,
+        last_sync_at: Some(synced_at),
+        exec_unavailable: None,
+    });
+    result
 }
 
 /// Read this PC's effective group membership — the union of the operator
@@ -783,6 +832,7 @@ fn build_notifications_list(
     NotificationsListResult {
         items: page,
         next_cursor,
+        cache: None,
     }
 }
 
@@ -1469,5 +1519,30 @@ mod tests {
         );
         assert_eq!(r.items.len(), 1, "same id collapses to one");
         assert_eq!(r.items[0].issued_at, base + chrono::Duration::seconds(60));
+    }
+
+    #[test]
+    fn offline_history_is_served_from_snapshot_with_user_acks_and_status() {
+        use crate::client_cache::NotificationSnapshot;
+        use kanade_shared::ipc::jobs::CacheSource;
+        let now = Utc::now();
+        let mut acks = HashMap::new();
+        acks.insert("n-all".to_string(), now);
+        let snap = NotificationSnapshot {
+            version: 1,
+            scope: "s".into(),
+            user_key: "alice".into(),
+            synced_at: now,
+            items: vec![sample_notification("n-all"), sample_notification("n-pc")],
+            acks,
+        };
+        let all = offline_notifications_list(snap.clone(), NotificationsFilter::All, now, 50, 0);
+        assert_eq!(all.items.len(), 2);
+        let cache = all.cache.expect("cache status");
+        assert_eq!(cache.source, CacheSource::Cache);
+        assert_eq!(cache.last_sync_at, Some(now));
+        let unread = offline_notifications_list(snap, NotificationsFilter::Unread, now, 50, 0);
+        assert_eq!(unread.items.len(), 1, "alice's ack marks n-all read");
+        assert_eq!(unread.items[0].id, "n-pc");
     }
 }

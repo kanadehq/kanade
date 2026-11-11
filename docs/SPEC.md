@@ -2262,6 +2262,12 @@ check を用意し、更新ジョブを `is: [fail]` でゲートする。
   `fleet`(SPA フリート集計軸)と `health`(Client Health 軸)は直交し、純粋なゲート検査は
   両方 off にすればどこにも出ずゲートだけ駆動する。
 
+#### `client.offline` — オフライン実行の明示 opt-in
+
+`client:` ジョブは `offline: { allow: true, max_age: <1s..24h> }` を持てる。
+未指定・`allow: false` (既存 manifest を含む) はオフラインで実行されない。
+閲覧用キャッシュと実行認可は別で、詳細は [client-offline.md](client-offline.md)。
+
 #### `client.unlock` — サポートコードによる時限表示 (裏コマンド)
 
 `client:` ジョブは `unlock: <scope>` を持てる。そのジョブは通常
