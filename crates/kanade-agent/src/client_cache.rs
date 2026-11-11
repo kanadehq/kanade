@@ -1393,16 +1393,18 @@ mod tests {
         use std::os::windows::ffi::OsStrExt;
         use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
-            SDDL_REVISION_1, SE_FILE_OBJECT,
+            ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
         };
-        use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
-        use windows::core::{PCWSTR, PWSTR};
+        use windows::Win32::Security::{
+            ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorControl,
+            GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        };
+        use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+        use windows::core::{BOOL, PCWSTR, PWSTR};
 
-        fn dacl(path: &Path) -> String {
+        fn dacl(path: &Path) -> (bool, Vec<String>) {
             let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
             let mut sd = PSECURITY_DESCRIPTOR::default();
-            let mut text = PWSTR::null();
             unsafe {
                 GetNamedSecurityInfoW(
                     PCWSTR(name.as_ptr()),
@@ -1416,18 +1418,32 @@ mod tests {
                 )
                 .ok()
                 .unwrap();
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    sd,
-                    SDDL_REVISION_1,
-                    DACL_SECURITY_INFORMATION,
-                    &mut text,
-                    None,
-                )
-                .unwrap();
-                let result = text.to_string().unwrap();
-                let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+                let mut control = 0;
+                let mut revision = 0;
+                GetSecurityDescriptorControl(sd, &mut control, &mut revision).unwrap();
+                let mut present = BOOL::default();
+                let mut defaulted = BOOL::default();
+                let mut acl = std::ptr::null_mut();
+                GetSecurityDescriptorDacl(sd, &mut present, &mut acl, &mut defaulted).unwrap();
+                assert!(
+                    present.as_bool() && !acl.is_null(),
+                    "a non-null DACL is required"
+                );
+                let mut trustees = Vec::new();
+                for index in 0..u32::from((*acl).AceCount) {
+                    let mut ace = std::ptr::null_mut();
+                    GetAce(acl, index, &mut ace).unwrap();
+                    let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                    assert_eq!(ace.Header.AceType, 0, "only ACCESS_ALLOWED_ACE is expected");
+                    assert_eq!(ace.Mask, FILE_ALL_ACCESS.0);
+                    let sid = PSID(std::ptr::addr_of!(ace.SidStart).cast_mut().cast());
+                    let mut text = PWSTR::null();
+                    ConvertSidToStringSidW(sid, &mut text).unwrap();
+                    trustees.push(text.to_string().unwrap());
+                    let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+                }
                 let _ = LocalFree(Some(HLOCAL(sd.0)));
-                result
+                (control & SE_DACL_PROTECTED.0 != 0, trustees)
             }
         }
 
@@ -1447,23 +1463,20 @@ mod tests {
                 HashMap::new(),
             )
             .unwrap();
+        // Compare the actual trustee SIDs. SDDL rendering can abbreviate a
+        // local Administrator SID as LA (and SYSTEM as SY), so its text is
+        // not a stable representation of the agent identity.
+        let mut expected = vec!["S-1-5-18".to_string(), windows_acl::agent_sid().unwrap()];
+        expected.sort();
         for path in [&cache, &legacy, &store.catalog_path()] {
-            let acl = dacl(path);
-            assert_eq!(acl.matches('(').count(), 2, "{acl}");
-            assert!(acl.contains(";;;SY)"), "{acl}");
-            let sid = windows_acl::agent_sid().unwrap();
-            if sid != "S-1-5-18" {
-                assert!(acl.contains(&format!(";;;{sid})")), "{acl}");
-            }
-            assert!(
-                !acl.contains(";;;OW)"),
-                "must grant the agent, not a pre-existing owner"
+            let (_, mut trustees) = dacl(path);
+            trustees.sort();
+            assert_eq!(
+                trustees, expected,
+                "only SYSTEM and the agent may access the cache"
             );
         }
-        assert!(
-            dacl(&cache).starts_with("D:P"),
-            "inheritance must be disabled"
-        );
+        assert!(dacl(&cache).0, "inheritance must be disabled");
         assert!(store.load_catalog().is_some());
     }
 
