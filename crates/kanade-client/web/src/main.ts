@@ -1261,13 +1261,18 @@ async function loadNotifications(): Promise<void> {
 
     await automaticNotificationsReady;
     await ensureLaunchId();
-    const target = pendingNotificationId
-      ? notifications.get(pendingNotificationId)
+    // Consume the launch request once, before dispatching any asynchronous
+    // toast/window action. Periodic history refreshes must not re-launch it.
+    const launchNotificationId = pendingNotificationId;
+    pendingNotificationId = null;
+    const target = launchNotificationId
+      ? notifications.get(launchNotificationId)
       : null;
     if (!automaticNotificationsAvailable) {
       // History remains usable without native notifications or session evidence.
-      pendingNotificationId = null;
-    } else if (pendingNotificationId && target) {
+      return;
+    }
+    if (launchNotificationId && target) {
       // Agent-launched for a specific emergency (#102): surface it as a
       // native OS toast (the window stays hidden so it never bursts over
       // a meeting) — clicking the toast opens the window onto it.
@@ -1282,7 +1287,7 @@ async function loadNotifications(): Promise<void> {
         // agent-launch isn't a silent no-op.
         void invoke("show_main_window").catch(() => {});
       }
-    } else if (pendingNotificationId) {
+    } else if (launchNotificationId) {
       // Launched for an id we don't have in history — reveal the window.
       void invoke("show_main_window").catch(() => {});
     } else {
