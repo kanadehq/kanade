@@ -162,12 +162,19 @@ pub enum NotificationsFilter {
 /// `notifications.list` response.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct NotificationsListResult {
+    /// Complete retained audience IDs, independent of filtering and pagination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_ids: Option<Vec<String>>,
     pub items: Vec<Notification>,
     /// Opaque continuation token. `Some(cursor)` ⇒ caller should
     /// re-request with `params.cursor = Some(cursor)` to fetch the
     /// next page; `None` ⇒ caller has the tail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// `Some` with `source: cache` when this history is the last synchronized
+    /// snapshot served without broker connectivity. #492 wire rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::ipc::jobs::CacheStatus>,
 }
 
 // ---------- notifications.subscribe ----------

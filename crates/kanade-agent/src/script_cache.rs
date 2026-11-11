@@ -128,6 +128,9 @@ impl ScriptCache {
             .info(key)
             .await
             .with_context(|| format!("object_store.info {key}"))?;
+        if info.deleted {
+            bail!("script_object was deleted");
+        }
         let raw = info
             .digest
             .as_deref()

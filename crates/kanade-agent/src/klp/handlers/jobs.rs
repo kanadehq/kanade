@@ -70,7 +70,7 @@ use super::super::connection::ConnectionState;
 use super::super::unlock;
 use super::system::HandlerResult;
 use crate::outbox;
-use crate::process::{ExecOutcome, run_command_with_kill};
+use crate::process::{ExecOutcome, LaunchGuard, run_command_with_guard};
 
 /// `jobs.list` — list the user-invokable job catalog for the Client
 /// App, optionally filtered to a single tab's category.
@@ -94,6 +94,13 @@ pub async fn handle_jobs_list(
         )
     })?;
 
+    // Broker unreachable: serve the last synchronized snapshot (browse only;
+    // execution authorization is decided separately, per job). A broker that
+    // IS reachable never falls back to the cache — an online NotFound / error
+    // is authoritative.
+    if !crate::klp::state::client_online(client) {
+        return offline_job_list(conn, params);
+    }
     let js = async_nats::jetstream::new(client.clone());
     let kv = js.get_key_value(BUCKET_JOBS).await.map_err(|e| {
         warn!(error = %e, "jobs.list: failed to open BUCKET_JOBS");
@@ -181,14 +188,200 @@ pub async fn handle_jobs_list(
     // the process-wide grant store, so a grant that lapsed mid-session drops
     // the rows on the next refresh with no client cooperation needed.
     let unlocked = |scope: &str| unlock::holds(&conn.peer.user_key, scope);
-    Ok(build_job_list(
+    let mut result = build_job_list(
         &manifests,
         params.category,
         &conn.pc_id,
         &groups,
         &checks,
         &unlocked,
+    );
+    result.cache = Some(crate::client_cache::live_status());
+    Ok(result)
+}
+
+/// Offline `jobs.list`: the persisted catalog, re-verified entry by entry,
+/// filtered with the same display gates as the live path.
+fn offline_job_list(
+    conn: &ConnectionState,
+    params: JobsListParams,
+) -> HandlerResult<JobsListResult> {
+    let no_cache = || {
+        RpcError::new(
+            ErrorKind::AgentDisconnected,
+            "サーバーに接続できず、保存済みのジョブ一覧もありません",
+        )
+    };
+    let store = crate::client_cache::store().ok_or_else(no_cache)?;
+    let snapshot = store.load_catalog().ok_or_else(no_cache)?;
+    let live_checks: HashMap<String, CheckStatus> = conn
+        .state_rx
+        .borrow()
+        .checks
+        .iter()
+        .map(|c| (c.name.clone(), c.status))
+        .collect();
+    let unlocked = |scope: &str| unlock::holds(&conn.peer.user_key, scope);
+    Ok(build_offline_job_list(
+        &snapshot,
+        store.evidence().as_ref(),
+        params.category,
+        &conn.pc_id,
+        &live_checks,
+        &unlocked,
+        Utc::now(),
+        std::time::Instant::now(),
     ))
+}
+
+/// Pure core of [`offline_job_list`]. Every row carries the per-job reason it
+/// cannot run offline (`exec_unavailable`); rows whose cached bytes fail the
+/// integrity check are not shown at all.
+#[allow(clippy::too_many_arguments)]
+pub fn build_offline_job_list(
+    snapshot: &crate::client_cache::CatalogSnapshot,
+    evidence: Option<&crate::client_cache::Evidence>,
+    filter: Option<String>,
+    pc_id: &str,
+    checks: &HashMap<String, CheckStatus>,
+    unlocked: &dyn Fn(&str) -> bool,
+    now_wall: chrono::DateTime<Utc>,
+    now_mono: std::time::Instant,
+) -> JobsListResult {
+    let manifests: Vec<Manifest> = snapshot
+        .entries
+        .iter()
+        .filter_map(|e| crate::client_cache::verify_entry(e).ok())
+        .collect();
+    let mut display_checks = snapshot.checks.clone();
+    display_checks.extend(checks.iter().map(|(name, status)| (name.clone(), *status)));
+    let mut result = build_job_list(
+        &manifests,
+        filter,
+        pc_id,
+        &snapshot.groups,
+        &display_checks,
+        unlocked,
+    );
+    for item in &mut result.items {
+        item.exec_unavailable =
+            crate::client_cache::evaluate(snapshot, evidence, &item.id, pc_id, now_wall, now_mono)
+                .err()
+                .map(crate::client_cache::Denied::to_wire);
+    }
+    result.cache = Some(crate::client_cache::status_for(
+        kanade_shared::ipc::jobs::CacheSource::Cache,
+        Some(snapshot),
+        evidence,
+        now_wall,
+        now_mono,
+    ));
+    result
+}
+
+/// Offline half of `jobs.execute`. Re-evaluates the gate against the freshly
+/// loaded snapshot immediately before starting; nothing here is queued or
+/// retried — a lost response means "unknown", never a replay.
+async fn offline_execute(
+    conn: &mut ConnectionState,
+    client: async_nats::Client,
+    params: JobsExecuteParams,
+) -> HandlerResult<JobsExecuteResult> {
+    if !valid_job_id(&params.id) {
+        return Err(RpcError::new(
+            ErrorKind::InvalidParams,
+            format!("job id '{}' is not a valid job id", params.id),
+        ));
+    }
+    let unavailable = |msg: &str| RpcError::new(ErrorKind::AgentDisconnected, msg.to_string());
+    let store = crate::client_cache::store()
+        .ok_or_else(|| unavailable("サーバーに接続できず、オフライン実行も利用できません"))?;
+    let snapshot = store
+        .load_catalog()
+        .ok_or_else(|| unavailable("サーバーに接続できず、保存済みのジョブ定義がありません"))?;
+    let run_id = Uuid::new_v4().to_string();
+    let request_id = Uuid::new_v4().to_string();
+    let cmd = prepare_offline_command(
+        &snapshot,
+        store.evidence().as_ref(),
+        &params.id,
+        &conn.pc_id,
+        &run_id,
+        &request_id,
+        Utc::now(),
+        std::time::Instant::now(),
+    )?;
+    let job_id = params.id.clone();
+    let guard_pc = conn.pc_id.clone();
+    let generation = snapshot.generation.clone();
+    let expected_script = cmd.script.clone();
+    let launch_guard: LaunchGuard = Arc::new(move || {
+        let current = store
+            .load_catalog()
+            .ok_or_else(|| anyhow::anyhow!("cached definition missing"))?;
+        anyhow::ensure!(
+            current.generation == generation,
+            "catalog changed before launch"
+        );
+        let manifest = crate::client_cache::evaluate(
+            &current,
+            store.evidence().as_ref(),
+            &job_id,
+            &guard_pc,
+            Utc::now(),
+            std::time::Instant::now(),
+        )
+        .map_err(|d| anyhow::anyhow!("{}", d.message()))?;
+        let command =
+            build_command(&manifest, "guard", "guard").map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        anyhow::ensure!(
+            command.script == expected_script,
+            "script changed before launch"
+        );
+        Ok(())
+    });
+    conn.register_run(run_id.clone());
+    // Local-only kill switch: the broker is unreachable.
+    let kill = crate::kill::KillSwitch::arm(None, cmd.exec_id.as_deref()).await;
+    let push_tx = conn.push_tx.clone();
+    let pc_id = conn.pc_id.clone();
+    tokio::spawn(run_job(
+        client,
+        cmd,
+        kill,
+        run_id.clone(),
+        push_tx,
+        pc_id,
+        Some(launch_guard),
+    ));
+    Ok(JobsExecuteResult { run_id })
+}
+
+/// Pure gate + command build for an offline run.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_offline_command(
+    snapshot: &crate::client_cache::CatalogSnapshot,
+    evidence: Option<&crate::client_cache::Evidence>,
+    id: &str,
+    pc_id: &str,
+    run_id: &str,
+    request_id: &str,
+    now_wall: chrono::DateTime<Utc>,
+    now_mono: std::time::Instant,
+) -> Result<Command, RpcError> {
+    let manifest = crate::client_cache::evaluate(snapshot, evidence, id, pc_id, now_wall, now_mono)
+        .map_err(|d| {
+            warn!(job_id = %id, reason = d.code(), "jobs.execute: offline execution refused");
+            RpcError::new(
+                ErrorKind::Unauthorized,
+                format!(
+                    "offline execution unavailable ({}): {}",
+                    d.code(),
+                    d.message()
+                ),
+            )
+        })?;
+    build_command(&manifest, run_id, request_id)
 }
 
 /// Resolve this agent's group membership from the `agent_groups.{pc_id}`
@@ -314,7 +507,7 @@ pub fn build_job_list(
             .cmp(&b.display_name)
             .then_with(|| a.id.cmp(&b.id))
     });
-    JobsListResult { items }
+    JobsListResult { items, cache: None }
 }
 
 /// Map one manifest to its catalog row, or `None` when it carries no
@@ -365,6 +558,7 @@ fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
         // Per-user run history is minted by `jobs.execute` (a
         // follow-up PR); until then every row is "never run by you".
         last_run: None,
+        exec_unavailable: None,
     })
 }
 
@@ -393,6 +587,10 @@ pub async fn handle_jobs_execute(
             )
         })?
         .clone();
+
+    if !crate::klp::state::client_online(&client) {
+        return offline_execute(conn, client, params).await;
+    }
 
     let manifest = fetch_manifest(&client, &params.id).await?;
 
@@ -460,7 +658,15 @@ pub async fn handle_jobs_execute(
     let push_tx = conn.push_tx.clone();
     let pc_id = conn.pc_id.clone();
     let spawned_run_id = run_id.clone();
-    tokio::spawn(run_job(client, cmd, kill, spawned_run_id, push_tx, pc_id));
+    tokio::spawn(run_job(
+        client,
+        cmd,
+        kill,
+        spawned_run_id,
+        push_tx,
+        pc_id,
+        None,
+    ));
 
     Ok(JobsExecuteResult { run_id })
 }
@@ -673,6 +879,7 @@ async fn run_job(
     run_id: String,
     push_tx: mpsc::Sender<Vec<u8>>,
     pc_id: String,
+    launch_guard: Option<LaunchGuard>,
 ) {
     // Client actions are interactive: start immediately without acquiring or
     // consuming a local slot, even when scheduled/admin jobs fill the budget.
@@ -747,7 +954,8 @@ async fn run_job(
     };
 
     let started_at = Utc::now();
-    let outcome = run_command_with_kill(&kill, &cmd, Some(live_handle.tail())).await;
+    let outcome =
+        run_command_with_guard(&kill, &cmd, Some(live_handle.tail()), None, launch_guard).await;
     let finished_at = Utc::now();
 
     // Stop the streamer and let its final tick flush before the terminal
@@ -1238,6 +1446,7 @@ mod tests {
                 show_when: None,
                 confirm: None,
                 unlock: None,
+                offline: None,
             }),
             tags: Vec::new(),
             origin: None,
@@ -1975,5 +2184,244 @@ mod tests {
         // No overlap at all (even with a long prev) → fall back to the
         // full tail; a little duplication beats a gap.
         assert_eq!(tail_delta(&"z".repeat(300), "qqqq"), "qqqq");
+    }
+
+    // ---------- offline browse / execute gate ----------
+
+    mod offline {
+        use super::*;
+        use crate::client_cache::{CatalogSnapshot, Evidence, cache_entry};
+        use chrono::Duration as CDuration;
+        use kanade_shared::ipc::jobs::CacheSource;
+        use std::time::{Duration as StdDuration, Instant};
+
+        fn detail(e: &RpcError) -> String {
+            e.data
+                .as_ref()
+                .map(|d| d.detail.clone())
+                .unwrap_or_default()
+        }
+
+        fn raw(id: &str, offline: Option<serde_json::Value>) -> Vec<u8> {
+            let mut client = serde_json::json!({"name": id, "category": "troubleshoot"});
+            if let Some(o) = offline {
+                client["offline"] = o;
+            }
+            let m = serde_json::json!({
+                "id": id, "version": "1.0.0",
+                "execute": {"shell": "powershell", "script": "echo hi", "timeout": "30s"},
+                "client": client,
+            });
+            let m: Manifest = serde_json::from_value(m).unwrap();
+            m.validate().unwrap();
+            serde_json::to_vec(&m).unwrap()
+        }
+
+        fn snapshot(at: chrono::DateTime<Utc>) -> CatalogSnapshot {
+            let allow = serde_json::json!({"allow": true, "max_age": "1h"});
+            CatalogSnapshot {
+                version: 1,
+                scope: "s".into(),
+                generation: "g".into(),
+                synced_at: at,
+                checks: HashMap::new(),
+                entries: vec![
+                    cache_entry("opt-in", &raw("opt-in", Some(allow)))
+                        .unwrap()
+                        .0,
+                    cache_entry("legacy", &raw("legacy", None)).unwrap().0,
+                ],
+                revoked: vec![],
+                groups: vec![],
+            }
+        }
+
+        fn ev(at: chrono::DateTime<Utc>, mono: Instant) -> Evidence {
+            Evidence {
+                generation: "g".into(),
+                wall: at,
+                mono,
+            }
+        }
+
+        #[test]
+        fn offline_show_when_survives_restart_without_granting_execution() {
+            let t0 = Utc::now();
+            let mut snap = snapshot(t0);
+            let mut value: serde_json::Value = serde_json::from_str(&snap.entries[0].raw).unwrap();
+            value["client"]["show_when"] = serde_json::json!({"check": "health", "is": ["fail"]});
+            snap.entries[0] = cache_entry("opt-in", &serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .0;
+            snap.checks.insert("health".into(), CheckStatus::Fail);
+            let list = build_offline_job_list(
+                &snap,
+                None,
+                None,
+                "pc",
+                &no_checks(),
+                &|_| false,
+                t0,
+                Instant::now(),
+            );
+            let row = list
+                .items
+                .iter()
+                .find(|j| j.id == "opt-in")
+                .expect("persisted show_when result keeps the row visible");
+            assert_eq!(
+                row.exec_unavailable.as_ref().unwrap().code,
+                "resync_required"
+            );
+            let live = HashMap::from([("health".into(), CheckStatus::Ok)]);
+            let list = build_offline_job_list(
+                &snap,
+                None,
+                None,
+                "pc",
+                &live,
+                &|_| false,
+                t0,
+                Instant::now(),
+            );
+            assert!(
+                list.items.iter().all(|j| j.id != "opt-in"),
+                "newer local check results override the snapshot"
+            );
+        }
+
+        #[test]
+        fn offline_list_shows_all_rows_but_only_opted_in_ones_are_runnable() {
+            let t0 = Utc::now();
+            let m0 = Instant::now();
+            let snap = snapshot(t0);
+            let e = ev(t0, m0);
+            let list = build_offline_job_list(
+                &snap,
+                Some(&e),
+                None,
+                "pc",
+                &no_checks(),
+                &|_| false,
+                t0,
+                m0,
+            );
+            let by_id: HashMap<_, _> = list.items.iter().map(|j| (j.id.as_str(), j)).collect();
+            assert_eq!(by_id.len(), 2, "cached viewing shows every row");
+            assert!(by_id["opt-in"].exec_unavailable.is_none());
+            assert_eq!(
+                by_id["legacy"].exec_unavailable.as_ref().unwrap().code,
+                "offline_not_allowed"
+            );
+            let cache = list.cache.unwrap();
+            assert_eq!(cache.source, CacheSource::Cache);
+            assert_eq!(cache.last_sync_at, Some(t0));
+            assert!(cache.exec_unavailable.is_none());
+        }
+
+        #[test]
+        fn restart_and_expiry_are_visible_in_status_and_rows() {
+            let t0 = Utc::now();
+            let m0 = Instant::now();
+            let snap = snapshot(t0);
+            // Restart: no evidence.
+            let list =
+                build_offline_job_list(&snap, None, None, "pc", &no_checks(), &|_| false, t0, m0);
+            assert_eq!(
+                list.cache
+                    .as_ref()
+                    .unwrap()
+                    .exec_unavailable
+                    .as_ref()
+                    .unwrap()
+                    .code,
+                "resync_required"
+            );
+            assert!(list.items.iter().all(|j| j.exec_unavailable.is_some()));
+            assert_eq!(list.items.len(), 2, "still browsable");
+            // Expired for the opted-in job only.
+            let e = ev(t0, m0);
+            let later = t0 + CDuration::hours(2);
+            let list = build_offline_job_list(
+                &snap,
+                Some(&e),
+                None,
+                "pc",
+                &no_checks(),
+                &|_| false,
+                later,
+                m0 + StdDuration::from_secs(7200),
+            );
+            let row = list.items.iter().find(|j| j.id == "opt-in").unwrap();
+            assert_eq!(row.exec_unavailable.as_ref().unwrap().code, "sync_expired");
+        }
+
+        #[test]
+        fn corrupted_entries_are_not_listed() {
+            let t0 = Utc::now();
+            let mut snap = snapshot(t0);
+            snap.entries[0].raw = snap.entries[0].raw.replace("echo hi", "echo bad");
+            let list = build_offline_job_list(
+                &snap,
+                None,
+                None,
+                "pc",
+                &no_checks(),
+                &|_| false,
+                t0,
+                Instant::now(),
+            );
+            assert!(list.items.iter().all(|j| j.id != "opt-in"));
+        }
+
+        #[test]
+        fn execute_gate_builds_a_local_command_only_when_allowed() {
+            let t0 = Utc::now();
+            let m0 = Instant::now();
+            let snap = snapshot(t0);
+            let e = ev(t0, m0);
+            let cmd =
+                prepare_offline_command(&snap, Some(&e), "opt-in", "pc", "run1", "req1", t0, m0)
+                    .expect("opted in and fresh");
+            assert_eq!(cmd.exec_id.as_deref(), Some("run1"));
+            assert_eq!(cmd.script, "echo hi");
+            for (id, code) in [
+                ("legacy", "offline_not_allowed"),
+                ("gone", "definition_missing"),
+            ] {
+                let err = prepare_offline_command(&snap, Some(&e), id, "pc", "r", "q", t0, m0)
+                    .unwrap_err();
+                assert_eq!(err.code, ErrorKind::Unauthorized.code(), "{id}");
+                assert!(detail(&err).contains(code), "{id}: {}", detail(&err));
+            }
+            let err =
+                prepare_offline_command(&snap, None, "opt-in", "pc", "r", "q", t0, m0).unwrap_err();
+            assert!(detail(&err).contains("resync_required"));
+        }
+
+        #[test]
+        fn reconnect_resync_revokes_and_deletes() {
+            // Models a post-reconnect snapshot replacing the stale one.
+            let t0 = Utc::now();
+            let m0 = Instant::now();
+            let mut snap = snapshot(t0);
+            let e = ev(t0, m0);
+            snap.revoked = vec!["opt-in".into()];
+            let err = prepare_offline_command(&snap, Some(&e), "opt-in", "pc", "r", "q", t0, m0)
+                .unwrap_err();
+            assert!(detail(&err).contains("revoked"));
+            snap.entries.retain(|x| x.id != "opt-in");
+            let list = build_offline_job_list(
+                &snap,
+                Some(&e),
+                None,
+                "pc",
+                &no_checks(),
+                &|_| false,
+                t0,
+                m0,
+            );
+            assert!(list.items.iter().all(|j| j.id != "opt-in"));
+        }
     }
 }

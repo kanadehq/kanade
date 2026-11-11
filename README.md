@@ -241,6 +241,13 @@ curl http://127.0.0.1:8081/api/audit
 start http://127.0.0.1:8081
 ```
 
+## Client App offline operation
+
+The Client App can browse the last synchronized catalog and notifications
+without broker connectivity; running a job offline is denied unless its manifest
+sets `client.offline: { allow: true, max_age: <1s..24h> }`. See
+[docs/client-offline.md](docs/client-offline.md).
+
 ## CLI cheat sheet
 
 Identity-addressed immutable app publication is an explicit opt-in; see the

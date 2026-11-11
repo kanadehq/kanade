@@ -138,6 +138,51 @@ pub struct UserInvokableJob {
     /// (operator-only `executions` table).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<JobRun>,
+    /// Why this row cannot be executed right now because the agent is
+    /// offline (or serving cached data): a machine-readable `code` plus a
+    /// user-facing `message`. `None` ⇒ no offline restriction (the agent is
+    /// connected and the row is live). Viewing a cached row never implies it
+    /// may be run. #492 wire rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_unavailable: Option<ExecUnavailable>,
+}
+
+/// Why a job cannot run while offline. See
+/// [`UserInvokableJob::exec_unavailable`].
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ExecUnavailable {
+    /// Stable snake_case reason code (e.g. `offline_not_allowed`,
+    /// `sync_expired`, `restart_resync_required`).
+    pub code: String,
+    /// Human-readable explanation for the Client App.
+    pub message: String,
+}
+
+/// Where a cached-capable response came from and how fresh it is. Carries
+/// connectivity and cache state separately: `source == Cache` means the
+/// broker was unreachable and the data is the last synchronized snapshot.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct CacheStatus {
+    /// `live` (just read from the broker) or `cache` (served from disk).
+    pub source: CacheSource,
+    /// Wall-clock start of the last successful authoritative sync, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Agent-wide reason offline execution is unavailable (when `source` is
+    /// `cache`): same codes as [`ExecUnavailable::code`]. `None` when at
+    /// least the freshness evidence is valid (individual jobs may still be
+    /// refused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_unavailable: Option<ExecUnavailable>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheSource {
+    Live,
+    Cache,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Confirmation-dialog config for a [`UserInvokableJob`], projected 1:1
@@ -184,6 +229,9 @@ pub struct JobsListParams {
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct JobsListResult {
     pub items: Vec<UserInvokableJob>,
+    /// Cache/offline status. `None` from an older agent ⇒ treat as live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheStatus>,
 }
 
 // ---------- jobs.execute ----------
@@ -362,6 +410,7 @@ mod tests {
             confirm: None,
             unlock: None,
             last_run: None,
+            exec_unavailable: None,
         })
         .unwrap();
         assert!(v.get("timeout_secs").is_none(), "wire: {v:?}");

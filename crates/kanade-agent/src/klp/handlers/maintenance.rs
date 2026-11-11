@@ -384,6 +384,7 @@ mod tests {
                 show_when: None,
                 confirm: None,
                 unlock: None,
+                offline: None,
             }),
             tags: Vec::new(),
             origin: None,
