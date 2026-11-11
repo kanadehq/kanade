@@ -567,15 +567,10 @@ impl Store {
         let scripts = crate::script_cache::ScriptCache::new(js.clone(), self.dir.join("scripts"));
         let mut object_digests = HashMap::new();
         let jobs = js.get_key_value(BUCKET_JOBS).await.context("open jobs")?;
-        let keys: Vec<String> = jobs
-            .keys()
-            .await
-            .context("scan jobs")?
-            .try_collect()
-            .await
-            .context("stream jobs")?;
+        let mut keys = jobs.keys().await.context("scan jobs")?;
         let mut entries = Vec::new();
-        for k in keys {
+        let mut budget = CatalogBudget::default();
+        while let Some(k) = keys.try_next().await.context("stream jobs")? {
             // `None`: deleted between scan and read — simply absent.
             let Some(bytes) = jobs
                 .get(&k)
@@ -587,6 +582,7 @@ impl Store {
             match cache_entry(&k, &bytes) {
                 // Only user-facing definitions are cached.
                 Some((mut entry, m)) if m.client.is_some() => {
+                    budget.definition(&entry)?;
                     if let Ok(shell) = m.execute.require_shell()
                         && let Some(key) = &shell.script_object
                         && let Ok(sha) = scripts.digest_of(key).await
@@ -595,8 +591,13 @@ impl Store {
                         if body.len() > crate::script_cache::MAX_BODY_BYTES {
                             bail!("script too large");
                         }
-                        object_digests.insert(key.clone(), sha.clone());
-                        entry.object_script = Some(CachedScript { body, sha256: sha });
+                        let script = CachedScript {
+                            body,
+                            sha256: sha.clone(),
+                        };
+                        budget.account(&script)?;
+                        object_digests.insert(key.clone(), sha);
+                        entry.object_script = Some(script);
                     }
                     entries.push(entry);
                 }
@@ -716,17 +717,158 @@ pub async fn run_sync_loop(
     }
 }
 
+// Count JSON bytes without allocating a serialized copy. Counting the script
+// separately slightly overestimates the entry size (the original null remains
+// in the budget), so escaped script bodies cannot bypass the byte cap.
+#[derive(Default)]
+struct CatalogBudget {
+    count: usize,
+    bytes: u64,
+}
+
+impl CatalogBudget {
+    fn definition(&mut self, entry: &CachedManifest) -> Result<()> {
+        if self.count >= MAX_MANIFESTS {
+            bail!("client cache: catalog exceeds {MAX_MANIFESTS} manifests");
+        }
+        self.account(entry)?;
+        self.count += 1;
+        Ok(())
+    }
+
+    fn account(&mut self, value: &impl Serialize) -> Result<()> {
+        // Include the array separator, conservatively even for the first entry.
+        self.bytes += 1;
+        serde_json::to_writer(&mut *self, value).context("client cache: catalog byte cap")
+    }
+}
+
+impl std::io::Write for CatalogBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() as u64 > MAX_FILE_BYTES.saturating_sub(self.bytes) {
+            return Err(std::io::Error::other("catalog exceeds byte cap"));
+        }
+        self.bytes += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 // ---------- file helpers ----------
 
 fn create_private_dir(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    if !std::fs::symlink_metadata(dir)?.file_type().is_dir() {
+        bail!("client cache: directory must not be a symlink");
+    }
+    #[cfg(windows)]
+    windows_acl::restrict(dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("chmod {}", dir.display()))?;
     }
+    #[cfg(windows)]
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            create_private_dir(&entry.path())?;
+        } else if kind.is_file() {
+            windows_acl::restrict(&entry.path())?;
+        } else {
+            bail!("client cache: refusing non-regular cache entry");
+        }
+    }
     Ok(())
+}
+
+#[cfg(windows)]
+mod windows_acl {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, SetFileSecurityW, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::{PCWSTR, PWSTR};
+
+    // Protected DACL: no ProgramData inheritance. Child files/directories
+    // inherit access for SYSTEM and the actual agent identity only. Do not
+    // grant OWNER RIGHTS: a pre-existing file may belong to another user.
+    pub(super) fn restrict(path: &Path) -> Result<()> {
+        let sid = agent_sid()?;
+        let sddl: Vec<u16> = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{sid})")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+            .context("client cache: build private DACL")?;
+            let result = SetFileSecurityW(
+                PCWSTR(name.as_ptr()),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                sd,
+            )
+            .ok();
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+            result.context("client cache: apply private DACL")?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn agent_sid() -> Result<String> {
+        let mut token = HANDLE::default();
+        // SAFETY: all output buffers outlive their Win32 calls; handles and
+        // LocalAlloc memory are released on both success and error paths.
+        unsafe {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+                .context("client cache: open agent token")?;
+            let result = (|| -> Result<String> {
+                let mut needed = 0;
+                let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+                if needed == 0 {
+                    bail!("client cache: agent SID size unavailable");
+                }
+                let mut buffer =
+                    vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    Some(buffer.as_mut_ptr().cast()),
+                    needed,
+                    &mut needed,
+                )
+                .context("client cache: read agent SID")?;
+                let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
+                let mut sid = PWSTR::null();
+                ConvertSidToStringSidW(user.User.Sid, &mut sid)
+                    .context("client cache: stringify agent SID")?;
+                let result = sid.to_string().context("client cache: decode agent SID");
+                let _ = LocalFree(Some(HLOCAL(sid.0.cast())));
+                result
+            })();
+            let _ = CloseHandle(token);
+            result
+        }
+    }
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -1220,6 +1362,111 @@ mod tests {
         assert!(store.load_notifications("carol").is_none());
     }
 
+    #[test]
+    fn catalog_collection_bounds_count_and_escaped_script_bytes() {
+        let (entry, _) = cache_entry("a", &manifest_json("a", OPT_IN, "")).unwrap();
+        let mut budget = CatalogBudget::default();
+        for _ in 0..MAX_MANIFESTS {
+            budget.definition(&entry).unwrap();
+        }
+        assert!(budget.definition(&entry).is_err());
+        assert_eq!(budget.count, MAX_MANIFESTS);
+
+        let mut budget = CatalogBudget::default();
+        // Each body is individually valid, but JSON escaping doubles its size.
+        let script = CachedScript {
+            body: "\\".repeat(crate::script_cache::MAX_BODY_BYTES),
+            sha256: "0".repeat(64),
+        };
+        for _ in 0..3 {
+            budget.definition(&entry).unwrap();
+            budget.account(&script).unwrap();
+        }
+        budget.definition(&entry).unwrap();
+        assert!(budget.account(&script).is_err());
+        assert!(budget.bytes <= MAX_FILE_BYTES);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cache_acl_is_private_and_repairs_existing_files() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+            SDDL_REVISION_1, SE_FILE_OBJECT,
+        };
+        use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+        use windows::core::{PCWSTR, PWSTR};
+
+        fn dacl(path: &Path) -> String {
+            let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut sd = PSECURITY_DESCRIPTOR::default();
+            let mut text = PWSTR::null();
+            unsafe {
+                GetNamedSecurityInfoW(
+                    PCWSTR(name.as_ptr()),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &mut sd,
+                )
+                .ok()
+                .unwrap();
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    sd,
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut text,
+                    None,
+                )
+                .unwrap();
+                let result = text.to_string().unwrap();
+                let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+                let _ = LocalFree(Some(HLOCAL(sd.0)));
+                result
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let legacy = cache.join("notifications-legacy.json");
+        std::fs::write(&legacy, b"{}").unwrap();
+        let store = Store::new(cache.clone(), "s".into()).unwrap();
+        store
+            .commit_catalog(
+                Utc::now(),
+                Instant::now(),
+                vec![],
+                vec![],
+                vec![],
+                HashMap::new(),
+            )
+            .unwrap();
+        for path in [&cache, &legacy, &store.catalog_path()] {
+            let acl = dacl(path);
+            assert_eq!(acl.matches('(').count(), 2, "{acl}");
+            assert!(acl.contains(";;;SY)"), "{acl}");
+            let sid = windows_acl::agent_sid().unwrap();
+            if sid != "S-1-5-18" {
+                assert!(acl.contains(&format!(";;;{sid})")), "{acl}");
+            }
+            assert!(
+                !acl.contains(";;;OW)"),
+                "must grant the agent, not a pre-existing owner"
+            );
+        }
+        assert!(
+            dacl(&cache).starts_with("D:P"),
+            "inheritance must be disabled"
+        );
+        assert!(store.load_catalog().is_some());
+    }
+
     #[cfg(unix)]
     #[test]
     fn unsafe_cache_files_are_ignored() {
@@ -1560,6 +1807,38 @@ mod tests {
             )
             .unwrap_err(),
             Denied::ScriptMissing
+        );
+        // Valid individual script bodies must not accumulate an unbounded
+        // catalog. A rejected sync preserves viewing but removes execution proof.
+        let objects = recovered_js
+            .get_object_store(kanade_shared::kv::OBJECT_SCRIPTS)
+            .await
+            .unwrap();
+        let large = "x".repeat(crate::script_cache::MAX_BODY_BYTES);
+        let mut body = large.as_bytes();
+        objects.put("large/1.0.0", &mut body).await.unwrap();
+        for n in 0..10 {
+            let id = format!("large-{n}");
+            let mut m: serde_json::Value =
+                serde_json::from_slice(&manifest_json(&id, OPT_IN, "")).unwrap();
+            m["execute"].as_object_mut().unwrap().remove("script");
+            m["execute"]["script_object"] = serde_json::json!("large/1.0.0");
+            jobs.put(id, serde_json::to_vec(&m).unwrap().into())
+                .await
+                .unwrap();
+        }
+        let error = restarted
+            .sync_catalog(&recovered_client, "pc1", checks.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("catalog byte cap"),
+            "{error:#}"
+        );
+        assert!(restarted.evidence().is_none());
+        assert_eq!(
+            restarted.load_catalog().unwrap().generation,
+            reconciled.generation
         );
         recovered_js
             .delete_key_value(BUCKET_AGENT_GROUPS_DERIVED)

@@ -60,6 +60,10 @@ an offline banner with the last synchronization time.
 `<data_dir>/client_cache/` (directory `0700`, files `0600` on Unix; symlinks,
 non-regular and group/world-writable files are ignored; atomic replace):
 
+Windowsでは継承ACLを無効化し、Agent実行アカウントとSYSTEMだけにアクセスを許可する。
+保存前にディレクトリを制限し、既存キャッシュのファイルにも同じACLを適用する。
+権限設定に失敗した場合はキャッシュを使用しない。
+
 * `catalog-*.json` — user-facing manifests (raw bytes + SHA-256), revocation
   set, effective group membership, sync start time. Per broker + PC scope.
 * `notifications-*.json` — the user's complete notification history and read
@@ -67,6 +71,8 @@ non-regular and group/world-writable files are ignored; atomic replace):
 
 Capacity: ≤ 2000 manifests (a larger catalog fails the sync and keeps the
 previous snapshot), newest 500 notifications, 32 MiB per file.
+定義の取得中から件数とJSONエスケープ後の累積バイト数を制限する。
+スクリプト追加で上限を超えた同期も失敗し、実行用の鮮度証拠を失効させる。
 
 Digests detect accidental corruption, **not tampering**; protection of the cache
 rests on its OS permissions.
