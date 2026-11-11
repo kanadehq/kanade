@@ -70,7 +70,7 @@ use super::super::connection::ConnectionState;
 use super::super::unlock;
 use super::system::HandlerResult;
 use crate::outbox;
-use crate::process::{ExecOutcome, run_command_with_kill};
+use crate::process::{ExecOutcome, LaunchGuard, run_command_with_guard};
 
 /// `jobs.list` — list the user-invokable job catalog for the Client
 /// App, optionally filtered to a single tab's category.
@@ -214,7 +214,7 @@ fn offline_job_list(
     };
     let store = crate::client_cache::store().ok_or_else(no_cache)?;
     let snapshot = store.load_catalog().ok_or_else(no_cache)?;
-    let checks: HashMap<String, CheckStatus> = conn
+    let live_checks: HashMap<String, CheckStatus> = conn
         .state_rx
         .borrow()
         .checks
@@ -227,7 +227,7 @@ fn offline_job_list(
         store.evidence().as_ref(),
         params.category,
         &conn.pc_id,
-        &checks,
+        &live_checks,
         &unlocked,
         Utc::now(),
         std::time::Instant::now(),
@@ -253,12 +253,14 @@ pub fn build_offline_job_list(
         .iter()
         .filter_map(|e| crate::client_cache::verify_entry(e).ok())
         .collect();
+    let mut display_checks = snapshot.checks.clone();
+    display_checks.extend(checks.iter().map(|(name, status)| (name.clone(), *status)));
     let mut result = build_job_list(
         &manifests,
         filter,
         pc_id,
         &snapshot.groups,
-        checks,
+        &display_checks,
         unlocked,
     );
     for item in &mut result.items {
@@ -309,12 +311,49 @@ async fn offline_execute(
         Utc::now(),
         std::time::Instant::now(),
     )?;
+    let job_id = params.id.clone();
+    let guard_pc = conn.pc_id.clone();
+    let generation = snapshot.generation.clone();
+    let expected_script = cmd.script.clone();
+    let launch_guard: LaunchGuard = Arc::new(move || {
+        let current = store
+            .load_catalog()
+            .ok_or_else(|| anyhow::anyhow!("cached definition missing"))?;
+        anyhow::ensure!(
+            current.generation == generation,
+            "catalog changed before launch"
+        );
+        let manifest = crate::client_cache::evaluate(
+            &current,
+            store.evidence().as_ref(),
+            &job_id,
+            &guard_pc,
+            Utc::now(),
+            std::time::Instant::now(),
+        )
+        .map_err(|d| anyhow::anyhow!("{}", d.message()))?;
+        let command =
+            build_command(&manifest, "guard", "guard").map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        anyhow::ensure!(
+            command.script == expected_script,
+            "script changed before launch"
+        );
+        Ok(())
+    });
     conn.register_run(run_id.clone());
     // Local-only kill switch: the broker is unreachable.
     let kill = crate::kill::KillSwitch::arm(None, cmd.exec_id.as_deref()).await;
     let push_tx = conn.push_tx.clone();
     let pc_id = conn.pc_id.clone();
-    tokio::spawn(run_job(client, cmd, kill, run_id.clone(), push_tx, pc_id));
+    tokio::spawn(run_job(
+        client,
+        cmd,
+        kill,
+        run_id.clone(),
+        push_tx,
+        pc_id,
+        Some(launch_guard),
+    ));
     Ok(JobsExecuteResult { run_id })
 }
 
@@ -619,7 +658,15 @@ pub async fn handle_jobs_execute(
     let push_tx = conn.push_tx.clone();
     let pc_id = conn.pc_id.clone();
     let spawned_run_id = run_id.clone();
-    tokio::spawn(run_job(client, cmd, kill, spawned_run_id, push_tx, pc_id));
+    tokio::spawn(run_job(
+        client,
+        cmd,
+        kill,
+        spawned_run_id,
+        push_tx,
+        pc_id,
+        None,
+    ));
 
     Ok(JobsExecuteResult { run_id })
 }
@@ -832,6 +879,7 @@ async fn run_job(
     run_id: String,
     push_tx: mpsc::Sender<Vec<u8>>,
     pc_id: String,
+    launch_guard: Option<LaunchGuard>,
 ) {
     // Client actions are interactive: start immediately without acquiring or
     // consuming a local slot, even when scheduled/admin jobs fill the budget.
@@ -906,7 +954,8 @@ async fn run_job(
     };
 
     let started_at = Utc::now();
-    let outcome = run_command_with_kill(&kill, &cmd, Some(live_handle.tail())).await;
+    let outcome =
+        run_command_with_guard(&kill, &cmd, Some(live_handle.tail()), None, launch_guard).await;
     let finished_at = Utc::now();
 
     // Stop the streamer and let its final tick flush before the terminal
@@ -2175,6 +2224,7 @@ mod tests {
                 scope: "s".into(),
                 generation: "g".into(),
                 synced_at: at,
+                checks: HashMap::new(),
                 entries: vec![
                     cache_entry("opt-in", &raw("opt-in", Some(allow)))
                         .unwrap()
@@ -2192,6 +2242,52 @@ mod tests {
                 wall: at,
                 mono,
             }
+        }
+
+        #[test]
+        fn offline_show_when_survives_restart_without_granting_execution() {
+            let t0 = Utc::now();
+            let mut snap = snapshot(t0);
+            let mut value: serde_json::Value = serde_json::from_str(&snap.entries[0].raw).unwrap();
+            value["client"]["show_when"] = serde_json::json!({"check": "health", "is": ["fail"]});
+            snap.entries[0] = cache_entry("opt-in", &serde_json::to_vec(&value).unwrap())
+                .unwrap()
+                .0;
+            snap.checks.insert("health".into(), CheckStatus::Fail);
+            let list = build_offline_job_list(
+                &snap,
+                None,
+                None,
+                "pc",
+                &no_checks(),
+                &|_| false,
+                t0,
+                Instant::now(),
+            );
+            let row = list
+                .items
+                .iter()
+                .find(|j| j.id == "opt-in")
+                .expect("persisted show_when result keeps the row visible");
+            assert_eq!(
+                row.exec_unavailable.as_ref().unwrap().code,
+                "resync_required"
+            );
+            let live = HashMap::from([("health".into(), CheckStatus::Ok)]);
+            let list = build_offline_job_list(
+                &snap,
+                None,
+                None,
+                "pc",
+                &live,
+                &|_| false,
+                t0,
+                Instant::now(),
+            );
+            assert!(
+                list.items.iter().all(|j| j.id != "opt-in"),
+                "newer local check results override the snapshot"
+            );
         }
 
         #[test]

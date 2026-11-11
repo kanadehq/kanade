@@ -917,6 +917,7 @@ pub(crate) async fn run_agent() -> Result<()> {
                 store,
                 client.clone(),
                 pc_id.clone(),
+                check_sink.clone(),
             ));
         }
         Err(e) => tracing::warn!(error = %format!("{e:#}"), "client cache disabled"),

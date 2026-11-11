@@ -68,6 +68,14 @@ pub struct CachedManifest {
     /// Digest of the inline script body, when the manifest has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_sha256: Option<String>,
+    #[serde(default)]
+    pub object_script: Option<CachedScript>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CachedScript {
+    pub body: String,
+    pub sha256: String,
 }
 
 /// Catalog-side snapshot of one authoritative sync (per PC).
@@ -81,6 +89,9 @@ pub struct CatalogSnapshot {
     /// Wall clock at the START of the sync (conservative freshness basis).
     pub synced_at: DateTime<Utc>,
     pub entries: Vec<CachedManifest>,
+    /// Display evidence only; never used as execution authorization.
+    #[serde(default)]
+    pub checks: HashMap<String, kanade_shared::ipc::state::CheckStatus>,
     /// Job ids whose `script_status` is REVOKED at sync time.
     pub revoked: Vec<String>,
     /// Effective group membership (manual ∪ derived).
@@ -117,6 +128,8 @@ pub enum Denied {
     InvalidPolicy,
     /// No cached definition for the job.
     DefinitionMissing,
+    /// A required Object Store script body was not synchronized.
+    ScriptMissing,
     /// Cached manifest or script body fails its digest / parse check.
     IntegrityMismatch,
     /// The job is revoked as of the last sync.
@@ -141,6 +154,7 @@ impl Denied {
             Denied::NotOptedIn => "offline_not_allowed",
             Denied::InvalidPolicy => "offline_policy_invalid",
             Denied::DefinitionMissing => "definition_missing",
+            Denied::ScriptMissing => "script_missing",
             Denied::IntegrityMismatch => "integrity_mismatch",
             Denied::Revoked => "revoked",
             Denied::NotVisible => "not_visible",
@@ -157,6 +171,7 @@ impl Denied {
             Denied::NotOptedIn => "このジョブはオフラインでの実行が許可されていません",
             Denied::InvalidPolicy => "オフライン実行の有効期間設定が不正です",
             Denied::DefinitionMissing => "ジョブ定義がこのPCに保存されていません",
+            Denied::ScriptMissing => "必要なスクリプト本体がこのPCに保存されていません",
             Denied::IntegrityMismatch => "保存されたジョブ定義の整合性を確認できません",
             Denied::Revoked => "このジョブは管理者により失効されています",
             Denied::NotVisible => "このジョブはこのPCでは利用できません",
@@ -203,6 +218,7 @@ pub fn cache_entry(id: &str, raw: &[u8]) -> Option<(CachedManifest, Manifest)> {
             sha256: sha256_hex(raw),
             raw: raw_s,
             script_sha256,
+            object_script: None,
         },
         manifest,
     ))
@@ -229,13 +245,25 @@ pub fn verify_entry(entry: &CachedManifest) -> Result<Manifest, Denied> {
     Ok(m)
 }
 
+/// Inline only already-verified local bytes; this performs no network reads.
+pub fn inline_object(manifest: &Manifest, body: &str) -> Result<Manifest> {
+    manifest.execute.require_shell()?;
+    let mut value = serde_json::to_value(manifest)?;
+    value["execute"]
+        .as_object_mut()
+        .context("invalid execute")?
+        .remove("script_object");
+    value["execute"]["script"] = serde_json::Value::String(body.to_string());
+    Ok(serde_json::from_value(value)?)
+}
+
 fn sha256_hex_str(s: &str) -> String {
     sha256_hex(s.as_bytes())
 }
 
 /// Reasons a job can never run offline irrespective of freshness: it needs
 /// the broker/backend (approval, collection upload, finalize hook, check /
-/// emit / inventory reporting, feed, Object Store body, typed deployment).
+/// emit / inventory reporting, feed, unresolved script source, typed deployment).
 fn needs_broker(m: &Manifest) -> bool {
     let Ok(exec) = m.execute.require_shell() else {
         return true;
@@ -290,7 +318,7 @@ pub fn evaluate(
         .iter()
         .find(|e| e.id == job_id)
         .ok_or(Denied::DefinitionMissing)?;
-    let m = verify_entry(entry)?;
+    let mut m = verify_entry(entry)?;
     // Explicit opt-in first: a job that never opted in is "not allowed",
     // whatever else is true of the cache.
     let Some(off) = m.client.as_ref().and_then(|c| c.offline.as_ref()) else {
@@ -313,6 +341,23 @@ pub fn evaluate(
         && !target.matches(pc_id, &snapshot.groups)
     {
         return Err(Denied::NotVisible);
+    }
+    if m.execute
+        .require_shell()
+        .is_ok_and(|e| e.script_object.is_some())
+    {
+        let script = entry.object_script.as_ref().ok_or(Denied::ScriptMissing)?;
+        if sha256_hex(script.body.as_bytes()) != script.sha256 {
+            return Err(Denied::IntegrityMismatch);
+        }
+        m = inline_object(&m, &script.body).map_err(|_| Denied::IntegrityMismatch)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    if m.execute
+        .require_shell()
+        .is_ok_and(|e| e.run_as != kanade_shared::wire::RunAs::System)
+    {
+        return Err(Denied::NeedsBroker);
     }
     if needs_broker(&m) {
         return Err(Denied::NeedsBroker);
@@ -428,6 +473,7 @@ impl Store {
         entries: Vec<CachedManifest>,
         revoked: Vec<String>,
         groups: Vec<String>,
+        checks: HashMap<String, kanade_shared::ipc::state::CheckStatus>,
     ) -> Result<CatalogSnapshot> {
         if entries.len() > MAX_MANIFESTS {
             bail!(
@@ -441,6 +487,7 @@ impl Store {
             generation: uuid::Uuid::new_v4().to_string(),
             synced_at: started_wall,
             entries,
+            checks,
             revoked,
             groups,
         };
@@ -479,16 +526,46 @@ impl Store {
 
     /// Full authoritative sync from the broker. Every read must succeed:
     /// a failed membership / revocation / catalog read aborts and leaves the
-    /// previous snapshot and evidence untouched (never "no revocations").
+    /// previous viewing snapshot untouched, but invalidates execution evidence
+    /// (never "no revocations").
     /// Single-flight: a concurrent call returns `Ok(false)` immediately.
-    pub async fn sync_catalog(&self, client: &async_nats::Client, pc_id: &str) -> Result<bool> {
+    pub async fn sync_catalog(
+        &self,
+        client: &async_nats::Client,
+        pc_id: &str,
+        checks: HashMap<String, kanade_shared::ipc::state::CheckStatus>,
+    ) -> Result<bool> {
         let Ok(_guard) = self.syncing.try_lock() else {
             return Ok(false);
         };
+        // A failed or racing authoritative scan must not keep an older grant alive.
+        if let Ok(mut evidence) = self.evidence.lock() {
+            *evidence = None;
+        }
         let started_wall = Utc::now();
         let started_mono = Instant::now();
         let js = async_nats::jetstream::new(client.clone());
 
+        let mut stores = Vec::new();
+        let mut revisions = Vec::new();
+        for name in [
+            BUCKET_JOBS,
+            BUCKET_SCRIPT_STATUS,
+            BUCKET_AGENT_GROUPS,
+            BUCKET_AGENT_GROUPS_DERIVED,
+        ] {
+            let mut store = js.get_key_value(name).await?;
+            let info = store.stream.info().await?;
+            revisions.push((
+                info.created,
+                info.state.last_sequence,
+                info.state.first_sequence,
+                info.state.messages,
+            ));
+            stores.push(store);
+        }
+        let scripts = crate::script_cache::ScriptCache::new(js.clone(), self.dir.join("scripts"));
+        let mut object_digests = HashMap::new();
         let jobs = js.get_key_value(BUCKET_JOBS).await.context("open jobs")?;
         let keys: Vec<String> = jobs
             .keys()
@@ -509,7 +586,20 @@ impl Store {
             };
             match cache_entry(&k, &bytes) {
                 // Only user-facing definitions are cached.
-                Some((entry, m)) if m.client.is_some() => entries.push(entry),
+                Some((mut entry, m)) if m.client.is_some() => {
+                    if let Ok(shell) = m.execute.require_shell()
+                        && let Some(key) = &shell.script_object
+                        && let Ok(sha) = scripts.digest_of(key).await
+                        && let Ok(body) = scripts.resolve(key, &sha).await
+                    {
+                        if body.len() > crate::script_cache::MAX_BODY_BYTES {
+                            bail!("script too large");
+                        }
+                        object_digests.insert(key.clone(), sha.clone());
+                        entry.object_script = Some(CachedScript { body, sha256: sha });
+                    }
+                    entries.push(entry);
+                }
                 Some(_) => {}
                 None => warn!(key = %k, "client cache: skipping unparseable manifest"),
             }
@@ -541,8 +631,25 @@ impl Store {
                 revoked.push(k);
             }
         }
+        for (key, sha) in object_digests {
+            if scripts.digest_of(&key).await? != sha {
+                bail!("script changed during synchronization");
+            }
+        }
+        for (store, revision) in stores.iter_mut().zip(revisions) {
+            let info = store.stream.info().await?;
+            if (
+                info.created,
+                info.state.last_sequence,
+                info.state.first_sequence,
+                info.state.messages,
+            ) != revision
+            {
+                bail!("authorization changed during synchronization");
+            }
+        }
         let n = entries.len();
-        self.commit_catalog(started_wall, started_mono, entries, revoked, groups)?;
+        self.commit_catalog(started_wall, started_mono, entries, revoked, groups, checks)?;
         info!(manifests = n, "client cache: catalog synchronized");
         Ok(true)
     }
@@ -572,7 +679,12 @@ async fn read_groups_strict(
 /// Background sync: runs after boot, on every reconnect, and every
 /// [`SYNC_INTERVAL`] while connected (retry after [`SYNC_RETRY`] on
 /// failure). Never starts user executions; only refreshes data.
-pub async fn run_sync_loop(store: &'static Store, client: async_nats::Client, pc_id: String) {
+pub async fn run_sync_loop(
+    store: &'static Store,
+    client: async_nats::Client,
+    pc_id: String,
+    check_sink: crate::check_cache::CheckSink,
+) {
     let mut was_online = false;
     let mut next_at = Instant::now();
     loop {
@@ -581,7 +693,18 @@ pub async fn run_sync_loop(store: &'static Store, client: async_nats::Client, pc
         let due = Instant::now() >= next_at;
         if online && (!was_online || due) {
             next_at = Instant::now()
-                + match store.sync_catalog(&client, &pc_id).await {
+                + match store
+                    .sync_catalog(
+                        &client,
+                        &pc_id,
+                        check_sink
+                            .checks()
+                            .into_iter()
+                            .map(|c| (c.name, c.status))
+                            .collect(),
+                    )
+                    .await
+                {
                     Ok(_) => SYNC_INTERVAL,
                     Err(e) => {
                         warn!(error = %format!("{e:#}"), "client cache: sync failed");
@@ -708,6 +831,7 @@ mod tests {
             scope: "pc1".into(),
             generation: "g1".into(),
             synced_at: at,
+            checks: HashMap::new(),
             entries: jobs
                 .iter()
                 .map(|(id, raw)| cache_entry(id, raw).unwrap().0)
@@ -919,7 +1043,7 @@ mod tests {
             evaluate(&s, Some(&e), "appr", "pc1", t0, m0).unwrap_err(),
             Denied::NeedsBroker
         );
-        // Object Store bodies are not locally available either.
+        // An Object Store definition without cached bytes remains unavailable.
         let raw = serde_json::json!({
             "id": "obj", "version": "1.0.0",
             "execute": {"shell": "powershell", "script_object": "k@1", "timeout": "30s"},
@@ -928,10 +1052,23 @@ mod tests {
         });
         if let Ok(m) = serde_json::from_value::<Manifest>(raw) {
             let bytes = serde_json::to_vec(&m).unwrap();
-            let s = snap(&[("obj", bytes)], &[], &[], t0);
+            let mut s = snap(&[("obj", bytes)], &[], &[], t0);
             assert_eq!(
                 evaluate(&s, Some(&e), "obj", "pc1", t0, m0).unwrap_err(),
-                Denied::NeedsBroker
+                Denied::ScriptMissing
+            );
+            s.entries[0].object_script = Some(CachedScript {
+                body: "echo local".into(),
+                sha256: sha256_hex(b"echo local"),
+            });
+            let prepared = evaluate(&s, Some(&e), "obj", "pc1", t0, m0).unwrap();
+            let shell = prepared.execute.require_shell().unwrap();
+            assert_eq!(shell.script.as_deref(), Some("echo local"));
+            assert!(shell.script_object.is_none());
+            s.entries[0].object_script.as_mut().unwrap().body = "echo changed".into();
+            assert_eq!(
+                evaluate(&s, Some(&e), "obj", "pc1", t0, m0).unwrap_err(),
+                Denied::IntegrityMismatch
             );
         }
     }
@@ -992,7 +1129,14 @@ mod tests {
         let (entry, _) = cache_entry("j", &raw).unwrap();
         let store = Store::new(dir.path().join("c"), "broker|pc1".into()).unwrap();
         store
-            .commit_catalog(t0, m0, vec![entry], vec![], vec!["g".into()])
+            .commit_catalog(
+                t0,
+                m0,
+                vec![entry],
+                vec![],
+                vec!["g".into()],
+                HashMap::new(),
+            )
             .unwrap();
         let loaded = store.load_catalog().unwrap();
         // Same process: evidence present → runnable.
@@ -1021,10 +1165,10 @@ mod tests {
         let a = cache_entry("a", &manifest_json("a", OPT_IN, "")).unwrap().0;
         let b = cache_entry("b", &manifest_json("b", OPT_IN, "")).unwrap().0;
         store
-            .commit_catalog(t0, m0, vec![a.clone(), b], vec![], vec![])
+            .commit_catalog(t0, m0, vec![a.clone(), b], vec![], vec![], HashMap::new())
             .unwrap();
         store
-            .commit_catalog(t0, m0, vec![a], vec!["a".into()], vec![])
+            .commit_catalog(t0, m0, vec![a], vec!["a".into()], vec![], HashMap::new())
             .unwrap();
         let s = store.load_catalog().unwrap();
         assert_eq!(s.entries.len(), 1);
@@ -1084,7 +1228,7 @@ mod tests {
         let store = Store::new(dir.path().join("c"), "s".into()).unwrap();
         let t0 = Utc::now();
         store
-            .commit_catalog(t0, Instant::now(), vec![], vec![], vec![])
+            .commit_catalog(t0, Instant::now(), vec![], vec![], vec![], HashMap::new())
             .unwrap();
         let p = store.catalog_path();
         assert_eq!(
@@ -1104,7 +1248,7 @@ mod tests {
         assert!(store.load_catalog().is_none());
         assert!(
             store
-                .commit_catalog(t0, Instant::now(), vec![], vec![], vec![])
+                .commit_catalog(t0, Instant::now(), vec![], vec![], vec![], HashMap::new())
                 .is_err()
         );
         // Corrupt bytes read as no cache.
@@ -1112,5 +1256,331 @@ mod tests {
         std::fs::write(&p, b"{not json").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(store.load_catalog().is_none());
+    }
+    #[tokio::test]
+    #[ignore = "requires the CI-pinned local nats-server binary"]
+    async fn authoritative_disconnect_restart_reconnect_and_partial_scan() {
+        let pinned = include_str!("../../../.github/workflows/integration.yml")
+            .lines()
+            .find(|line| line.trim_start().starts_with("NATS_SERVER_VERSION:"))
+            .and_then(|line| line.split('"').nth(1))
+            .expect("CI NATS pin");
+        let version = std::process::Command::new("nats-server")
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert!(version.status.success());
+        assert_eq!(
+            String::from_utf8(version.stdout).unwrap().trim(),
+            format!("nats-server: v{pinned}"),
+            "Use the CI-pinned NATS binary on PATH"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let conf = root.join("nats.conf");
+        std::fs::write(&conf, format!("host: 127.0.0.1\nport: -1\nhttp_port: -1\nports_file_dir: \"{}\"\njetstream {{ store_dir: \"{}\", max_file_store: 1TB }}\n", root.display(), root.join("store").display())).unwrap();
+        let mut server = tokio::process::Command::new("nats-server")
+            .arg("-c")
+            .arg(&conf)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let url = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for entry in std::fs::read_dir(&root).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy().ends_with(".ports") {
+                        if let Ok(bytes) = std::fs::read(entry.path()) {
+                            if let Ok(ports) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                if let Some(url) = ports["nats"][0].as_str() {
+                                    return url.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let client = async_nats::connect(&url).await.unwrap();
+        let js = async_nats::jetstream::new(client.clone());
+
+        for bucket in [
+            BUCKET_JOBS,
+            BUCKET_SCRIPT_STATUS,
+            BUCKET_AGENT_GROUPS,
+            BUCKET_AGENT_GROUPS_DERIVED,
+        ] {
+            js.create_key_value(async_nats::jetstream::kv::Config {
+                bucket: bucket.into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        }
+        let jobs = js.get_key_value(BUCKET_JOBS).await.unwrap();
+        for id in ["allowed", "deleted", "revoked"] {
+            jobs.put(id, manifest_json(id, OPT_IN, "").into())
+                .await
+                .unwrap();
+        }
+        jobs.put("legacy", manifest_json("legacy", "", "").into())
+            .await
+            .unwrap();
+        let objects = js
+            .create_object_store(async_nats::jetstream::object_store::Config {
+                bucket: kanade_shared::kv::OBJECT_SCRIPTS.into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut body = b"echo object".as_slice();
+        objects.put("action/1.0.0", &mut body).await.unwrap();
+        let mut object: serde_json::Value =
+            serde_json::from_slice(&manifest_json("object", OPT_IN, "")).unwrap();
+        object["execute"].as_object_mut().unwrap().remove("script");
+        object["execute"]["script_object"] = serde_json::json!("action/1.0.0");
+        jobs.put("object", serde_json::to_vec(&object).unwrap().into())
+            .await
+            .unwrap();
+        let store = Store::new(root.join("cache"), "scope".into()).unwrap();
+        let checks = HashMap::from([(
+            "health".into(),
+            kanade_shared::ipc::state::CheckStatus::Fail,
+        )]);
+        store
+            .sync_catalog(&client, "pc1", checks.clone())
+            .await
+            .unwrap();
+        let snapshot = store.load_catalog().unwrap();
+        let evidence = store.evidence().unwrap();
+        assert!(
+            evaluate(
+                &snapshot,
+                Some(&evidence),
+                "object",
+                "pc1",
+                Utc::now(),
+                Instant::now()
+            )
+            .is_ok()
+        );
+        server.kill().await.unwrap();
+        server.wait().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while crate::klp::state::client_online(&client) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (_, cfg_rx) =
+            tokio::sync::watch::channel(kanade_shared::wire::EffectiveConfig::builtin_defaults());
+        let (_, state_rx) = tokio::sync::watch::channel(kanade_shared::ipc::state::StateSnapshot {
+            pc_id: "pc1".into(),
+            online: false,
+            checks: vec![],
+            agent_version: "test".into(),
+            target_version: "test".into(),
+        });
+        let (push_tx, _push_rx) = tokio::sync::mpsc::channel(8);
+        let conn = crate::klp::connection::ConnectionState::new(
+            crate::klp::auth::PeerIdentity {
+                user_key: "user".into(),
+                user_display: "User".into(),
+                pid: 1,
+                session: None,
+            },
+            "pc1".into(),
+            "test".into(),
+            cfg_rx,
+            state_rx,
+            root.join("agent.log"),
+            push_tx,
+        )
+        .with_nats(client.clone());
+        use crate::klp::handlers::notifications::{
+            handle_notifications_ack, handle_notifications_unack,
+        };
+        use kanade_shared::ipc::notifications::{NotificationsAckParams, NotificationsUnackParams};
+        assert_eq!(
+            handle_notifications_ack(
+                &conn,
+                NotificationsAckParams {
+                    id: "notice".into()
+                }
+            )
+            .await
+            .unwrap_err()
+            .data
+            .unwrap()
+            .kind,
+            kanade_shared::ipc::error::ErrorKind::AgentDisconnected
+        );
+        assert_eq!(
+            handle_notifications_unack(
+                &conn,
+                NotificationsUnackParams {
+                    id: "notice".into()
+                }
+            )
+            .await
+            .unwrap_err()
+            .data
+            .unwrap()
+            .kind,
+            kanade_shared::ipc::error::ErrorKind::AgentDisconnected
+        );
+        assert!(
+            evaluate(
+                &snapshot,
+                Some(&evidence),
+                "allowed",
+                "pc1",
+                Utc::now(),
+                Instant::now()
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            evaluate(
+                &snapshot,
+                Some(&evidence),
+                "legacy",
+                "pc1",
+                Utc::now(),
+                Instant::now()
+            )
+            .unwrap_err(),
+            Denied::NotOptedIn
+        );
+        let restarted = Store::new(root.join("cache"), "scope".into()).unwrap();
+        let restored = restarted.load_catalog().unwrap();
+        assert_eq!(restored.checks, checks);
+        assert_eq!(restored.entries.len(), 5);
+        assert_eq!(
+            evaluate(
+                &restored,
+                restarted.evidence().as_ref(),
+                "allowed",
+                "pc1",
+                Utc::now(),
+                Instant::now()
+            )
+            .unwrap_err(),
+            Denied::ResyncRequired
+        );
+        let mut server = tokio::process::Command::new("nats-server")
+            .arg("-c")
+            .arg(&conf)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let suffix = format!("_{}.ports", server.id().unwrap());
+        let reconnect_url = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for entry in std::fs::read_dir(&root).unwrap().flatten() {
+                    if entry.file_name().to_string_lossy().ends_with(&suffix) {
+                        if let Ok(bytes) = std::fs::read(entry.path()) {
+                            if let Ok(ports) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                if let Some(url) = ports["nats"][0].as_str() {
+                                    return url.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let recovered_client = async_nats::connect(reconnect_url).await.unwrap();
+        let recovered_js = async_nats::jetstream::new(recovered_client.clone());
+
+        let jobs = recovered_js.get_key_value(BUCKET_JOBS).await.unwrap();
+        jobs.delete("deleted").await.unwrap();
+        recovered_js
+            .get_key_value(BUCKET_SCRIPT_STATUS)
+            .await
+            .unwrap()
+            .put("revoked", SCRIPT_STATUS_REVOKED.into())
+            .await
+            .unwrap();
+        recovered_js
+            .get_object_store(kanade_shared::kv::OBJECT_SCRIPTS)
+            .await
+            .unwrap()
+            .delete("action/1.0.0")
+            .await
+            .unwrap();
+        restarted
+            .sync_catalog(&recovered_client, "pc1", checks.clone())
+            .await
+            .unwrap();
+        let reconciled = restarted.load_catalog().unwrap();
+        let ev = restarted.evidence();
+        assert_eq!(
+            evaluate(
+                &reconciled,
+                ev.as_ref(),
+                "deleted",
+                "pc1",
+                Utc::now(),
+                Instant::now()
+            )
+            .unwrap_err(),
+            Denied::DefinitionMissing
+        );
+        assert_eq!(
+            evaluate(
+                &reconciled,
+                ev.as_ref(),
+                "revoked",
+                "pc1",
+                Utc::now(),
+                Instant::now()
+            )
+            .unwrap_err(),
+            Denied::Revoked
+        );
+        assert_eq!(
+            evaluate(
+                &reconciled,
+                ev.as_ref(),
+                "object",
+                "pc1",
+                Utc::now(),
+                Instant::now()
+            )
+            .unwrap_err(),
+            Denied::ScriptMissing
+        );
+        recovered_js
+            .delete_key_value(BUCKET_AGENT_GROUPS_DERIVED)
+            .await
+            .unwrap();
+        assert!(
+            restarted
+                .sync_catalog(&recovered_client, "pc1", checks)
+                .await
+                .is_err()
+        );
+        assert!(
+            restarted.evidence().is_none(),
+            "partial scans must invalidate execution evidence"
+        );
+        assert_eq!(
+            restarted.load_catalog().unwrap().generation,
+            reconciled.generation,
+            "partial scans retain the last complete view"
+        );
+        server.kill().await.unwrap();
+        server.wait().await.unwrap();
     }
 }

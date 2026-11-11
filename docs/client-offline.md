@@ -32,9 +32,10 @@ client:
 ## What an offline run requires (all of it)
 
 1. `client.offline.allow: true` with a valid `max_age`.
-2. The definition and its inline script body are in the local cache and match
-   their recorded SHA-256 digests (re-checked on every read, including right
-   before starting).
+2. 定義と必須スクリプト本体（inline または `script_object`）がローカルに保存され、
+   SHA-256 が一致すること。Object Store 本体は同期時にdigestを確認して保存し、
+   オフライン実行では保存済みバイトだけをinline化する。欠落・破損時は拒否する。
+   起動直前にも認可・有効期間・定義世代を再検証する。
 3. Not revoked (`script_status`) and visible to this PC (`client.visible_to`
    against the cached group membership) as of the last sync.
 4. In-process freshness evidence for the loaded snapshot, within the validity
@@ -45,12 +46,13 @@ client:
 5. The job can complete locally. Jobs needing the broker/backend are refused
    with `needs_broker` even when `allow: true`: `require_approval`,
    `deploy_authorization`, `collect`, `finalize`, `check`, `emit`, `inventory`,
-   `feed`, `script_object` bodies and typed deployments.
+   `feed` and typed deployments.
+   macOS以外の別ユーザーセッション経由の起動も、起動直前ガードに対応しないため拒否する。
 
 Anything absent or uncertain denies (fail closed). Each Client row shows the
 reason code and message (`offline_not_allowed`, `sync_expired`,
 `resync_required`, `revoked`, `not_visible`, `definition_missing`,
-`integrity_mismatch`, `clock_anomaly`, `needs_broker`, …) and the Client shows
+`script_missing`, `integrity_mismatch`, `clock_anomaly`, `needs_broker`, …) and the Client shows
 an offline banner with the last synchronization time.
 
 ## What is cached, and where
@@ -71,17 +73,19 @@ rests on its OS permissions.
 
 ## Synchronization and reconnect
 
-A background single-flight task syncs after boot, on every reconnect and every
-5 minutes (30 s retry after a failure). A sync is *authoritative* only if every
-read succeeds: catalog, both group-membership buckets and the full
-`script_status` scan. A failed read is never rounded to "no revocations" or "no
-groups": the previous snapshot and its freshness evidence are left untouched, so
-the validity period is not extended. A successful sync replaces the snapshot
-wholesale, so deleted manifests, new revocations and membership changes take
-effect on reconnect. Notification history is refreshed whenever the user's list
-is fetched online and replaced only after the complete replay succeeded
-(recalled notifications disappear). Acknowledging a notification needs the
-broker.
+同期タスクは起動後・再接続時・接続中の5分周期で実行し、失敗時は30秒後に再試行する。
+カタログ、両グループ所属KV、`script_status`の全件読み取りが成功した場合だけ同期を
+確定する。部分的な失敗を「失効なし」「所属なし」と扱わない。閲覧用の前回スナップショットは
+保持するが、実行の鮮度証拠は同期開始時に無効化する。成功時はスナップショットを置換し、
+削除・失効・所属変更を反映する。同期前後の各KVストリームのsequenceなどが異なる場合は、
+同期中の変更として確定を拒否する。Object Store本体のdigestも最後に再確認する。
+通知履歴はオンラインで一覧を取得するときに更新し、全件リプレイ成功後だけ置換する。
+オフライン時のack/unackはAgentで拒否し、Clientのボタンも無効化する。
+
+`show_when`のチェック結果はカタログスナップショットに保存し、再起動後も表示判定に
+利用する。これは閲覧専用の証拠であり、実行認可には使わない。Clientは接続状態の
+変化時と30秒周期でジョブ・通知を再取得する。通知の`retained_ids`はページとは独立した
+保持ID一覧で、ページ外の通知を誤削除せずにrecallを反映する。
 
 Nothing about a user's run request is stored or replayed: a request that
 arrives while offline either starts once (and its result goes through the
@@ -93,5 +97,3 @@ A lost response means "unknown", never an automatic retry.
 * Revocations or membership changes made while the PC is disconnected reach it
   only after reconnect; `max_age` (≤ 24h) bounds that exposure. Pick the
   smallest value that serves the job.
-* The sync is not snapshot-isolated against concurrent operator edits during
-  its few reads; the next sync (≤ 5 min online) converges.

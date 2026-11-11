@@ -357,6 +357,20 @@ pub async fn run_command_with_start_deadline(
     live: Option<Arc<LiveTail>>,
     start_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<ExecOutcome> {
+    run_command_with_guard(kill, cmd, live, start_deadline, None).await
+}
+
+/// Optional local authorization check evaluated after asynchronous host setup,
+/// immediately before spawning. Other execution paths retain their own gates.
+pub type LaunchGuard = Arc<dyn Fn() -> Result<()> + Send + Sync>;
+
+pub async fn run_command_with_guard(
+    kill: &KillSwitch,
+    cmd: &Command,
+    live: Option<Arc<LiveTail>>,
+    start_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    launch_guard: Option<LaunchGuard>,
+) -> Result<ExecOutcome> {
     cmd.ensure_execution_enabled().map_err(anyhow::Error::msg)?;
     // v0.21: on Windows, run_as: user / system_gui take a separate Win32
     // path (CreateProcessAsUserW). System (default) stays on tokio::process
@@ -366,6 +380,11 @@ pub async fn run_command_with_start_deadline(
     // machinery below.
     #[cfg(not(target_os = "macos"))]
     if !matches!(cmd.run_as, RunAs::System) {
+        if launch_guard.is_some() {
+            anyhow::bail!(
+                "Offline guarded execution does not support a separate user-session launcher"
+            );
+        }
         return run_in_user_session_dispatch(kill, cmd, live, start_deadline).await;
     }
 
@@ -470,6 +489,9 @@ pub async fn run_command_with_start_deadline(
     #[cfg(unix)]
     spawn_in_own_session(&mut builder);
     ensure_start_deadline(start_deadline)?;
+    if let Some(guard) = &launch_guard {
+        guard()?;
+    }
     // A kill that arrived while the run was waiting (jitter, slot, backoff)
     // must not cost a process launch.
     if kill.is_killed() {
@@ -1210,6 +1232,22 @@ mod process_tree_tests {
 
     use super::{ExecOutcome, run_command_with_kill};
     use crate::kill::{KillSwitch, trigger_local};
+
+    #[tokio::test]
+    async fn launch_guard_denial_prevents_process_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let command = sh_job(&format!("touch '{}'", marker.display()), 5);
+        let guard: super::LaunchGuard =
+            std::sync::Arc::new(|| anyhow::bail!("offline authorization expired"));
+        let error =
+            super::run_command_with_guard(&KillSwitch::inert(), &command, None, None, Some(guard))
+                .await
+                .err()
+                .expect("launch must be refused");
+        assert!(error.to_string().contains("offline authorization expired"));
+        assert!(!marker.exists());
+    }
 
     #[test]
     fn native_payload_cannot_enter_the_process_command_type() {

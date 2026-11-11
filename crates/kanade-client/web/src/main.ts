@@ -754,6 +754,7 @@ const jobsByCategory = new Map<JobCategory, UserInvokableJob[]>();
 // there's no fixed first tab to default to).
 let activeJobsTab: JobCategory = "";
 let jobsLoaded = false;
+let jobsLoading = false;
 
 // `force` re-fetches even after the first load: a run completing can flip
 // a `show_when` display gate agent-side (e.g. an update job re-emits its
@@ -761,7 +762,8 @@ let jobsLoaded = false;
 // rows. The first connect calls it without `force` (the guard makes a
 // reconnect storm cheap); `handleProgress` passes `force` on a terminal run.
 async function loadJobs(force = false): Promise<void> {
-  if (jobsLoaded && !force) return;
+  if (jobsLoading || (jobsLoaded && !force)) return;
+  jobsLoading = true;
   jobsLoaded = true;
   try {
     // `category: null` → every tab's jobs in one round-trip; group locally.
@@ -786,6 +788,8 @@ async function loadJobs(force = false): Promise<void> {
       $("nav-categories").innerHTML =
         `<p class="nav-error error">ジョブ一覧を取得できません</p>`;
     }
+  } finally {
+    jobsLoading = false;
   }
 }
 
@@ -874,6 +878,10 @@ function renderJobRow(j: UserInvokableJob): string {
 // the last synchronization time, and why running is unavailable. The two
 // sources (jobs, notifications) are tracked separately; the banner shows
 // while either is cache-served.
+function notificationsOffline(): boolean {
+  return lastSnapshot?.online === false || cacheStatusBySource.notifications?.source === "cache";
+}
+
 const cacheStatusBySource: Record<string, CacheStatus | null | undefined> = {};
 
 function updateCacheBanner(
@@ -1156,6 +1164,7 @@ type AppNotification = {
 };
 
 type NotificationsListResult = {
+  retained_ids?: string[] | null;
   items: AppNotification[];
   next_cursor?: string | null;
   cache?: CacheStatus | null;
@@ -1223,15 +1232,10 @@ async function loadNotifications(): Promise<void> {
     });
     updateCacheBanner("notifications", res.cache);
     for (const n of res.items) notifications.set(n.id, n);
-    // Reconcile recalls missed while offline: an id deleted from the stream
-    // no longer comes back in `notifications.list`, so any locally-held id
-    // absent from a COMPLETE listing was recalled — drop it. Guard on
-    // `next_cursor`: if the history is paginated (more pages exist) an id
-    // beyond this first page isn't really gone, so skip the prune entirely
-    // rather than wrongly evicting it. Expired ids are handled separately by
-    // `evictOldNotifications`, so leave them be here.
-    if (!res.next_cursor) {
-      const present = new Set(res.items.map((n) => n.id));
+    // retained_ids covers the entire retained audience, including other pages.
+    // Older agents omit it; only prune their complete, unpaginated responses.
+    if (res.retained_ids || !res.next_cursor) {
+      const present = new Set(res.retained_ids ?? res.items.map((n) => n.id));
       for (const [id, n] of notifications) {
         if (!present.has(id) && !isExpired(n)) {
           notifications.delete(id);
@@ -1583,16 +1587,10 @@ async function resurfaceAllToasts(): Promise<void> {
     });
     updateCacheBanner("notifications", res.cache);
     for (const n of res.items) notifications.set(n.id, n);
-    // Reconcile recalls (same guard as `loadNotifications`): a notification
-    // recalled while the screen was locked is gone from the stream but still
-    // in the map, and this function re-toasts every map entry — so without
-    // this prune a recalled notification would re-pop on unlock. Only prune on
-    // a COMPLETE listing (`next_cursor` absent) so a paginated-out id isn't
-    // wrongly evicted. `klp-connected`/`loadNotifications` does NOT fire on a
-    // plain unlock of an already-connected session, so this is the only place
-    // that catches a lock-window recall before the re-toast loop.
-    if (!res.next_cursor) {
-      const present = new Set(res.items.map((n) => n.id));
+    // Reconcile recalls across pages before showing lock-window notifications.
+    // Older agents require a complete, unpaginated response before pruning.
+    if (res.retained_ids || !res.next_cursor) {
+      const present = new Set(res.retained_ids ?? res.items.map((n) => n.id));
       for (const [id, n] of notifications) {
         if (!present.has(id) && !isExpired(n)) {
           notifications.delete(id);
@@ -1615,6 +1613,7 @@ async function resurfaceAllToasts(): Promise<void> {
 // Ack a notification for this OS user. Marks it read locally on success;
 // the panel re-renders to swap the 確認 button for the ✓確認済み marker.
 async function ackNotification(id: string): Promise<void> {
+  if (notificationsOffline()) return;
   try {
     const r = await invoke<NotificationsAckResult>("notifications_ack", { id });
     const n = notifications.get(id);
@@ -1632,6 +1631,7 @@ async function ackNotification(id: string): Promise<void> {
 // acked_at so the row returns to its unread/確認-button state. Re-acking is
 // just pressing 確認 again — a true read↔unread toggle.
 async function unackNotification(id: string): Promise<void> {
+  if (notificationsOffline()) return;
   try {
     await invoke<NotificationsUnackResult>("notifications_unack", { id });
     const n = notifications.get(id);
@@ -1746,9 +1746,9 @@ function renderNotification(n: AppNotification): string {
   const ackCtl = !n.require_ack
     ? ""
     : acked
-      ? `<span class="notif-acked muted">✓ 確認済み</span><button class="notif-unack-btn" data-notif-unack="${id}" title="確認を取り消して未確認に戻す">取り消す</button>`
+      ? `<span class="notif-acked muted">✓ 確認済み</span><button class="notif-unack-btn" ${notificationsOffline() ? "disabled" : ""} data-notif-unack="${id}" title="確認を取り消して未確認に戻す">取り消す</button>`
       : seen
-        ? `<button class="notif-ack-btn" data-notif-id="${id}">確認</button>`
+        ? `<button class="notif-ack-btn" ${notificationsOffline() ? "disabled" : ""} data-notif-id="${id}">確認</button>`
         : `<button class="notif-ack-btn notif-ack-locked" data-notif-toggle="${id}" title="本文を開いて内容をご確認ください">開いて確認</button>`;
   // An unread dot makes the badge count legible per-row; it clears the
   // moment the notification is read/acked.
@@ -1946,7 +1946,13 @@ async function renderHealth() {
   const el = $("health");
   try {
     const s = await invoke<StateSnapshot>("state_snapshot");
+    const connectivityChanged = lastSnapshot !== null && lastSnapshot.online !== s.online;
     lastSnapshot = s;
+    if (connectivityChanged) {
+      void loadJobs(true);
+      void loadNotifications();
+      renderNotifications();
+    }
     el.innerHTML = renderSnapshot(s);
     hydrateIcons();
     if (activeView === "home") renderDashboard();
@@ -2138,7 +2144,7 @@ async function onConnected() {
   // Before the catalog: a grant that survived the reconnect decides what
   // `jobs.list` returns, and this restores the banner that goes with it.
   await refreshSupportStatus();
-  void loadJobs();
+  void loadJobs(true);
   void loadNotifications();
 }
 
@@ -2467,6 +2473,7 @@ window.addEventListener("DOMContentLoaded", () => {
     const id = event.payload;
     if (id) focusNotificationInPanel(id);
   });
+  window.setInterval(() => { void loadJobs(true); void loadNotifications(); }, 30_000);
   window.setInterval(checkStuckRuns, 60_000);
   window.setInterval(sweepExpired, 60_000);
 

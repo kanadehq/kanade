@@ -164,6 +164,12 @@ pub async fn handle_notifications_ack(
             "NATS client not available on this agent build",
         )
     })?;
+    if !crate::klp::state::client_online(client) {
+        return Err(RpcError::new(
+            ErrorKind::AgentDisconnected,
+            "確認操作にはサーバー接続が必要です",
+        ));
+    }
     let pc_id = conn.pc_id.as_str();
     let acked_at = Utc::now();
 
@@ -282,6 +288,12 @@ pub async fn handle_notifications_unack(
             "NATS client not available on this agent build",
         )
     })?;
+    if !crate::klp::state::client_online(client) {
+        return Err(RpcError::new(
+            ErrorKind::AgentDisconnected,
+            "確認操作にはサーバー接続が必要です",
+        ));
+    }
     let pc_id = conn.pc_id.as_str();
     let unacked_at = Utc::now();
 
@@ -815,6 +827,7 @@ fn build_notifications_list(
         }
     }
 
+    let retained_ids = Some(deduped.iter().map(|n| n.id.clone()).collect());
     let mut items: Vec<Notification> = match filter {
         NotificationsFilter::Unread => deduped
             .into_iter()
@@ -830,6 +843,7 @@ fn build_notifications_list(
     let next_offset = offset + page.len();
     let next_cursor = (next_offset < total).then(|| next_offset.to_string());
     NotificationsListResult {
+        retained_ids,
         items: page,
         next_cursor,
         cache: None,
@@ -1488,6 +1502,9 @@ mod tests {
         let ids1: Vec<&str> = p1.items.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids1, vec!["newest", "mid"], "newest first");
         assert_eq!(p1.next_cursor.as_deref(), Some("2"));
+        let mut retained = p1.retained_ids.clone().unwrap();
+        retained.sort();
+        assert_eq!(retained, vec!["mid", "newest", "oldest"]);
         // Page 2: from the cursor offset → the tail, no further cursor.
         let p2 = build_notifications_list(
             items,
@@ -1542,6 +1559,11 @@ mod tests {
         assert_eq!(cache.source, CacheSource::Cache);
         assert_eq!(cache.last_sync_at, Some(now));
         let unread = offline_notifications_list(snap, NotificationsFilter::Unread, now, 50, 0);
+        assert_eq!(
+            unread.retained_ids.as_ref().unwrap().len(),
+            2,
+            "read marks do not imply recalls"
+        );
         assert_eq!(unread.items.len(), 1, "alice's ack marks n-all read");
         assert_eq!(unread.items[0].id, "n-pc");
     }
