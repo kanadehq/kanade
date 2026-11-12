@@ -101,6 +101,7 @@ windows-service = "0.8.1"
 # v0.21: CreateProcessAsUserW + WTSQueryUserToken for run_as: user /
 # system_gui. Feature flags scope the binding to just what we need.
 windows = { version = "0.62.2", features = [
+    "Devices_Geolocation",
     "Win32_Foundation",
     "Win32_Security",
     # SDDL → SECURITY_DESCRIPTOR for the KLP Named Pipe ACL (SPEC

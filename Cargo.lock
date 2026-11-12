@@ -3418,6 +3418,7 @@ dependencies = [
  "jsonwebtoken",
  "kanade-shared",
  "lettre",
+ "libsqlite3-sys",
  "mime_guess",
  "portpicker",
  "rand 0.10.2",

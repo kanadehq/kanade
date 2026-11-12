@@ -40,6 +40,7 @@ export const GATEABLE_FEATURES = [
   'jetstream',
   'accounts',
   'settings',
+  'location',
 ] as const;
 
 export type Feature = (typeof GATEABLE_FEATURES)[number];
@@ -72,6 +73,7 @@ export const FEATURE_NAV_KEY: Record<Feature, string> = {
   jetstream: 'nav.jetstream',
   accounts: 'nav.accounts',
   settings: 'nav.settings',
+  location: 'nav.location',
 };
 
 // Route-path first segment → gated feature. A route not listed here (`/`,
@@ -105,6 +107,7 @@ const ROUTE_FEATURE: Record<string, Feature> = {
   '/jetstream': 'jetstream',
   '/accounts': 'accounts',
   '/settings': 'settings',
+  '/location': 'location',
 };
 
 /** The gated feature owning a route, or `null` for a commons/baseline route

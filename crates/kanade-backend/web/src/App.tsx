@@ -24,6 +24,7 @@ import { ThemeProvider, useTheme } from '@/lib/theme';
 // routes ARE the cold-load target for an unauthenticated session, and
 // Placeholder is a one-liner.
 const Accounts = lazy(() => import('@/pages/Accounts').then((m) => ({ default: m.Accounts })));
+const Location = lazy(() => import('@/pages/Location').then((m) => ({ default: m.Location })));
 const AgentDetail = lazy(() => import('@/pages/AgentDetail').then((m) => ({ default: m.AgentDetail })));
 const AgentInstall = lazy(() =>
   import('@/pages/AgentInstall').then((m) => ({ default: m.AgentInstall })),
@@ -123,6 +124,7 @@ function AppContent() {
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/agents" element={<Agents />} />
               <Route path="/agents/:pcId" element={<AgentDetail />} />
+              <Route path="/location" element={<Location />} />
               <Route path="/run" element={<Run />} />
               <Route path="/activity" element={<Activity />} />
               <Route path="/activity/:resultId" element={<ResultDetail />} />
