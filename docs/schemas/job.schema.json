@@ -670,7 +670,7 @@
           "type": "string"
         },
         "offline": {
-          "description": "Optional **offline execution opt-in** for the end-user Client App.\n\n`None` (every existing manifest) ⇒ the job may be *browsed* from the\nagent's durable cache while the broker is unreachable, but it is\n**never executed offline** (default deny). Viewing cached data and\nauthorizing an execution are separate decisions: only\n`offline: { allow: true, max_age: \"1h\" }` lets the agent start the job\nwithout broker connectivity, and only while the last successful\nauthoritative synchronization (full catalog / membership / revocation\nscan) is younger than `max_age` **and** every definition and script body\nthe run needs is locally present and digest-checked. Absent or\nuncertain freshness evidence (clock skew, agent restart since the last\nsync, partial sync) fails closed. A stricter `staleness: strict` on the\nmanifest still applies (the shorter bound wins). Jobs that need the\nbroker to complete (`collect:`, `finalize:`, `check:`, `emit:`,\n`script_object`) are refused offline even when allowed.\n\nAffects the Client App path only; agent-scheduled and operator\nexecutions are unchanged. New field ⇒ #492 wire rule.",
+          "description": "Optional **offline execution opt-in** for the end-user Client App.\n\n`None` (every existing manifest) ⇒ the job may be *browsed* from the\nagent's durable cache while the broker is unreachable, but it is\n**never executed offline** (default deny). Viewing cached data and\nauthorizing an execution are separate decisions: only\n`offline: { allow: true }` lets the agent start the job\nwithout broker connectivity, and only while the last successful\nauthoritative synchronization (full catalog / membership / revocation\nscan) is within `max_age` (30 days when omitted) **and** every definition and script body\nthe run needs is locally present and digest-checked. Absent or\nuncertain freshness evidence (clock skew, agent restart since the last\nsync, partial sync) fails closed. A stricter `staleness: strict` on the\nmanifest still applies (the shorter bound wins). Jobs that need the\nbroker to complete (`collect:`, `finalize:`, `check:`, `emit:`,\n`script_object`) are refused offline even when allowed.\n\nAffects the Client App path only; agent-scheduled and operator\nexecutions are unchanged. New field ⇒ #492 wire rule.",
           "anyOf": [
             {
               "$ref": "#/$defs/OfflineHint"
@@ -1211,7 +1211,7 @@
           "type": "boolean"
         },
         "max_age": {
-          "description": "Humantime validity period (`1s` ..= `24h`) counted from the START of\nthe last successful authoritative synchronization. Required when\n`allow: true`.",
+          "description": "Humantime validity period counted from the START of the last successful\nauthoritative synchronization. When `allow: true`, omission means 30 days.\nExplicit values must be whole seconds in `1s` ..= `30d` (`720h` also\nspells 30 days), checked by `Manifest::validate`. Omit when `allow: false`.",
           "type": [
             "string",
             "null"

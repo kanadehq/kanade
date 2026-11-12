@@ -10,7 +10,7 @@ run jobs. Viewing and executing are separate decisions.
 | Question | Answer |
 |----------|--------|
 | May a job run offline? | **No by default.** Only `client.offline.allow: true`. A manifest with no `offline` block (every existing manifest) or `allow: false` is never run offline. |
-| How long after the last sync? | `client.offline.max_age`, **1s – 24h**, whole seconds, required when `allow: true`. |
+| How long after the last sync? | `client.offline.max_age`, **1s – 30d**, whole seconds; defaults to **30 days** when `allow: true` and omitted. |
 | Counted from? | The **start** of the last successful *authoritative* sync (never extended by mere reconnection or a partial sync). |
 | Does `staleness: strict` still apply? | Yes. The shorter of `offline.max_age` and `staleness.max_cache_age` wins. `cached` / `unchecked` add no extra bound. |
 | After an Agent restart? | Browsing is restored from disk. **Execution stays denied until the next successful sync**, because a stored timestamp cannot prove how long the machine was off or whether the clock changed. |
@@ -22,16 +22,26 @@ client:
   category: troubleshoot
   offline:
     allow: true
-    max_age: 1h      # 1s..24h; omit the whole block to deny offline runs
+    max_age: 1h      # optional shorter override; omit for 30 days
 ```
 
-`allow: false` with a `max_age`, `allow: true` without one, a value outside
-1s–24h, sub-second values and unknown keys are rejected by `Manifest::validate`
-/ the schema (`docs/schemas/job.schema.json`).
+The minimal offline opt-in is `client: { offline: { allow: true } }` (alongside
+required client metadata such as `name` and `category`). It uses a bounded
+30-day validity period, not unlimited validity. Explicit `max_age: 30d`, `720h`
+or `2592000s` also means exactly 30 days. `1M` / `1month` means approximately
+30.44 days in humantime and exceeds the limit.
+
+`allow: false` with a `max_age`, a value outside 1s–30d, fractional-second
+values and unknown keys are rejected. `Manifest::validate` enforces the
+conditional policy and duration bounds; the generated schema
+(`docs/schemas/job.schema.json`) describes these semantics and rejects unknown keys.
+
+Update Agents before using the omitted form: older Agents reject it as an
+invalid policy and deny offline execution.
 
 ## What an offline run requires (all of it)
 
-1. `client.offline.allow: true` with a valid `max_age`.
+1. `client.offline.allow: true` with a valid explicit `max_age` or the 30-day default.
 2. 定義と必須スクリプト本体（inline または `script_object`）がローカルに保存され、
    SHA-256 が一致すること。Object Store 本体は同期時にdigestを確認して保存し、
    オフライン実行では保存済みバイトだけをinline化する。欠落・破損時は拒否する。
@@ -101,5 +111,7 @@ A lost response means "unknown", never an automatic retry.
 ## Known limitations
 
 * Revocations or membership changes made while the PC is disconnected reach it
-  only after reconnect; `max_age` (≤ 24h) bounds that exposure. Pick the
+  only after a successful authoritative resync; effective `max_age` (≤ 30 days)
+  bounds that exposure. A stricter `staleness: strict` / `max_cache_age` still
+  shortens the window, and Agent restart requires a new sync before execution. Pick the
   smallest value that serves the job.

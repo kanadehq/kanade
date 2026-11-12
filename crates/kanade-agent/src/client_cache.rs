@@ -1063,6 +1063,50 @@ mod tests {
     }
 
     #[test]
+    fn omitted_max_age_defaults_to_thirty_days_and_strict_can_shorten_it() {
+        let t0 = Utc::now();
+        let m0 = Instant::now();
+        let minimal = r#""offline": {"allow": true}"#;
+        for (staleness, ages) in [
+            (
+                "",
+                vec![
+                    (29 * 86400, true),
+                    (30 * 86400, true),
+                    (30 * 86400 + 1, false),
+                ],
+            ),
+            (
+                r#""staleness": {"mode": "strict", "max_cache_age": "1h"}"#,
+                vec![(3540, true), (3660, false)],
+            ),
+        ] {
+            let s = snap(
+                &[("j", manifest_json("j", minimal, staleness))],
+                &[],
+                &[],
+                t0,
+            );
+            let e = ev(t0, m0);
+            for (seconds, allowed) in ages {
+                let result = evaluate(
+                    &s,
+                    Some(&e),
+                    "j",
+                    "pc1",
+                    t0 + CDuration::seconds(seconds),
+                    m0 + Duration::from_secs(seconds as u64),
+                );
+                if allowed {
+                    assert!(result.is_ok(), "{staleness}, {seconds}: {result:?}");
+                } else {
+                    assert_eq!(result.unwrap_err(), Denied::SyncExpired);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn restart_without_evidence_denies_but_data_remains() {
         let t0 = Utc::now();
         let s = snap(&[("j", manifest_json("j", OPT_IN, ""))], &[], &[], t0);

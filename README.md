@@ -245,7 +245,8 @@ start http://127.0.0.1:8081
 
 The Client App can browse the last synchronized catalog and notifications
 without broker connectivity; running a job offline is denied unless its manifest
-sets `client.offline: { allow: true, max_age: <1s..24h> }`. See
+sets `client.offline: { allow: true }` (30-day default). An optional
+`max_age` accepts whole seconds from `1s` through `30d`, for example `1h`. See
 [docs/client-offline.md](docs/client-offline.md).
 
 ## CLI cheat sheet
