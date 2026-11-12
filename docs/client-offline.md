@@ -16,13 +16,25 @@ run jobs. Viewing and executing are separate decisions.
 | After an Agent restart? | Browsing is restored from disk. **Execution stays denied until the next successful sync**, because a stored timestamp cannot prove how long the machine was off or whether the clock changed. |
 | Online behaviour? | Unchanged. A reachable broker is always authoritative: an online `NotFound`, refusal or error is never answered from the cache. Agent-scheduled and operator executions are untouched. |
 
+Minimal opt-in (valid for 30 days after the last sync):
+
 ```yaml
 client:
   name: "Clear temp files"
   category: troubleshoot
   offline:
     allow: true
-    max_age: 1h      # optional shorter override; omit for 30 days
+```
+
+Explicit shorter override:
+
+```yaml
+client:
+  name: "Clear temp files"
+  category: troubleshoot
+  offline:
+    allow: true
+    max_age: 1h      # 1s..30d, whole seconds
 ```
 
 The minimal offline opt-in is `client: { offline: { allow: true } }` (alongside
