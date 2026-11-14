@@ -9032,10 +9032,7 @@ pub fn require_met(req: &Require, env: &EnvState) -> bool {
             _ => return false,
         }
     }
-    if req.network && !env.network_up {
-        return false;
-    }
-    true
+    !req.network || env.network_up
 }
 
 /// [`Active`] decides *over what date range* a schedule is live,
