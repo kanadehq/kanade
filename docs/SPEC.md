@@ -2264,8 +2264,15 @@ check を用意し、更新ジョブを `is: [fail]` でゲートする。
 
 #### `client.offline` — オフライン実行の明示 opt-in
 
-`client:` ジョブは `offline: { allow: true, max_age: <1s..24h> }` を持てる。
-未指定・`allow: false` (既存 manifest を含む) はオフラインで実行されない。
+`client:` ジョブは `offline: { allow: true }` でオフライン実行を許可できる。
+`max_age` 省略時は最終の完全な同期開始から **30日**（無期限ではない）。
+明示値は整数秒の `1s`〜`30d`（`720h` も30日）で、例: `max_age: 1h`。
+`1M` / `1month` は約30.44日なので上限を超えて拒否される。
+`offline` 未指定・`allow: false` (既存 manifest を含む) はオフラインで実行されない。
+`allow: false` と `max_age` の併記・未知キーは拒否する。
+`staleness: strict` の `max_cache_age` が短ければそちらを優先し、Agent再起動後は
+次の同期まで実行を拒否する。失効・所属変更は再同期まで届かないため必要最小の期間を指定する。
+省略形を使う前にAgentを更新すること（旧Agentは不正ポリシーとして実行を拒否する）。
 閲覧用キャッシュと実行認可は別で、詳細は [client-offline.md](client-offline.md)。
 
 #### `client.unlock` — サポートコードによる時限表示 (裏コマンド)

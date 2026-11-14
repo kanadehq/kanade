@@ -920,10 +920,10 @@ pub struct ClientHint {
     /// agent's durable cache while the broker is unreachable, but it is
     /// **never executed offline** (default deny). Viewing cached data and
     /// authorizing an execution are separate decisions: only
-    /// `offline: { allow: true, max_age: "1h" }` lets the agent start the job
+    /// `offline: { allow: true }` lets the agent start the job
     /// without broker connectivity, and only while the last successful
     /// authoritative synchronization (full catalog / membership / revocation
-    /// scan) is younger than `max_age` **and** every definition and script body
+    /// scan) is within `max_age` (30 days when omitted) **and** every definition and script body
     /// the run needs is locally present and digest-checked. Absent or
     /// uncertain freshness evidence (clock skew, agent restart since the last
     /// sync, partial sync) fails closed. A stricter `staleness: strict` on the
@@ -939,9 +939,11 @@ pub struct ClientHint {
 
 /// Lower bound of [`OfflineHint::max_age`].
 pub const OFFLINE_MAX_AGE_MIN_SECS: u64 = 1;
-/// Upper bound of [`OfflineHint::max_age`] (24 h): revocations only reach a
+/// Upper bound of [`OfflineHint::max_age`] (30 days): revocations only reach a
 /// disconnected agent after it reconnects, so the window is bounded.
-pub const OFFLINE_MAX_AGE_MAX_SECS: u64 = 24 * 60 * 60;
+pub const OFFLINE_MAX_AGE_MAX_SECS: u64 = 30 * 24 * 60 * 60;
+/// Default validity when offline execution is allowed and `max_age` is omitted.
+pub const OFFLINE_MAX_AGE_DEFAULT_SECS: u64 = OFFLINE_MAX_AGE_MAX_SECS;
 
 /// Offline execution policy for a [`ClientHint`] — see
 /// [`ClientHint::offline`].
@@ -951,9 +953,10 @@ pub struct OfflineHint {
     /// Explicit opt-in. `false` (or omitting the whole block) denies offline
     /// execution.
     pub allow: bool,
-    /// Humantime validity period (`1s` ..= `24h`) counted from the START of
-    /// the last successful authoritative synchronization. Required when
-    /// `allow: true`.
+    /// Humantime validity period counted from the START of the last successful
+    /// authoritative synchronization. When `allow: true`, omission means 30 days.
+    /// Explicit values must be whole seconds in `1s` ..= `30d` (`720h` also
+    /// spells 30 days), checked by `Manifest::validate`. Omit when `allow: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age: Option<String>,
 }
@@ -965,7 +968,10 @@ impl OfflineHint {
         if !self.allow {
             return None;
         }
-        let d = humantime::parse_duration(self.max_age.as_deref()?.trim()).ok()?;
+        let Some(raw) = self.max_age.as_deref() else {
+            return Some(std::time::Duration::from_secs(OFFLINE_MAX_AGE_DEFAULT_SECS));
+        };
+        let d = humantime::parse_duration(raw.trim()).ok()?;
         let secs = d.as_secs();
         ((OFFLINE_MAX_AGE_MIN_SECS..=OFFLINE_MAX_AGE_MAX_SECS).contains(&secs)
             && d.subsec_nanos() == 0)
@@ -3052,15 +3058,10 @@ impl Manifest {
             }
             if let Some(off) = &client.offline {
                 match (off.allow, off.max_age.as_deref()) {
-                    (true, None) => {
-                        return Err(
-                            "client.offline.max_age is required when allow is true".to_string()
-                        );
-                    }
                     (true, Some(_)) if off.validity().is_none() => {
                         return Err(format!(
                             "client.offline.max_age must be a whole-second duration between \
-                             {OFFLINE_MAX_AGE_MIN_SECS}s and 24h (got {:?})",
+                             {OFFLINE_MAX_AGE_MIN_SECS}s and {OFFLINE_MAX_AGE_MAX_SECS}s (30 days) (got {:?})",
                             off.max_age.as_deref().unwrap_or_default()
                         ));
                     }
@@ -4319,12 +4320,12 @@ client:
         m.validate().expect("valid opt-in");
         let off = m.client.as_ref().unwrap().offline.clone().unwrap();
         assert_eq!(off.validity(), Some(std::time::Duration::from_secs(3600)));
-        for ok in ["1s", "24h"] {
+        for ok in ["1s", "24h", "25h", "1d 1s", "30d", "720h", "2592000s"] {
             offline_manifest(&format!("  offline:\n    allow: true\n    max_age: {ok}\n"))
                 .validate()
                 .expect(ok);
         }
-        for bad in ["0s", "500ms", "25h", "1d 1s", "soon", "1.5s"] {
+        for bad in ["0s", "500ms", "30d 1s", "31d", "1M", "soon", "1.5s"] {
             let err = offline_manifest(&format!(
                 "  offline:\n    allow: true\n    max_age: \"{bad}\"\n"
             ))
@@ -4335,11 +4336,26 @@ client:
     }
 
     #[test]
-    fn manifest_client_offline_requires_max_age_and_rejects_noise() {
-        let err = offline_manifest("  offline:\n    allow: true\n")
-            .validate()
-            .expect_err("missing max_age");
-        assert!(err.contains("client.offline.max_age"), "{err}");
+    fn manifest_client_offline_defaults_to_thirty_days_without_changing_wire() {
+        let m = offline_manifest("  offline:\n    allow: true\n");
+        m.validate().expect("minimal opt-in");
+        let off = m.client.as_ref().unwrap().offline.as_ref().unwrap();
+        assert!(off.max_age.is_none());
+        assert_eq!(
+            off.validity(),
+            Some(std::time::Duration::from_secs(2_592_000))
+        );
+        let wire = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            wire["client"]["offline"],
+            serde_json::json!({"allow": true})
+        );
+        let restored: Manifest = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.client.unwrap().offline.unwrap(), *off);
+    }
+
+    #[test]
+    fn manifest_client_offline_rejects_max_age_with_deny_and_noise() {
         let err = offline_manifest("  offline:\n    allow: false\n    max_age: 1h\n")
             .validate()
             .expect_err("max_age with deny");
@@ -9016,10 +9032,7 @@ pub fn require_met(req: &Require, env: &EnvState) -> bool {
             _ => return false,
         }
     }
-    if req.network && !env.network_up {
-        return false;
-    }
-    true
+    !req.network || env.network_up
 }
 
 /// [`Active`] decides *over what date range* a schedule is live,

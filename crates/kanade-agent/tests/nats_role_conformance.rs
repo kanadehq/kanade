@@ -125,9 +125,12 @@ fn in_ci() -> bool {
 }
 
 fn exe(name: &str) -> PathBuf {
-    let mut here = std::env::current_exe().expect("test exe path");
-    here.pop(); // deps
-    here.pop(); // debug / release
+    // Sibling binaries sit next to the agent binary in `target/<profile>`.
+    // Deriving this from `current_exe()` breaks when the test binary lives in
+    // a per-package build directory (`build/<pkg>/<hash>/out/`) instead of
+    // `deps/`, so anchor on the cargo-provided agent path instead.
+    let mut here = agent_exe();
+    here.pop();
     here.push(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     here
 }
