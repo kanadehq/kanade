@@ -1,9 +1,9 @@
 preset = "github.com/yukimemi/pj-presets:rust-workspace"
-applied_at = "2026-11-19T11:45:55.488491298Z"
+applied_at = "2026-11-22T11:31:07.102999427Z"
 
 [[templates]]
 source = "github.com/yukimemi/pj-base"
-rev = "e6da08d35873812eae82841e5c7cf82c8d4d0185"
+rev = "fde196ac259b1acde901d0cbc91516ae2fbd7bfb"
 version = "0.18.0"
 
 [[templates]]
@@ -13,7 +13,7 @@ version = "0.8.1"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust-workspace"
-rev = "37d92065429d4c1a5dc33be955ba7beea8d59df1"
+rev = "67f0d886afc3f87477e548a4bd391c1ea2a4bf5a"
 version = "0.3.4"
 
 [files.".agents/skills/renri/SKILL.md"]
@@ -42,10 +42,10 @@ content_hash = "4e2735f40c2ae61014810159a2458da2edc1646589f5f65d9f2f3d099366c9a8
 content_hash = "4aae1c2f39d146003164245b2da6e1d75a8668dc227f1851db6082481ebe515a"
 
 [files.".github/workflows/kata-apply.yml"]
-content_hash = "7000353151b01b5d14cb8f56e314b1a25b020e22bdf5842dcaf5686efb59facb"
+content_hash = "bdb83929c3c6a898dcdcfb3d6fa96e6477e4bef47b2c37db34e8a991a3979db2"
 
 [files.".github/workflows/release.yml"]
-content_hash = "ab6e411abf57f5aab4d534fb119b26c38a8c815eaf8f75bb79e4590f12cad74a"
+content_hash = "dd493287cf830d96fc1297d142e158e3dd1cf5c12d7d217f5753fc1e1f862ac2"
 
 [files.".gitignore"]
 content_hash = "4bebd1c3417c33f9d1c51f011694f6d82b098bbb1a5a102ba56e97ab01a866ef"
