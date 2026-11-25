@@ -73,7 +73,7 @@ async fn status(base: &str) -> Result<()> {
     }
     let freeze: Option<Freeze> = resp.json().await?;
     match freeze {
-        None => println!(
+        None => anstream::println!(
             "fleet is {} (no freeze configured — schedules fire normally)",
             term::Palette::stdout().ok("NOT frozen")
         ),
@@ -83,7 +83,7 @@ async fn status(base: &str) -> Result<()> {
             // fires right now (coderabbit #472). Report the live state,
             // not merely "a freeze row exists".
             if f.is_active(chrono::Utc::now()) {
-                println!(
+                anstream::println!(
                     "fleet is {} now — all schedule fires are skipped",
                     term::Palette::stdout().warn("FROZEN")
                 );

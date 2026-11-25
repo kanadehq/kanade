@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
     // Resolve the colour policy before anything prints: clap's help and
     // usage errors need it, and so does the tracing subscriber.
     let early = term::prescan(
-        std::env::args().collect::<Vec<_>>(),
+        std::env::args_os(),
         std::env::var("KANADE_COLOR").ok().as_deref(),
     );
     term::init(early);
@@ -143,6 +143,7 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "info,kanade=debug".into()),
         )
         .with_ansi(term::Palette::stdout().enabled())
+        .with_writer(|| anstream::AutoStream::auto(std::io::stdout()))
         .init();
 
     let Cli {
@@ -234,7 +235,7 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
                 &watched,
             )
             .await;
-            eprintln!(
+            anstream::eprintln!(
                 "{} cannot authenticate to NATS (credential refused or connection lost)",
                 term::Palette::stderr().err("error:")
             );

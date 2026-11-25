@@ -148,7 +148,7 @@ pub async fn finalize(handle: Option<UpdateHandle>) {
         }
         Some(UpdateHandle::Installing { handle }) => {
             if let Ok(Ok(Ok(Some(latest)))) = tokio::time::timeout(INSTALL_DRAIN, handle).await {
-                eprintln!(
+                anstream::eprintln!(
                     "\nkanade updated to {} — takes effect on the next invocation.",
                     crate::term::Palette::stderr().ok(&latest.tag_name)
                 );

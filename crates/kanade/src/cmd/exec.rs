@@ -85,11 +85,11 @@ pub async fn execute(backend_url: &str, args: ExecArgs) -> Result<()> {
     let payload: ExecResponse = resp.json().await.context("decode exec response")?;
 
     let pal = term::Palette::stdout();
-    println!("{}       : {}", pal.label("exec_id"), payload.exec_id);
-    println!("{}        : {}", pal.label("job_id"), payload.job_id);
-    println!("{}       : {}", pal.label("version"), payload.version);
-    println!("{}  : {}", pal.label("target_count"), payload.target_count);
-    println!("{}      :", pal.label("subjects"));
+    anstream::println!("{}       : {}", pal.label("exec_id"), payload.exec_id);
+    anstream::println!("{}        : {}", pal.label("job_id"), payload.job_id);
+    anstream::println!("{}       : {}", pal.label("version"), payload.version);
+    anstream::println!("{}  : {}", pal.label("target_count"), payload.target_count);
+    anstream::println!("{}      :", pal.label("subjects"));
     for s in &payload.subjects {
         println!("  - {s}");
     }

@@ -220,9 +220,9 @@ pub async fn export(
                 .await
                 .and_then(|y| write_yaml(&dir, id, &y))
             {
-                Ok(path) => println!("{} {id} → {}", term::ok_mark(), path.display()),
+                Ok(path) => anstream::println!("{} {id} → {}", term::ok_mark(), path.display()),
                 Err(e) => {
-                    eprintln!("{} {id}: {e:#}", term::fail_mark());
+                    anstream::eprintln!("{} {id}: {e:#}", term::fail_mark());
                     failures += 1;
                 }
             }
@@ -241,7 +241,7 @@ pub async fn export(
                 std::fs::create_dir_all(&dir)
                     .with_context(|| format!("create out dir {}", dir.display()))?;
                 let path = write_yaml(&dir, &id, &yaml)?;
-                println!("{} {id} → {}", term::ok_mark(), path.display());
+                anstream::println!("{} {id} → {}", term::ok_mark(), path.display());
             }
             // No trailing println: the YAML already ends with a newline,
             // so the redirect target is a clean re-creatable file.
@@ -275,7 +275,7 @@ async fn export_all_bundle(base: &str, kind: &str, ids: &[String]) -> Result<()>
                 }
             }
             Err(e) => {
-                eprintln!("{} {id}: {e:#}", term::fail_mark());
+                anstream::eprintln!("{} {id}: {e:#}", term::fail_mark());
                 failures += 1;
             }
         }

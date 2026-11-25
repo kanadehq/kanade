@@ -7,6 +7,7 @@
 //! styling wraps a finished cell, so stripping the escapes yields exactly the
 //! plain rendering.
 
+use std::ffi::OsStr;
 use std::fmt::Display;
 use std::io;
 
@@ -62,13 +63,15 @@ pub fn clap_choice(policy: ColorPolicy) -> clap::ColorChoice {
 pub fn prescan<I, S>(args: I, env: Option<&str>) -> ColorPolicy
 where
     I: IntoIterator<Item = S>,
-    S: AsRef<str>,
+    S: AsRef<OsStr>,
 {
     let parse = |v: &str| ColorPolicy::from_str(v, true).ok();
     let mut found = None;
     let mut it = args.into_iter().skip(1);
     while let Some(a) = it.next() {
-        let a = a.as_ref();
+        let Some(a) = a.as_ref().to_str() else {
+            continue;
+        };
         if a == "--" {
             break;
         }
@@ -77,7 +80,7 @@ where
         } else if a == "--color"
             && let Some(v) = it.next()
         {
-            found = parse(v.as_ref()).or(found);
+            found = v.as_ref().to_str().and_then(parse).or(found);
         }
     }
     found.or_else(|| env.and_then(parse)).unwrap_or_default()
