@@ -111,7 +111,7 @@ async fn create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
     let mut failures = 0usize;
     for f in &files {
         if let Err(e) = create_one(base, f).await {
-            anstream::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
+            term::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
             failures += 1;
         }
     }
@@ -137,7 +137,7 @@ async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
     let mut failures = 0usize;
     for (i, doc) in docs.iter().enumerate() {
         if let Err(e) = create_one_doc(base, yaml, doc).await {
-            anstream::eprintln!(
+            term::eprintln!(
                 "{} {} [doc {}]: {e:#}",
                 term::fail_mark(),
                 yaml.display(),
@@ -305,7 +305,7 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
         .get("version")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    anstream::println!(
+    term::println!(
         "{} {} → job '{id}' v{version}",
         term::ok_mark(),
         yaml.display()
@@ -319,7 +319,7 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
     if let Some(changes) = payload.get("schema_changes").and_then(|v| v.as_array()) {
         for change in changes {
             if let Some(note) = change.as_str() {
-                anstream::println!("  {} schema migrated: {note}", term::warn_mark());
+                term::println!("  {} schema migrated: {note}", term::warn_mark());
             }
         }
     }
@@ -335,7 +335,7 @@ fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
     let mut failures = 0usize;
     for f in &files {
         if let Err(e) = validate_one(f) {
-            anstream::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
+            term::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
             failures += 1;
         }
     }
@@ -366,7 +366,7 @@ fn validate_one(yaml: &std::path::Path) -> Result<()> {
     let mut failures = 0usize;
     for (i, doc) in docs.iter().enumerate() {
         if let Err(e) = validate_one_doc(yaml, doc) {
-            anstream::eprintln!(
+            term::eprintln!(
                 "{} {} [doc {}]: {e:#}",
                 term::fail_mark(),
                 yaml.display(),
@@ -418,7 +418,7 @@ fn validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
     } else {
         ""
     };
-    anstream::println!(
+    term::println!(
         "{} {} → job '{}' v{} (valid{note})",
         term::ok_mark(),
         yaml.display(),

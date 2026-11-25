@@ -123,6 +123,48 @@ fn failure_marks_stay_on_stderr_and_exit_code_is_kept() {
     assert!(text(&colored.stderr).contains('✗'));
 }
 
+// Windows ChildStdin uses an overlapped pipe that cannot be reused as a
+// synchronous child standard stream. On Unix this supplies a real EPIPE.
+#[cfg(unix)]
+#[test]
+fn closed_output_pipe_remains_a_failure() {
+    use std::process::Stdio;
+
+    for color in ["never", "always"] {
+        for stdout in [true, false] {
+            // Keep only the write end of a pipe whose reader has exited.
+            let mut reader = Command::new(env!("CARGO_BIN_EXE_kanade"))
+                .arg("--version")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pipe = reader.stdin.take().unwrap();
+            assert!(reader.wait().unwrap().success());
+
+            let mut command = Command::new(env!("CARGO_BIN_EXE_kanade"));
+            command
+                .env("KANADE_NO_AUTOUPDATE", "1")
+                .env("RUST_LOG", "off")
+                .args(["--color", color, "job", "validate"]);
+            if stdout {
+                command.arg(job_manifest()).stdout(Stdio::from(pipe));
+            } else {
+                command
+                    .arg("definitely-missing.yaml")
+                    .stderr(Stdio::from(pipe));
+            }
+            let output = command.output().unwrap();
+            assert!(!output.status.success(), "{color}, stdout={stdout}");
+            if stdout {
+                assert!(text(&output.stderr).contains("failed printing to stdout"));
+            } else {
+                assert_ne!(output.status.code(), Some(1), "{color}");
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn non_unicode_manifest_path_is_accepted() {

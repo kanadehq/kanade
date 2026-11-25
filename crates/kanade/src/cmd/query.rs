@@ -88,7 +88,7 @@ fn render_table(payload: &serde_json::Value) {
 
     let out = term::Palette::stdout();
     if columns.is_empty() {
-        anstream::println!("{}", out.dim("(no rows)"));
+        term::println!("{}", out.dim("(no rows)"));
     } else {
         // Column widths = max of header + every cell in that column.
         let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count()).collect();
@@ -113,8 +113,8 @@ fn render_table(payload: &serde_json::Value) {
                 .collect::<Vec<_>>()
                 .join("  ")
         };
-        anstream::println!("{}", line(&columns, term::Palette::heading));
-        anstream::println!(
+        term::println!("{}", line(&columns, term::Palette::heading));
+        term::println!(
             "{}",
             out.dim(
                 widths
@@ -152,7 +152,7 @@ fn render_table(payload: &serde_json::Value) {
     } else {
         trunc.to_string()
     };
-    anstream::eprintln!("\n{row_count} row(s) in {elapsed} ms{trunc}");
+    term::eprintln!("\n{row_count} row(s) in {elapsed} ms{trunc}");
 }
 
 /// Stringify a JSON cell for the table: strings raw (no quotes), null as

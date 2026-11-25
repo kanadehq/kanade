@@ -56,6 +56,33 @@ pub fn clap_choice(policy: ColorPolicy) -> clap::ColorChoice {
     policy.clap()
 }
 
+// Unlike anstream's print macros, these retain std's panic on write errors,
+// including BrokenPipe, while still adapting colors to Windows consoles.
+macro_rules! human_print {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        write!(anstream::stdout(), $($arg)*).expect("failed printing to stdout")
+    }};
+}
+
+macro_rules! human_println {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        writeln!(anstream::stdout(), $($arg)*).expect("failed printing to stdout")
+    }};
+}
+
+macro_rules! human_eprintln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        writeln!(anstream::stderr(), $($arg)*).expect("failed printing to stderr")
+    }};
+}
+
+pub(crate) use human_eprintln as eprintln;
+pub(crate) use human_print as print;
+pub(crate) use human_println as println;
+
 /// Find the colour policy in raw arguments before clap parses them, so that
 /// `--help` and usage errors honour it. Stops at `--` (everything after is
 /// positional). Falls back to `KANADE_COLOR`, then `auto`. Unparseable values

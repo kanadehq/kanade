@@ -235,7 +235,7 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
                 &watched,
             )
             .await;
-            anstream::eprintln!(
+            crate::term::eprintln!(
                 "{} cannot authenticate to NATS (credential refused or connection lost)",
                 term::Palette::stderr().err("error:")
             );

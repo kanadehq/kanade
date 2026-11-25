@@ -90,7 +90,7 @@ pub async fn status(backend_url: &str) -> Result<()> {
         .json()
         .await
         .with_context(|| format!("parse JSON response from GET {url}"))?;
-    anstream::print!("{}", render_status(&snap, &Palette::stdout()));
+    crate::term::print!("{}", render_status(&snap, &Palette::stdout()));
     Ok(())
 }
 
