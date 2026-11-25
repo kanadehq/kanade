@@ -2,12 +2,13 @@ mod audit;
 mod cli_config;
 mod cmd;
 mod http_client;
+mod term;
 #[cfg(test)]
 mod test_http;
 mod updater;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use tracing::debug;
 
 const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
@@ -17,9 +18,18 @@ const DEFAULT_BACKEND: &str = "http://127.0.0.1:8080";
 #[command(
     name = "kanade",
     about = "Admin CLI for the kanade endpoint management system",
-    version
+    version,
+    styles = term::clap_styles()
 )]
 struct Cli {
+    /// When to colorize human-facing output: auto, always or never.
+    ///
+    /// `auto` colors a stream only when it is a terminal and honours
+    /// `NO_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE`. JSON / YAML and other
+    /// machine-readable output is never colorized.
+    #[arg(long, global = true, value_enum, default_value_t = term::ColorPolicy::Auto, env = "KANADE_COLOR")]
+    color: term::ColorPolicy,
+
     /// NATS broker URL (not the backend).
     ///
     /// Used by the broker subcommands: `run` and `kill`. Its credential is NOT a flag — the CLI reads
@@ -116,15 +126,27 @@ enum SubCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Resolve the colour policy before anything prints: clap's help and
+    // usage errors need it, and so does the tracing subscriber.
+    let early = term::prescan(
+        std::env::args().collect::<Vec<_>>(),
+        std::env::var("KANADE_COLOR").ok().as_deref(),
+    );
+    term::init(early);
+    let matches = Cli::command().color(term::clap_choice(early)).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    term::init(cli.color);
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,kanade=debug".into()),
         )
+        .with_ansi(term::Palette::stdout().enabled())
         .init();
 
-    let cli = Cli::parse();
     let Cli {
+        color: _,
         server,
         backend_url,
         command,
@@ -212,7 +234,10 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
                 &watched,
             )
             .await;
-            eprintln!("error: cannot authenticate to NATS (credential refused or connection lost)");
+            eprintln!(
+                "{} cannot authenticate to NATS (credential refused or connection lost)",
+                term::Palette::stderr().err("error:")
+            );
             std::process::exit(1);
         });
     }

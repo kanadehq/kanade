@@ -1,3 +1,4 @@
+use crate::term;
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use kanade_shared::Heartbeat;
@@ -70,9 +71,10 @@ pub async fn execute(backend_url: &str, args: PingArgs) -> Result<()> {
         .json()
         .await
         .with_context(|| format!("parse JSON response from POST {url}"))?;
-    println!("pc_id         : {}", hb.pc_id);
-    println!("at            : {}", hb.at);
-    println!("agent_version : {}", hb.agent_version);
+    let pal = term::Palette::stdout();
+    println!("{}         : {}", pal.label("pc_id"), hb.pc_id);
+    println!("{}            : {}", pal.label("at"), hb.at);
+    println!("{} : {}", pal.label("agent_version"), hb.agent_version);
     Ok(())
 }
 

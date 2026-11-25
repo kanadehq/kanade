@@ -10,6 +10,7 @@
 //! against the operator's account there; the CLI writes no audit record of
 //! its own.
 
+use crate::term;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -220,7 +221,7 @@ pub async fn delete(
         .await
         .with_context(|| format!("DELETE {url}"))?;
     match resp.status() {
-        s if s.is_success() => println!("deleted: {key}"),
+        s if s.is_success() => println!("{} {key}", term::Palette::stdout().ok("deleted:")),
         StatusCode::NOT_FOUND => println!("not present: {key} (idempotent no-op)"),
         _ => return Err(rejected("delete", resp, None).await),
     }
@@ -229,7 +230,7 @@ pub async fn delete(
 
 /// Print the `published:` block shared by both publish commands.
 pub fn print_published(bucket: &Bucket, key: &str, published: &Published) {
-    println!("published: {key}");
+    println!("{} {key}", term::Palette::stdout().ok("published:"));
     println!("  object_store : {}/{key}", bucket.store);
     println!("  size         : {} bytes", published.size);
     if let Some(d) = published.digest.as_deref() {

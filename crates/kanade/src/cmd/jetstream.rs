@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde::Deserialize;
 
+use crate::term::Palette;
+
 #[derive(Args, Debug)]
 pub struct JetstreamArgs {
     #[command(subcommand)]
@@ -35,12 +37,12 @@ struct Snapshot {
     object_stores: Vec<Probe>,
 }
 
-fn render_status(snap: &Snapshot) -> String {
+fn render_status(snap: &Snapshot, pal: &Palette) -> String {
     use std::fmt::Write;
     fn num(v: Option<u64>) -> String {
         v.map_or_else(|| "?".to_string(), |n| n.to_string())
     }
-    let mut out = String::from("streams:\n");
+    let mut out = format!("{}\n", pal.heading("streams:"));
     for p in &snap.streams {
         if p.exists {
             let _ = writeln!(
@@ -51,16 +53,20 @@ fn render_status(snap: &Snapshot) -> String {
                 num(p.bytes)
             );
         } else {
-            let _ = writeln!(out, "  {}: NOT FOUND", p.name);
+            let _ = writeln!(out, "  {}: {}", p.name, pal.err("NOT FOUND"));
         }
     }
     for (title, probes) in [
         ("KV buckets:", &snap.kv_buckets),
         ("object stores:", &snap.object_stores),
     ] {
-        let _ = writeln!(out, "{title}");
+        let _ = writeln!(out, "{}", pal.heading(title));
         for p in probes {
-            let state = if p.exists { "OK" } else { "NOT FOUND" };
+            let state = if p.exists {
+                pal.ok("OK")
+            } else {
+                pal.err("NOT FOUND")
+            };
             let _ = writeln!(out, "  {}: {state}", p.name);
         }
     }
@@ -84,7 +90,7 @@ pub async fn status(backend_url: &str) -> Result<()> {
         .json()
         .await
         .with_context(|| format!("parse JSON response from GET {url}"))?;
-    print!("{}", render_status(&snap));
+    print!("{}", render_status(&snap, &Palette::stdout()));
     Ok(())
 }
 
@@ -104,7 +110,7 @@ mod tests {
     fn render_keeps_the_three_sections_and_not_found() {
         let snap: Snapshot = serde_json::from_str(SNAP).unwrap();
         assert_eq!(
-            render_status(&snap),
+            render_status(&snap, &Palette::plain()),
             "streams:\n  EXEC: messages=3, bytes=10\n  AUDIT: NOT FOUND\n\
              KV buckets:\n  jobs: OK\nobject stores:\n  agent_releases: NOT FOUND\n"
         );
@@ -116,7 +122,7 @@ mod tests {
             r#"{"streams":[{"name":"EXEC","exists":true}],"kv_buckets":[],"object_stores":[]}"#,
         )
         .unwrap();
-        assert!(render_status(&snap).contains("EXEC: messages=?, bytes=?"));
+        assert!(render_status(&snap, &Palette::plain()).contains("EXEC: messages=?, bytes=?"));
     }
 
     #[tokio::test]

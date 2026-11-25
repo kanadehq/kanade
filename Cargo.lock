@@ -3327,6 +3327,7 @@ dependencies = [
 name = "kanade"
 version = "0.107.0"
 dependencies = [
+ "anstream",
  "anyhow",
  "async-nats",
  "base64 0.23.1",

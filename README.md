@@ -324,6 +324,27 @@ kanade meta clear <pc_id>                        # drop every key
 
 `kanade <subcommand> --help` for argument details.
 
+### Terminal colors
+
+Human-facing output (help, usage errors, table headings, status words, ✓/✗/⚠
+marks, log lines) is colorized with one shared palette: bold headings, cyan
+labels, green success, yellow warnings, bold red failures, all basic ANSI
+colors so they follow your terminal theme on light and dark backgrounds.
+JSON / YAML, tokens, manifests and remote command output are never colorized.
+
+```sh
+kanade --color auto   job list   # default: color only on a terminal
+kanade --color always job validate configs/jobs/*.yaml | less -R
+kanade --color never  jetstream status
+KANADE_COLOR=never kanade query "SELECT 1"
+```
+
+Precedence: `--color` flag, then `KANADE_COLOR`, then `auto`. Under `auto`
+each stream (stdout, stderr) is decided separately: `NO_COLOR` disables,
+`CLICOLOR_FORCE` forces, `CLICOLOR=0` disables, otherwise color is used only
+when the stream is a terminal (Windows consoles included). An explicit
+`--color always|never` overrides those environment variables.
+
 ## Authoring jobs
 
 YAML manifests in `configs/jobs/*.yaml` (see [spec §2.4.1](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md)).
