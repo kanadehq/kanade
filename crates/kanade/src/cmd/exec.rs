@@ -4,6 +4,7 @@
 //! `--pcs`. Wave rollout is intentionally not exposed on the CLI —
 //! use a Schedule yaml if you want waves.
 
+use crate::term;
 use anyhow::{Context, Result};
 use clap::Args;
 use kanade_shared::manifest::{FanoutPlan, Target};
@@ -83,11 +84,12 @@ pub async fn execute(backend_url: &str, args: ExecArgs) -> Result<()> {
     }
     let payload: ExecResponse = resp.json().await.context("decode exec response")?;
 
-    println!("exec_id       : {}", payload.exec_id);
-    println!("job_id        : {}", payload.job_id);
-    println!("version       : {}", payload.version);
-    println!("target_count  : {}", payload.target_count);
-    println!("subjects      :");
+    let pal = term::Palette::stdout();
+    term::println!("{}       : {}", pal.label("exec_id"), payload.exec_id);
+    term::println!("{}        : {}", pal.label("job_id"), payload.job_id);
+    term::println!("{}       : {}", pal.label("version"), payload.version);
+    term::println!("{}  : {}", pal.label("target_count"), payload.target_count);
+    term::println!("{}      :", pal.label("subjects"));
     for s in &payload.subjects {
         println!("  - {s}");
     }

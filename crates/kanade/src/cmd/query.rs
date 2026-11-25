@@ -11,6 +11,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 
+use crate::term;
+
 #[derive(Args, Debug)]
 pub struct QueryArgs {
     /// The SQL to run. Read-only only (SELECT / WITH); the server rejects
@@ -84,8 +86,9 @@ fn render_table(payload: &serde_json::Value) {
         })
         .unwrap_or_default();
 
+    let out = term::Palette::stdout();
     if columns.is_empty() {
-        println!("(no rows)");
+        term::println!("{}", out.dim("(no rows)"));
     } else {
         // Column widths = max of header + every cell in that column.
         let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count()).collect();
@@ -96,25 +99,33 @@ fn render_table(payload: &serde_json::Value) {
                 }
             }
         }
-        let line = |cells: &[String]| {
+        // Pad on plain text first, then style the finished cell, so the
+        // escapes never disturb alignment.
+        let line = |cells: &[String], style: fn(&term::Palette, String) -> String| {
             cells
                 .iter()
                 .enumerate()
-                .map(|(i, c)| format!("{:<width$}", c, width = widths.get(i).copied().unwrap_or(0)))
+                .map(|(i, c)| {
+                    let padded =
+                        format!("{:<width$}", c, width = widths.get(i).copied().unwrap_or(0));
+                    style(&out, padded)
+                })
                 .collect::<Vec<_>>()
                 .join("  ")
         };
-        println!("{}", line(&columns));
-        println!(
+        term::println!("{}", line(&columns, term::Palette::heading));
+        term::println!(
             "{}",
-            widths
-                .iter()
-                .map(|w| "-".repeat(*w))
-                .collect::<Vec<_>>()
-                .join("  ")
+            out.dim(
+                widths
+                    .iter()
+                    .map(|w| "-".repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            )
         );
         for row in &rows {
-            println!("{}", line(row));
+            println!("{}", line(row, |_, s| s));
         }
     }
 
@@ -135,7 +146,13 @@ fn render_table(payload: &serde_json::Value) {
     } else {
         ""
     };
-    eprintln!("\n{row_count} row(s) in {elapsed} ms{trunc}");
+    let err = term::Palette::stderr();
+    let trunc = if truncated {
+        err.warn(trunc)
+    } else {
+        trunc.to_string()
+    };
+    term::eprintln!("\n{row_count} row(s) in {elapsed} ms{trunc}");
 }
 
 /// Stringify a JSON cell for the table: strings raw (no quotes), null as

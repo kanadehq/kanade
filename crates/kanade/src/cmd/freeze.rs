@@ -5,6 +5,7 @@
 //! scheduler skip every fire. Set it during an incident or a planned
 //! change-freeze; clear it to thaw.
 
+use crate::term;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use kanade_shared::manifest::Freeze;
@@ -72,14 +73,20 @@ async fn status(base: &str) -> Result<()> {
     }
     let freeze: Option<Freeze> = resp.json().await?;
     match freeze {
-        None => println!("fleet is NOT frozen (no freeze configured — schedules fire normally)"),
+        None => term::println!(
+            "fleet is {} (no freeze configured — schedules fire normally)",
+            term::Palette::stdout().ok("NOT frozen")
+        ),
         Some(f) => {
             // A freeze can be CONFIGURED but not currently active — a
             // future `from` or a past `until` means it isn't gating
             // fires right now (coderabbit #472). Report the live state,
             // not merely "a freeze row exists".
             if f.is_active(chrono::Utc::now()) {
-                println!("fleet is FROZEN now — all schedule fires are skipped");
+                term::println!(
+                    "fleet is {} now — all schedule fires are skipped",
+                    term::Palette::stdout().warn("FROZEN")
+                );
             } else {
                 println!(
                     "freeze is CONFIGURED but NOT active right now (outside its window — schedules fire normally)"

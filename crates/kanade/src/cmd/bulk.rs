@@ -10,6 +10,7 @@
 //! `script_file:` + stamp GitOps provenance, schedules don't); this
 //! module only owns the argument-expansion and export halves they share.
 
+use crate::term;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -219,9 +220,9 @@ pub async fn export(
                 .await
                 .and_then(|y| write_yaml(&dir, id, &y))
             {
-                Ok(path) => println!("✓ {id} → {}", path.display()),
+                Ok(path) => term::println!("{} {id} → {}", term::ok_mark(), path.display()),
                 Err(e) => {
-                    eprintln!("✗ {id}: {e:#}");
+                    term::eprintln!("{} {id}: {e:#}", term::fail_mark());
                     failures += 1;
                 }
             }
@@ -240,7 +241,7 @@ pub async fn export(
                 std::fs::create_dir_all(&dir)
                     .with_context(|| format!("create out dir {}", dir.display()))?;
                 let path = write_yaml(&dir, &id, &yaml)?;
-                println!("✓ {id} → {}", path.display());
+                term::println!("{} {id} → {}", term::ok_mark(), path.display());
             }
             // No trailing println: the YAML already ends with a newline,
             // so the redirect target is a clean re-creatable file.
@@ -274,7 +275,7 @@ async fn export_all_bundle(base: &str, kind: &str, ids: &[String]) -> Result<()>
                 }
             }
             Err(e) => {
-                eprintln!("✗ {id}: {e:#}");
+                term::eprintln!("{} {id}: {e:#}", term::fail_mark());
                 failures += 1;
             }
         }

@@ -4,6 +4,7 @@
 //! schedule` (HTTP to the backend); a view has no `execute` and no schedule,
 //! so this is create / validate / list / export / delete.
 
+use crate::term;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -96,7 +97,7 @@ async fn create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
     let mut failures = 0usize;
     for f in &files {
         if let Err(e) = create_one(base, f).await {
-            eprintln!("✗ {}: {e:#}", f.display());
+            term::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
             failures += 1;
         }
     }
@@ -118,7 +119,7 @@ fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
         // (parity with job/schedule validate and view's own create path), so
         // this loop only surfaces file-level failures.
         if let Err(e) = validate_one(f) {
-            eprintln!("✗ {}: {e:#}", f.display());
+            term::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
             failures += 1;
         }
     }
@@ -148,7 +149,12 @@ fn validate_one(yaml: &std::path::Path) -> Result<()> {
     let mut failures = 0usize;
     for (i, doc) in docs.iter().enumerate() {
         if let Err(e) = validate_one_doc(yaml, doc) {
-            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            term::eprintln!(
+                "{} {} [doc {}]: {e:#}",
+                term::fail_mark(),
+                yaml.display(),
+                i + 1
+            );
             failures += 1;
         }
     }
@@ -171,8 +177,9 @@ fn validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
     // Per-document success line, matching job/schedule validate and this
     // file's create path, so every document in a bundle is acknowledged
     // (not just the failing ones).
-    println!(
-        "✓ {} → view '{}' ({} widget(s)) (valid)",
+    term::println!(
+        "{} {} → view '{}' ({} widget(s)) (valid)",
+        term::ok_mark(),
         yaml.display(),
         view.id,
         view.widgets.len(),
@@ -195,7 +202,12 @@ async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
     let mut failures = 0usize;
     for (i, doc) in docs.iter().enumerate() {
         if let Err(e) = create_one_doc(base, yaml, doc).await {
-            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            term::eprintln!(
+                "{} {} [doc {}]: {e:#}",
+                term::fail_mark(),
+                yaml.display(),
+                i + 1
+            );
             failures += 1;
         }
     }
@@ -258,7 +270,11 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
         .get("widget_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    println!("✓ {} → view '{id}' ({n} widget(s))", yaml.display());
+    term::println!(
+        "{} {} → view '{id}' ({n} widget(s))",
+        term::ok_mark(),
+        yaml.display()
+    );
     Ok(())
 }
 

@@ -16,6 +16,7 @@
 //! higher than the manual memberships alone; `list --pc` shows one PC's
 //! manual membership only.
 
+use crate::term;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -155,7 +156,7 @@ async fn def_create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
     let mut failures = 0usize;
     for f in &files {
         if let Err(e) = def_create_one(base, f).await {
-            eprintln!("✗ {}: {e:#}", f.display());
+            term::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
             failures += 1;
         }
     }
@@ -170,7 +171,7 @@ fn def_validate_all(paths: Vec<PathBuf>) -> Result<()> {
     let mut failures = 0usize;
     for f in &files {
         if let Err(e) = def_validate_one(f) {
-            eprintln!("✗ {}: {e:#}", f.display());
+            term::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
             failures += 1;
         }
     }
@@ -194,7 +195,12 @@ fn def_validate_one(yaml: &std::path::Path) -> Result<()> {
     let mut failures = 0usize;
     for (i, doc) in docs.iter().enumerate() {
         if let Err(e) = def_validate_one_doc(yaml, doc) {
-            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            term::eprintln!(
+                "{} {} [doc {}]: {e:#}",
+                term::fail_mark(),
+                yaml.display(),
+                i + 1
+            );
             failures += 1;
         }
     }
@@ -218,8 +224,9 @@ fn def_validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
     } else {
         "static"
     };
-    println!(
-        "✓ {} → group '{}' ({kind}) (valid)",
+    term::println!(
+        "{} {} → group '{}' ({kind}) (valid)",
+        term::ok_mark(),
         yaml.display(),
         group.id,
     );
@@ -237,7 +244,12 @@ async fn def_create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
     let mut failures = 0usize;
     for (i, doc) in docs.iter().enumerate() {
         if let Err(e) = def_create_one_doc(base, yaml, doc).await {
-            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            term::eprintln!(
+                "{} {} [doc {}]: {e:#}",
+                term::fail_mark(),
+                yaml.display(),
+                i + 1
+            );
             failures += 1;
         }
     }
@@ -290,7 +302,11 @@ async fn def_create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Re
         .context("parse JSON response from server")?;
     let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-    println!("✓ {} → group '{id}' ({kind})", yaml.display());
+    term::println!(
+        "{} {} → group '{id}' ({kind})",
+        term::ok_mark(),
+        yaml.display()
+    );
     Ok(())
 }
 
@@ -427,17 +443,16 @@ fn render_pc_groups(pc_id: &str, g: &AgentGroups) -> String {
     }
 }
 
-fn render_overview(o: &GroupsOverview) -> String {
+fn render_overview(o: &GroupsOverview, pal: &term::Palette) -> String {
     if o.groups.is_empty() {
-        return "(no groups yet)".to_string();
+        return pal.dim("(no groups yet)");
     }
     let mut rows: Vec<&GroupSummary> = o.groups.iter().collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     let mut out = format!(
-        "{group:<24} {members:>7}  config\n{}",
-        "-".repeat(48),
-        group = "group",
-        members = "members"
+        "{}\n{}",
+        pal.heading(format!("{:<24} {:>7}  config", "group", "members")),
+        pal.dim("-".repeat(48)),
     );
     for g in rows {
         let cfg = if g.has_config { "yes" } else { "—" };
@@ -498,7 +513,10 @@ async fn list_pc(base: &str, pc_id: &str) -> Result<()> {
 }
 
 async fn list_all(base: &str) -> Result<()> {
-    println!("{}", render_overview(&fetch_overview(base).await?));
+    term::println!(
+        "{}",
+        render_overview(&fetch_overview(base).await?, &term::Palette::stdout())
+    );
     Ok(())
 }
 
@@ -830,7 +848,7 @@ mod tests {
 
     #[test]
     fn render_overview_matches_legacy_table() {
-        let out = render_overview(&overview());
+        let out = render_overview(&overview(), &term::Palette::plain());
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(
             lines[0],
@@ -840,7 +858,7 @@ mod tests {
         assert_eq!(lines[2], format!("{:<24} {:>7}  yes", "a", 0));
         assert_eq!(lines[3], format!("{:<24} {:>7}  —", "b", 2));
         assert_eq!(
-            render_overview(&GroupsOverview { groups: vec![] }),
+            render_overview(&GroupsOverview { groups: vec![] }, &term::Palette::plain()),
             "(no groups yet)"
         );
     }

@@ -148,9 +148,9 @@ pub async fn finalize(handle: Option<UpdateHandle>) {
         }
         Some(UpdateHandle::Installing { handle }) => {
             if let Ok(Ok(Ok(Some(latest)))) = tokio::time::timeout(INSTALL_DRAIN, handle).await {
-                eprintln!(
+                crate::term::eprintln!(
                     "\nkanade updated to {} — takes effect on the next invocation.",
-                    latest.tag_name
+                    crate::term::Palette::stderr().ok(&latest.tag_name)
                 );
             }
             // Anything else (throttled, no release, dev build, lock held,

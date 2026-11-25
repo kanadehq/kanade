@@ -4,6 +4,7 @@
 //! Schedules and ad-hoc deploys reference it by id; editing a job
 //! in-place rewrites what subsequent fires deploy.
 
+use crate::term;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -110,7 +111,7 @@ async fn create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
     let mut failures = 0usize;
     for f in &files {
         if let Err(e) = create_one(base, f).await {
-            eprintln!("✗ {}: {e:#}", f.display());
+            term::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
             failures += 1;
         }
     }
@@ -136,7 +137,12 @@ async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
     let mut failures = 0usize;
     for (i, doc) in docs.iter().enumerate() {
         if let Err(e) = create_one_doc(base, yaml, doc).await {
-            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            term::eprintln!(
+                "{} {} [doc {}]: {e:#}",
+                term::fail_mark(),
+                yaml.display(),
+                i + 1
+            );
             failures += 1;
         }
     }
@@ -299,7 +305,11 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
         .get("version")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    println!("✓ {} → job '{id}' v{version}", yaml.display());
+    term::println!(
+        "{} {} → job '{id}' v{version}",
+        term::ok_mark(),
+        yaml.display()
+    );
     // #1492: an `inventory.explode` derived table that had to be
     // migrated (or rebuilt) to match this manifest is exactly the
     // kind of thing that used to fail silently — the table just
@@ -309,7 +319,7 @@ async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result
     if let Some(changes) = payload.get("schema_changes").and_then(|v| v.as_array()) {
         for change in changes {
             if let Some(note) = change.as_str() {
-                println!("  ⚠ schema migrated: {note}");
+                term::println!("  {} schema migrated: {note}", term::warn_mark());
             }
         }
     }
@@ -325,7 +335,7 @@ fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
     let mut failures = 0usize;
     for f in &files {
         if let Err(e) = validate_one(f) {
-            eprintln!("✗ {}: {e:#}", f.display());
+            term::eprintln!("{} {}: {e:#}", term::fail_mark(), f.display());
             failures += 1;
         }
     }
@@ -356,7 +366,12 @@ fn validate_one(yaml: &std::path::Path) -> Result<()> {
     let mut failures = 0usize;
     for (i, doc) in docs.iter().enumerate() {
         if let Err(e) = validate_one_doc(yaml, doc) {
-            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            term::eprintln!(
+                "{} {} [doc {}]: {e:#}",
+                term::fail_mark(),
+                yaml.display(),
+                i + 1
+            );
             failures += 1;
         }
     }
@@ -403,8 +418,9 @@ fn validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
     } else {
         ""
     };
-    println!(
-        "✓ {} → job '{}' v{} (valid{note})",
+    term::println!(
+        "{} {} → job '{}' v{} (valid{note})",
+        term::ok_mark(),
         yaml.display(),
         job.id,
         job.version,
