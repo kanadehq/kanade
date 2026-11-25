@@ -71,6 +71,17 @@ class E2eTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         e2e.check_nats()
 
+    def test_broker_version_check_uses_child_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / ("nats-server.exe" if os.name == "nt" else "nats-server")
+            binary.touch()
+            binary.chmod(0o755)
+            env = dict(os.environ, PATH=tmp)
+            with patch.object(e2e.subprocess, "run", return_value=
+                              subprocess.CompletedProcess([], 0, "nats-server: v2.14.3\n")) as run:
+                e2e.check_nats(env=env)
+            self.assertEqual(Path(run.call_args.args[0][0]), binary)
+
 
 class LegacyLocaleTests(unittest.TestCase):
     def test_runner_under_legacy_locale(self):

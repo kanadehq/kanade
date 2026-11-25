@@ -101,6 +101,12 @@ def nats_version():
 
 def check_nats(binary="nats-server", version=None, env=None):
     expected = "nats-server: v" + (version or nats_version())
+    if binary == "nats-server" and env is not None:
+        # Windows CreateProcess resolves bare executables against the parent's
+        # PATH, not the environment supplied for the child.
+        binary = shutil.which(binary, path=env.get("PATH", ""))
+        if binary is None:
+            raise FileNotFoundError("nats-server not found on child PATH")
     result = subprocess.run([str(binary), "--version"], env=env, text=True,
                             encoding="utf-8", errors="replace",
                             capture_output=True, check=True)
