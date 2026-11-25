@@ -174,15 +174,33 @@ fn non_unicode_manifest_path_is_accepted() {
     let path = dir
         .path()
         .join(std::ffi::OsStr::from_bytes(b"job-\xff.yaml"));
-    std::fs::copy(job_manifest(), &path).unwrap();
+    // APFS rejects non-UTF-8 filenames, but exec still accepts native byte
+    // arguments. On that filesystem prove the argument reaches the file read
+    // rather than being rejected by the color scan or clap.
+    let exists = match std::fs::copy(job_manifest(), &path) {
+        Ok(_) => true,
+        Err(e) if cfg!(target_os = "macos") && e.raw_os_error() == Some(92) => false,
+        Err(e) => panic!("could not create manifest fixture: {e}"),
+    };
     let output = Command::new(env!("CARGO_BIN_EXE_kanade"))
         .env("KANADE_NO_AUTOUPDATE", "1")
         .args(["--color=always", "job", "validate"])
-        .arg(path)
+        .arg(&path)
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", text(&output.stderr));
-    assert!(has_ansi(&text(&output.stdout)));
+    if exists {
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        assert!(has_ansi(&text(&output.stdout)));
+    } else {
+        let stderr = text(&output.stderr);
+        assert!(!output.status.success());
+        assert!(stderr.contains(&format!("read {path:?}")), "{stderr}");
+        assert!(
+            stderr.contains("1/1 job manifest(s) failed validation"),
+            "{stderr}"
+        );
+        assert!(has_ansi(&stderr), "{stderr}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
