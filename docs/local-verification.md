@@ -36,6 +36,12 @@ loopback の bind/connect 権限は引き続き必要。
 `test result: ok. N passed` を集計し、成功が 0 件、ignored が残る、
 harness ごとの件数が一致しない場合も失敗にする。Cargo の終了コードが
 非ゼロなら、その失敗を保持する。次の回帰テストは外部サービス不要。
+`integration.yml` は strict UTF-8 で読み、Cargo/Rust および NATS の
+子プロセス出力は UTF-8 としてデコードする（不正なバイトは置換）。
+CLI の標準出力・標準エラーは既存の文字コードを維持し、表現できない文字は
+エスケープする。回帰テストは UTF-8 モードを無効にした子 Python と
+CP932 の標準出力で、版照合、実子プロセスの出力、件数判定と終了コードを確認する。
+暗黙のエンコーディング指定漏れは `EncodingWarning` をエラー化して検出する。
 
 ```sh
 python3 -m unittest discover -s scripts/ci -p test_magi_e2e.py

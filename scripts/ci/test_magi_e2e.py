@@ -1,8 +1,10 @@
 """外部サービスなしで空振り検出を検証する。"""
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -68,6 +70,50 @@ class E2eTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         e2e.check_nats()
+
+
+class LegacyLocaleTests(unittest.TestCase):
+    def test_runner_under_legacy_locale(self):
+        # The child uses the real workflow and real subprocess output, but
+        # replaces the network/tool preparation and Cargo commands.
+        program = r"""
+import importlib.util
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location("magi_e2e", sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+assert runner.nats_version() == "2.14.3"
+try:
+    runner.check_nats(sys.executable)
+except ValueError:
+    pass
+else:
+    raise AssertionError("wrong broker version accepted")
+
+def offline_main():
+    payload = "\u65e5\u672c\u8a9e \U0001f680\n".encode("utf-8") + b"\xff\n"
+    payload += b"running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n"
+    command = [sys.executable, "-c",
+               f"import sys; sys.stdout.buffer.write({payload!r}); sys.exit({sys.argv[2]})"]
+    return runner.run(command, os.environ.copy())
+
+runner.main = offline_main
+sys.exit(runner.cli())
+"""
+        env = dict(os.environ, PYTHONUTF8="0", PYTHONIOENCODING="cp932:strict",
+                   PYTHONCOERCECLOCALE="0", LC_ALL="C")
+        for code in (0, 17):
+            with self.subTest(code=code):
+                result = subprocess.run(
+                    [sys.executable, "-X", "warn_default_encoding", "-W",
+                     "error::EncodingWarning", "-c", program, e2e.__file__, str(code)],
+                    env=env, capture_output=True)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertIn("日本語".encode("cp932") + b" \\U0001f680", result.stdout)
+                self.assertIn(b"\\ufffd", result.stdout)
+                self.assertIn(b"1 passed; 0 failed; 0 ignored;", result.stdout)
 
 
 class NatsSetupTests(unittest.TestCase):

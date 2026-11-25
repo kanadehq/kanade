@@ -78,6 +78,7 @@ def executed_tests(output):
 def run(command, env):
     print(shlex.join(command), flush=True)
     result = subprocess.run(command, cwd=ROOT, env=env, text=True,
+                            encoding="utf-8", errors="replace",
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(result.stdout, end="", flush=True)
     if result.returncode:
@@ -90,7 +91,7 @@ def run(command, env):
 
 
 def nats_version():
-    workflow = (ROOT / ".github/workflows/integration.yml").read_text()
+    workflow = (ROOT / ".github/workflows/integration.yml").read_text(encoding="utf-8")
     version = re.search(r'^  NATS_SERVER_VERSION: "(\d+\.\d+\.\d+)"$', workflow,
                         re.MULTILINE)
     if version is None:
@@ -101,6 +102,7 @@ def nats_version():
 def check_nats(binary="nats-server", version=None, env=None):
     expected = "nats-server: v" + (version or nats_version())
     result = subprocess.run([str(binary), "--version"], env=env, text=True,
+                            encoding="utf-8", errors="replace",
                             capture_output=True, check=True)
     if result.stdout.strip() != expected:
         raise ValueError(f"NATS バージョン不一致: expected {expected}, got {result.stdout.strip()}")
@@ -187,10 +189,18 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
+def cli():
+    # Preserve the caller's console encoding without losing diagnostics that
+    # cannot be represented in it.
+    sys.stdout.reconfigure(errors="backslashreplace")
+    sys.stderr.reconfigure(errors="backslashreplace")
     try:
-        sys.exit(main())
+        return main()
     except (OSError, ValueError, subprocess.SubprocessError,
             tarfile.TarError, zipfile.BadZipFile) as error:
         print(f"ERROR: {error}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(cli())
