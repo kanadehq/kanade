@@ -3325,7 +3325,7 @@ dependencies = [
 
 [[package]]
 name = "kanade"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "anstream",
  "anyhow",
@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-agent"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3400,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-backend"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3451,7 +3451,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-client"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-shared"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "anyhow",
  "async-nats",
