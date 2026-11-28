@@ -5,6 +5,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <Security/Security.h>
+#import <CoreLocation/CoreLocation.h>
 
 bool kanade_capture_supported(void) {
     if (@available(macOS 14.0, *)) return true;
@@ -128,5 +129,86 @@ bool kanade_signing_identity(char *buffer, size_t length) {
         if (!team.length || !identifier.length) return false;
         NSString *identity = [NSString stringWithFormat:@"%@:%@", team, identifier];
         return [identity getCString:buffer maxLength:length encoding:NSUTF8StringEncoding];
+    }
+}
+
+@interface KanadeLocationDelegate : NSObject <CLLocationManagerDelegate>
+@property (nonatomic) BOOL finished;
+@property (nonatomic, strong) CLLocation *location;
+@property (nonatomic, strong) NSError *error;
+@end
+
+@implementation KanadeLocationDelegate
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    (void)manager;
+    self.location = locations.lastObject;
+    self.finished = YES;
+}
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
+    (void)manager;
+    self.error = error;
+    self.finished = YES;
+}
+@end
+
+// Status codes: 0 = Success, 1 = LocationDisabled, 2 = PermissionDenied, 3 = Unavailable, 4 = Timeout, 5 = NotDetermined
+bool kanade_macos_acquire_location(int32_t *status_code, double *latitude, double *longitude, double *accuracy, int64_t *acquired_ms) {
+    @autoreleasepool {
+        if (![CLLocationManager locationServicesEnabled]) {
+            *status_code = 1;
+            return false;
+        }
+
+        CLLocationManager *tempMgr = [[CLLocationManager alloc] init];
+        CLAuthorizationStatus status = tempMgr.authorizationStatus;
+
+        if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) {
+            *status_code = 2;
+            return false;
+        }
+
+        if (status == kCLAuthorizationStatusNotDetermined) {
+            *status_code = 5;
+            return false;
+        }
+        KanadeLocationDelegate *delegate = [[KanadeLocationDelegate alloc] init];
+        CLLocationManager *manager = [[CLLocationManager alloc] init];
+        manager.delegate = delegate;
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters;
+
+        // CLLocationManager delivers delegate callbacks on its creating thread's
+        // RunLoop. This function runs on a blocking worker and pumps that loop.
+        [manager requestLocation];
+        double deadline = [NSProcessInfo processInfo].systemUptime + 5.0;
+        while (!delegate.finished && [NSProcessInfo processInfo].systemUptime < deadline) {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+        }
+        [manager stopUpdatingLocation];
+        manager.delegate = nil;
+        if (!delegate.finished) {
+            *status_code = 4;
+            return false;
+        }
+
+        if (delegate.location && delegate.location.horizontalAccuracy >= 0) {
+            *latitude = delegate.location.coordinate.latitude;
+            *longitude = delegate.location.coordinate.longitude;
+            *accuracy = delegate.location.horizontalAccuracy;
+            *acquired_ms = (int64_t)(delegate.location.timestamp.timeIntervalSince1970 * 1000.0);
+            *status_code = 0;
+            return true;
+        }
+
+        if (delegate.error) {
+            if (delegate.error.code == kCLErrorDenied) {
+                *status_code = 2;
+            } else {
+                *status_code = 3;
+            }
+            return false;
+        }
+
+        *status_code = 3;
+        return false;
     }
 }

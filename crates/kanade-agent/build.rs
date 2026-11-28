@@ -128,6 +128,7 @@ fn main() {
         "CoreGraphics",
         "SystemConfiguration",
         "Security",
+        "CoreLocation",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }

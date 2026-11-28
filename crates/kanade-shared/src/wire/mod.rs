@@ -10,6 +10,7 @@ mod heartbeat;
 mod host_perf;
 mod inventory;
 mod jobtail;
+mod location;
 mod logs;
 mod obs_event;
 mod process_perf;
@@ -39,6 +40,10 @@ pub use heartbeat::Heartbeat;
 pub use host_perf::HostPerf;
 pub use inventory::{DiskInfo, HwInventory};
 pub use jobtail::{JobTailReply, JobTailRequest};
+pub use location::{
+    DEFAULT_LOCATION_RETENTION_DAYS, LocationReading, LocationReply, LocationRequest,
+    LocationSettings, LocationSource, LocationStatus, MAX_LOCATION_RETENTION_DAYS,
+};
 pub use logs::LogsRequest;
 pub use obs_event::ObsEvent;
 pub use process_perf::{ProcessPerf, ProcessSnapshot};

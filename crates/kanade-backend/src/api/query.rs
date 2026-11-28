@@ -281,6 +281,27 @@ impl std::fmt::Display for ReadOnlyError {
     }
 }
 
+// SQLite resolves table access before invoking this callback, including reads
+// through views, subqueries and quoted/case-insensitive identifiers. SQL text
+// filtering cannot reliably enforce this privacy boundary.
+unsafe extern "C" fn location_authorizer(
+    _: *mut std::ffi::c_void,
+    action: std::ffi::c_int,
+    table: *const std::ffi::c_char,
+    _: *const std::ffi::c_char,
+    _: *const std::ffi::c_char,
+    _: *const std::ffi::c_char,
+) -> std::ffi::c_int {
+    if action == libsqlite3_sys::SQLITE_READ && !table.is_null() {
+        // SQLite guarantees a valid NUL-terminated table name for SQLITE_READ.
+        let table = unsafe { std::ffi::CStr::from_ptr(table) }.to_bytes();
+        if table.eq_ignore_ascii_case(b"device_locations") {
+            return libsqlite3_sys::SQLITE_DENY;
+        }
+    }
+    libsqlite3_sys::SQLITE_OK
+}
+
 /// Run one read-only query on the dedicated `SQLITE_OPEN_READONLY` pool,
 /// validating it first and bounding it by row cap + wall-clock timeout. Shared
 /// by the ad-hoc `POST /api/query` endpoint and the materialized `view:`
@@ -310,10 +331,28 @@ pub(crate) async fn run_read_only(
         None => (sql.to_string(), 0),
     };
     let fetch = async {
+        let mut conn = pool.acquire().await?;
+        {
+            let mut handle = conn.lock_handle().await?;
+            // Keep the stateless callback installed for the connection's life.
+            // Installing it also invalidates previously prepared statements.
+            let rc = unsafe {
+                libsqlite3_sys::sqlite3_set_authorizer(
+                    handle.as_raw_handle().as_ptr(),
+                    Some(location_authorizer),
+                    std::ptr::null_mut(),
+                )
+            };
+            if rc != libsqlite3_sys::SQLITE_OK {
+                return Err(sqlx::Error::Protocol(
+                    "cannot protect location records".into(),
+                ));
+            }
+        }
         // Column names from `describe` (prepares without running), so a
         // zero-row result still reports its columns instead of an empty
         // header (claude #899).
-        let described = pool
+        let described = (&mut *conn)
             .describe(AssertSqlSafe(effective_sql.clone()).into_sql_str())
             .await?;
         let columns: Vec<String> = described
@@ -330,7 +369,7 @@ pub(crate) async fn run_read_only(
                 q = q.bind(pc.to_string());
             }
         }
-        let mut stream = q.fetch(pool);
+        let mut stream = q.fetch(&mut *conn);
         let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
         let mut truncated = false;
         while let Some(row) = stream.try_next().await? {
@@ -462,6 +501,44 @@ mod tests {
         assert_eq!(strip_sql_noise("a /* b;c */ d"), "a   d");
         // Doubled quote is an escape — stays one logical literal.
         assert_eq!(strip_sql_noise("'it''s' x"), "  x");
+    }
+
+    #[tokio::test]
+    async fn sql_cannot_read_location_even_through_views_or_count() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE device_locations (latitude REAL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO device_locations VALUES (35.0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE VIEW innocuous AS SELECT * FROM device_locations")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for query in [
+            "SELECT * FROM device_locations",
+            r#"SELECT * FROM "DEVICE_LOCATIONS""#,
+            "SELECT * FROM [device_locations]",
+            "SELECT * FROM `device_locations`",
+            "SELECT * FROM 'device_locations'",
+            "SELECT count(*) FROM device_locations",
+            "WITH x AS (SELECT * FROM device_locations) SELECT * FROM x",
+            "SELECT * FROM innocuous",
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM device_locations)",
+        ] {
+            assert!(
+                run_read_only(&pool, query, 100, None).await.is_err(),
+                "{query}"
+            );
+        }
+        assert!(run_read_only(&pool, "SELECT 1", 100, None).await.is_ok());
     }
 
     #[tokio::test]
