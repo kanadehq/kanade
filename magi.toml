@@ -1,6 +1,11 @@
 # Repo-owned magi settings (not kata-managed). Only what is peculiar to this
 # repository lives here; roster and run shape live at the machine layer.
 
+[vars]
+# Shared build cache for the verification commands; override per machine with
+# MAGI_CACHE. Rendered by teravars (single quotes inside the braces).
+cache = "{{ env.MAGI_CACHE | default(value='/tmp') }}"
+
 [verify]
 # The final gate mirrors the Rust jobs of .github/workflows/ci.yml, in order:
 # check, test (all targets), rustfmt, clippy and the locked check. No frontend
@@ -10,12 +15,21 @@
 # have, so it is not a CI check. The editorconfig and coverage jobs need tools
 # outside the local toolchain and stay with CI, as do the Windows and Linux
 # legs of the check/test/clippy matrices; a run here covers the host OS only.
+#
+# The cargo steps build into one shared directory under vars.cache instead of
+# each worktree's target/. Measured on 2026-11-28: one finished run's worktree
+# held 8.9 GiB of target/ two days after it had merged. magi recognises
+# CARGO_TARGET_DIR in a rendered verify command as a shared build cache: it
+# takes a lease on it (verification of concurrent runs is serialised on it)
+# and prunes it to `[disk] cache_limit_bytes`. Never build by hand into that
+# directory. An agent's own `cargo` calls inside its worktree still go to
+# target/.
 gate = [
-  "cargo check --all-targets",
-  "cargo test --all-targets",
+  "CARGO_TARGET_DIR={{ vars.cache }}/kanade-target cargo check --all-targets",
+  "CARGO_TARGET_DIR={{ vars.cache }}/kanade-target cargo test --all-targets",
   "cargo fmt --all -- --check",
-  "cargo clippy --all-targets -- -D warnings",
-  "cargo check --locked --all-targets",
+  "CARGO_TARGET_DIR={{ vars.cache }}/kanade-target cargo clippy --all-targets -- -D warnings",
+  "CARGO_TARGET_DIR={{ vars.cache }}/kanade-target cargo check --locked --all-targets",
 ]
 
 # Focused end-to-end checks of what recent deploy stages added. Stage 1b runs
@@ -27,8 +41,10 @@ gate = [
 # Stage 2a/2b run the signed
 # package manifest, publisher trust and admission tests plus their CLI tests
 # with real temporary keys and directories.
+# The runner's own tools stay under the worktree's target/magi-tools (a fixed
+# path in the script); only the cargo builds it starts go to the shared cache.
 e2e = [
-  "python3 scripts/ci/magi-e2e.py",
+  "CARGO_TARGET_DIR={{ vars.cache }}/kanade-target python3 scripts/ci/magi-e2e.py",
 ]
 
 [merge]
